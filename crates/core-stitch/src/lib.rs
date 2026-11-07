@@ -125,10 +125,9 @@ impl Stitcher {
             });
         }
         let room = self.config.max_height.saturating_sub(self.height);
-        if room == 0 {
+        if room < appended {
             return Err(StitchError::HeightLimit(self.config.max_height));
         }
-        let appended = appended.min(room);
         let start = (inset + overlap) as usize * self.width as usize * 4;
         let end = start + appended as usize * self.width as usize * 4;
         self.pixels.extend_from_slice(&frame.pixels()[start..end]);
@@ -143,15 +142,17 @@ impl Stitcher {
         })
     }
 
-    pub fn finish(&self) -> Result<RgbaFrame, StitchError> {
-        if self.frames == 0 {
+    /// Consumes the accumulated pixels without cloning the full stitched image.
+    pub fn finish(&mut self) -> Result<RgbaFrame, StitchError> {
+        if self.frames == 0 || self.height == 0 {
             return Err(StitchError::EmptyFrame);
         }
-        Ok(RgbaFrame::from_pixels(
-            self.width,
-            self.height,
-            self.pixels.clone(),
-        )?)
+        let width = self.width;
+        let height = self.height;
+        let pixels = std::mem::take(&mut self.pixels);
+        self.height = 0;
+        self.frames = 0;
+        Ok(RgbaFrame::from_pixels(width, height, pixels)?)
     }
 
     fn find_overlap(&self, frame: &RgbaFrame) -> Option<(u32, u32)> {
@@ -190,57 +191,112 @@ impl Stitcher {
         }
 
         let base_step = self.config.row_step.max(1);
-        let try_inset = |inset: u32, row_step: u32| -> Option<u32> {
+        let tolerance = f64::from(self.config.tolerance);
+        let sample_count = f64::from(samples);
+
+        // Mean absolute difference for one candidate alignment. Sampling the
+        // full overlap and verifying the last row avoids the old "first
+        // passing overlap wins" behavior, which could pick a large offset on
+        // periodic or mostly blank content.
+        let mean_difference = |inset: u32, overlap: u32, row_step: u32| -> Option<f64> {
+            let previous_offset = (max_overlap - overlap) as usize * samples as usize;
+            let mut rows: Vec<u32> = (0..overlap).step_by(row_step.max(1) as usize).collect();
+            if rows.last().copied() != Some(overlap - 1) {
+                rows.push(overlap - 1);
+            }
+            let mut difference = 0u64;
+            for row in rows {
+                let previous = &previous_signatures
+                    [previous_offset + row as usize * samples as usize..][..samples as usize];
+                let next_index = (inset + row) as usize * samples as usize;
+                let next = &next_signatures[next_index..][..samples as usize];
+                for (left, right) in previous.iter().zip(next) {
+                    difference += u64::from(left.abs_diff(*right));
+                }
+            }
+            let compared = (overlap.div_ceil(row_step.max(1)) as f64) * sample_count;
+            (compared > 0.0).then_some(difference as f64 / compared)
+        };
+
+        // Returns the best passing alignment plus the runner-up mean. A best
+        // candidate that is not clearly better than the runner-up is treated
+        // as ambiguous instead of silently stitching the wrong offset.
+        enum SearchResult {
+            Found(u32),
+            Ambiguous,
+            None,
+        }
+        let search = |inset: u32, row_step: u32| -> SearchResult {
             let available = frame.height().saturating_sub(inset);
             let max = max_overlap.min(available);
             let min = min_overlap.min(max);
             if max < min || max == 0 {
-                return None;
+                return SearchResult::None;
             }
+            let first_next_index = inset as usize * samples as usize;
+            let first_next = &next_signatures[first_next_index..][..samples as usize];
+            let mut best: Option<(u32, f64)> = None;
+            let mut second = f64::INFINITY;
             for overlap in (min..=max).rev() {
                 let previous_offset = (max_overlap - overlap) as usize * samples as usize;
                 let first_previous = &previous_signatures[previous_offset..][..samples as usize];
-                let first_next_index = inset as usize * samples as usize;
-                let first_next = &next_signatures[first_next_index..][..samples as usize];
                 let first_difference: u64 = first_previous
                     .iter()
                     .zip(first_next)
                     .map(|(left, right)| u64::from(left.abs_diff(*right)))
                     .sum();
-                if first_difference > u64::from(self.config.tolerance) * u64::from(samples) {
+                if first_difference > u64::from(self.config.tolerance) * u64::from(samples) * 2 {
                     continue;
                 }
-                let mut difference = 0u64;
-                let mut compared_rows = 0u64;
-                for row in (0..overlap).step_by(row_step as usize) {
-                    let previous = &previous_signatures
-                        [previous_offset + row as usize * samples as usize..]
-                        [..samples as usize];
-                    let next_index = (inset + row) as usize * samples as usize;
-                    let next = &next_signatures[next_index..][..samples as usize];
-                    for (left, right) in previous.iter().zip(next) {
-                        difference += u64::from(left.abs_diff(*right));
-                    }
-                    compared_rows += 1;
+                let Some(mean) = mean_difference(inset, overlap, row_step) else {
+                    continue;
+                };
+                if mean > tolerance {
+                    continue;
                 }
-                let limit = u64::from(self.config.tolerance) * compared_rows * u64::from(samples);
-                if compared_rows > 0 && difference <= limit {
-                    return Some(overlap);
+                match best {
+                    Some((_, best_mean)) if mean >= best_mean - 0.01 => {
+                        second = second.min(mean);
+                    }
+                    Some((_, best_mean)) => {
+                        second = second.min(best_mean);
+                        best = Some((overlap, mean));
+                    }
+                    None => best = Some((overlap, mean)),
                 }
             }
-            None
+            let Some((overlap, mean)) = best else {
+                return SearchResult::None;
+            };
+            let Some(verified) = mean_difference(inset, overlap, 1) else {
+                return SearchResult::None;
+            };
+            if verified > tolerance {
+                return SearchResult::None;
+            }
+            if second.is_finite() && second - mean < 0.75 {
+                return SearchResult::Ambiguous;
+            }
+            SearchResult::Found(overlap)
         };
 
-        if let Some(overlap) = try_inset(0, base_step) {
-            return Some((overlap, 0));
+        match search(0, base_step) {
+            SearchResult::Found(overlap) => return Some((overlap, 0)),
+            // Uniform content makes every offset equally plausible. Trying
+            // all insets would be expensive and would not make the match more
+            // reliable, so stop and let the caller fall back to manual scroll.
+            SearchResult::Ambiguous => return None,
+            SearchResult::None => {}
         }
         let max_inset = self
             .config
             .max_top_inset_rows
             .min(frame.height().saturating_sub(self.config.min_overlap_rows));
         for inset in 1..=max_inset {
-            if let Some(overlap) = try_inset(inset, base_step.saturating_mul(2)) {
-                return Some((overlap, inset));
+            match search(inset, base_step.saturating_mul(2)) {
+                SearchResult::Found(overlap) => return Some((overlap, inset)),
+                SearchResult::Ambiguous => return None,
+                SearchResult::None => {}
             }
         }
         None
