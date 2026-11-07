@@ -1,4 +1,6 @@
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use core_types::RgbaFrame;
@@ -6,6 +8,34 @@ use core_types::RgbaFrame;
 use crate::settings_state;
 
 const APP_FOLDER: &str = "Capin";
+
+/// Keeps the lock file open for the lifetime of the process. Two instances
+/// would otherwise share `pins.json` and delete each other's pin images.
+static INSTANCE_LOCK: OnceLock<Option<File>> = OnceLock::new();
+
+pub fn acquire_single_instance() -> bool {
+    let Some(directory) = app_data_dir() else {
+        return true;
+    };
+    if ensure_directory(&directory).is_err() {
+        return true;
+    }
+    let path = directory.join("capin.lock");
+    let Ok(file) = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+    else {
+        return true;
+    };
+    if file.try_lock().is_err() {
+        return false;
+    }
+    let _ = INSTANCE_LOCK.set(Some(file));
+    true
+}
 
 pub fn screenshot_dir() -> PathBuf {
     settings_state::get()

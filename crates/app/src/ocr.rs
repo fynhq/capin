@@ -11,11 +11,10 @@ const TEXT: u32 = 0xF2F2F2;
 const MUTED: u32 = 0x9A9A9A;
 const BORDER: u32 = 0xFFFFFF1A;
 const CARD: u32 = 0x1F1F1F;
-const HOVER: u32 = 0xFFFFFF14;
 const FALLBACK_ACCENT: u32 = 0x4c9aff;
 
 pub fn start(frame: RgbaFrame, cx: &mut App) {
-    let bounds = centered_bounds(cx, 620.0, 480.0);
+    let bounds = crate::ui::centered_bounds(cx, 620.0, 480.0);
     let display_id = cx.primary_display().map(|display| display.id());
     let language = settings_state::get().language;
     let options = WindowOptions {
@@ -117,30 +116,8 @@ impl OcrView {
     fn close(&mut self, cx: &mut Context<Self>) {
         let handles = cx.window_stack().unwrap_or_default();
         cx.defer(move |cx| {
-            crate::pin::close_windows_except_pins(cx, handles);
+            crate::windows::close_auxiliary(cx, handles);
         });
-    }
-
-    fn action_button(
-        &self,
-        id: &'static str,
-        label: String,
-        color: Rgba,
-        cx: &mut Context<Self>,
-        action: fn(&mut Self, &mut Context<Self>),
-    ) -> impl IntoElement + use<> {
-        let hover = rgba(HOVER);
-        div()
-            .id(id)
-            .px(px(10.0))
-            .py(px(5.0))
-            .rounded(px(6.0))
-            .bg(rgba(0xFFFFFF12))
-            .text_size(px(12.0))
-            .text_color(color)
-            .hover(move |style| style.bg(hover))
-            .on_click(cx.listener(move |this, _, _, cx| action(this, cx)))
-            .child(label)
     }
 
     fn section_title(&self, title: String, muted: Rgba, copy: Option<impl IntoElement>) -> Div {
@@ -165,7 +142,7 @@ impl Render for OcrView {
         let copied = self.copied.clone();
 
         let copy_text = (!self.text.is_empty()).then(|| {
-            self.action_button(
+            crate::ui::flat_button(
                 "ocr-copy-text",
                 t(language, "ocr.copy_text").to_owned(),
                 accent,
@@ -174,7 +151,7 @@ impl Render for OcrView {
             )
         });
         let copy_qr = (!self.qr_codes.is_empty()).then(|| {
-            self.action_button(
+            crate::ui::flat_button(
                 "ocr-copy-qr",
                 t(language, "ocr.copy_qr").to_owned(),
                 accent,
@@ -182,7 +159,7 @@ impl Render for OcrView {
                 Self::copy_qr,
             )
         });
-        let close = self.action_button(
+        let close = crate::ui::flat_button(
             "ocr-close",
             t(language, "ocr.close").to_owned(),
             muted,
@@ -344,21 +321,5 @@ impl Render for OcrView {
                     .text_color(rgba(0xFFFFFF66))
                     .child(t(language, "ocr.hint")),
             )
-    }
-}
-
-fn centered_bounds(cx: &App, width: f32, height: f32) -> Bounds<Pixels> {
-    match cx.primary_display() {
-        Some(display) => {
-            let center = display.bounds().center();
-            Bounds {
-                origin: point(center.x - px(width / 2.0), center.y - px(height / 2.0)),
-                size: size(px(width), px(height)),
-            }
-        }
-        None => Bounds {
-            origin: point(px(80.0), px(80.0)),
-            size: size(px(width), px(height)),
-        },
     }
 }

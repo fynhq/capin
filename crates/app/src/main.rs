@@ -12,9 +12,15 @@ mod settings;
 mod settings_state;
 mod storage;
 mod tray;
+mod ui;
 mod window_style;
+mod windows;
 
 fn main() {
+    if !storage::acquire_single_instance() {
+        eprintln!("capin: another instance is already running");
+        return;
+    }
     gpui_kit::application()
         .with_quit_mode(gpui_kit::QuitMode::Explicit)
         .run(|cx| {
