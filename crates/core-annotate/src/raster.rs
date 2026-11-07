@@ -120,6 +120,42 @@ fn build_path(annotation: &Annotation) -> Result<Path, RasterError> {
     }
 }
 
+/// Measures the rendered height of wrapped text using the same layout engine
+/// as the exporter. The editor uses this for hit-testing and selection boxes so
+/// CJK and long wrapped lines do not drift from the exported bitmap.
+pub fn measure_text_height(text: &str, font_size: f32, width: u32) -> u32 {
+    if text.is_empty() || width == 0 {
+        return 0;
+    }
+    let font_size = font_size.max(1.0);
+    TEXT_ENGINE.with(|engine| {
+        let mut engine = engine.borrow_mut();
+        let engine = engine.get_or_insert_with(|| TextEngine {
+            font_system: FontSystem::new(),
+            swash_cache: SwashCache::new(),
+        });
+        if engine.font_system.db_mut().is_empty() {
+            return (font_size * 1.3).ceil() as u32;
+        }
+        let mut buffer = Buffer::new(
+            &mut engine.font_system,
+            Metrics::new(font_size, font_size * 1.3),
+        );
+        buffer.set_size(Some(width as f32), None);
+        buffer.set_text(
+            text,
+            &Attrs::new().family(Family::SansSerif),
+            Shaping::Advanced,
+            None,
+        );
+        let mut height = font_size * 1.3;
+        for run in buffer.layout_runs() {
+            height = height.max(run.line_top + run.line_height);
+        }
+        height.ceil().max(font_size * 1.3) as u32
+    })
+}
+
 fn draw_text(pixmap: &mut Pixmap, annotation: &Annotation) {
     let Shape::Text { bounds, text } = &annotation.shape else {
         return;
@@ -325,7 +361,9 @@ fn blur_region(data: &mut [u8], width: u32, height: u32, rect: PhysicalRect) {
 
     let region_width = x1 - x0;
     let region_height = y1 - y0;
-    let radius = (region_width.min(region_height) / 12).clamp(2, 32);
+    // Keep the export radius aligned with the editor preview, which blurs a
+    // downscaled copy once instead of deriving strength from the selection.
+    let radius = 16usize.min(region_width.min(region_height) / 2).max(1);
     let mut scratch = vec![0u8; region_width * region_height * 4];
 
     // Three box passes are a close, separable approximation of a Gaussian blur.

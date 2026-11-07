@@ -4,4 +4,4 @@ mod document;
 mod raster;
 
 pub use document::{Annotation, AnnotationDocument, AnnotationId, AnnotationStyle, Shape};
-pub use raster::{RasterError, rasterize};
+pub use raster::{RasterError, measure_text_height, rasterize};

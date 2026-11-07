@@ -164,6 +164,10 @@ struct TextEdit {
     origin: PhysicalPoint,
     bounds: PhysicalRect,
     content: String,
+    /// UTF-8 byte offsets. `anchor` is the selection origin; `cursor` is the
+    /// caret and the end of a selection.
+    cursor: usize,
+    anchor: usize,
     marked: Option<Range<usize>>,
     style: AnnotationStyle,
 }
@@ -177,6 +181,8 @@ impl TextEdit {
             origin,
             bounds: PhysicalRect::new(origin.x, origin.y, width, height),
             content: String::new(),
+            cursor: 0,
+            anchor: 0,
             marked: None,
             style,
         }
@@ -192,6 +198,8 @@ impl TextEdit {
             target: Some(id),
             origin: bounds.origin,
             bounds,
+            cursor: content.len(),
+            anchor: content.len(),
             content,
             marked: None,
             style,
@@ -199,6 +207,68 @@ impl TextEdit {
     }
 
     fn cursor_utf8(&self) -> usize {
+        self.cursor.min(self.content.len())
+    }
+
+    fn selection(&self) -> Range<usize> {
+        let cursor = self.cursor_utf8();
+        let anchor = self.anchor.min(self.content.len());
+        if anchor <= cursor {
+            anchor..cursor
+        } else {
+            cursor..anchor
+        }
+    }
+
+    fn move_cursor(&mut self, cursor: usize, extend_selection: bool) {
+        let cursor = cursor.min(self.content.len());
+        let cursor = if self.content.is_char_boundary(cursor) {
+            cursor
+        } else {
+            previous_char_boundary(&self.content, cursor)
+        };
+        self.cursor = cursor;
+        if !extend_selection {
+            self.anchor = cursor;
+        }
+    }
+
+    fn previous_boundary(&self) -> usize {
+        previous_char_boundary(&self.content, self.cursor_utf8())
+    }
+
+    fn next_boundary(&self) -> usize {
+        next_char_boundary(&self.content, self.cursor_utf8())
+    }
+
+    fn index_at_local(&self, local_x: f32, local_y: f32, width_logical: f32) -> usize {
+        if self.content.is_empty() {
+            return 0;
+        }
+        let scale = (width_logical / self.bounds.size.width.max(1) as f32).max(0.01);
+        let x = local_x / scale;
+        let y = local_y / scale;
+        let font_size = self.style.font_size.max(1.0);
+        let line_height = font_size * 1.3;
+        let target_line = (y / line_height).floor().max(0.0) as usize;
+        let width = self.bounds.size.width as f32;
+
+        let mut line = 0usize;
+        let mut line_width = 0.0f32;
+        for (index, ch) in self.content.char_indices() {
+            let advance = estimated_char_width(ch, font_size);
+            if line_width + advance > width && line_width > 0.0 {
+                if line == target_line {
+                    return index;
+                }
+                line += 1;
+                line_width = 0.0;
+            }
+            line_width += advance;
+            if line == target_line && x <= line_width - advance / 2.0 {
+                return index;
+            }
+        }
         self.content.len()
     }
 
@@ -236,29 +306,61 @@ impl TextEdit {
     }
 
     fn replace(&mut self, range: Option<Range<usize>>, text: &str) {
+        let selection = self.selection();
         let range = range
             .or_else(|| self.marked.take())
-            .unwrap_or(self.content.len()..self.content.len());
+            .or_else(|| (!selection.is_empty()).then_some(selection))
+            .unwrap_or(self.cursor_utf8()..self.cursor_utf8());
         let text: String = text
             .chars()
             .filter(|ch| *ch != '\n' && *ch != '\r')
             .collect();
         self.content.replace_range(range.clone(), &text);
+        self.cursor = range.start + text.len();
+        self.anchor = self.cursor;
         self.marked = (!text.is_empty()).then_some(range.start..range.start + text.len());
     }
 
     fn finish_bounds(&self) -> PhysicalRect {
-        let font_size = self.style.font_size.max(1.0);
-        let characters = self.content.chars().count().max(1) as f32;
-        let per_line = (self.bounds.size.width as f32 / (font_size * 0.6)).max(1.0);
-        let lines = (characters / per_line).ceil().max(1.0);
-        let height = (lines * font_size * 1.3).ceil() as u32;
+        let measured = core_annotate::measure_text_height(
+            &self.content,
+            self.style.font_size,
+            self.bounds.size.width,
+        );
         PhysicalRect::new(
             self.bounds.origin.x,
             self.bounds.origin.y,
             self.bounds.size.width,
-            height.max(self.bounds.size.height),
+            measured.max(self.bounds.size.height),
         )
+    }
+}
+
+fn previous_char_boundary(content: &str, cursor: usize) -> usize {
+    let cursor = cursor.min(content.len());
+    content[..cursor]
+        .char_indices()
+        .next_back()
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn next_char_boundary(content: &str, cursor: usize) -> usize {
+    let cursor = cursor.min(content.len());
+    content[cursor..]
+        .chars()
+        .next()
+        .map(|ch| cursor + ch.len_utf8())
+        .unwrap_or(cursor)
+}
+
+fn estimated_char_width(ch: char, font_size: f32) -> f32 {
+    if ch.is_whitespace() {
+        font_size * 0.35
+    } else if ch.is_ascii() {
+        font_size * 0.6
+    } else {
+        font_size
     }
 }
 
@@ -274,6 +376,7 @@ struct EditorView {
     draft: Option<Draft>,
     move_draft: Option<MoveDraft>,
     text_edit: Option<TextEdit>,
+    text_edit_screen: Option<Bounds<Pixels>>,
     accent: Rgba,
     accent_hex: u32,
     accent_selected: Rgba,
@@ -303,6 +406,7 @@ impl EditorView {
             draft: None,
             move_draft: None,
             text_edit: None,
+            text_edit_screen: None,
             accent: rgb(accent_hex),
             accent_hex,
             accent_selected: rgba((accent_hex << 8) | 0x33),
@@ -437,21 +541,68 @@ impl EditorView {
         let Some(edit) = &mut self.text_edit else {
             return;
         };
+        let selection = edit.selection();
         let range = edit.marked.take().or_else(|| {
-            let cursor = edit.cursor_utf8();
-            if cursor == 0 {
-                return None;
+            if !selection.is_empty() {
+                Some(selection)
+            } else {
+                let cursor = edit.cursor_utf8();
+                (cursor > 0).then(|| edit.previous_boundary()..cursor)
             }
-            let previous = edit.content[..cursor]
-                .char_indices()
-                .next_back()
-                .map(|(index, _)| index)
-                .unwrap_or(0);
-            Some(previous..cursor)
         });
         if let Some(range) = range {
-            edit.content.replace_range(range, "");
+            edit.content.replace_range(range.clone(), "");
+            edit.cursor = range.start;
+            edit.anchor = range.start;
         }
+        cx.notify();
+    }
+
+    fn delete_text(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = &mut self.text_edit else {
+            return;
+        };
+        let selection = edit.selection();
+        let range = if !selection.is_empty() {
+            Some(selection)
+        } else {
+            let cursor = edit.cursor_utf8();
+            (cursor < edit.content.len()).then(|| cursor..edit.next_boundary())
+        };
+        if let Some(range) = range {
+            edit.content.replace_range(range.clone(), "");
+            edit.cursor = range.start;
+            edit.anchor = range.start;
+        }
+        cx.notify();
+    }
+
+    fn move_text_cursor(&mut self, cursor: usize, extend: bool, cx: &mut Context<Self>) {
+        if let Some(edit) = &mut self.text_edit {
+            edit.move_cursor(cursor, extend);
+            cx.notify();
+        }
+    }
+
+    fn select_all_text(&mut self, cx: &mut Context<Self>) {
+        if let Some(edit) = &mut self.text_edit {
+            edit.anchor = 0;
+            edit.cursor = edit.content.len();
+            cx.notify();
+        }
+    }
+
+    fn copy_text_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = self.text_edit.as_ref() else {
+            return;
+        };
+        let selection = edit.selection();
+        if selection.is_empty() {
+            return;
+        }
+        let text = edit.content[selection].to_owned();
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.status = Some(t(settings_state::get().language, "editor.copied").to_owned());
         cx.notify();
     }
 
@@ -809,10 +960,10 @@ impl EntityInputHandler for EditorView {
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
         let edit = self.text_edit.as_ref()?;
-        let cursor = edit.offset_to_utf16(edit.cursor_utf8());
+        let selection = edit.selection();
         Some(UTF16Selection {
-            range: cursor..cursor,
-            reversed: false,
+            range: edit.range_to_utf16(&selection),
+            reversed: edit.anchor > edit.cursor,
         })
     }
 
@@ -877,17 +1028,24 @@ impl EntityInputHandler for EditorView {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         self.text_edit.as_ref()?;
-        Some(element_bounds)
+        Some(self.text_edit_screen.unwrap_or(element_bounds))
     }
 
     fn character_index_for_point(
         &mut self,
-        _point: Point<Pixels>,
+        point: Point<Pixels>,
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
         let edit = self.text_edit.as_ref()?;
-        Some(edit.offset_to_utf16(edit.cursor_utf8()))
+        let bounds = self.text_edit_screen?;
+        let local_x = (f32::from(point.x - bounds.origin.x)).max(0.0);
+        let local_y = (f32::from(point.y - bounds.origin.y)).max(0.0);
+        Some(edit.offset_to_utf16(edit.index_at_local(
+            local_x,
+            local_y,
+            f32::from(bounds.size.width),
+        )))
     }
 
     fn text_length_utf16(
@@ -896,7 +1054,7 @@ impl EntityInputHandler for EditorView {
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
         let edit = self.text_edit.as_ref()?;
-        Some(edit.offset_to_utf16(edit.cursor_utf8()))
+        Some(edit.offset_to_utf16(edit.content.len()))
     }
 }
 
@@ -904,6 +1062,16 @@ impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let image_rect = self.image_view_rect(window);
         let scale = f32::from(image_rect.size.width) / self.image_size.width as f32;
+        self.text_edit_screen = self.text_edit.as_ref().map(|edit| Bounds {
+            origin: point(
+                image_rect.origin.x + px(edit.bounds.origin.x as f32 * scale),
+                image_rect.origin.y + px(edit.bounds.origin.y as f32 * scale),
+            ),
+            size: size(
+                px((edit.bounds.size.width as f32 * scale).max(24.0)),
+                px((edit.bounds.size.height as f32 * scale).max(12.0)),
+            ),
+        });
         let mut objects = self.document.objects().to_vec();
         if let Some(move_draft) = &self.move_draft {
             let dx = move_draft.current.x - move_draft.start.x;
@@ -925,99 +1093,103 @@ impl Render for EditorView {
         let status = self.status.clone();
         let accent_hex = self.accent_hex;
 
-        let blur_layers: Vec<Div> = objects
-            .iter()
-            .filter_map(|annotation| {
-                let Shape::Blur(rect) = &annotation.shape else {
-                    return None;
-                };
-                if rect.is_empty() {
-                    return None;
+        // Build one layer per annotation in document order. Rendering every
+        // vector shape in a single canvas put all of them above text and
+        // numbers, so the preview no longer matched the exported z-order.
+        let mut object_layers: Vec<AnyElement> = Vec::with_capacity(objects.len());
+        for annotation in &objects {
+            match &annotation.shape {
+                Shape::Blur(rect) => {
+                    if rect.is_empty() {
+                        continue;
+                    }
+                    let left = rect.origin.x as f32 * scale;
+                    let top = rect.origin.y as f32 * scale;
+                    let width = px(rect.size.width as f32 * scale);
+                    let height = px(rect.size.height as f32 * scale);
+                    object_layers.push(
+                        div()
+                            .absolute()
+                            .left(px(left))
+                            .top(px(top))
+                            .w(width)
+                            .h(height)
+                            .overflow_hidden()
+                            .child(
+                                img(self.blur_image.clone())
+                                    .absolute()
+                                    .left(px(-left))
+                                    .top(px(-top))
+                                    .w(image_rect.size.width)
+                                    .h(image_rect.size.height)
+                                    .object_fit(ObjectFit::Fill),
+                            )
+                            .into_any_element(),
+                    );
                 }
-                let left = rect.origin.x as f32 * scale;
-                let top = rect.origin.y as f32 * scale;
-                let width = px(rect.size.width as f32 * scale);
-                let height = px(rect.size.height as f32 * scale);
-                Some(
-                    div()
+                Shape::Text { bounds, text } => {
+                    object_layers.push(
+                        div()
+                            .absolute()
+                            .left(px(bounds.origin.x as f32 * scale))
+                            .top(px(bounds.origin.y as f32 * scale))
+                            .w(px(bounds.size.width as f32 * scale))
+                            .text_size(px(annotation.style.font_size * scale))
+                            .text_color(rgb((annotation.style.color >> 8) & 0x00FF_FFFF))
+                            .child(text.clone())
+                            .into_any_element(),
+                    );
+                }
+                Shape::Number { bounds, value } => {
+                    let color = (annotation.style.color >> 8) & 0x00FF_FFFF;
+                    let foreground = if prefers_dark_foreground(color) {
+                        rgb(0x111111)
+                    } else {
+                        rgb(0xFFFFFF)
+                    };
+                    let width = bounds.size.width as f32 * scale;
+                    let height = bounds.size.height as f32 * scale;
+                    object_layers.push(
+                        div()
+                            .absolute()
+                            .left(px(bounds.origin.x as f32 * scale))
+                            .top(px(bounds.origin.y as f32 * scale))
+                            .w(px(width))
+                            .h(px(height))
+                            .rounded(px(height.min(width) / 2.0))
+                            .bg(rgb(color))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px((height * 0.54).max(8.0)))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(foreground)
+                            .child(value.to_string())
+                            .into_any_element(),
+                    );
+                }
+                shape => {
+                    let shape = shape.clone();
+                    let style = annotation.style;
+                    object_layers.push(
+                        canvas(
+                            |_, _, _| (),
+                            move |bounds, _, window, _| {
+                                paint_shape(window, bounds, scale, &shape, style);
+                            },
+                        )
                         .absolute()
-                        .left(px(left))
-                        .top(px(top))
-                        .w(width)
-                        .h(height)
-                        .overflow_hidden()
-                        .child(
-                            img(self.blur_image.clone())
-                                .absolute()
-                                .left(px(-left))
-                                .top(px(-top))
-                                .w(image_rect.size.width)
-                                .h(image_rect.size.height)
-                                .object_fit(ObjectFit::Fill),
-                        ),
-                )
-            })
-            .collect();
+                        .inset_0()
+                        .size_full()
+                        .into_any_element(),
+                    );
+                }
+            }
+        }
 
-        let text_layers: Vec<Div> = objects
-            .iter()
-            .filter_map(|annotation| {
-                let Shape::Text { bounds, text } = &annotation.shape else {
-                    return None;
-                };
-                Some(
-                    div()
-                        .absolute()
-                        .left(px(bounds.origin.x as f32 * scale))
-                        .top(px(bounds.origin.y as f32 * scale))
-                        .w(px(bounds.size.width as f32 * scale))
-                        .text_size(px(annotation.style.font_size * scale))
-                        .text_color(rgb((annotation.style.color >> 8) & 0x00FF_FFFF))
-                        .child(text.clone()),
-                )
-            })
-            .collect();
-
-        let number_layers: Vec<Div> = objects
-            .iter()
-            .filter_map(|annotation| {
-                let Shape::Number { bounds, value } = &annotation.shape else {
-                    return None;
-                };
-                let color = (annotation.style.color >> 8) & 0x00FF_FFFF;
-                let foreground = if prefers_dark_foreground(color) {
-                    rgb(0x111111)
-                } else {
-                    rgb(0xFFFFFF)
-                };
-                let width = bounds.size.width as f32 * scale;
-                let height = bounds.size.height as f32 * scale;
-                Some(
-                    div()
-                        .absolute()
-                        .left(px(bounds.origin.x as f32 * scale))
-                        .top(px(bounds.origin.y as f32 * scale))
-                        .w(px(width))
-                        .h(px(height))
-                        .rounded(px(height.min(width) / 2.0))
-                        .bg(rgb(color))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px((height * 0.54).max(8.0)))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(foreground)
-                        .child(value.to_string()),
-                )
-            })
-            .collect();
-
-        let canvas_layer = canvas(
+        let overlay_canvas = canvas(
             |_, _, _| (),
             move |bounds, _, window, _| {
-                for annotation in &objects {
-                    paint_shape(window, bounds, scale, &annotation.shape, annotation.style);
-                }
                 if let Some((shape, style)) = &preview {
                     paint_shape(window, bounds, scale, shape, *style);
                 }
@@ -1050,10 +1222,11 @@ impl Render for EditorView {
             )
             .absolute()
             .inset_0();
+            let cursor = edit.cursor_utf8();
             let text = if edit.content.is_empty() {
                 "|".to_owned()
             } else {
-                format!("{}|", edit.content)
+                format!("{}|{}", &edit.content[..cursor], &edit.content[cursor..])
             };
             div()
                 .absolute()
@@ -1072,7 +1245,21 @@ impl Render for EditorView {
                 .child(input)
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                    cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                        if let (Some(bounds), Some(edit)) =
+                            (this.text_edit_screen, this.text_edit.as_ref())
+                        {
+                            let local_x = f32::from(event.position.x - bounds.origin.x).max(0.0);
+                            let local_y = f32::from(event.position.y - bounds.origin.y).max(0.0);
+                            let index =
+                                edit.index_at_local(local_x, local_y, f32::from(bounds.size.width));
+                            if let Some(edit) = this.text_edit.as_mut() {
+                                edit.move_cursor(index, false);
+                            }
+                            cx.notify();
+                        }
+                        cx.stop_propagation();
+                    }),
                 )
                 .into_any_element()
         });
@@ -1090,10 +1277,8 @@ impl Render for EditorView {
                     .size_full()
                     .object_fit(ObjectFit::Fill),
             )
-            .children(blur_layers)
-            .children(text_layers)
-            .children(number_layers)
-            .child(canvas_layer)
+            .children(object_layers)
+            .child(overlay_canvas)
             .children(text_overlay)
             .on_mouse_down(
                 MouseButton::Left,
@@ -1249,6 +1434,7 @@ impl Render for EditorView {
                 let command =
                     event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
                 if this.text_edit.is_some() {
+                    let extend = event.keystroke.modifiers.shift;
                     match key {
                         "escape" => {
                             this.cancel_text(cx);
@@ -1262,9 +1448,55 @@ impl Render for EditorView {
                             this.backspace_text(cx);
                             return;
                         }
-                        "delete" => return,
+                        "delete" => {
+                            this.delete_text(cx);
+                            return;
+                        }
+                        "left" => {
+                            let position =
+                                this.text_edit.as_ref().map(|edit| edit.previous_boundary());
+                            if let Some(position) = position {
+                                this.move_text_cursor(position, extend, cx);
+                            }
+                            return;
+                        }
+                        "right" => {
+                            let position = this.text_edit.as_ref().map(|edit| edit.next_boundary());
+                            if let Some(position) = position {
+                                this.move_text_cursor(position, extend, cx);
+                            }
+                            return;
+                        }
+                        "home" => {
+                            this.move_text_cursor(0, extend, cx);
+                            return;
+                        }
+                        "end" => {
+                            let end = this.text_edit.as_ref().map(|edit| edit.content.len());
+                            if let Some(end) = end {
+                                this.move_text_cursor(end, extend, cx);
+                            }
+                            return;
+                        }
                         _ => {}
                     }
+                    if command && key == "a" {
+                        this.select_all_text(cx);
+                        return;
+                    }
+                    if command && key == "c" {
+                        this.copy_text_selection(cx);
+                        return;
+                    }
+                    if command && key == "s" {
+                        this.commit_text(cx);
+                        this.export(false, cx);
+                        return;
+                    }
+                    // While editing, swallow document-level shortcuts so
+                    // Cmd/Ctrl+Z cannot undo an object out from under the
+                    // in-flight text edit.
+                    return;
                 }
                 if key == "escape" {
                     window.remove_window();
@@ -1333,7 +1565,7 @@ fn open_editor_with_pin(frame: RgbaFrame, pin_target: Option<u64>, cx: &mut App)
     let content_height = (image_height * scale).max(240.0);
     let window_width = (content_width + PADDING * 2.0).max(MIN_WINDOW_WIDTH);
     let window_height = (content_height + TOOLBAR_HEIGHT + PADDING * 2.0).max(480.0);
-    let bounds = centered_bounds(cx, window_width, window_height);
+    let bounds = crate::ui::centered_bounds(cx, window_width, window_height);
     let display_id = cx.primary_display().map(|display| display.id());
     let language = settings_state::get().language;
 
@@ -1370,22 +1602,6 @@ fn open_editor_with_pin(frame: RgbaFrame, pin_target: Option<u64>, cx: &mut App)
             cx.activate(true);
         }
         Err(error) => eprintln!("capin: failed to open editor: {error}"),
-    }
-}
-
-fn centered_bounds(cx: &App, width: f32, height: f32) -> Bounds<Pixels> {
-    match cx.primary_display() {
-        Some(display) => {
-            let center = display.bounds().center();
-            Bounds {
-                origin: point(center.x - px(width / 2.0), center.y - px(height / 2.0)),
-                size: size(px(width), px(height)),
-            }
-        }
-        None => Bounds {
-            origin: point(px(80.0), px(80.0)),
-            size: size(px(width), px(height)),
-        },
     }
 }
 
