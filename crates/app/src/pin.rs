@@ -14,6 +14,7 @@ use crate::i18n::{Language, t};
 use crate::image_util;
 use crate::settings_state;
 use crate::storage;
+use crate::ui::centered_bounds;
 
 const MAX_RESTORED_PINS: usize = 20;
 const CARD_WIDTH: f32 = 380.0;
@@ -26,6 +27,7 @@ thread_local! {
     static LAST_CAPTURE: RefCell<Option<RgbaFrame>> = const { RefCell::new(None) };
     static PINS: RefCell<HashMap<u64, PinState>> = RefCell::new(HashMap::new());
     static PIN_MENU: RefCell<Option<AnyWindowHandle>> = const { RefCell::new(None) };
+    static MANIFEST_REVISION: Cell<u64> = const { Cell::new(0) };
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -414,11 +416,15 @@ pub fn restore(cx: &mut App) {
             }
             _ => continue,
         };
+        let zoom = entry.zoom.clamp(0.1, 4.0);
+        let (width, height) = content.size(zoom);
         let bounds = ensure_visible(
             cx,
             Bounds {
                 origin: point(px(entry.x), px(entry.y)),
-                size: size(px(entry.width), px(entry.height)),
+                // Content size is authoritative: a previous zoom might not
+                // have been written together with the window bounds.
+                size: size(px(width), px(height)),
             },
         );
         let existing_image = match &content {
@@ -433,7 +439,7 @@ pub fn restore(cx: &mut App) {
             content,
             Some(entry.id),
             bounds,
-            entry.zoom.clamp(0.1, 4.0),
+            zoom,
             entry.opacity.clamp(0.2, 1.0),
             entry.click_through,
             existing_image,
@@ -554,14 +560,6 @@ pub fn is_pin_window(handle: &AnyWindowHandle) -> bool {
     })
 }
 
-pub fn close_windows_except_pins(cx: &mut App, handles: Vec<AnyWindowHandle>) {
-    for handle in handles {
-        if !is_pin_window(&handle) {
-            let _ = handle.update(cx, |_, window, _| window.remove_window());
-        }
-    }
-}
-
 pub fn refresh_recognition(cx: &mut App) {
     let entities: Vec<Entity<PinView>> = PINS.with(|pins| {
         pins.borrow()
@@ -624,6 +622,34 @@ fn update_meta(id: u64, zoom: f32, opacity: f32) {
             state.opacity = opacity;
         }
     });
+}
+
+fn update_bounds_state(id: u64, bounds: Bounds<Pixels>) {
+    PINS.with(|pins| {
+        if let Some(state) = pins.borrow_mut().get_mut(&id) {
+            state.bounds = bounds;
+        }
+    });
+}
+
+/// Debounces manifest writes while the user scrolls to zoom or change opacity.
+fn schedule_manifest_save(cx: &mut Context<PinView>) {
+    let revision = MANIFEST_REVISION.with(|revision| {
+        let next = revision.get().wrapping_add(1);
+        revision.set(next);
+        next
+    });
+    cx.spawn(async move |this, cx| {
+        cx.background_executor()
+            .timer(Duration::from_millis(250))
+            .await;
+        let _ = this.update(cx, |_, _| {
+            if MANIFEST_REVISION.with(|current| current.get()) == revision {
+                save_manifest();
+            }
+        });
+    })
+    .detach();
 }
 
 fn set_state_click_through(id: u64, enabled: bool) {
@@ -740,11 +766,17 @@ fn parse_color(text: &str) -> Option<(u8, u8, u8)> {
                 let blue = chars.next()?.to_digit(16)? as u8 * 17;
                 Some((red, green, blue))
             }
-            6 | 8 => Some((
-                u8::from_str_radix(&hex[0..2], 16).ok()?,
-                u8::from_str_radix(&hex[2..4], 16).ok()?,
-                u8::from_str_radix(&hex[4..6], 16).ok()?,
-            )),
+            6 | 8 => {
+                // Parse the whole string instead of slicing by byte offsets:
+                // clipboard text can contain multi-byte UTF-8 and slicing at
+                // arbitrary offsets would panic.
+                let value = u32::from_str_radix(hex, 16).ok()?;
+                Some((
+                    ((value >> 16) & 0xFF) as u8,
+                    ((value >> 8) & 0xFF) as u8,
+                    (value & 0xFF) as u8,
+                ))
+            }
             _ => None,
         };
     }
@@ -1079,13 +1111,23 @@ impl PinView {
         self.zoom = zoom.clamp(0.15, 4.0);
         let (width, height) = self.content.size(self.zoom);
         window.resize(size(px(width), px(height)));
+        let origin = window.bounds().origin;
+        update_bounds_state(
+            self.id,
+            Bounds {
+                origin,
+                size: size(px(width), px(height)),
+            },
+        );
         update_meta(self.id, self.zoom, self.opacity);
+        schedule_manifest_save(cx);
         cx.notify();
     }
 
     fn set_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
         self.opacity = opacity.clamp(0.2, 1.0);
         update_meta(self.id, self.zoom, self.opacity);
+        schedule_manifest_save(cx);
         cx.notify();
     }
 
@@ -1450,6 +1492,7 @@ struct PinMenuView {
     pin_id: u64,
     items: Vec<(PinMenuAction, String)>,
     focus_handle: FocusHandle,
+    _blur_subscription: Option<gpui_kit::Subscription>,
 }
 
 impl Render for PinMenuView {
@@ -1579,8 +1622,15 @@ fn open_pin_menu(
             pin_id,
             items,
             focus_handle: cx.focus_handle(),
+            _blur_subscription: None,
         });
         let focus = view.read(cx).focus_handle.clone();
+        view.update(cx, |view, cx| {
+            view._blur_subscription = Some(cx.on_blur(&focus, window, |_, window, _| {
+                forget_pin_menu();
+                window.remove_window();
+            }));
+        });
         window.defer(cx, move |window, cx| window.focus(&focus, cx));
         view
     }) {
@@ -1731,18 +1781,22 @@ fn ensure_visible(cx: &App, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
     )
 }
 
-fn centered_bounds(cx: &App, width: f32, height: f32) -> Bounds<Pixels> {
-    match cx.primary_display() {
-        Some(display) => {
-            let center = display.bounds().center();
-            Bounds {
-                origin: point(center.x - px(width / 2.0), center.y - px(height / 2.0)),
-                size: size(px(width), px(height)),
-            }
-        }
-        None => Bounds {
-            origin: point(px(100.0), px(100.0)),
-            size: size(px(width), px(height)),
-        },
+#[cfg(test)]
+mod tests {
+    use super::parse_color;
+
+    #[test]
+    fn parse_color_accepts_hex_and_rgb_forms() {
+        assert_eq!(parse_color("#f80"), Some((255, 136, 0)));
+        assert_eq!(parse_color("#ff8800"), Some((255, 136, 0)));
+        assert_eq!(parse_color("#80ff8800"), Some((255, 136, 0)));
+        assert_eq!(parse_color("rgb(255, 136, 0)"), Some((255, 136, 0)));
+    }
+
+    #[test]
+    fn parse_color_does_not_panic_on_multibyte_hex_text() {
+        // Eight bytes after '#', but 'é' spans two bytes and used to split a
+        // UTF-8 code point when the string was sliced by byte offsets.
+        assert_eq!(parse_color("#aéééa"), None);
     }
 }
