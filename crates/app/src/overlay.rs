@@ -147,7 +147,8 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
         let frame = Arc::new(frame);
         let image = image_util::render_image(&frame);
         let scale = monitor.scale.get();
-        let session = SelectionSession::new(monitor.id, monitor.bounds, windows.clone());
+        let session =
+            SelectionSession::with_scale(monitor.id, monitor.bounds, windows.clone(), scale);
         let options = overlay_options(monitor.id, window_bounds);
 
         match gpui_kit::open_window(options, cx, move |window, cx| {
@@ -222,7 +223,6 @@ struct OverlayView {
     mode: OverlayMode,
     aspect: AspectPreset,
     color_format: ColorFormat,
-    window_targeting: bool,
     shift_held: bool,
     magnifier: Option<Magnifier>,
     copy_serial: u64,
@@ -254,7 +254,6 @@ impl OverlayView {
             mode,
             aspect: AspectPreset::Free,
             color_format: ColorFormat::Hex,
-            window_targeting: false,
             shift_held: false,
             magnifier: None,
             copy_serial: 0,
@@ -336,10 +335,9 @@ impl OverlayView {
     }
 
     fn set_window_targeting(&mut self, enabled: bool) {
-        if self.window_targeting == enabled {
+        if self.session.window_targeting() == enabled {
             return;
         }
-        self.window_targeting = enabled;
         self.session.set_window_targeting(enabled);
         if let Some(point) = self.cursor {
             self.session.pointer_moved(point);
@@ -667,27 +665,46 @@ impl OverlayView {
     }
 
     fn finish(&self, outcome: SelectionOutcome, cx: &mut Context<Self>) {
+        let monitor_bounds = self.session.monitor_bounds();
+        let window_region = |id| -> Option<core_types::CaptureRegion> {
+            let window = self.session.window(id)?;
+            let clipped = window.bounds.intersection(monitor_bounds)?;
+            Some(core_types::CaptureRegion::new(
+                self.session.monitor(),
+                PhysicalRect::new(
+                    clipped.origin.x - monitor_bounds.origin.x,
+                    clipped.origin.y - monitor_bounds.origin.y,
+                    clipped.size.width,
+                    clipped.size.height,
+                ),
+            ))
+        };
         let region = match &outcome {
             SelectionOutcome::Region(region) => Some(*region),
-            _ => None,
+            SelectionOutcome::Window(id) => window_region(*id),
+            SelectionOutcome::Monitor(_) => None,
         };
         if matches!(self.mode, OverlayMode::Scroll | OverlayMode::Ocr) && region.is_none() {
             return;
         }
         let handles = cx.window_stack().unwrap_or_default();
+        let scale = match &outcome {
+            SelectionOutcome::Window(id) => self
+                .session
+                .window(*id)
+                .map(|window| window.scale.get())
+                .unwrap_or(self.scale),
+            _ => self.scale,
+        };
         let target = match outcome {
             SelectionOutcome::Monitor(id) => CaptureTarget::Monitor(id),
             SelectionOutcome::Window(id) => CaptureTarget::Window(id),
             SelectionOutcome::Region(region) => CaptureTarget::Region(region),
         };
         let mode = self.mode;
-        let scale = self.scale;
 
         cx.defer(move |cx| {
-            crate::pin::close_windows_except_pins(cx, handles);
-            // Give the compositor a moment to remove the overlays before
-            // capturing the monitor or region underneath them.
-            std::thread::sleep(Duration::from_millis(50));
+            crate::windows::close_auxiliary(cx, handles);
 
             let mut backend = platform_backend();
             if mode == OverlayMode::Record {
@@ -730,14 +747,14 @@ impl OverlayView {
     fn close_overlays(&self, cx: &mut Context<Self>) {
         let handles = cx.window_stack().unwrap_or_default();
         cx.defer(move |cx| {
-            crate::pin::close_windows_except_pins(cx, handles);
+            crate::windows::close_auxiliary(cx, handles);
         });
     }
 
     fn open_settings(&self, cx: &mut Context<Self>) {
         let handles = cx.window_stack().unwrap_or_default();
         cx.defer(move |cx| {
-            crate::pin::close_windows_except_pins(cx, handles);
+            crate::windows::close_auxiliary(cx, handles);
             crate::settings::open_settings(cx);
         });
     }
@@ -873,7 +890,14 @@ impl Render for OverlayView {
                 this.set_window_targeting(event.modifiers.alt);
                 let point = this.to_physical(event.position);
                 this.cursor = Some(point);
-                this.session.pointer_moved(point);
+                if this.session.has_drag() && event.pressed_button.is_none() {
+                    // The mouse-up happened outside this overlay. Drop the
+                    // stale press instead of turning the next click into a
+                    // region that starts at the old origin.
+                    this.session.cancel();
+                } else {
+                    this.session.pointer_moved(point);
+                }
                 cx.notify();
             }))
             .on_mouse_down(

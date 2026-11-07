@@ -246,23 +246,25 @@ fn build_filter(
     match target {
         CaptureTarget::Monitor(id) => {
             let display = find_display(content, id.raw())?;
-            let empty = NSArray::<SCWindow>::from_slice(&[]);
+            let excluded = own_windows(content);
+            let windows = NSArray::from_retained_slice(&excluded);
             Ok(unsafe {
                 SCContentFilter::initWithDisplay_excludingWindows(
                     SCContentFilter::alloc(),
                     &display,
-                    &empty,
+                    &windows,
                 )
             })
         }
         CaptureTarget::Region(region) => {
             let display = find_display(content, region.monitor.raw())?;
-            let empty = NSArray::<SCWindow>::from_slice(&[]);
+            let excluded = own_windows(content);
+            let windows = NSArray::from_retained_slice(&excluded);
             Ok(unsafe {
                 SCContentFilter::initWithDisplay_excludingWindows(
                     SCContentFilter::alloc(),
                     &display,
-                    &empty,
+                    &windows,
                 )
             })
         }
@@ -341,6 +343,20 @@ fn build_config(
         }
     }
     Ok(config)
+}
+
+/// Returns Capin's own on-screen windows so display captures never include
+/// pins, menus, or helper bars. `NSWindow.sharingType` is ignored by
+/// ScreenCaptureKit on macOS 15, so the exclusion must happen in the filter.
+fn own_windows(content: &SCShareableContent) -> Vec<Retained<SCWindow>> {
+    let process = std::process::id() as i32;
+    unsafe { content.windows() }
+        .iter()
+        .filter(|window| {
+            unsafe { window.owningApplication() }
+                .is_some_and(|application| unsafe { application.processID() } == process)
+        })
+        .collect()
 }
 
 fn find_display(content: &SCShareableContent, raw: u64) -> Result<Retained<SCDisplay>> {

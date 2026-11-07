@@ -28,6 +28,10 @@ core-foundation = "0.10.1"
 core-graphics = { version = "0.24.0", features = ["highsierra"] }
 foreign-types-shared = "0.3.1"
 objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSProcessInfo",
+] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std",
     "NSApplication",

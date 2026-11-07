@@ -159,12 +159,14 @@ impl ScrollView {
                 }
 
                 let scroll = this
-                    .update(cx, |this, _| (this.scroll_point, this.notches))
+                    .update(cx, |this, _| {
+                        (this.region.monitor, this.scroll_point, this.notches)
+                    })
                     .ok();
-                let Some((point, notches)) = scroll else {
+                let Some((monitor, point, notches)) = scroll else {
                     break;
                 };
-                if !platform_window::scroll_wheel_at(point.x, point.y, -notches) {
+                if !platform_window::scroll_wheel_at(monitor.raw(), point.x, point.y, -notches) {
                     this.update(cx, |this, cx| {
                         this.auto = false;
                         this.status = t(this.language, "scroll.auto_unavailable").to_owned();
@@ -216,7 +218,7 @@ impl ScrollView {
             Ok(frame) => {
                 let handles = cx.window_stack().unwrap_or_default();
                 cx.defer(move |cx| {
-                    crate::pin::close_windows_except_pins(cx, handles);
+                    crate::windows::close_auxiliary(cx, handles);
                     crate::editor::open_editor(frame, cx);
                 });
             }
@@ -230,30 +232,8 @@ impl ScrollView {
     fn cancel(&mut self, cx: &mut Context<Self>) {
         let handles = cx.window_stack().unwrap_or_default();
         cx.defer(move |cx| {
-            crate::pin::close_windows_except_pins(cx, handles);
+            crate::windows::close_auxiliary(cx, handles);
         });
-    }
-
-    fn button(
-        &self,
-        id: &'static str,
-        label: String,
-        accent: Rgba,
-        cx: &mut Context<Self>,
-        action: fn(&mut Self, &mut Context<Self>),
-    ) -> impl IntoElement + use<> {
-        let hover = rgba(0xFFFFFF1A);
-        div()
-            .id(id)
-            .px(px(10.0))
-            .py(px(5.0))
-            .rounded(px(6.0))
-            .bg(rgba(0xFFFFFF14))
-            .text_size(px(12.0))
-            .text_color(accent)
-            .hover(move |style| style.bg(hover))
-            .on_click(cx.listener(move |this, _, _, cx| action(this, cx)))
-            .child(label)
     }
 }
 
@@ -272,10 +252,12 @@ impl Render for ScrollView {
         } else {
             t(language, "scroll.auto").to_owned()
         };
-        let auto = self.button("scroll-auto", auto_label, accent, cx, Self::toggle_auto);
-        let capture = self.button("scroll-capture", capture_label, accent, cx, Self::capture);
-        let finish = self.button("scroll-finish", finish_label, accent, cx, Self::finish);
-        let cancel = self.button("scroll-cancel", cancel_label, muted, cx, Self::cancel);
+        let auto = crate::ui::flat_button("scroll-auto", auto_label, accent, cx, Self::toggle_auto);
+        let capture =
+            crate::ui::flat_button("scroll-capture", capture_label, accent, cx, Self::capture);
+        let finish =
+            crate::ui::flat_button("scroll-finish", finish_label, accent, cx, Self::finish);
+        let cancel = crate::ui::flat_button("scroll-cancel", cancel_label, muted, cx, Self::cancel);
 
         div()
             .size_full()
@@ -319,19 +301,11 @@ impl Render for ScrollView {
 }
 
 fn region_center(region: CaptureRegion) -> PhysicalPoint {
-    let origin = platform_backend()
-        .monitors()
-        .ok()
-        .and_then(|monitors| {
-            monitors
-                .into_iter()
-                .find(|monitor| monitor.id == region.monitor)
-        })
-        .map(|monitor| monitor.bounds.origin)
-        .unwrap_or_default();
+    // Monitor-local coordinates keep mixed-DPI macOS desktops unambiguous;
+    // the platform layer resolves the display before injecting the wheel.
     PhysicalPoint::new(
-        origin.x + region.rect.origin.x + region.rect.size.width as i32 / 2,
-        origin.y + region.rect.origin.y + region.rect.size.height as i32 / 2,
+        region.rect.origin.x + region.rect.size.width as i32 / 2,
+        region.rect.origin.y + region.rect.size.height as i32 / 2,
     )
 }
 

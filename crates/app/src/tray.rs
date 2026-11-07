@@ -184,11 +184,17 @@ mod imp {
         }
 
         cx.defer(move |cx| {
-            crate::pin::close_windows_except_pins(cx, handles);
-            // Let the closed window leave the compositor before a screenshot
-            // freezes the desktop.
-            std::thread::sleep(Duration::from_millis(50));
-            open(cx);
+            crate::windows::close_auxiliary(cx, handles);
+            // Let the closed window leave the compositor without blocking the
+            // UI thread. Capture itself excludes Capin windows, so this delay
+            // is only a visual cleanup.
+            cx.spawn(async move |cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(50))
+                    .await;
+                cx.update(|cx| open(cx));
+            })
+            .detach();
         });
     }
 

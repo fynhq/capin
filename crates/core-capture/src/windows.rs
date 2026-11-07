@@ -13,7 +13,8 @@ use windows::Win32::Graphics::Dwm::{
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUNDSMALL, DwmGetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
-    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MONITORINFOEXW, MonitorFromWindow,
 };
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
@@ -21,8 +22,8 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Accessibility::{CUIAutomation, TreeScope_Descendants};
 use windows::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, MDT_EFFECTIVE_DPI,
-    SetProcessDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, GetDpiForWindow,
+    MDT_EFFECTIVE_DPI, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetDesktopWindow, GetShellWindow, GetWindowRect, IsIconic, IsZoomed,
@@ -346,10 +347,18 @@ fn enumerate_windows() -> Result<Vec<WindowInfo>> {
             continue;
         }
 
+        let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+        let monitor_id =
+            (!monitor.0.is_null()).then(|| MonitorId::from_raw(monitor.0 as usize as u64));
+        let dpi = unsafe { GetDpiForWindow(hwnd) };
+        let scale = DpiScale::new(dpi as f32 / 96.0).unwrap_or(DpiScale::ONE);
+
         result.push(WindowInfo {
             id: WindowId::from_raw(hwnd.0 as usize as u64),
             bounds,
             title: window.title().unwrap_or_default(),
+            monitor: monitor_id,
+            scale,
         });
     }
 

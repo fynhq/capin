@@ -23,7 +23,7 @@ impl WindowStyle {
         always_on_top: true,
         skip_taskbar: true,
         no_activate: false,
-        exclude_from_capture: false,
+        exclude_from_capture: true,
     };
 
     pub const PIN: Self = Self {

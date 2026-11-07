@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{COLORREF, HWND, POINT};
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
@@ -110,7 +111,9 @@ pub(super) fn set_click_through(
         // window already uses a composition surface.
         let _ = unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA) };
     } else {
-        ex_style &= !WS_EX_TRANSPARENT.0;
+        // Remove LAYERED again: leaving it behind can make later opacity or
+        // composition changes behave differently from the original window.
+        ex_style &= !(WS_EX_TRANSPARENT.0 | WS_EX_LAYERED.0);
     }
     // SAFETY: the extended style value came from the same window.
     unsafe {
@@ -126,12 +129,36 @@ fn platform_error(operation: &'static str, error: impl std::fmt::Display) -> Pla
     }
 }
 
-pub(super) fn scroll_wheel_at(x: i32, y: i32, notches: i32) -> bool {
+pub(super) fn native_window_id(window: &impl HasWindowHandle) -> Option<u64> {
+    let handle = window.window_handle().ok()?;
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return None;
+    };
+    Some(win32.hwnd.get() as u64)
+}
+
+pub(super) fn scroll_wheel_at(monitor: u64, x: i32, y: i32, notches: i32) -> bool {
     if notches == 0 {
         return true;
     }
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: the monitor handle comes from the same process that enumerated
+    // it; GetMonitorInfoW only writes into the provided structure.
+    if !unsafe { GetMonitorInfoW(HMONITOR(monitor as usize as *mut c_void), &mut info) }.as_bool() {
+        return false;
+    }
+    let screen_x = info.rcMonitor.left + x;
+    let screen_y = info.rcMonitor.top + y;
     // SAFETY: the point is supplied by the caller and Query APIs do not retain it.
-    let target = unsafe { WindowFromPoint(POINT { x, y }) };
+    let target = unsafe {
+        WindowFromPoint(POINT {
+            x: screen_x,
+            y: screen_y,
+        })
+    };
     if target.0.is_null() {
         return false;
     }

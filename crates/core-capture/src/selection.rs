@@ -2,7 +2,7 @@ use core_types::{CaptureRegion, MonitorId, PhysicalPoint, PhysicalRect, WindowId
 
 use crate::WindowInfo;
 
-/// Pointer travel, in physical pixels, before a press becomes a region drag.
+/// Pointer travel, in logical pixels, before a press becomes a region drag.
 pub const DRAG_THRESHOLD_PX: i32 = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,10 +46,28 @@ pub struct SelectionSession {
     drag: Option<Drag>,
     aspect_ratio: Option<f32>,
     window_targeting: bool,
+    drag_threshold: i32,
 }
 
 impl SelectionSession {
     pub fn new(monitor: MonitorId, monitor_bounds: PhysicalRect, windows: Vec<WindowInfo>) -> Self {
+        Self::with_scale(monitor, monitor_bounds, windows, 1.0)
+    }
+
+    /// Builds a session for one monitor. Windows reported for other monitors
+    /// are discarded so mixed-DPI macOS desktops cannot hover a window that
+    /// visually belongs to a neighboring display.
+    pub fn with_scale(
+        monitor: MonitorId,
+        monitor_bounds: PhysicalRect,
+        windows: Vec<WindowInfo>,
+        scale: f32,
+    ) -> Self {
+        let windows = windows
+            .into_iter()
+            .filter(|window| window.monitor.is_none() || window.monitor == Some(monitor))
+            .collect();
+        let drag_threshold = (DRAG_THRESHOLD_PX as f32 * scale.max(0.1)).round() as i32;
         Self {
             monitor,
             monitor_bounds,
@@ -59,6 +77,7 @@ impl SelectionSession {
             drag: None,
             aspect_ratio: None,
             window_targeting: false,
+            drag_threshold: drag_threshold.max(1),
         }
     }
 
@@ -91,11 +110,20 @@ impl SelectionSession {
 
     pub fn hovered_window(&self) -> Option<&WindowInfo> {
         let hovered = self.hovered?;
-        self.windows.iter().find(|window| window.id == hovered)
+        self.window(hovered)
+    }
+
+    pub fn window(&self, id: WindowId) -> Option<&WindowInfo> {
+        self.windows.iter().find(|window| window.id == id)
     }
 
     pub fn is_dragging(&self) -> bool {
         self.drag.as_ref().is_some_and(|drag| drag.active)
+    }
+
+    /// Returns whether a press is pending or a drag is active.
+    pub fn has_drag(&self) -> bool {
+        self.drag.is_some()
     }
 
     pub fn hovered_element(&self) -> Option<PhysicalRect> {
@@ -140,11 +168,12 @@ impl SelectionSession {
     }
 
     pub fn pointer_moved(&mut self, point: PhysicalPoint) {
+        let threshold = self.drag_threshold;
         if let Some(drag) = &mut self.drag {
             drag.raw_current = point;
             drag.current =
                 constrain_ratio(self.monitor_bounds, drag.origin, point, self.aspect_ratio);
-            if is_past_threshold(drag.origin, point) {
+            if is_past_threshold(drag.origin, point, threshold) {
                 drag.active = true;
                 self.hovered = None;
                 self.hovered_element = None;
@@ -170,9 +199,10 @@ impl SelectionSession {
     }
 
     pub fn pointer_pressed(&mut self, point: PhysicalPoint) {
-        if self.drag.is_some() {
-            return;
-        }
+        // Replace a stale press left behind by a mouse-up that happened outside
+        // the overlay. Without this, the next click would capture a region from
+        // the old origin.
+        self.drag = None;
 
         let over_window = self.hit_test(point).is_some();
         let start_window = if self.window_targeting {
@@ -204,7 +234,7 @@ impl SelectionSession {
         drag.raw_current = point;
         drag.current = constrain_ratio(self.monitor_bounds, drag.origin, point, self.aspect_ratio);
 
-        if drag.active || is_past_threshold(drag.origin, point) {
+        if drag.active || is_past_threshold(drag.origin, point, self.drag_threshold) {
             let Some(region) =
                 region_from_drag(self.monitor, self.monitor_bounds, drag.origin, drag.current)
             else {
@@ -242,6 +272,13 @@ impl SelectionSession {
             .iter()
             .find(|window| window.bounds.contains(point))
     }
+}
+
+fn is_past_threshold(origin: PhysicalPoint, current: PhysicalPoint, threshold: i32) -> bool {
+    (current.x - origin.x)
+        .abs()
+        .max((current.y - origin.y).abs())
+        >= threshold
 }
 
 fn constrain_ratio(
@@ -339,13 +376,6 @@ pub fn region_from_drag(
     Some(CaptureRegion::new(monitor, rect))
 }
 
-fn is_past_threshold(origin: PhysicalPoint, current: PhysicalPoint) -> bool {
-    (current.x - origin.x)
-        .abs()
-        .max((current.y - origin.y).abs())
-        >= DRAG_THRESHOLD_PX
-}
-
 fn clamp_to_bounds(point: PhysicalPoint, bounds: PhysicalRect) -> PhysicalPoint {
     // Region edges are exclusive, so the far edge may equal right()/bottom().
     let max_x = bounds.right();
@@ -365,6 +395,8 @@ mod tests {
             id: WindowId::from_raw(id),
             bounds: PhysicalRect::new(x, y, width, height),
             title: String::new(),
+            monitor: None,
+            scale: core_types::DpiScale::ONE,
         }
     }
 
@@ -556,6 +588,52 @@ mod tests {
             session.pointer_released(PhysicalPoint::new(200, 120)),
             SelectionAction::None
         );
+    }
+
+    #[test]
+    fn windows_from_other_monitors_are_filtered_out() {
+        let monitor = MonitorId::from_raw(1);
+        let mut other = window(30, 10, 10, 50, 50);
+        other.monitor = Some(MonitorId::from_raw(2));
+        let mut session = SelectionSession::with_scale(
+            monitor,
+            PhysicalRect::new(0, 0, 1000, 800),
+            vec![window(10, 100, 100, 100, 100), other],
+            2.0,
+        );
+        session.set_window_targeting(true);
+        session.pointer_moved(PhysicalPoint::new(20, 20));
+        assert_eq!(session.hovered_window(), None);
+    }
+
+    #[test]
+    fn a_new_press_replaces_a_stale_drag() {
+        let mut session = session();
+        session.pointer_pressed(PhysicalPoint::new(120, 120));
+        session.pointer_moved(PhysicalPoint::new(400, 500));
+        assert!(session.has_drag());
+
+        session.pointer_pressed(PhysicalPoint::new(600, 600));
+        let action = session.pointer_released(PhysicalPoint::new(600, 600));
+        assert_eq!(
+            action,
+            SelectionAction::Capture(SelectionOutcome::Monitor(MonitorId::from_raw(1)))
+        );
+    }
+
+    #[test]
+    fn drag_threshold_scales_with_the_monitor() {
+        let mut session = SelectionSession::with_scale(
+            MonitorId::from_raw(1),
+            PhysicalRect::new(0, 0, 1000, 800),
+            Vec::new(),
+            2.0,
+        );
+        session.pointer_pressed(PhysicalPoint::new(100, 100));
+        session.pointer_moved(PhysicalPoint::new(105, 100));
+        assert!(!session.is_dragging());
+        session.pointer_moved(PhysicalPoint::new(110, 100));
+        assert!(session.is_dragging());
     }
 
     #[test]

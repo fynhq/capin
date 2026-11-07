@@ -24,7 +24,9 @@ pub fn compose_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> Rgb
             .round()
             .clamp(0.0, 2048.0) as u32,
         corner_radius: core_capture::window_corner_radius(id, scale),
-        shadow: settings.window_shadow.then_some(Shadow {
+        shadow: (settings.window_shadow
+            && !platform_window::window_capture_includes_native_shadow())
+        .then_some(Shadow {
             offset_y: (SHADOW_OFFSET * scale).round() as i32,
             blur_radius: (SHADOW_BLUR * scale).round() as u32,
             opacity: SHADOW_OPACITY,

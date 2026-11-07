@@ -78,11 +78,17 @@ impl CaptureBackend for MacosCapture {
             }
             let center_x = x + width / 2.0;
             let center_y = y + height / 2.0;
-            let scale = displays
+            let display = displays
                 .iter()
-                .find(|display| contains(display.point_bounds, center_x, center_y))
-                .map(|display| display.scale.get())
-                .unwrap_or(1.0);
+                .find(|display| contains(display.point_bounds, center_x, center_y));
+            let (monitor, scale) = display
+                .map(|display| {
+                    (
+                        Some(MonitorId::from_raw(u64::from(display.id))),
+                        display.scale.get(),
+                    )
+                })
+                .unwrap_or((None, 1.0));
             let bounds = PhysicalRect::new(
                 (x * f64::from(scale)).round() as i32,
                 (y * f64::from(scale)).round() as i32,
@@ -97,6 +103,8 @@ impl CaptureBackend for MacosCapture {
                 id: WindowId::from_raw(number as u64),
                 bounds,
                 title,
+                monitor,
+                scale: DpiScale::new(scale).unwrap_or(DpiScale::ONE),
             });
         }
         Ok(result)
@@ -104,24 +112,28 @@ impl CaptureBackend for MacosCapture {
 
     fn capture(&mut self, target: CaptureTarget) -> Result<RgbaFrame> {
         ensure_permission()?;
-        match sck::capture(target) {
+        let sck_error = match sck::capture(target) {
             Ok(frame) => return Ok(frame),
             Err(error) => {
                 eprintln!(
                     "capin: ScreenCaptureKit screenshot failed, falling back to CoreGraphics: {error}"
                 );
+                error.to_string()
             }
-        }
+        };
         // Legacy CoreGraphics fallback, mainly for macOS 13 environments where
         // the ScreenCaptureKit path is unavailable.
-        match target {
+        let fallback = match target {
             CaptureTarget::Monitor(id) => capture_display(id),
             CaptureTarget::Window(id) => capture_window(id),
             CaptureTarget::Region(region) => {
-                let frame = capture_display(region.monitor)?;
-                crop(&frame, region.rect)
+                capture_display(region.monitor).and_then(|frame| crop(&frame, region.rect))
             }
-        }
+        };
+        fallback.map_err(|error| CaptureError::Platform {
+            operation: "ScreenCaptureKit+CoreGraphics",
+            message: format!("ScreenCaptureKit: {sck_error}; fallback: {error}"),
+        })
     }
 
     fn capture_with_cursor(&mut self, target: CaptureTarget) -> Result<RgbaFrame> {
@@ -183,15 +195,12 @@ impl MacosCapture {
                 Some((local_x - rect.origin.x, local_y - rect.origin.y, scale))
             }
             CaptureTarget::Window(id) => {
-                let display = displays
-                    .iter()
-                    .find(|display| contains(display.point_bounds, cursor.x, cursor.y))?;
-                let scale = display.scale.get();
                 let window = self
                     .windows()
                     .ok()?
                     .into_iter()
                     .find(|window| window.id == id)?;
+                let scale = window.scale.get();
                 let origin_x = f64::from(window.bounds.origin.x) / f64::from(scale);
                 let origin_y = f64::from(window.bounds.origin.y) / f64::from(scale);
                 let x = ((cursor.x - origin_x) * f64::from(scale)).round() as i32;
@@ -515,6 +524,6 @@ fn bounds_field(info: &CFDictionary<CFString, CFType>) -> Option<(f64, f64, f64,
 fn contains(bounds: CGRect, x: f64, y: f64) -> bool {
     x >= bounds.origin.x
         && y >= bounds.origin.y
-        && x <= bounds.origin.x + bounds.size.width
-        && y <= bounds.origin.y + bounds.size.height
+        && x < bounds.origin.x + bounds.size.width
+        && y < bounds.origin.y + bounds.size.height
 }

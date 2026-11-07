@@ -85,14 +85,35 @@ pub(super) fn apply(
     Ok(())
 }
 
-pub(super) fn scroll_wheel_at(x: i32, y: i32, notches: i32) -> bool {
+pub(super) fn window_capture_includes_native_shadow() -> bool {
+    use objc2_foundation::{NSOperatingSystemVersion, NSProcessInfo};
+
+    !NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(NSOperatingSystemVersion {
+        majorVersion: 14,
+        minorVersion: 0,
+        patchVersion: 0,
+    })
+}
+
+pub(super) fn native_window_id(window: &impl HasWindowHandle) -> Option<u64> {
+    let handle = window.window_handle().ok()?;
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return None;
+    };
+    // SAFETY: the handle points to the NSView owned by the live GPUI window.
+    let view = unsafe { &*(appkit.ns_view.as_ptr() as *const NSView) };
+    let window = view.window()?;
+    Some(window.windowNumber() as u64)
+}
+
+pub(super) fn scroll_wheel_at(monitor: u64, x: i32, y: i32, notches: i32) -> bool {
     if notches == 0 {
         return true;
     }
     if !unsafe { AXIsProcessTrusted() } {
         return false;
     }
-    let Some(target) = physical_to_points(x, y) else {
+    let Some(target) = display_point(monitor, x, y) else {
         return false;
     };
     let source = match CGEventSource::new(CGEventSourceStateID::CombinedSessionState) {
@@ -141,39 +162,33 @@ fn cursor_point() -> Option<CGPoint> {
     Some(event.location())
 }
 
-/// Converts virtual-desktop physical pixels into AppKit points.
+/// Converts a monitor-local physical pixel into an AppKit point.
 ///
-/// The overlay and capture layers work in the same physical space as the
-/// Windows backend, while CoreGraphics events use points.
-fn physical_to_points(x: i32, y: i32) -> Option<CGPoint> {
-    let ids = CGDisplay::active_displays().ok()?;
-    for id in ids {
-        if id == 0 {
-            continue;
-        }
-        let display = CGDisplay::new(id);
-        let bounds = display.bounds();
-        if bounds.size.width <= 0.0 || bounds.size.height <= 0.0 {
-            continue;
-        }
-        let scale = display.pixels_wide() as f64 / bounds.size.width;
-        if scale <= 0.0 {
-            continue;
-        }
-        let origin_x = bounds.origin.x * scale;
-        let origin_y = bounds.origin.y * scale;
-        let width = display.pixels_wide() as f64;
-        let height = display.pixels_high() as f64;
-        let px = f64::from(x);
-        let py = f64::from(y);
-        if px >= origin_x && py >= origin_y && px <= origin_x + width && py <= origin_y + height {
-            return Some(CGPoint::new(
-                bounds.origin.x + (px - origin_x) / scale,
-                bounds.origin.y + (py - origin_y) / scale,
-            ));
-        }
+/// Resolving the display by identifier keeps mixed-DPI desktops unambiguous:
+/// the previous global inverse mapping could pick the wrong display when two
+/// monitors used different scales.
+fn display_point(monitor: u64, x: i32, y: i32) -> Option<CGPoint> {
+    let display_id = u32::try_from(monitor).ok()?;
+    if display_id == 0 {
+        return None;
     }
-    None
+    let ids = CGDisplay::active_displays().ok()?;
+    if !ids.contains(&display_id) {
+        return None;
+    }
+    let display = CGDisplay::new(display_id);
+    let bounds = display.bounds();
+    if bounds.size.width <= 0.0 || bounds.size.height <= 0.0 {
+        return None;
+    }
+    let scale = display.pixels_wide() as f64 / bounds.size.width;
+    if scale <= 0.0 {
+        return None;
+    }
+    Some(CGPoint::new(
+        bounds.origin.x + f64::from(x) / scale,
+        bounds.origin.y + f64::from(y) / scale,
+    ))
 }
 
 #[link(name = "ApplicationServices", kind = "framework")]
