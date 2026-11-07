@@ -51,8 +51,8 @@ xattr -d -r com.apple.quarantine /Applications/Capin.app
 - 截图后进入标注编辑器：绘制、文字、序号、聚光灯、模糊，复制、保存或贴图；选中已有对象可改颜色与线宽，双击文字可再次编辑。
 - 窗口截图的圆角、阴影、留白与背景在「设置 → 截图 → 窗口截图」中调整，这些样式只作用于窗口截图；默认透明背景并输出带 Alpha 的 PNG。
 - 贴图窗口可置顶、调整透明度与缩放，图片贴图可顺时针旋转 90°；默认不显示操作栏，左键移动或划选文字，右键菜单可旋转、编辑、复制、保存、关闭；也可开启鼠标穿透。开启穿透后从托盘选择「恢复贴图交互」恢复操作；贴图会在重启后恢复。
-- 图片贴图可按「设置 → 截图 → 贴图」中的开关自动识别文字与二维码：在文字上拖动即可划选，松开后自动复制；双击选择单词；拖动左上角手柄可移动贴图。
-- 录屏以系统 H.264 编码保存为 MP4；拖拽选区或按住 Alt 点击窗口开始录制，录制过程可暂停，停止后自动保存。
+- 图片贴图可按「设置 → 截图 → 贴图」中的开关自动识别文字与二维码：在文字上拖动即可划选，松开后自动复制；双击选择单词；在非文字区域按住左键拖动可移动贴图。
+- 录屏以系统 H.264 编码保存为 MP4；默认包含光标，可在「设置 → 录屏」中关闭；拖拽选区或按住 Alt 点击窗口开始录制，录制过程可暂停，停止后自动保存。
 - 所有截图与录屏只在本机处理；不上传，无遥测。
 
 ## 从源码构建
@@ -121,8 +121,8 @@ xattr -d -r com.apple.quarantine /Applications/Capin.app
 - The editor supports drawing, text, numbered badges, spotlight, blur, copy, save, and pin; select an existing object to recolor or resize its stroke, and double-click text to edit it again.
 - Configure window corners, shadow, padding and background under Settings → Capture → Window capture; these styles apply to window captures only. The default is a transparent PNG with alpha.
 - Pin windows can stay on top, change opacity and zoom, and rotate image pins clockwise by 90 degrees; no action bar is shown by default. Left-click to move or select text, and right-click for rotate, edit, copy, save and close (plus click-through). After click-through, use Release pinned windows in the tray menu; pins restore after a restart.
-- Image pins can recognize text and QR codes according to Settings → Capture → Pins: drag over text to select it and release to copy; double-click to select a word; drag the top-left handle to move the pin.
-- Recording encodes MP4 with the system H.264 encoder. Drag a region or hold Alt and click a window to start; pause while recording, and the file is saved on stop.
+- Image pins can recognize text and QR codes according to Settings → Capture → Pins: drag over text to select it and release to copy; double-click to select a word; drag any non-text area with the left button to move the pin.
+- Recording encodes MP4 with the system H.264 encoder and includes the cursor by default (disable it in Settings → Recording). Drag a region or hold Alt and click a window to start; pause while recording, and the file is saved on stop.
 - Captures and recordings stay local; no upload, no telemetry.
 
 ## Build from source
