@@ -190,26 +190,33 @@ fn paint_background_image(
     let image = image::RgbaImage::from_raw(frame.width(), frame.height(), raw)
         .ok_or(ComposeError::EmptyBackground)?;
 
+    // Crop to the target aspect ratio before scaling. Resizing a very wide or
+    // tall wallpaper directly to "cover" can allocate an enormous temporary
+    // image (a 1x10000 source would be scaled to tens of millions of pixels).
+    let target_aspect = f64::from(width) / f64::from(height);
     let source_width = f64::from(frame.width());
     let source_height = f64::from(frame.height());
-    let scale = (f64::from(width) / source_width).max(f64::from(height) / source_height);
-    let scaled_width = (source_width * scale).ceil().max(1.0) as u32;
-    let scaled_height = (source_height * scale).ceil().max(1.0) as u32;
-    let resized =
-        image::imageops::resize(&image, scaled_width, scaled_height, FilterType::Triangle);
+    let source_aspect = source_width / source_height;
+    let (crop_width, crop_height) = if source_aspect > target_aspect {
+        let crop_width = (source_height * target_aspect).round().max(1.0) as u32;
+        (crop_width.min(frame.width()), frame.height())
+    } else {
+        let crop_height = (source_width / target_aspect).round().max(1.0) as u32;
+        (frame.width(), crop_height.min(frame.height()))
+    };
+    let crop_x = (frame.width().saturating_sub(crop_width)) / 2;
+    let crop_y = (frame.height().saturating_sub(crop_height)) / 2;
+    let cropped = image::imageops::crop_imm(&image, crop_x, crop_y, crop_width, crop_height);
+    let resized = image::imageops::resize(&cropped.to_image(), width, height, FilterType::Triangle);
 
-    let offset_x = (scaled_width.saturating_sub(width)) / 2;
-    let offset_y = (scaled_height.saturating_sub(height)) / 2;
-    for y in 0..height {
-        let source_start =
-            ((y + offset_y) as usize * scaled_width as usize + offset_x as usize) * 4;
-        let source_end = source_start + width as usize * 4;
+    for y in 0..height as usize {
+        let start = y * width as usize * 4;
+        let end = start + width as usize * 4;
         let source = resized
             .as_raw()
-            .get(source_start..source_end)
+            .get(start..end)
             .ok_or(ComposeError::SizeOverflow)?;
-        let target_start = y as usize * width as usize * 4;
-        pixels[target_start..target_start + width as usize * 4].copy_from_slice(source);
+        pixels[start..end].copy_from_slice(source);
     }
     Ok(())
 }
@@ -226,9 +233,22 @@ struct CanvasLayout {
 
 fn paint_shadow(pixels: &mut [u8], layout: CanvasLayout, shadow: &Shadow) {
     let opacity = shadow.opacity.clamp(0.0, 1.0);
-    if opacity <= 0.0 {
+    if opacity <= 0.0 || layout.padding == 0 {
         return;
     }
+
+    // Three box passes spread the shadow roughly `3 * radius` pixels beyond
+    // the window. Clamp the radius to the padding on the tighter side (the
+    // vertical offset eats into one edge) so the canvas never cuts a partially
+    // transparent shadow into a hard line.
+    let available = layout
+        .padding
+        .saturating_sub(shadow.offset_y.unsigned_abs());
+    let max_radius = available / BLUR_PASSES as u32;
+    if max_radius == 0 {
+        return;
+    }
+    let blur_radius = shadow.blur_radius.min(max_radius);
 
     let origin_x = layout.padding as i64;
     let origin_y = layout.padding as i64 + i64::from(shadow.offset_y);
@@ -240,7 +260,7 @@ fn paint_shadow(pixels: &mut [u8], layout: CanvasLayout, shadow: &Shadow) {
         return;
     }
 
-    let mut mask = vec![0.0f32; layout.width as usize * layout.height as usize];
+    let mut mask = vec![0u8; layout.width as usize * layout.height as usize];
     for y in top as u32..bottom as u32 {
         for x in left as u32..right as u32 {
             let local_x = (i64::from(x) - origin_x) as u32;
@@ -253,21 +273,21 @@ fn paint_shadow(pixels: &mut [u8], layout: CanvasLayout, shadow: &Shadow) {
                 layout.corner_radius,
             );
             if coverage > 0.0 {
-                mask[y as usize * layout.width as usize + x as usize] = coverage;
+                mask[y as usize * layout.width as usize + x as usize] =
+                    (coverage * 255.0).round().clamp(0.0, 255.0) as u8;
             }
         }
     }
 
-    if shadow.blur_radius > 0 {
-        blur_alpha(&mut mask, layout.width, layout.height, shadow.blur_radius);
+    if blur_radius > 0 {
+        blur_alpha(&mut mask, layout.width, layout.height, blur_radius);
     }
 
-    let alpha_scale = opacity * 255.0;
     for (index, coverage) in mask.into_iter().enumerate() {
-        if coverage <= 0.0 {
+        if coverage == 0 {
             continue;
         }
-        let alpha = (coverage * alpha_scale).round().clamp(0.0, 255.0) as u8;
+        let alpha = (f32::from(coverage) * opacity).round().clamp(0.0, 255.0) as u8;
         if alpha == 0 {
             continue;
         }
@@ -330,7 +350,7 @@ fn rounded_coverage(x: u32, y: u32, width: u32, height: u32, radius: u32) -> f32
     (0.5 - distance).clamp(0.0, 1.0)
 }
 
-fn blur_alpha(mask: &mut [f32], width: u32, height: u32, radius: u32) {
+fn blur_alpha(mask: &mut [u8], width: u32, height: u32, radius: u32) {
     let radius = radius.min(MAX_BLUR_RADIUS) as usize;
     if radius == 0 {
         return;
@@ -338,42 +358,42 @@ fn blur_alpha(mask: &mut [f32], width: u32, height: u32, radius: u32) {
 
     let width = width as usize;
     let height = height as usize;
-    let mut scratch = vec![0.0f32; mask.len()];
+    let mut scratch = vec![0u8; mask.len()];
     for _ in 0..BLUR_PASSES {
         blur_horizontal(mask, &mut scratch, width, height, radius);
         blur_vertical(&scratch, mask, width, height, radius);
     }
 }
 
-fn blur_horizontal(src: &[f32], dst: &mut [f32], width: usize, height: usize, radius: usize) {
-    let mut prefix = vec![0.0f32; width + 1];
+fn blur_horizontal(src: &[u8], dst: &mut [u8], width: usize, height: usize, radius: usize) {
+    let mut prefix = vec![0u32; width + 1];
     for y in 0..height {
         let row = y * width;
-        prefix[0] = 0.0;
+        prefix[0] = 0;
         for x in 0..width {
-            prefix[x + 1] = prefix[x] + src[row + x];
+            prefix[x + 1] = prefix[x] + u32::from(src[row + x]);
         }
         for x in 0..width {
             let left = x.saturating_sub(radius);
             let right = (x + radius).min(width - 1);
-            let count = (right - left + 1) as f32;
-            dst[row + x] = (prefix[right + 1] - prefix[left]) / count;
+            let count = (right - left + 1) as u32;
+            dst[row + x] = ((prefix[right + 1] - prefix[left]) / count) as u8;
         }
     }
 }
 
-fn blur_vertical(src: &[f32], dst: &mut [f32], width: usize, height: usize, radius: usize) {
-    let mut prefix = vec![0.0f32; height + 1];
+fn blur_vertical(src: &[u8], dst: &mut [u8], width: usize, height: usize, radius: usize) {
+    let mut prefix = vec![0u32; height + 1];
     for x in 0..width {
-        prefix[0] = 0.0;
+        prefix[0] = 0;
         for y in 0..height {
-            prefix[y + 1] = prefix[y] + src[y * width + x];
+            prefix[y + 1] = prefix[y] + u32::from(src[y * width + x]);
         }
         for y in 0..height {
             let top = y.saturating_sub(radius);
             let bottom = (y + radius).min(height - 1);
-            let count = (bottom - top + 1) as f32;
-            dst[y * width + x] = (prefix[bottom + 1] - prefix[top]) / count;
+            let count = (bottom - top + 1) as u32;
+            dst[y * width + x] = ((prefix[bottom + 1] - prefix[top]) / count) as u8;
         }
     }
 }
