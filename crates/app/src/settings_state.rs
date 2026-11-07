@@ -59,6 +59,7 @@ pub struct AppSettings {
     pub copy_to_clipboard: bool,
     pub record_format: RecordFormat,
     pub record_frame_rate: FrameRate,
+    pub record_cursor: bool,
     pub capture_hotkey: String,
     pub pin_hotkey: String,
     pub screenshot_dir: Option<PathBuf>,
@@ -82,6 +83,7 @@ impl Default for AppSettings {
             copy_to_clipboard: true,
             record_format: RecordFormat::Mp4,
             record_frame_rate: FrameRate::Fps30,
+            record_cursor: true,
             capture_hotkey: DEFAULT_CAPTURE_HOTKEY.to_owned(),
             pin_hotkey: DEFAULT_PIN_HOTKEY.to_owned(),
             screenshot_dir: None,
@@ -168,6 +170,7 @@ fn parse(text: &str) -> AppSettings {
                 "30" => settings.record_frame_rate = FrameRate::Fps30,
                 _ => {}
             },
+            "record_cursor" => settings.record_cursor = value != "false",
             "capture_hotkey" => settings.capture_hotkey = value.to_owned(),
             "pin_hotkey" => settings.pin_hotkey = value.to_owned(),
             "screenshot_dir" => settings.screenshot_dir = parse_directory(value),
@@ -233,13 +236,14 @@ fn persist(settings: &AppSettings) {
         .map(|path| path.display().to_string())
         .unwrap_or_default();
     let text = format!(
-        "language={}\nauto_start={}\nauto_start_explicit={}\ncopy_to_clipboard={}\nrecord_format={}\nrecord_frame_rate={}\ncapture_hotkey={}\npin_hotkey={}\nscreenshot_dir={}\nrecording_dir={}\nwindow_composition={}\nwindow_background={}\nwindow_padding={}\nwindow_shadow={}\nwindow_wallpaper={}\ncapture_cursor={}\npin_text_ocr={}\npin_qr={}\n",
+        "language={}\nauto_start={}\nauto_start_explicit={}\ncopy_to_clipboard={}\nrecord_format={}\nrecord_frame_rate={}\nrecord_cursor={}\ncapture_hotkey={}\npin_hotkey={}\nscreenshot_dir={}\nrecording_dir={}\nwindow_composition={}\nwindow_background={}\nwindow_padding={}\nwindow_shadow={}\nwindow_wallpaper={}\ncapture_cursor={}\npin_text_ocr={}\npin_qr={}\n",
         settings.language.code(),
         settings.auto_start,
         settings.auto_start_explicit,
         settings.copy_to_clipboard,
         format,
         frame_rate,
+        settings.record_cursor,
         settings.capture_hotkey,
         settings.pin_hotkey,
         screenshot_dir,

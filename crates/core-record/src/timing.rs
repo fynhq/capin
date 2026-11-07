@@ -23,6 +23,14 @@ impl FrameRate {
     pub const fn interval(self) -> Duration {
         Duration::from_nanos(1_000_000_000 / self.as_u32() as u64)
     }
+
+    pub const fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            30 => Some(Self::Fps30),
+            60 => Some(Self::Fps60),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for FrameRate {
@@ -68,6 +76,11 @@ impl FrameTimeline {
         let duplicates = index - self.next_index;
         self.next_index = index + 1;
         FrameDecision::Encode { index, duplicates }
+    }
+
+    /// Index that the next encoded frame will receive.
+    pub const fn next_index(&self) -> u64 {
+        self.next_index
     }
 
     pub fn reset(&mut self) {
@@ -179,6 +192,13 @@ mod tests {
                 duplicates: 0
             }
         );
+    }
+
+    #[test]
+    fn frame_rate_round_trips_from_u32() {
+        assert_eq!(FrameRate::from_u32(30), Some(FrameRate::Fps30));
+        assert_eq!(FrameRate::from_u32(60), Some(FrameRate::Fps60));
+        assert_eq!(FrameRate::from_u32(45), None);
     }
 
     #[test]

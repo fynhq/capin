@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use core_capture::CaptureTarget;
-use core_record::RecordConfig;
+use core_record::{FrameDecision, FrameRate, FrameTimeline, RecordConfig};
 use core_types::PhysicalRect;
-use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
+use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
 use windows_capture::encoder::{
     AudioSettingsBuilder, ContainerSettingsBuilder, VideoEncoder, VideoSettingsBuilder,
     VideoSettingsSubType,
@@ -34,6 +34,7 @@ enum Source {
 struct CaptureInfo {
     source: Source,
     output: PathBuf,
+    final_output: PathBuf,
     fps: u32,
     include_cursor: bool,
     shared: Arc<Flags>,
@@ -42,6 +43,7 @@ struct CaptureInfo {
 pub(crate) fn start(
     config: RecordConfig,
     output: PathBuf,
+    temp: PathBuf,
     shared: Arc<Flags>,
 ) -> Result<(), String> {
     if let CaptureTarget::Region(region) = config.target
@@ -56,7 +58,8 @@ pub(crate) fn start(
             let monitor = find_monitor(region.monitor.raw())?;
             let info = CaptureInfo {
                 source: Source::Region(region.rect),
-                output,
+                output: temp,
+                final_output: output,
                 fps,
                 include_cursor: config.include_cursor,
                 shared,
@@ -67,7 +70,8 @@ pub(crate) fn start(
             let monitor = find_monitor(id.raw())?;
             let info = CaptureInfo {
                 source: Source::Monitor,
-                output,
+                output: temp,
+                final_output: output,
                 fps,
                 include_cursor: config.include_cursor,
                 shared,
@@ -79,7 +83,8 @@ pub(crate) fn start(
             let window = Window::from_raw_hwnd(raw);
             let info = CaptureInfo {
                 source: Source::Window,
-                output,
+                output: temp,
+                final_output: output,
                 fps,
                 include_cursor: config.include_cursor,
                 shared,
@@ -94,58 +99,67 @@ fn find_monitor(raw: u64) -> Result<Monitor, String> {
         .map_err(|error| error.to_string())?
         .into_iter()
         .find(|monitor| monitor.as_raw_hmonitor() as usize as u64 == raw)
-        .or_else(|| Monitor::primary().ok())
-        .ok_or_else(|| "monitor not found".to_owned())
+        .ok_or_else(|| "the monitor to record no longer exists".to_owned())
 }
 
 fn spawn_monitor(monitor: Monitor, info: CaptureInfo) -> Result<(), String> {
-    spawn(move || {
-        let shared = Arc::clone(&info.shared);
-        let cursor = cursor_settings(info.include_cursor);
-        let settings = CaptureSettings::new(
-            monitor,
-            cursor,
-            DrawBorderSettings::WithoutBorder,
-            SecondaryWindowSettings::Default,
-            interval(info.fps),
-            DirtyRegionSettings::Default,
-            ColorFormat::Bgra8,
-            info,
-        );
-        if let Err(error) = Recorder::start(settings) {
-            shared.fail(error.to_string());
-            eprintln!("capin: recording stopped with an error: {error}");
-        }
-    })
+    let shared = Arc::clone(&info.shared);
+    let cursor = cursor_settings(info.include_cursor);
+    let settings = CaptureSettings::new(
+        monitor,
+        cursor,
+        DrawBorderSettings::WithoutBorder,
+        SecondaryWindowSettings::Default,
+        interval(info.fps),
+        DirtyRegionSettings::Default,
+        ColorFormat::Bgra8,
+        info,
+    );
+    let control = Recorder::start_free_threaded(settings).map_err(|error| error.to_string())?;
+    supervise(control, shared);
+    Ok(())
 }
 
 fn spawn_window(window: Window, info: CaptureInfo) -> Result<(), String> {
-    spawn(move || {
-        let shared = Arc::clone(&info.shared);
-        let cursor = cursor_settings(info.include_cursor);
-        let settings = CaptureSettings::new(
-            window,
-            cursor,
-            DrawBorderSettings::WithoutBorder,
-            SecondaryWindowSettings::Default,
-            interval(info.fps),
-            DirtyRegionSettings::Default,
-            ColorFormat::Bgra8,
-            info,
-        );
-        if let Err(error) = Recorder::start(settings) {
-            shared.fail(error.to_string());
-            eprintln!("capin: recording stopped with an error: {error}");
-        }
-    })
+    let shared = Arc::clone(&info.shared);
+    let cursor = cursor_settings(info.include_cursor);
+    let settings = CaptureSettings::new(
+        window,
+        cursor,
+        DrawBorderSettings::WithoutBorder,
+        SecondaryWindowSettings::Default,
+        interval(info.fps),
+        DirtyRegionSettings::Default,
+        ColorFormat::Bgra8,
+        info,
+    );
+    let control = Recorder::start_free_threaded(settings).map_err(|error| error.to_string())?;
+    supervise(control, shared);
+    Ok(())
 }
 
-fn spawn(run: impl FnOnce() + Send + 'static) -> Result<(), String> {
+/// Watches for the stop request independently of frame arrival. The previous
+/// implementation only created this watcher inside the first frame callback,
+/// so a recording that never received a frame could not be stopped.
+fn supervise(
+    control: CaptureControl<Recorder, Box<dyn std::error::Error + Send + Sync>>,
+    shared: Arc<Flags>,
+) {
     std::thread::Builder::new()
-        .name("capin-record-wgc".to_owned())
-        .spawn(run)
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+        .name("capin-record-stop".to_owned())
+        .spawn(move || {
+            while !shared.stop_requested() {
+                if shared.finished.load(Ordering::Acquire) {
+                    let _ = control.wait();
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(80));
+            }
+            if let Err(error) = control.stop() {
+                shared.fail(error.to_string());
+            }
+        })
+        .ok();
 }
 
 fn interval(fps: u32) -> MinimumUpdateIntervalSettings {
@@ -163,12 +177,11 @@ fn cursor_settings(include_cursor: bool) -> CursorCaptureSettings {
 struct Recorder {
     encoder: Option<VideoEncoder>,
     output_size: Option<(u32, u32)>,
-    frame_bytes: Vec<u8>,
+    last_buffer: Option<Vec<u8>>,
+    last_pts: i64,
+    frame_ticks: i64,
+    timeline: FrameTimeline,
     flags: CaptureInfo,
-    watching: bool,
-    last_frame: Option<Instant>,
-    pause_started: Option<Instant>,
-    paused_total: Duration,
 }
 
 impl GraphicsCaptureApiHandler for Recorder {
@@ -176,15 +189,17 @@ impl GraphicsCaptureApiHandler for Recorder {
     type Error = Box<dyn std::error::Error + Send + Sync>;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
+        let fps = ctx.flags.fps.max(1);
+        ctx.flags.shared.restart_started();
+        let frame_rate = FrameRate::from_u32(fps).unwrap_or(FrameRate::Fps30);
         Ok(Self {
             encoder: None,
             output_size: None,
-            frame_bytes: Vec::new(),
+            last_buffer: None,
+            last_pts: 0,
+            frame_ticks: 10_000_000 / i64::from(fps),
+            timeline: FrameTimeline::new(frame_rate),
             flags: ctx.flags,
-            watching: false,
-            last_frame: None,
-            pause_started: None,
-            paused_total: Duration::ZERO,
         })
     }
 
@@ -193,29 +208,23 @@ impl GraphicsCaptureApiHandler for Recorder {
         frame: &mut Frame,
         capture_control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
-        self.watch_stop(capture_control);
-
         if self.flags.shared.stop_requested() {
             return Ok(());
         }
         if self.flags.shared.is_paused() {
-            if self.pause_started.is_none() {
-                self.pause_started = Some(Instant::now());
-            }
             return Ok(());
-        }
-        if let Some(started) = self.pause_started.take() {
-            self.paused_total += started.elapsed();
         }
 
-        let interval = Duration::from_millis(1000 / u64::from(self.flags.fps.max(1)));
-        if self
-            .last_frame
-            .is_some_and(|last| last.elapsed() < interval.saturating_sub(Duration::from_millis(2)))
-        {
+        let paused_ticks = (self.flags.shared.paused_duration().as_nanos() / 100) as i64;
+        let adjusted = frame
+            .timestamp()?
+            .Duration
+            .saturating_sub(paused_ticks)
+            .max(0);
+        let adjusted = Duration::from_nanos((adjusted as u64).saturating_mul(100));
+        let FrameDecision::Encode { index, .. } = self.timeline.submit(adjusted) else {
             return Ok(());
-        }
-        self.last_frame = Some(Instant::now());
+        };
 
         let (x0, y0, x1, y1) = match self.flags.source {
             Source::Region(region) => {
@@ -243,16 +252,15 @@ impl GraphicsCaptureApiHandler for Recorder {
         if let Some(expected) = self.output_size
             && expected != (width, height)
         {
+            self.flags
+                .shared
+                .fail("the recording target changed size; stop and start again");
+            capture_control.stop();
             return Ok(());
         }
 
         let row = width as usize * 4;
-        if self.frame_bytes.len() < row * height as usize {
-            self.frame_bytes.resize(row * height as usize, 0);
-        }
-
-        let paused_ticks = (self.paused_total.as_nanos() / 100) as i64;
-        let timestamp = frame.timestamp()?.Duration.saturating_sub(paused_ticks);
+        let mut frame_bytes = vec![0u8; row * height as usize];
 
         let buffer = frame.buffer_crop(x0, y0, x1, y1)?;
         let mut packed = Vec::new();
@@ -262,7 +270,7 @@ impl GraphicsCaptureApiHandler for Recorder {
         }
         for y in 0..height as usize {
             let source = (height as usize - 1 - y) * row;
-            self.frame_bytes[y * row..y * row + row].copy_from_slice(&data[source..source + row]);
+            frame_bytes[y * row..y * row + row].copy_from_slice(&data[source..source + row]);
         }
 
         if self.encoder.is_none() {
@@ -287,43 +295,49 @@ impl GraphicsCaptureApiHandler for Recorder {
             self.output_size = Some((width, height));
         }
 
+        let pts = (index as i64).saturating_mul(self.frame_ticks);
         if let Some(encoder) = self.encoder.as_mut() {
-            encoder.send_frame_buffer(&self.frame_bytes[..row * height as usize], timestamp)?;
+            encoder.send_frame_buffer(&frame_bytes, pts)?;
         }
+        self.last_pts = pts;
+        self.last_buffer = Some(frame_bytes);
         Ok(())
-    }
-}
-
-impl Recorder {
-    fn watch_stop(&mut self, capture_control: InternalCaptureControl) {
-        if self.watching {
-            return;
-        }
-        self.watching = true;
-        let stop = Arc::clone(&self.flags.shared);
-        std::thread::spawn(move || {
-            while !stop.stop_requested() {
-                if stop.finished.load(Ordering::Acquire) {
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(80));
-            }
-            capture_control.stop();
-        });
     }
 }
 
 impl Drop for Recorder {
     fn drop(&mut self) {
-        if let Some(encoder) = self.encoder.take() {
-            if let Err(error) = encoder.finish() {
-                self.flags.shared.fail(error.to_string());
-                return;
-            }
-        } else {
+        let Some(mut encoder) = self.encoder.take() else {
             self.flags
                 .shared
                 .fail("no frames were captured before the recording stopped");
+            let _ = std::fs::remove_file(&self.flags.output);
+            return;
+        };
+
+        // Hold the last frame until the stop timestamp so static content does
+        // not produce a file much shorter than the on-screen timer.
+        if let Some(buffer) = self.last_buffer.take() {
+            let elapsed_ticks = (self.flags.shared.elapsed_active().as_nanos() / 100) as i64;
+            let final_pts = elapsed_ticks.max(self.last_pts.saturating_add(self.frame_ticks));
+            if let Err(error) = encoder.send_frame_buffer(&buffer, final_pts) {
+                self.flags.shared.fail(error.to_string());
+                let _ = std::fs::remove_file(&self.flags.output);
+                return;
+            }
+        }
+
+        if let Err(error) = encoder.finish() {
+            self.flags.shared.fail(error.to_string());
+            let _ = std::fs::remove_file(&self.flags.output);
+            return;
+        }
+
+        if let Err(error) = std::fs::rename(&self.flags.output, &self.flags.final_output) {
+            self.flags
+                .shared
+                .fail(format!("failed to publish the recording: {error}"));
+            let _ = std::fs::remove_file(&self.flags.output);
             return;
         }
         self.flags.shared.finish();

@@ -1160,6 +1160,7 @@ impl SettingsView {
                 vec![
                     self.recording_format_row(theme, cx),
                     self.recording_frame_rate_row(theme, cx),
+                    div().child(self.recording_cursor_row(theme, cx)),
                     div().child(self.save_location_row(SaveTarget::Recordings, theme, cx)),
                 ],
             ))
@@ -1228,6 +1229,27 @@ impl SettingsView {
                 t(language, "settings.frame_rate_desc"),
             ))
             .child(control)
+    }
+
+    fn recording_cursor_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = self.settings.language;
+        let value = self.settings.record_cursor;
+
+        row_shell(theme)
+            .id("settings-record-cursor")
+            .on_click(cx.listener(|this, _, _, cx| {
+                let value = !this.settings.record_cursor;
+                this.settings.record_cursor = value;
+                settings_state::update(|settings| settings.record_cursor = value);
+                this.status = None;
+                cx.notify();
+            }))
+            .child(label_block(
+                theme,
+                t(language, "settings.record_cursor"),
+                t(language, "settings.record_cursor_desc"),
+            ))
+            .child(toggle(theme, value))
     }
 
     fn shortcuts(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
@@ -1520,7 +1542,7 @@ impl SettingsView {
     fn start_capture(&self, cx: &mut Context<Self>) {
         let handles = cx.window_stack().unwrap_or_default();
         cx.defer(move |cx| {
-            crate::pin::close_windows_except_pins(cx, handles);
+            crate::windows::close_auxiliary(cx, handles);
             crate::overlay::open_overlays(cx);
         });
     }
@@ -1596,21 +1618,7 @@ pub fn open_settings(cx: &mut App) {
 }
 
 fn settings_bounds(cx: &App) -> Bounds<Pixels> {
-    let width = px(900.0);
-    let height = px(620.0);
-    match cx.primary_display() {
-        Some(display) => {
-            let center = display.bounds().center();
-            Bounds {
-                origin: point(center.x - px(450.0), center.y - px(310.0)),
-                size: size(width, height),
-            }
-        }
-        None => Bounds {
-            origin: point(px(120.0), px(120.0)),
-            size: size(width, height),
-        },
-    }
+    crate::ui::centered_bounds(cx, 900.0, 620.0)
 }
 
 fn settings_background() -> WindowBackgroundAppearance {

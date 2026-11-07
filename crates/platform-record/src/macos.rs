@@ -1,12 +1,12 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use block2::RcBlock;
 use core_capture::CaptureTarget;
-use core_record::RecordConfig;
+use core_record::{FrameDecision, FrameRate, FrameTimeline, RecordConfig};
 use core_types::PhysicalRect;
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
@@ -42,30 +42,51 @@ const FRAME_QUEUE: usize = 4;
 pub(crate) fn start(
     config: RecordConfig,
     output: PathBuf,
+    temp: PathBuf,
+    excluded_windows: Vec<u64>,
     flags: Arc<Flags>,
 ) -> Result<(), String> {
     ensure_permission()?;
     let content = shareable_content()?;
-    let plan = build_plan(&content, &config)?;
+    let plan = build_plan(&content, &config, &excluded_windows)?;
+    flags.restart_started();
     let (tx, rx) = sync_channel::<EncodedFrame>(FRAME_QUEUE);
     let (width, height) = (plan.width, plan.height);
     let fps = config.frame_rate.as_u32();
+    let encoder_flags = Arc::clone(&flags);
+    let encoder_temp = temp.clone();
+    let encoder_output = output.clone();
     let encoder = std::thread::Builder::new()
         .name("capin-record-av".to_owned())
-        .spawn(move || encode_loop(output, rx, width, height, fps))
+        .spawn(move || {
+            encode_loop(
+                &encoder_temp,
+                &encoder_output,
+                rx,
+                width,
+                height,
+                fps,
+                encoder_flags,
+            )
+        })
         .map_err(|error| error.to_string())?;
 
-    let result = capture_session(&config, &plan, flags, tx);
+    let session_flags = Arc::clone(&flags);
+    let result = capture_session(&config, &plan, session_flags, tx);
     let encoded = match encoder.join() {
         Ok(result) => result,
         Err(_) => Err("the recording encoder thread panicked".to_owned()),
     };
 
-    match (result, encoded) {
+    let outcome = match (result, encoded) {
         (Err(error), _) => Err(error),
         (Ok(()), Err(error)) => Err(error),
         (Ok(()), Ok(())) => Ok(()),
+    };
+    if outcome.is_err() {
+        let _ = std::fs::remove_file(&temp);
     }
+    outcome
 }
 
 struct SessionPlan {
@@ -76,16 +97,21 @@ struct SessionPlan {
     single_window: bool,
 }
 
-fn build_plan(content: &SCShareableContent, config: &RecordConfig) -> Result<SessionPlan, String> {
+fn build_plan(
+    content: &SCShareableContent,
+    config: &RecordConfig,
+    extra_exclusions: &[u64],
+) -> Result<SessionPlan, String> {
     match config.target {
         CaptureTarget::Monitor(id) => {
             let display = find_display(content, id.raw())?;
-            let empty = NSArray::<SCWindow>::from_slice(&[]);
+            let excluded = own_windows(content, extra_exclusions);
+            let windows = NSArray::from_retained_slice(&excluded);
             let filter = unsafe {
                 SCContentFilter::initWithDisplay_excludingWindows(
                     SCContentFilter::alloc(),
                     &display,
-                    &empty,
+                    &windows,
                 )
             };
             Ok(SessionPlan {
@@ -110,12 +136,13 @@ fn build_plan(content: &SCShareableContent, config: &RecordConfig) -> Result<Ses
                     region.rect.size.height as f64 / scale,
                 ),
             );
-            let empty = NSArray::<SCWindow>::from_slice(&[]);
+            let excluded = own_windows(content, extra_exclusions);
+            let windows = NSArray::from_retained_slice(&excluded);
             let filter = unsafe {
                 SCContentFilter::initWithDisplay_excludingWindows(
                     SCContentFilter::alloc(),
                     &display,
-                    &empty,
+                    &windows,
                 )
             };
             Ok(SessionPlan {
@@ -141,6 +168,21 @@ fn build_plan(content: &SCShareableContent, config: &RecordConfig) -> Result<Ses
             })
         }
     }
+}
+
+/// Excludes Capin's own windows (pins, menu, recording bar) from a display
+/// stream. `NSWindow.sharingType` no longer hides windows from
+/// ScreenCaptureKit on macOS 15, so the filter is the only reliable mechanism.
+fn own_windows(content: &SCShareableContent, extra: &[u64]) -> Vec<Retained<SCWindow>> {
+    let process = std::process::id() as i32;
+    unsafe { content.windows() }
+        .iter()
+        .filter(|window| {
+            let own = unsafe { window.owningApplication() }
+                .is_some_and(|application| unsafe { application.processID() } == process);
+            own || extra.contains(&(unsafe { window.windowID() } as u64))
+        })
+        .collect()
 }
 
 fn find_display(content: &SCShareableContent, raw: u64) -> Result<Retained<SCDisplay>, String> {
@@ -238,7 +280,7 @@ fn capture_session(
         )
     };
 
-    let output = ScreenOutput::new(tx, Arc::clone(&flags));
+    let output = ScreenOutput::new(tx, Arc::clone(&flags), config.frame_rate.as_u32());
     let output_protocol: &ProtocolObject<dyn SCStreamOutput> = ProtocolObject::from_ref(&*output);
     let queue = DispatchQueue::new("io.github.fynhq.capin.record", None);
     unsafe {
@@ -262,7 +304,7 @@ fn capture_session(
         Err(_) => return Err("screen capture did not start in time".to_owned()),
     }
 
-    while !flags.stop_requested() {
+    while !flags.stop_requested() && !flags.finished.load(std::sync::atomic::Ordering::Acquire) {
         std::thread::sleep(Duration::from_millis(50));
     }
 
@@ -367,16 +409,11 @@ fn ns_error(error: &NSError) -> String {
     error.localizedDescription().to_string()
 }
 
-struct Clock {
-    started: Option<Instant>,
-    paused_total: Duration,
-    pause_started: Option<Instant>,
-}
-
 struct OutputIvars {
     tx: SyncSender<EncodedFrame>,
     flags: Arc<Flags>,
-    clock: Mutex<Clock>,
+    fps: u32,
+    timeline: Mutex<FrameTimeline>,
 }
 
 define_class!(
@@ -398,54 +435,46 @@ define_class!(
             if output_type != SCStreamOutputType::Screen {
                 return;
             }
+            let ivars = self.ivars();
+            if ivars.flags.is_paused() || ivars.flags.stop_requested() {
+                return;
+            }
             let Some(buffer) = (unsafe { sample_buffer.image_buffer() }) else {
                 return;
             };
-            let now = Instant::now();
-            let ivars = self.ivars();
-            let mut clock = match ivars.clock.lock() {
-                Ok(clock) => clock,
+            let elapsed = ivars.flags.elapsed_active();
+            let mut timeline = match ivars.timeline.lock() {
+                Ok(timeline) => timeline,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            if ivars.flags.is_paused() {
-                if clock.pause_started.is_none() {
-                    clock.pause_started = Some(now);
-                }
+            let FrameDecision::Encode { index, .. } = timeline.submit(elapsed) else {
                 return;
-            }
-            if let Some(started) = clock.pause_started.take() {
-                clock.paused_total += started.elapsed();
-            }
-            let started = *clock.started.get_or_insert(now);
-            let elapsed = now
-                .saturating_duration_since(started)
-                .saturating_sub(clock.paused_total);
-            drop(clock);
+            };
+            drop(timeline);
 
             let (data, width, height) = copy_bgra(&buffer);
             if data.is_empty() {
                 return;
             }
+            let pts_millis = (index.saturating_mul(1000) / u64::from(ivars.fps.max(1))) as i64;
             let _ = ivars.tx.try_send(EncodedFrame {
                 data,
                 width,
                 height,
-                pts_millis: elapsed.as_millis() as i64,
+                pts_millis,
             });
         }
     }
 );
 
 impl ScreenOutput {
-    fn new(tx: SyncSender<EncodedFrame>, flags: Arc<Flags>) -> Retained<Self> {
+    fn new(tx: SyncSender<EncodedFrame>, flags: Arc<Flags>, fps: u32) -> Retained<Self> {
+        let frame_rate = FrameRate::from_u32(fps).unwrap_or(FrameRate::Fps30);
         let this = Self::alloc().set_ivars(OutputIvars {
             tx,
             flags,
-            clock: Mutex::new(Clock {
-                started: None,
-                paused_total: Duration::ZERO,
-                pause_started: None,
-            }),
+            fps: fps.max(1),
+            timeline: Mutex::new(FrameTimeline::new(frame_rate)),
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -485,25 +514,37 @@ fn copy_bgra(buffer: &CVPixelBuffer) -> (Vec<u8>, usize, usize) {
 }
 
 fn encode_loop(
-    output: PathBuf,
+    temp: &Path,
+    final_output: &Path,
     rx: std::sync::mpsc::Receiver<EncodedFrame>,
     width: usize,
     height: usize,
     fps: u32,
+    flags: Arc<Flags>,
 ) -> Result<(), String> {
-    let mut writer: Option<Writer> = None;
-    while let Ok(frame) = rx.recv() {
-        if writer.is_none() {
-            writer = Some(Writer::new(&output, width, height, fps)?);
+    let result = (|| {
+        let mut writer: Option<Writer> = None;
+        while let Ok(frame) = rx.recv() {
+            if writer.is_none() {
+                writer = Some(Writer::new(temp, width, height, fps)?);
+            }
+            if let Some(writer) = writer.as_mut() {
+                writer.append(&frame)?;
+            }
         }
-        if let Some(writer) = writer.as_mut() {
-            writer.append(&frame)?;
-        }
+        let final_pts = flags.elapsed_active().as_millis() as i64;
+        let Some(writer) = writer else {
+            return Err("no frames were captured before the recording stopped".to_owned());
+        };
+        writer.finish(final_pts)?;
+        std::fs::rename(temp, final_output)
+            .map_err(|error| format!("failed to publish the recording: {error}"))
+    })();
+    if let Err(error) = &result {
+        let _ = std::fs::remove_file(temp);
+        flags.fail(error.clone());
     }
-    match writer {
-        Some(writer) => writer.finish(),
-        None => Err("no frames were captured before the recording stopped".to_owned()),
-    }
+    result
 }
 
 struct Writer {
@@ -512,10 +553,11 @@ struct Writer {
     adaptor: Retained<AVAssetWriterInputPixelBufferAdaptor>,
     width: usize,
     height: usize,
+    last_pts_millis: i64,
 }
 
 impl Writer {
-    fn new(path: &PathBuf, width: usize, height: usize, fps: u32) -> Result<Self, String> {
+    fn new(path: &Path, width: usize, height: usize, fps: u32) -> Result<Self, String> {
         if path.exists() {
             let _ = std::fs::remove_file(path);
         }
@@ -566,12 +608,13 @@ impl Writer {
             adaptor,
             width,
             height,
+            last_pts_millis: 0,
         })
     }
 
     fn append(&mut self, frame: &EncodedFrame) -> Result<(), String> {
         if frame.width != self.width || frame.height != self.height {
-            return Ok(());
+            return Err("the recording target changed size; stop and start again".to_owned());
         }
         if !unsafe { self.input.isReadyForMoreMediaData() } {
             return Ok(());
@@ -608,6 +651,7 @@ impl Writer {
                 .unwrap_or_else(|| "unknown error".to_owned());
             return Err(format!("failed to append a video frame: {message}"));
         }
+        self.last_pts_millis = self.last_pts_millis.max(frame.pts_millis);
         Ok(())
     }
 
@@ -634,7 +678,15 @@ impl Writer {
         Ok(unsafe { CFRetained::from_raw(pointer) })
     }
 
-    fn finish(self) -> Result<(), String> {
+    fn finish(self, final_pts_millis: i64) -> Result<(), String> {
+        // Extend the session to the stop time so static content does not
+        // produce a clip that ends at the last changed frame.
+        if final_pts_millis > self.last_pts_millis {
+            unsafe {
+                self.writer
+                    .endSessionAtSourceTime(CMTime::new(final_pts_millis, 1000));
+            }
+        }
         unsafe { self.input.markAsFinished() };
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         let block = RcBlock::new(move || {

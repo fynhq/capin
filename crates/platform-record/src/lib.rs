@@ -4,9 +4,10 @@
 //! and reports progress through [`Recorder`]. Encoding stays on the platform:
 //! Media Foundation on Windows and AVFoundation on macOS.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use core_capture::{CaptureTarget, platform_backend};
 use core_record::RecordConfig;
@@ -39,9 +40,12 @@ pub(crate) struct Flags {
     paused: AtomicBool,
     finished: AtomicBool,
     error: Mutex<Option<String>>,
+    started: Mutex<Option<Instant>>,
+    paused_since: Mutex<Option<Instant>>,
+    paused_total: Mutex<Duration>,
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // platform backends only
 impl Flags {
     fn new() -> Self {
         Self {
@@ -49,6 +53,9 @@ impl Flags {
             paused: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             error: Mutex::new(None),
+            started: Mutex::new(None),
+            paused_since: Mutex::new(None),
+            paused_total: Mutex::new(Duration::ZERO),
         }
     }
 
@@ -58,6 +65,68 @@ impl Flags {
 
     pub(crate) fn is_paused(&self) -> bool {
         self.paused.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn mark_started(&self) {
+        let now = Instant::now();
+        if let Ok(mut started) = self.started.lock() {
+            started.get_or_insert(now);
+        }
+    }
+
+    /// Resets the active clock when the platform stream actually starts.
+    /// Without this, setup time before the first frame appeared as a leading
+    /// gap in the output file.
+    pub(crate) fn restart_started(&self) {
+        if let Ok(mut started) = self.started.lock() {
+            *started = Some(Instant::now());
+        }
+        if let Ok(mut total) = self.paused_total.lock() {
+            *total = Duration::ZERO;
+        }
+        if let Ok(mut since) = self.paused_since.lock() {
+            *since = None;
+        }
+    }
+
+    /// Active (non-paused) recording time, independent of whether frames
+    /// arrived. This keeps the timer, pause math, and final file duration in
+    /// sync on static screens.
+    pub(crate) fn elapsed_active(&self) -> Duration {
+        let started = self.started.lock().ok().and_then(|started| *started);
+        let Some(started) = started else {
+            return Duration::ZERO;
+        };
+        started.elapsed().saturating_sub(self.paused_duration())
+    }
+
+    pub(crate) fn paused_duration(&self) -> Duration {
+        let mut total = self
+            .paused_total
+            .lock()
+            .map(|total| *total)
+            .unwrap_or_default();
+        if let Ok(paused_since) = self.paused_since.lock()
+            && let Some(since) = *paused_since
+        {
+            total += since.elapsed();
+        }
+        total
+    }
+
+    pub(crate) fn set_paused(&self, paused: bool) {
+        if let Ok(mut since) = self.paused_since.lock() {
+            if paused {
+                if since.is_none() {
+                    *since = Some(Instant::now());
+                }
+            } else if let Some(started) = since.take()
+                && let Ok(mut total) = self.paused_total.lock()
+            {
+                *total += started.elapsed();
+            }
+        }
+        self.paused.store(paused, Ordering::Relaxed);
     }
 
     pub(crate) fn fail(&self, message: impl Into<String>) {
@@ -74,6 +143,18 @@ impl Flags {
     }
 }
 
+fn part_path(output: &Path) -> PathBuf {
+    let stem = output
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "capin-recording".to_owned());
+    let extension = output
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("mp4");
+    output.with_file_name(format!(".{stem}.part.{extension}"))
+}
+
 /// A running recording session.
 ///
 /// Dropping the recorder requests a stop; the platform thread still finishes
@@ -88,6 +169,17 @@ impl Recorder {
     /// The returned recorder reports setup and encoding failures through
     /// [`Recorder::error`] once the background thread stops.
     pub fn start(config: RecordConfig, output: PathBuf) -> Result<Self, RecorderError> {
+        Self::start_excluding(config, output, &[])
+    }
+
+    /// Starts a recorder while excluding extra native window identifiers from
+    /// display capture. macOS uses this for the recording bar; Windows already
+    /// excludes it through `WDA_EXCLUDEFROMCAPTURE`.
+    pub fn start_excluding(
+        config: RecordConfig,
+        output: PathBuf,
+        excluded_windows: &[u64],
+    ) -> Result<Self, RecorderError> {
         if config.format != RecordFormat::Mp4 {
             return Err(RecorderError::UnsupportedFormat(config.format));
         }
@@ -95,11 +187,18 @@ impl Recorder {
         config.validate(dimensions)?;
 
         let flags = Arc::new(Flags::new());
+        flags.mark_started();
         let thread_flags = Arc::clone(&flags);
+        let temp = part_path(&output);
+        let cleanup = temp.clone();
+        let excluded = excluded_windows.to_vec();
         std::thread::Builder::new()
             .name("capin-record".to_owned())
             .spawn(move || {
-                if let Err(error) = platform_start(config, output, Arc::clone(&thread_flags)) {
+                if let Err(error) =
+                    platform_start(config, output, temp, excluded, Arc::clone(&thread_flags))
+                {
+                    let _ = std::fs::remove_file(&cleanup);
                     thread_flags.fail(error);
                 }
             })
@@ -113,7 +212,7 @@ impl Recorder {
     }
 
     pub fn set_paused(&self, paused: bool) {
-        self.flags.paused.store(paused, Ordering::Relaxed);
+        self.flags.set_paused(paused);
     }
 
     pub fn is_finished(&self) -> bool {
@@ -158,19 +257,33 @@ fn resolve_dimensions(config: &RecordConfig) -> Result<PhysicalSize, RecorderErr
 }
 
 #[cfg(target_os = "windows")]
-fn platform_start(config: RecordConfig, output: PathBuf, flags: Arc<Flags>) -> Result<(), String> {
-    windows::start(config, output, flags)
+fn platform_start(
+    config: RecordConfig,
+    output: PathBuf,
+    temp: PathBuf,
+    _excluded_windows: Vec<u64>,
+    flags: Arc<Flags>,
+) -> Result<(), String> {
+    windows::start(config, output, temp, flags)
 }
 
 #[cfg(target_os = "macos")]
-fn platform_start(config: RecordConfig, output: PathBuf, flags: Arc<Flags>) -> Result<(), String> {
-    macos::start(config, output, flags)
+fn platform_start(
+    config: RecordConfig,
+    output: PathBuf,
+    temp: PathBuf,
+    excluded_windows: Vec<u64>,
+    flags: Arc<Flags>,
+) -> Result<(), String> {
+    macos::start(config, output, temp, excluded_windows, flags)
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn platform_start(
     _config: RecordConfig,
     _output: PathBuf,
+    _temp: PathBuf,
+    _excluded_windows: Vec<u64>,
     _flags: Arc<Flags>,
 ) -> Result<(), String> {
     Err(RecorderError::UnsupportedPlatform.to_string())

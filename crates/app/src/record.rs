@@ -30,14 +30,7 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
         target,
         format,
         frame_rate: settings.record_frame_rate,
-        include_cursor: settings.capture_cursor,
-    };
-    let recorder = match Recorder::start(config, output.clone()) {
-        Ok(recorder) => recorder,
-        Err(error) => {
-            eprintln!("capin: failed to start recording: {error}");
-            return;
-        }
+        include_cursor: settings.record_cursor,
     };
 
     let bounds = bar_bounds(target);
@@ -58,10 +51,22 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
     };
 
     match gpui_kit::open_window(options, cx, move |window, cx| {
-        if let Err(error) = apply_window_style(&*window, WindowStyle::CAPTURE_BAR) {
-            eprintln!("capin: failed to style recording bar: {error}");
-        }
-        cx.new(|cx| RecordBar::new(output, recorder, format, cx))
+        let exclusion_ok = match apply_window_style(&*window, WindowStyle::CAPTURE_BAR) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("capin: failed to style recording bar: {error}");
+                false
+            }
+        };
+        // The bar must exist before the macOS content filter is built so it
+        // can be excluded from the stream. Windows already applies
+        // WDA_EXCLUDEFROMCAPTURE above.
+        let excluded: Vec<u64> = platform_window::native_window_id(&*window)
+            .into_iter()
+            .collect();
+        let recorder = Recorder::start_excluding(config, output.clone(), &excluded)
+            .map_err(|error| error.to_string());
+        cx.new(|cx| RecordBar::new(output, recorder, format, exclusion_ok, cx))
     }) {
         Ok(_) => {}
         Err(error) => eprintln!("capin: failed to open recording bar: {error}"),
@@ -70,7 +75,7 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
 
 struct RecordBar {
     output: PathBuf,
-    recorder: Recorder,
+    recorder: Option<Recorder>,
     format: RecordFormat,
     fps: u32,
     started: Instant,
@@ -86,41 +91,27 @@ struct RecordBar {
 impl RecordBar {
     fn new(
         output: PathBuf,
-        recorder: Recorder,
+        recorder: Result<Recorder, String>,
         format: RecordFormat,
+        exclusion_ok: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         let settings = settings_state::get();
         let fps = settings.record_frame_rate.as_u32();
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(200))
-                    .await;
-                let alive = this
-                    .update(cx, |this, cx| {
-                        if this.completed {
-                            return false;
-                        }
-                        if this.recorder.is_finished() {
-                            this.completed = true;
-                            this.stopping = false;
-                            this.apply_final_status();
-                            cx.notify();
-                            return false;
-                        }
-                        cx.notify();
-                        true
-                    })
-                    .unwrap_or(false);
-                if !alive {
-                    break;
-                }
-            }
-        })
-        .detach();
+        let language = settings.language;
+        let (recorder, mut status, completed) = match recorder {
+            Ok(recorder) => (Some(recorder), None, false),
+            Err(error) => (
+                None,
+                Some(format!("{}{}", t(language, "record.failed"), error)),
+                true,
+            ),
+        };
+        if !exclusion_ok && !completed {
+            status = Some(t(language, "record.exclusion_failed").to_owned());
+        }
 
-        Self {
+        let bar = Self {
             output,
             recorder,
             format,
@@ -130,15 +121,51 @@ impl RecordBar {
             pause_started: None,
             paused: false,
             stopping: false,
-            completed: false,
-            status: None,
-            language: settings.language,
+            completed,
+            status,
+            language,
+        };
+        if bar.recorder.is_some() {
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(200))
+                        .await;
+                    let alive = this
+                        .update(cx, |this, cx| {
+                            if this.completed {
+                                return false;
+                            }
+                            if this
+                                .recorder
+                                .as_ref()
+                                .is_some_and(|recorder| recorder.is_finished())
+                            {
+                                this.completed = true;
+                                this.stopping = false;
+                                this.apply_final_status();
+                                cx.notify();
+                                return false;
+                            }
+                            cx.notify();
+                            true
+                        })
+                        .unwrap_or(false);
+                    if !alive {
+                        break;
+                    }
+                }
+            })
+            .detach();
         }
+        bar
     }
 
     fn apply_final_status(&mut self) {
-        let error = self.recorder.error();
-        self.status = Some(match error {
+        let Some(recorder) = self.recorder.as_ref() else {
+            return;
+        };
+        self.status = Some(match recorder.error() {
             Some(error) => format!("{}{}", t(self.language, "record.failed"), error),
             None => format!(
                 "{} {}",
@@ -160,16 +187,19 @@ impl RecordBar {
         if self.stopping || self.completed {
             return;
         }
+        let Some(recorder) = self.recorder.as_ref() else {
+            return;
+        };
         if self.paused {
             self.paused = false;
-            self.recorder.set_paused(false);
+            recorder.set_paused(false);
             if let Some(started) = self.pause_started.take() {
                 self.paused_total += started.elapsed();
             }
         } else {
             self.paused = true;
             self.pause_started = Some(Instant::now());
-            self.recorder.set_paused(true);
+            recorder.set_paused(true);
         }
         cx.notify();
     }
@@ -178,8 +208,11 @@ impl RecordBar {
         if self.stopping || self.completed {
             return;
         }
+        let Some(recorder) = self.recorder.as_ref() else {
+            return;
+        };
         self.stopping = true;
-        self.recorder.stop();
+        recorder.stop();
         self.status = Some(t(self.language, "record.saving").to_owned());
         cx.notify();
     }
@@ -187,30 +220,8 @@ impl RecordBar {
     fn close(&mut self, cx: &mut Context<Self>) {
         let handles = cx.window_stack().unwrap_or_default();
         cx.defer(move |cx| {
-            crate::pin::close_windows_except_pins(cx, handles);
+            crate::windows::close_auxiliary(cx, handles);
         });
-    }
-
-    fn button(
-        &self,
-        id: &'static str,
-        label: String,
-        color: Rgba,
-        cx: &mut Context<Self>,
-        action: fn(&mut Self, &mut Context<Self>),
-    ) -> impl IntoElement + use<> {
-        let hover = rgba(0xFFFFFF1A);
-        div()
-            .id(id)
-            .px(px(10.0))
-            .py(px(5.0))
-            .rounded(px(6.0))
-            .bg(rgba(0xFFFFFF14))
-            .text_size(px(12.0))
-            .text_color(color)
-            .hover(move |style| style.bg(hover))
-            .on_click(cx.listener(move |this, _, _, cx| action(this, cx)))
-            .child(label)
     }
 }
 
@@ -240,10 +251,11 @@ impl Render for RecordBar {
         } else {
             t(language, "record.pause").to_owned()
         };
-        let pause = (!self.stopping && !self.completed)
-            .then(|| self.button("record-pause", pause_label, accent, cx, Self::toggle_pause));
+        let pause = (!self.stopping && !self.completed).then(|| {
+            crate::ui::flat_button("record-pause", pause_label, accent, cx, Self::toggle_pause)
+        });
         let stop = (!self.stopping && !self.completed).then(|| {
-            self.button(
+            crate::ui::flat_button(
                 "record-stop",
                 t(language, "record.stop").to_owned(),
                 accent,
@@ -252,7 +264,7 @@ impl Render for RecordBar {
             )
         });
         let close = self.completed.then(|| {
-            self.button(
+            crate::ui::flat_button(
                 "record-close",
                 t(language, "record.close").to_owned(),
                 muted,
@@ -333,7 +345,9 @@ fn target_monitor(target: CaptureTarget) -> Option<core_types::MonitorId> {
         CaptureTarget::Window(id) => {
             let windows = platform_backend().windows().ok()?;
             let window = windows.into_iter().find(|window| window.id == id)?;
-            monitor_for_rect(&monitors, window.bounds)
+            window
+                .monitor
+                .or_else(|| monitor_for_rect(&monitors, window.bounds))
         }
     }
 }
