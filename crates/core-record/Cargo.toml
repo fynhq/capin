@@ -1,0 +1,16 @@
+[package]
+name = "core-record"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+core-capture.workspace = true
+core-types.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,1603 @@
+use std::ops::Range;
+use std::sync::Arc;
+
+use core_annotate::{AnnotationDocument, AnnotationStyle, Shape, rasterize};
+use core_types::{PhysicalPoint, PhysicalRect, PhysicalSize, RgbaFrame, prefers_dark_foreground};
+use gpui_kit::prelude::*;
+use gpui_kit::*;
+use platform_window::system_accent_hex;
+
+use crate::{i18n::t, icons, image_util, settings_state};
+
+const TOOLBAR_HEIGHT: f32 = 48.0;
+const PADDING: f32 = 16.0;
+const MAX_IMAGE_WIDTH: f32 = 1200.0;
+const MAX_IMAGE_HEIGHT: f32 = 800.0;
+const MIN_WINDOW_WIDTH: f32 = 860.0;
+const BACKGROUND: u32 = 0x141414FF;
+const TOOLBAR_BG: u32 = 0x202020FF;
+const TEXT: u32 = 0xF2F2F2FF;
+const MUTED: u32 = 0x9A9A9AFF;
+const BORDER: u32 = 0xFFFFFF1A;
+const HOVER: u32 = 0xFFFFFF14;
+const TOOLBAR_SIZE: u32 = 32;
+const BADGE_SIZE: u32 = 32;
+
+const COLORS: [(u32, &str); 5] = [
+    (0xFF3B30, "red"),
+    (0xFFCC00, "yellow"),
+    (0x34C759, "green"),
+    (0x0A84FF, "blue"),
+    (0xFFFFFF, "white"),
+];
+
+const STROKE_WIDTHS: [f32; 3] = [2.0, 4.0, 8.0];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tool {
+    Select,
+    Rect,
+    Ellipse,
+    Arrow,
+    Highlighter,
+    Blur,
+    Text,
+    Number,
+    Spotlight,
+    Eraser,
+}
+
+impl Tool {
+    const ALL: [Self; 10] = [
+        Self::Select,
+        Self::Rect,
+        Self::Ellipse,
+        Self::Arrow,
+        Self::Highlighter,
+        Self::Blur,
+        Self::Text,
+        Self::Number,
+        Self::Spotlight,
+        Self::Eraser,
+    ];
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Select => "editor-tool-select",
+            Self::Rect => "editor-tool-rect",
+            Self::Ellipse => "editor-tool-ellipse",
+            Self::Arrow => "editor-tool-arrow",
+            Self::Highlighter => "editor-tool-highlighter",
+            Self::Blur => "editor-tool-blur",
+            Self::Text => "editor-tool-text",
+            Self::Number => "editor-tool-number",
+            Self::Spotlight => "editor-tool-spotlight",
+            Self::Eraser => "editor-tool-eraser",
+        }
+    }
+
+    fn icon(self) -> &'static [u8] {
+        match self {
+            Self::Select => icons::SELECT,
+            Self::Rect => icons::RECT,
+            Self::Ellipse => icons::ELLIPSE,
+            Self::Arrow => icons::ARROW,
+            Self::Highlighter => icons::HIGHLIGHTER,
+            Self::Blur => icons::BLUR,
+            Self::Text => icons::TEXT,
+            Self::Number => icons::NUMBER,
+            Self::Spotlight => icons::SPOTLIGHT,
+            Self::Eraser => icons::ERASER,
+        }
+    }
+
+    fn label_key(self) -> &'static str {
+        match self {
+            Self::Select => "editor.tool.select",
+            Self::Rect => "editor.tool.rect",
+            Self::Ellipse => "editor.tool.ellipse",
+            Self::Arrow => "editor.tool.arrow",
+            Self::Highlighter => "editor.tool.highlighter",
+            Self::Blur => "editor.tool.blur",
+            Self::Text => "editor.tool.text",
+            Self::Number => "editor.tool.number",
+            Self::Spotlight => "editor.tool.spotlight",
+            Self::Eraser => "editor.tool.eraser",
+        }
+    }
+}
+
+fn color_label_key(name: &str) -> &'static str {
+    match name {
+        "red" => "color.red",
+        "yellow" => "color.yellow",
+        "green" => "color.green",
+        "blue" => "color.blue",
+        _ => "color.white",
+    }
+}
+
+fn stroke_id(width: f32) -> &'static str {
+    match width as u32 {
+        2 => "editor-width-2",
+        4 => "editor-width-4",
+        _ => "editor-width-8",
+    }
+}
+
+struct TooltipLabel {
+    text: SharedString,
+}
+
+impl Render for TooltipLabel {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(px(6.0))
+            .bg(rgba(0x000000E6))
+            .text_size(px(11.5))
+            .text_color(rgb(0xFFFFFF))
+            .child(self.text.clone())
+    }
+}
+
+fn tooltip_view(text: String, cx: &mut App) -> AnyView {
+    cx.new(|_| TooltipLabel { text: text.into() }).into()
+}
+
+struct Draft {
+    tool: Tool,
+    start: PhysicalPoint,
+    current: PhysicalPoint,
+    points: Vec<PhysicalPoint>,
+}
+
+struct MoveDraft {
+    id: core_annotate::AnnotationId,
+    start: PhysicalPoint,
+    current: PhysicalPoint,
+}
+
+struct TextEdit {
+    target: Option<core_annotate::AnnotationId>,
+    origin: PhysicalPoint,
+    bounds: PhysicalRect,
+    content: String,
+    marked: Option<Range<usize>>,
+    style: AnnotationStyle,
+}
+
+impl TextEdit {
+    fn start(origin: PhysicalPoint, image_size: PhysicalSize, style: AnnotationStyle) -> Self {
+        let width = (image_size.width as i32 - origin.x).clamp(24, 640) as u32;
+        let height = (style.font_size * 1.6).ceil() as u32;
+        Self {
+            target: None,
+            origin,
+            bounds: PhysicalRect::new(origin.x, origin.y, width, height),
+            content: String::new(),
+            marked: None,
+            style,
+        }
+    }
+
+    fn edit_existing(
+        id: core_annotate::AnnotationId,
+        bounds: PhysicalRect,
+        content: String,
+        style: AnnotationStyle,
+    ) -> Self {
+        Self {
+            target: Some(id),
+            origin: bounds.origin,
+            bounds,
+            content,
+            marked: None,
+            style,
+        }
+    }
+
+    fn cursor_utf8(&self) -> usize {
+        self.content.len()
+    }
+
+    fn offset_from_utf16(&self, offset: usize) -> usize {
+        let mut utf8_offset = 0;
+        let mut utf16_count = 0;
+        for ch in self.content.chars() {
+            if utf16_count >= offset {
+                break;
+            }
+            utf16_count += ch.len_utf16();
+            utf8_offset += ch.len_utf8();
+        }
+        utf8_offset
+    }
+
+    fn offset_to_utf16(&self, offset: usize) -> usize {
+        let offset = offset.min(self.content.len());
+        self.content[..offset]
+            .chars()
+            .map(|ch| ch.len_utf16())
+            .sum()
+    }
+
+    fn range_from_utf16(&self, range: &Range<usize>) -> Range<usize> {
+        let start = self.offset_from_utf16(range.start);
+        let end = self.offset_from_utf16(range.end).max(start);
+        start..end
+    }
+
+    fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
+        let start = self.offset_to_utf16(range.start);
+        let end = self.offset_to_utf16(range.end).max(start);
+        start..end
+    }
+
+    fn replace(&mut self, range: Option<Range<usize>>, text: &str) {
+        let range = range
+            .or_else(|| self.marked.take())
+            .unwrap_or(self.content.len()..self.content.len());
+        let text: String = text
+            .chars()
+            .filter(|ch| *ch != '\n' && *ch != '\r')
+            .collect();
+        self.content.replace_range(range.clone(), &text);
+        self.marked = (!text.is_empty()).then_some(range.start..range.start + text.len());
+    }
+
+    fn finish_bounds(&self) -> PhysicalRect {
+        let font_size = self.style.font_size.max(1.0);
+        let characters = self.content.chars().count().max(1) as f32;
+        let per_line = (self.bounds.size.width as f32 / (font_size * 0.6)).max(1.0);
+        let lines = (characters / per_line).ceil().max(1.0);
+        let height = (lines * font_size * 1.3).ceil() as u32;
+        PhysicalRect::new(
+            self.bounds.origin.x,
+            self.bounds.origin.y,
+            self.bounds.size.width,
+            height.max(self.bounds.size.height),
+        )
+    }
+}
+
+struct EditorView {
+    image: Arc<RenderImage>,
+    blur_image: Arc<RenderImage>,
+    frame: RgbaFrame,
+    pin_target: Option<u64>,
+    document: AnnotationDocument,
+    image_size: PhysicalSize,
+    tool: Tool,
+    style: AnnotationStyle,
+    draft: Option<Draft>,
+    move_draft: Option<MoveDraft>,
+    text_edit: Option<TextEdit>,
+    accent: Rgba,
+    accent_hex: u32,
+    accent_selected: Rgba,
+    status: Option<String>,
+    focus_handle: FocusHandle,
+}
+
+impl EditorView {
+    fn new(frame: RgbaFrame, pin_target: Option<u64>, cx: &mut Context<Self>) -> Self {
+        let image_size = PhysicalSize::new(frame.width(), frame.height());
+        let image = image_util::render_image(&frame);
+        let blur_image = image_util::blurred_image(&frame);
+        let accent_hex = system_accent_hex().unwrap_or(0x4C9AFF);
+        Self {
+            image,
+            blur_image,
+            frame,
+            pin_target,
+            document: AnnotationDocument::new(image_size),
+            image_size,
+            tool: Tool::Select,
+            style: AnnotationStyle {
+                color: 0xFF3B30FF,
+                stroke_width: 4.0,
+                font_size: 20.0,
+            },
+            draft: None,
+            move_draft: None,
+            text_edit: None,
+            accent: rgb(accent_hex),
+            accent_hex,
+            accent_selected: rgba((accent_hex << 8) | 0x33),
+            status: None,
+            focus_handle: cx.focus_handle(),
+        }
+    }
+
+    fn image_view_rect(&self, window: &Window) -> Bounds<Pixels> {
+        let viewport = window.viewport_size();
+        let available_width = (f32::from(viewport.width) - PADDING * 2.0).max(1.0);
+        let available_height =
+            (f32::from(viewport.height) - TOOLBAR_HEIGHT - PADDING * 2.0).max(1.0);
+        let image_width = self.image_size.width as f32;
+        let image_height = self.image_size.height as f32;
+        let scale = (available_width / image_width)
+            .min(available_height / image_height)
+            .min(1.0);
+        let display_width = image_width * scale;
+        let display_height = image_height * scale;
+        Bounds {
+            origin: point(
+                px(PADDING + (available_width - display_width) / 2.0),
+                px(TOOLBAR_HEIGHT + PADDING + (available_height - display_height) / 2.0),
+            ),
+            size: size(px(display_width), px(display_height)),
+        }
+    }
+
+    fn to_image_point(&self, position: Point<Pixels>, window: &Window) -> Option<PhysicalPoint> {
+        let view = self.image_view_rect(window);
+        let scale = f32::from(view.size.width) / self.image_size.width as f32;
+        let x = ((f32::from(position.x) - f32::from(view.origin.x)) / scale).floor() as i32;
+        let y = ((f32::from(position.y) - f32::from(view.origin.y)) / scale).floor() as i32;
+        if x < 0 || y < 0 || x >= self.image_size.width as i32 || y >= self.image_size.height as i32
+        {
+            return None;
+        }
+        Some(PhysicalPoint::new(x, y))
+    }
+
+    fn effective_style(&self) -> AnnotationStyle {
+        let mut style = self.style;
+        if self.tool == Tool::Highlighter {
+            style.color = (style.color & 0xFFFFFF00) | 0x80;
+            style.stroke_width = 12.0;
+        }
+        style
+    }
+
+    fn update_style(&mut self, update: impl FnOnce(&mut AnnotationStyle)) {
+        let selected_style = self
+            .document
+            .selected()
+            .and_then(|id| self.document.object(id))
+            .map(|annotation| annotation.style);
+        if let Some(mut style) = selected_style {
+            update(&mut style);
+            self.document.update_selected_style(style);
+            self.style = style;
+            return;
+        }
+        update(&mut self.style);
+    }
+
+    fn select_annotation(&mut self, id: Option<core_annotate::AnnotationId>) {
+        self.document.select(id);
+        if let Some(annotation) = id.and_then(|id| self.document.object(id)) {
+            self.style = annotation.style;
+        }
+    }
+
+    fn edit_text_at(&mut self, point: PhysicalPoint, cx: &mut Context<Self>) -> bool {
+        let Some(id) = self.document.hit_test(point) else {
+            return false;
+        };
+        let Some(annotation) = self.document.object(id) else {
+            return false;
+        };
+        let Shape::Text { bounds, text } = &annotation.shape else {
+            return false;
+        };
+        let bounds = *bounds;
+        let text = text.clone();
+        let style = annotation.style;
+        self.document.select(Some(id));
+        self.text_edit = Some(TextEdit::edit_existing(id, bounds, text, style));
+        self.style = style;
+        self.status = None;
+        cx.notify();
+        true
+    }
+
+    fn preview_shape(&self) -> Option<(Shape, AnnotationStyle)> {
+        let draft = self.draft.as_ref()?;
+        finalize_shape(draft, draft.current).map(|shape| (shape, self.effective_style()))
+    }
+
+    fn commit_text(&mut self, cx: &mut Context<Self>) {
+        let Some(mut edit) = self.text_edit.take() else {
+            return;
+        };
+        let text = edit.content.trim_end().to_owned();
+        if text.is_empty() {
+            if let Some(id) = edit.target {
+                self.document.remove(id);
+                self.status = None;
+            }
+            cx.notify();
+            return;
+        }
+        edit.content = text.clone();
+        let bounds = edit.finish_bounds();
+        let shape = Shape::Text { bounds, text };
+        if let Some(id) = edit.target {
+            self.document.update_shape(id, shape, edit.style);
+        } else {
+            self.document.add(shape, edit.style);
+        }
+        self.style = edit.style;
+        self.status = None;
+        cx.notify();
+    }
+
+    fn cancel_text(&mut self, cx: &mut Context<Self>) {
+        if self.text_edit.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn backspace_text(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = &mut self.text_edit else {
+            return;
+        };
+        let range = edit.marked.take().or_else(|| {
+            let cursor = edit.cursor_utf8();
+            if cursor == 0 {
+                return None;
+            }
+            let previous = edit.content[..cursor]
+                .char_indices()
+                .next_back()
+                .map(|(index, _)| index)
+                .unwrap_or(0);
+            Some(previous..cursor)
+        });
+        if let Some(range) = range {
+            edit.content.replace_range(range, "");
+        }
+        cx.notify();
+    }
+
+    fn toolbar(&self, cx: &mut Context<Self>) -> Div {
+        let language = settings_state::get().language;
+        let text = rgb(TEXT);
+        let muted = rgb(MUTED);
+        let accent = self.accent;
+        let accent_selected = self.accent_selected;
+        let hover = rgba(HOVER);
+        let border = rgba(BORDER);
+
+        let mut tools = Vec::new();
+        for tool in Tool::ALL {
+            let selected = self.tool == tool;
+            let label = t(language, tool.label_key()).to_owned();
+            let button = div()
+                .id(tool.id())
+                .tooltip(move |_, cx| tooltip_view(label.clone(), cx))
+                .w(px(TOOLBAR_SIZE as f32))
+                .h(px(TOOLBAR_SIZE as f32))
+                .rounded(px(7.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(selected, |button| button.bg(accent_selected))
+                .hover(move |style| style.bg(hover))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.commit_text(cx);
+                    this.tool = tool;
+                    this.status = None;
+                    cx.notify();
+                }))
+                .child(icons::icon(
+                    tool.icon(),
+                    18.0,
+                    if selected { accent } else { muted },
+                ));
+            tools.push(button.into_any_element());
+        }
+
+        let mut swatches = Vec::new();
+        for (color, name) in COLORS {
+            let selected = (self.style.color & 0xFFFFFF00) == (color << 8);
+            let label = t(language, color_label_key(name)).to_owned();
+            let swatch = div()
+                .id(name)
+                .tooltip(move |_, cx| tooltip_view(label.clone(), cx))
+                .w(px(18.0))
+                .h(px(18.0))
+                .rounded(px(9.0))
+                .bg(rgb(color))
+                .border_2()
+                .border_color(if selected {
+                    rgb(0xFFFFFF)
+                } else {
+                    rgba(0x00000000)
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.commit_text(cx);
+                    this.update_style(|style| {
+                        style.color = (color << 8) | (style.color & 0xFF);
+                    });
+                    this.status = None;
+                    cx.notify();
+                }));
+            swatches.push(swatch.into_any_element());
+        }
+
+        let mut widths = Vec::new();
+        for width in STROKE_WIDTHS {
+            let selected = (self.style.stroke_width - width).abs() < 0.1;
+            let label = format!("{width:.0}");
+            let button = div()
+                .id(stroke_id(width))
+                .tooltip(move |_, cx| tooltip_view(label.clone(), cx))
+                .w(px(22.0))
+                .h(px(22.0))
+                .rounded(px(5.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(selected, |button| button.bg(accent_selected))
+                .hover(move |style| style.bg(hover))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.commit_text(cx);
+                    this.update_style(|style| style.stroke_width = width);
+                    this.status = None;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .w(px(14.0))
+                        .h(px(width))
+                        .rounded(px(width / 2.0))
+                        .bg(if selected { accent } else { muted }),
+                );
+            widths.push(button.into_any_element());
+        }
+
+        let undo_label = t(language, "editor.undo").to_owned();
+        let undo = if self.document.can_undo() {
+            div()
+                .id("editor-undo")
+                .tooltip(move |_, cx| tooltip_view(undo_label.clone(), cx))
+                .w(px(TOOLBAR_SIZE as f32))
+                .h(px(TOOLBAR_SIZE as f32))
+                .rounded(px(7.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .hover(move |style| style.bg(hover))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.document.undo();
+                    this.status = None;
+                    cx.notify();
+                }))
+                .child(icons::icon(icons::UNDO, 18.0, muted))
+                .into_any_element()
+        } else {
+            div()
+                .w(px(TOOLBAR_SIZE as f32))
+                .h(px(TOOLBAR_SIZE as f32))
+                .flex()
+                .items_center()
+                .justify_center()
+                .opacity(0.35)
+                .child(icons::icon(icons::UNDO, 18.0, muted))
+                .into_any_element()
+        };
+
+        let redo_label = t(language, "editor.redo").to_owned();
+        let redo = if self.document.can_redo() {
+            div()
+                .id("editor-redo")
+                .tooltip(move |_, cx| tooltip_view(redo_label.clone(), cx))
+                .w(px(TOOLBAR_SIZE as f32))
+                .h(px(TOOLBAR_SIZE as f32))
+                .rounded(px(7.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .hover(move |style| style.bg(hover))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.document.redo();
+                    this.status = None;
+                    cx.notify();
+                }))
+                .child(icons::icon(icons::REDO, 18.0, muted))
+                .into_any_element()
+        } else {
+            div()
+                .w(px(TOOLBAR_SIZE as f32))
+                .h(px(TOOLBAR_SIZE as f32))
+                .flex()
+                .items_center()
+                .justify_center()
+                .opacity(0.35)
+                .child(icons::icon(icons::REDO, 18.0, muted))
+                .into_any_element()
+        };
+
+        let pin_label = t(language, "editor.pin").to_owned();
+        let pin = div()
+            .id("editor-pin")
+            .tooltip(move |_, cx| tooltip_view(pin_label.clone(), cx))
+            .w(px(TOOLBAR_SIZE as f32))
+            .h(px(TOOLBAR_SIZE as f32))
+            .rounded(px(7.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(|this, _, _, cx| this.pin(cx)))
+            .child(icons::icon(icons::PIN, 18.0, text))
+            .into_any_element();
+
+        let copy_label = t(language, "editor.copy").to_owned();
+        let copy = div()
+            .id("editor-copy")
+            .tooltip(move |_, cx| tooltip_view(copy_label.clone(), cx))
+            .w(px(TOOLBAR_SIZE as f32))
+            .h(px(TOOLBAR_SIZE as f32))
+            .rounded(px(7.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(|this, _, _, cx| this.export(true, cx)))
+            .child(icons::icon(icons::COPY, 18.0, text))
+            .into_any_element();
+
+        let save_label = t(language, "editor.save").to_owned();
+        let save = div()
+            .id("editor-save")
+            .tooltip(move |_, cx| tooltip_view(save_label.clone(), cx))
+            .w(px(TOOLBAR_SIZE as f32))
+            .h(px(TOOLBAR_SIZE as f32))
+            .rounded(px(7.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(|this, _, _, cx| this.export(false, cx)))
+            .child(icons::icon(icons::SAVE, 18.0, text))
+            .into_any_element();
+
+        let close_label = t(language, "editor.close").to_owned();
+        let close = div()
+            .id("editor-close")
+            .tooltip(move |_, cx| tooltip_view(close_label.clone(), cx))
+            .w(px(TOOLBAR_SIZE as f32))
+            .h(px(TOOLBAR_SIZE as f32))
+            .rounded(px(7.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(|_, _, window, _| window.remove_window()))
+            .child(icons::icon(icons::CLOSE, 18.0, muted))
+            .into_any_element();
+
+        div()
+            .absolute()
+            .top(px(0.0))
+            .left(px(0.0))
+            .w_full()
+            .h(px(TOOLBAR_HEIGHT))
+            .px(px(12.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .bg(rgb(TOOLBAR_BG))
+            .border_b_1()
+            .border_color(border)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.0))
+                    .children(tools),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .children(swatches)
+                    .child(div().w(px(1.0)).h(px(18.0)).bg(border))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(2.0))
+                            .children(widths),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(2.0))
+                    .child(undo)
+                    .child(redo)
+                    .child(div().w(px(8.0)))
+                    .child(pin)
+                    .child(copy)
+                    .child(save)
+                    .child(close),
+            )
+    }
+
+    fn pin(&mut self, cx: &mut Context<Self>) {
+        self.commit_text(cx);
+        match rasterize(&self.document, &self.frame) {
+            Ok(output) => crate::pin::open_frame(output, cx),
+            Err(error) => {
+                let language = settings_state::get().language;
+                self.status = Some(format!("{}{}", t(language, "editor.export_failed"), error));
+            }
+        }
+        cx.notify();
+    }
+
+    fn export(&mut self, copy_only: bool, cx: &mut Context<Self>) {
+        self.commit_text(cx);
+        let language = settings_state::get().language;
+        let mut messages = Vec::new();
+        match rasterize(&self.document, &self.frame) {
+            Ok(output) => {
+                crate::pin::remember(&output);
+                if copy_only || settings_state::get().copy_to_clipboard {
+                    match image_util::copy_png(&output, cx) {
+                        Ok(()) => messages.push(t(language, "editor.copied").to_owned()),
+                        Err(error) => {
+                            messages.push(format!("{}{}", t(language, "editor.copy_failed"), error))
+                        }
+                    }
+                }
+                if !copy_only {
+                    if let Some(pin_id) = self.pin_target {
+                        if crate::pin::replace_image(pin_id, &output, cx) {
+                            messages.push(t(language, "editor.pin_updated").to_owned());
+                        } else {
+                            messages.push(t(language, "editor.pin_missing").to_owned());
+                        }
+                    } else {
+                        match image_util::save_png(&output) {
+                            Ok(path) => messages.push(format!(
+                                "{} {}",
+                                t(language, "editor.saved"),
+                                path.display()
+                            )),
+                            Err(error) => messages.push(format!(
+                                "{} {}",
+                                t(language, "editor.save_failed"),
+                                error
+                            )),
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                messages.push(format!("{}{}", t(language, "editor.export_failed"), error))
+            }
+        }
+        self.status = Some(messages.join(" · "));
+        cx.notify();
+    }
+}
+
+impl EntityInputHandler for EditorView {
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        actual_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let edit = self.text_edit.as_ref()?;
+        let range = edit.range_from_utf16(&range_utf16);
+        actual_range.replace(edit.range_to_utf16(&range));
+        Some(edit.content[range].to_string())
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        let edit = self.text_edit.as_ref()?;
+        let cursor = edit.offset_to_utf16(edit.cursor_utf8());
+        Some(UTF16Selection {
+            range: cursor..cursor,
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        let edit = self.text_edit.as_ref()?;
+        edit.marked.as_ref().map(|range| edit.range_to_utf16(range))
+    }
+
+    fn unmark_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(edit) = &mut self.text_edit {
+            edit.marked = None;
+            window.notify_text_input_changed(&self.focus_handle);
+            cx.notify();
+        }
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(edit) = &mut self.text_edit {
+            let range = range_utf16
+                .as_ref()
+                .map(|range| edit.range_from_utf16(range));
+            edit.marked = None;
+            edit.replace(range, new_text);
+            window.notify_text_input_changed(&self.focus_handle);
+            cx.notify();
+        }
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        _new_selected_range: Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(edit) = &mut self.text_edit {
+            let range = range_utf16
+                .as_ref()
+                .map(|range| edit.range_from_utf16(range));
+            edit.replace(range, new_text);
+            window.notify_text_input_changed(&self.focus_handle);
+            cx.notify();
+        }
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        self.text_edit.as_ref()?;
+        Some(element_bounds)
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        let edit = self.text_edit.as_ref()?;
+        Some(edit.offset_to_utf16(edit.cursor_utf8()))
+    }
+
+    fn text_length_utf16(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        let edit = self.text_edit.as_ref()?;
+        Some(edit.offset_to_utf16(edit.cursor_utf8()))
+    }
+}
+
+impl Render for EditorView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let image_rect = self.image_view_rect(window);
+        let scale = f32::from(image_rect.size.width) / self.image_size.width as f32;
+        let mut objects = self.document.objects().to_vec();
+        if let Some(move_draft) = &self.move_draft {
+            let dx = move_draft.current.x - move_draft.start.x;
+            let dy = move_draft.current.y - move_draft.start.y;
+            if (dx != 0 || dy != 0)
+                && let Some(annotation) = objects
+                    .iter_mut()
+                    .find(|annotation| annotation.id == move_draft.id)
+            {
+                *annotation = annotation.clone().translated(dx, dy);
+            }
+        }
+        let selected_bounds = self
+            .document
+            .selected()
+            .and_then(|id| objects.iter().find(|annotation| annotation.id == id))
+            .map(|annotation| annotation.bounds());
+        let preview = self.preview_shape();
+        let status = self.status.clone();
+        let accent_hex = self.accent_hex;
+
+        let blur_layers: Vec<Div> = objects
+            .iter()
+            .filter_map(|annotation| {
+                let Shape::Blur(rect) = &annotation.shape else {
+                    return None;
+                };
+                if rect.is_empty() {
+                    return None;
+                }
+                let left = rect.origin.x as f32 * scale;
+                let top = rect.origin.y as f32 * scale;
+                let width = px(rect.size.width as f32 * scale);
+                let height = px(rect.size.height as f32 * scale);
+                Some(
+                    div()
+                        .absolute()
+                        .left(px(left))
+                        .top(px(top))
+                        .w(width)
+                        .h(height)
+                        .overflow_hidden()
+                        .child(
+                            img(self.blur_image.clone())
+                                .absolute()
+                                .left(px(-left))
+                                .top(px(-top))
+                                .w(image_rect.size.width)
+                                .h(image_rect.size.height)
+                                .object_fit(ObjectFit::Fill),
+                        ),
+                )
+            })
+            .collect();
+
+        let text_layers: Vec<Div> = objects
+            .iter()
+            .filter_map(|annotation| {
+                let Shape::Text { bounds, text } = &annotation.shape else {
+                    return None;
+                };
+                Some(
+                    div()
+                        .absolute()
+                        .left(px(bounds.origin.x as f32 * scale))
+                        .top(px(bounds.origin.y as f32 * scale))
+                        .w(px(bounds.size.width as f32 * scale))
+                        .text_size(px(annotation.style.font_size * scale))
+                        .text_color(rgb((annotation.style.color >> 8) & 0x00FF_FFFF))
+                        .child(text.clone()),
+                )
+            })
+            .collect();
+
+        let number_layers: Vec<Div> = objects
+            .iter()
+            .filter_map(|annotation| {
+                let Shape::Number { bounds, value } = &annotation.shape else {
+                    return None;
+                };
+                let color = (annotation.style.color >> 8) & 0x00FF_FFFF;
+                let foreground = if prefers_dark_foreground(color) {
+                    rgb(0x111111)
+                } else {
+                    rgb(0xFFFFFF)
+                };
+                let width = bounds.size.width as f32 * scale;
+                let height = bounds.size.height as f32 * scale;
+                Some(
+                    div()
+                        .absolute()
+                        .left(px(bounds.origin.x as f32 * scale))
+                        .top(px(bounds.origin.y as f32 * scale))
+                        .w(px(width))
+                        .h(px(height))
+                        .rounded(px(height.min(width) / 2.0))
+                        .bg(rgb(color))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px((height * 0.54).max(8.0)))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(foreground)
+                        .child(value.to_string()),
+                )
+            })
+            .collect();
+
+        let canvas_layer = canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                for annotation in &objects {
+                    paint_shape(window, bounds, scale, &annotation.shape, annotation.style);
+                }
+                if let Some((shape, style)) = &preview {
+                    paint_shape(window, bounds, scale, shape, *style);
+                }
+                if let Some(rect) = selected_bounds {
+                    paint_selection(window, bounds, scale, rect, accent_hex);
+                }
+            },
+        )
+        .absolute()
+        .inset_0()
+        .size_full();
+
+        let text_overlay = self.text_edit.as_ref().map(|edit| {
+            let left = edit.origin.x as f32 * scale;
+            let top = edit.origin.y as f32 * scale;
+            let font_size = (edit.style.font_size * scale).max(8.0);
+            let width = (edit.bounds.size.width as f32 * scale).max(24.0);
+            let color = edit.style.color;
+            let entity = cx.entity();
+            let focus = self.focus_handle.clone();
+            let input = canvas(
+                |_, _, _| (),
+                move |bounds, _, window, cx| {
+                    window.handle_input(
+                        &focus,
+                        ElementInputHandler::new(bounds, entity.clone()),
+                        cx,
+                    );
+                },
+            )
+            .absolute()
+            .inset_0();
+            let text = if edit.content.is_empty() {
+                "|".to_owned()
+            } else {
+                format!("{}|", edit.content)
+            };
+            div()
+                .absolute()
+                .left(px(left))
+                .top(px(top))
+                .w(px(width))
+                .px(px(3.0))
+                .py(px(1.0))
+                .rounded(px(3.0))
+                .bg(rgba(0x00000080))
+                .border_1()
+                .border_color(rgba((accent_hex << 8) | 0xB3))
+                .text_size(px(font_size))
+                .text_color(rgb((color >> 8) & 0x00FF_FFFF))
+                .child(text)
+                .child(input)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                )
+                .into_any_element()
+        });
+
+        let image_layer = div()
+            .absolute()
+            .left(image_rect.origin.x)
+            .top(image_rect.origin.y)
+            .w(image_rect.size.width)
+            .h(image_rect.size.height)
+            .child(
+                img(self.image.clone())
+                    .absolute()
+                    .inset_0()
+                    .size_full()
+                    .object_fit(ObjectFit::Fill),
+            )
+            .children(blur_layers)
+            .children(text_layers)
+            .children(number_layers)
+            .child(canvas_layer)
+            .children(text_overlay)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    let Some(point) = this.to_image_point(event.position, window) else {
+                        return;
+                    };
+                    if this.text_edit.is_some() {
+                        this.commit_text(cx);
+                    }
+                    if this.tool == Tool::Select {
+                        if event.click_count >= 2 && this.edit_text_at(point, cx) {
+                            let focus = this.focus_handle.clone();
+                            window.focus(&focus, cx);
+                            return;
+                        }
+                        let selected = this.document.hit_test(point);
+                        this.select_annotation(selected);
+                        this.move_draft = selected.map(|id| MoveDraft {
+                            id,
+                            start: point,
+                            current: point,
+                        });
+                        this.status = None;
+                        cx.notify();
+                        return;
+                    }
+                    if this.tool == Tool::Eraser {
+                        if let Some(id) = this.document.hit_test(point) {
+                            this.document.remove(id);
+                        }
+                        this.status = None;
+                        cx.notify();
+                        return;
+                    }
+                    if this.tool == Tool::Number {
+                        let max_left = (this.image_size.width.saturating_sub(BADGE_SIZE)) as i32;
+                        let max_top = (this.image_size.height.saturating_sub(BADGE_SIZE)) as i32;
+                        let left = (point.x - BADGE_SIZE as i32 / 2).clamp(0, max_left);
+                        let top = (point.y - BADGE_SIZE as i32 / 2).clamp(0, max_top);
+                        let value = this.document.next_number();
+                        this.document.add(
+                            Shape::Number {
+                                bounds: PhysicalRect::new(left, top, BADGE_SIZE, BADGE_SIZE),
+                                value,
+                            },
+                            this.effective_style(),
+                        );
+                        this.status = None;
+                        cx.notify();
+                        return;
+                    }
+                    if this.tool == Tool::Text {
+                        this.text_edit = Some(TextEdit::start(
+                            point,
+                            this.image_size,
+                            this.effective_style(),
+                        ));
+                        this.status = None;
+                        let focus = this.focus_handle.clone();
+                        window.focus(&focus, cx);
+                        cx.notify();
+                        return;
+                    }
+                    this.draft = Some(Draft {
+                        tool: this.tool,
+                        start: point,
+                        current: point,
+                        points: vec![point],
+                    });
+                    cx.notify();
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                let Some(point) = this.to_image_point(event.position, window) else {
+                    return;
+                };
+                if let Some(move_draft) = &mut this.move_draft {
+                    move_draft.current = point;
+                    cx.notify();
+                    return;
+                }
+                let Some(draft) = &mut this.draft else {
+                    return;
+                };
+                draft.current = point;
+                if draft.tool == Tool::Highlighter {
+                    let last = draft.points.last().copied().unwrap_or(point);
+                    if distance(last, point) >= 2.0 {
+                        draft.points.push(point);
+                    }
+                }
+                cx.notify();
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    if let Some(move_draft) = this.move_draft.take() {
+                        let point = this
+                            .to_image_point(event.position, window)
+                            .unwrap_or(move_draft.current);
+                        let dx = point.x - move_draft.start.x;
+                        let dy = point.y - move_draft.start.y;
+                        if dx != 0 || dy != 0 {
+                            this.document.move_selected(dx, dy);
+                            this.status = None;
+                        }
+                        cx.notify();
+                        return;
+                    }
+
+                    let Some(draft) = this.draft.take() else {
+                        return;
+                    };
+                    let point = this
+                        .to_image_point(event.position, window)
+                        .unwrap_or(draft.current);
+                    if let Some(shape) = finalize_shape(&draft, point) {
+                        this.document.add(shape, this.effective_style());
+                        this.status = None;
+                    }
+                    cx.notify();
+                }),
+            )
+            .on_mouse_exit(cx.listener(|this, _, _, cx| {
+                if this.draft.take().is_some() || this.move_draft.take().is_some() {
+                    cx.notify();
+                }
+            }));
+
+        let status_toast = status.map(|message| {
+            div()
+                .absolute()
+                .bottom(px(16.0))
+                .right(px(16.0))
+                .px(px(10.0))
+                .py(px(6.0))
+                .rounded(px(6.0))
+                .bg(rgba(0x000000CC))
+                .text_size(px(12.0))
+                .text_color(rgb(0xFFFFFF))
+                .child(message)
+        });
+
+        div()
+            .relative()
+            .size_full()
+            .bg(rgb(BACKGROUND))
+            .text_color(rgb(TEXT))
+            .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let key = event.keystroke.key.as_str();
+                let command =
+                    event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
+                if this.text_edit.is_some() {
+                    match key {
+                        "escape" => {
+                            this.cancel_text(cx);
+                            return;
+                        }
+                        "enter" => {
+                            this.commit_text(cx);
+                            return;
+                        }
+                        "backspace" => {
+                            this.backspace_text(cx);
+                            return;
+                        }
+                        "delete" => return,
+                        _ => {}
+                    }
+                }
+                if key == "escape" {
+                    window.remove_window();
+                    return;
+                }
+                if (key == "delete" || key == "backspace")
+                    && let Some(id) = this.document.selected()
+                {
+                    this.document.remove(id);
+                    this.status = None;
+                    cx.notify();
+                    return;
+                }
+                if command && key == "c" {
+                    this.export(true, cx);
+                    return;
+                }
+                if command && key == "s" {
+                    this.export(false, cx);
+                    return;
+                }
+                if command && key == "z" {
+                    if event.keystroke.modifiers.shift {
+                        this.document.redo();
+                    } else {
+                        this.document.undo();
+                    }
+                    this.status = None;
+                    cx.notify();
+                }
+            }))
+            .child(self.toolbar(cx))
+            .child(image_layer)
+            .children(status_toast)
+            .child(
+                div()
+                    .absolute()
+                    .left(px(12.0))
+                    .bottom(px(8.0))
+                    .text_size(px(10.5))
+                    .text_color(rgba(0xFFFFFF66))
+                    .child(format!(
+                        "{} x {}",
+                        self.image_size.width, self.image_size.height
+                    )),
+            )
+    }
+}
+
+pub fn open_editor(frame: RgbaFrame, cx: &mut App) {
+    open_editor_with_pin(frame, None, cx);
+}
+
+pub fn open_pin_editor(frame: RgbaFrame, pin_id: u64, cx: &mut App) {
+    open_editor_with_pin(frame, Some(pin_id), cx);
+}
+
+fn open_editor_with_pin(frame: RgbaFrame, pin_target: Option<u64>, cx: &mut App) {
+    crate::pin::remember(&frame);
+    let image_width = frame.width() as f32;
+    let image_height = frame.height() as f32;
+    let scale = (MAX_IMAGE_WIDTH / image_width)
+        .min(MAX_IMAGE_HEIGHT / image_height)
+        .min(1.0);
+    let content_width = (image_width * scale).max(320.0);
+    let content_height = (image_height * scale).max(240.0);
+    let window_width = (content_width + PADDING * 2.0).max(MIN_WINDOW_WIDTH);
+    let window_height = (content_height + TOOLBAR_HEIGHT + PADDING * 2.0).max(480.0);
+    let bounds = centered_bounds(cx, window_width, window_height);
+    let display_id = cx.primary_display().map(|display| display.id());
+    let language = settings_state::get().language;
+
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: Some(TitlebarOptions {
+            title: Some(t(language, "editor.title").into()),
+            ..Default::default()
+        }),
+        focus: true,
+        show: true,
+        kind: WindowKind::Normal,
+        is_movable: true,
+        is_resizable: true,
+        is_minimizable: true,
+        display_id,
+        window_background: WindowBackgroundAppearance::Opaque,
+        window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(360.0))),
+        app_id: Some("capin-editor".to_owned()),
+        ..Default::default()
+    };
+
+    match gpui_kit::open_window(options, cx, move |window, cx| {
+        let view = cx.new(|cx| EditorView::new(frame, pin_target, cx));
+        let focus = view.read(cx).focus_handle.clone();
+        window.defer(cx, move |window, cx| {
+            window.focus(&focus, cx);
+            window.activate_window();
+        });
+        view
+    }) {
+        Ok((handle, _)) => {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+            cx.activate(true);
+        }
+        Err(error) => eprintln!("capin: failed to open editor: {error}"),
+    }
+}
+
+fn centered_bounds(cx: &App, width: f32, height: f32) -> Bounds<Pixels> {
+    match cx.primary_display() {
+        Some(display) => {
+            let center = display.bounds().center();
+            Bounds {
+                origin: point(center.x - px(width / 2.0), center.y - px(height / 2.0)),
+                size: size(px(width), px(height)),
+            }
+        }
+        None => Bounds {
+            origin: point(px(80.0), px(80.0)),
+            size: size(px(width), px(height)),
+        },
+    }
+}
+
+fn finalize_shape(draft: &Draft, end: PhysicalPoint) -> Option<Shape> {
+    match draft.tool {
+        Tool::Rect => {
+            let rect = normalized_rect(draft.start, end);
+            (rect.size.width >= 2 && rect.size.height >= 2).then_some(Shape::Rect(rect))
+        }
+        Tool::Ellipse => {
+            let rect = normalized_rect(draft.start, end);
+            (rect.size.width >= 2 && rect.size.height >= 2).then_some(Shape::Ellipse(rect))
+        }
+        Tool::Blur => {
+            let rect = normalized_rect(draft.start, end);
+            (rect.size.width >= 2 && rect.size.height >= 2).then_some(Shape::Blur(rect))
+        }
+        Tool::Spotlight => {
+            let rect = normalized_rect(draft.start, end);
+            (rect.size.width >= 2 && rect.size.height >= 2).then_some(Shape::Spotlight(rect))
+        }
+        Tool::Arrow => (distance(draft.start, end) >= 2.0).then_some(Shape::Arrow {
+            start: draft.start,
+            end,
+        }),
+        Tool::Highlighter => {
+            let mut points = draft.points.clone();
+            if points.last().is_none_or(|last| distance(*last, end) >= 2.0) {
+                points.push(end);
+            }
+            (points.len() >= 2).then_some(Shape::Highlighter { points })
+        }
+        Tool::Text | Tool::Select | Tool::Number | Tool::Eraser => None,
+    }
+}
+
+fn normalized_rect(start: PhysicalPoint, end: PhysicalPoint) -> PhysicalRect {
+    let left = start.x.min(end.x);
+    let top = start.y.min(end.y);
+    let right = start.x.max(end.x);
+    let bottom = start.y.max(end.y);
+    PhysicalRect::new(left, top, (right - left) as u32, (bottom - top) as u32)
+}
+
+fn distance(a: PhysicalPoint, b: PhysicalPoint) -> f32 {
+    let dx = (a.x - b.x) as f32;
+    let dy = (a.y - b.y) as f32;
+    (dx * dx + dy * dy).sqrt()
+}
+
+fn paint_selection(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    scale: f32,
+    rect: PhysicalRect,
+    accent_hex: u32,
+) {
+    let left = rect.origin.x as f32;
+    let top = rect.origin.y as f32;
+    let right = left + rect.size.width as f32;
+    let bottom = top + rect.size.height as f32;
+    let stroke = px((1.5 * scale).max(1.0));
+    let to_point = |x: f32, y: f32| {
+        point(
+            bounds.origin.x + px(x * scale),
+            bounds.origin.y + px(y * scale),
+        )
+    };
+    let mut builder = PathBuilder::stroke(stroke);
+    builder.move_to(to_point(left, top));
+    builder.line_to(to_point(right, top));
+    builder.line_to(to_point(right, bottom));
+    builder.line_to(to_point(left, bottom));
+    builder.close();
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, rgba((accent_hex << 8) | 0xFF));
+    }
+}
+
+fn paint_shape(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    scale: f32,
+    shape: &Shape,
+    style: AnnotationStyle,
+) {
+    let color = rgba(style.color);
+    let stroke = px((style.stroke_width * scale).max(1.0));
+    let to_point = |x: f32, y: f32| {
+        point(
+            bounds.origin.x + px(x * scale),
+            bounds.origin.y + px(y * scale),
+        )
+    };
+
+    match shape {
+        Shape::Rect(rect) => {
+            let left = rect.origin.x as f32;
+            let top = rect.origin.y as f32;
+            let right = left + rect.size.width as f32;
+            let bottom = top + rect.size.height as f32;
+            let mut builder = PathBuilder::stroke(stroke);
+            builder.move_to(to_point(left, top));
+            builder.line_to(to_point(right, top));
+            builder.line_to(to_point(right, bottom));
+            builder.line_to(to_point(left, bottom));
+            builder.close();
+            if let Ok(path) = builder.build() {
+                window.paint_path(path, color);
+            }
+        }
+        Shape::Ellipse(rect) => {
+            let center_x = rect.origin.x as f32 + rect.size.width as f32 / 2.0;
+            let center_y = rect.origin.y as f32 + rect.size.height as f32 / 2.0;
+            let radius_x = rect.size.width as f32 / 2.0;
+            let radius_y = rect.size.height as f32 / 2.0;
+            let mut builder = PathBuilder::stroke(stroke);
+            builder.move_to(to_point(center_x + radius_x, center_y));
+            builder.arc_to(
+                point(px(radius_x * scale), px(radius_y * scale)),
+                px(0.0),
+                false,
+                false,
+                to_point(center_x - radius_x, center_y),
+            );
+            builder.arc_to(
+                point(px(radius_x * scale), px(radius_y * scale)),
+                px(0.0),
+                false,
+                false,
+                to_point(center_x + radius_x, center_y),
+            );
+            builder.close();
+            if let Ok(path) = builder.build() {
+                window.paint_path(path, color);
+            }
+        }
+        Shape::Arrow { start, end } => {
+            let mut builder = PathBuilder::stroke(stroke);
+            builder.move_to(to_point(start.x as f32, start.y as f32));
+            builder.line_to(to_point(end.x as f32, end.y as f32));
+
+            let dx = (end.x - start.x) as f32;
+            let dy = (end.y - start.y) as f32;
+            let angle = dy.atan2(dx);
+            let head = (style.stroke_width * 3.5).max(10.0);
+            let spread = 0.55;
+            let left = (
+                end.x as f32 - head * (angle - spread).cos(),
+                end.y as f32 - head * (angle - spread).sin(),
+            );
+            let right = (
+                end.x as f32 - head * (angle + spread).cos(),
+                end.y as f32 - head * (angle + spread).sin(),
+            );
+            builder.move_to(to_point(left.0, left.1));
+            builder.line_to(to_point(end.x as f32, end.y as f32));
+            builder.line_to(to_point(right.0, right.1));
+            if let Ok(path) = builder.build() {
+                window.paint_path(path, color);
+            }
+        }
+        Shape::Highlighter { points } => {
+            let Some(first) = points.first() else {
+                return;
+            };
+            let mut builder = PathBuilder::stroke(stroke);
+            builder.move_to(to_point(first.x as f32, first.y as f32));
+            for next in &points[1..] {
+                builder.line_to(to_point(next.x as f32, next.y as f32));
+            }
+            if let Ok(path) = builder.build() {
+                window.paint_path(path, color);
+            }
+        }
+        Shape::Blur(_) | Shape::Text { .. } | Shape::Number { .. } => {}
+        Shape::Spotlight(rect) => paint_spotlight(window, bounds, scale, *rect),
+    }
+}
+
+fn paint_spotlight(window: &mut Window, bounds: Bounds<Pixels>, scale: f32, rect: PhysicalRect) {
+    let image_left = f32::from(bounds.origin.x);
+    let image_top = f32::from(bounds.origin.y);
+    let image_right = image_left + f32::from(bounds.size.width);
+    let image_bottom = image_top + f32::from(bounds.size.height);
+    let hole_left = (image_left + rect.origin.x as f32 * scale).clamp(image_left, image_right);
+    let hole_top = (image_top + rect.origin.y as f32 * scale).clamp(image_top, image_bottom);
+    let hole_right = (hole_left + rect.size.width as f32 * scale).clamp(hole_left, image_right);
+    let hole_bottom = (hole_top + rect.size.height as f32 * scale).clamp(hole_top, image_bottom);
+
+    let pieces = [
+        (image_left, image_top, image_right, hole_top),
+        (image_left, hole_bottom, image_right, image_bottom),
+        (image_left, hole_top, hole_left, hole_bottom),
+        (hole_right, hole_top, image_right, hole_bottom),
+    ];
+    for (left, top, right, bottom) in pieces {
+        if right <= left || bottom <= top {
+            continue;
+        }
+        let mut builder = PathBuilder::fill();
+        builder.add_polygon(
+            &[
+                point(px(left), px(top)),
+                point(px(right), px(top)),
+                point(px(right), px(bottom)),
+                point(px(left), px(bottom)),
+            ],
+            true,
+        );
+        if let Ok(path) = builder.build() {
+            window.paint_path(path, rgba(0x0000008C));
+        }
+    }
+}

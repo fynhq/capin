@@ -1,0 +1,701 @@
+use std::cell::RefCell;
+
+use core_types::{FrameError, PhysicalRect, PhysicalSize, RgbaFrame, prefers_dark_foreground};
+use cosmic_text::{
+    Attrs, Buffer, Color as TextColor, Family, FontSystem, Metrics, Shaping, SwashCache,
+};
+use thiserror::Error;
+use tiny_skia::{
+    IntSize, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, Transform,
+};
+
+use crate::{Annotation, AnnotationDocument, AnnotationId, AnnotationStyle, Shape};
+
+pub fn rasterize(
+    document: &AnnotationDocument,
+    frame: &RgbaFrame,
+) -> Result<RgbaFrame, RasterError> {
+    let expected = document.image_size();
+    let actual = PhysicalSize::new(frame.width(), frame.height());
+    if expected != actual {
+        return Err(RasterError::SizeMismatch { expected, actual });
+    }
+
+    let mut pixels = frame.pixels().to_vec();
+    premultiply(&mut pixels);
+    let size = IntSize::from_wh(expected.width, expected.height).ok_or(RasterError::Pixmap)?;
+    let mut pixmap = Pixmap::from_vec(pixels, size).ok_or(RasterError::Pixmap)?;
+
+    for annotation in document.objects() {
+        if let Shape::Blur(rect) = &annotation.shape {
+            blur_region(pixmap.data_mut(), expected.width, expected.height, *rect);
+            continue;
+        }
+        if matches!(annotation.shape, Shape::Text { .. }) {
+            draw_text(&mut pixmap, annotation);
+            continue;
+        }
+        if matches!(annotation.shape, Shape::Number { .. }) {
+            draw_number(&mut pixmap, annotation);
+            continue;
+        }
+        if let Shape::Spotlight(rect) = annotation.shape {
+            draw_spotlight(&mut pixmap, expected, rect);
+            continue;
+        }
+
+        let path = build_path(annotation)?;
+        let (red, green, blue, alpha) = unpack(annotation.style.color);
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(red, green, blue, alpha);
+        let stroke = Stroke {
+            width: annotation.style.stroke_width.max(1.0),
+            line_cap: LineCap::Round,
+            line_join: LineJoin::Round,
+            ..Default::default()
+        };
+        let mut target = pixmap.as_mut();
+        target.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    }
+
+    let mut pixels = pixmap.data().to_vec();
+    unpremultiply(&mut pixels);
+    Ok(RgbaFrame::from_pixels(
+        expected.width,
+        expected.height,
+        pixels,
+    )?)
+}
+
+fn build_path(annotation: &Annotation) -> Result<Path, RasterError> {
+    match &annotation.shape {
+        Shape::Rect(rect) => {
+            let mut builder = PathBuilder::new();
+            builder.push_rect(to_skia_rect(*rect)?);
+            builder.finish().ok_or(RasterError::InvalidGeometry)
+        }
+        Shape::Ellipse(rect) => {
+            let mut builder = PathBuilder::new();
+            builder.push_oval(to_skia_rect(*rect)?);
+            builder.finish().ok_or(RasterError::InvalidGeometry)
+        }
+        Shape::Arrow { start, end } => {
+            let mut builder = PathBuilder::new();
+            builder.move_to(start.x as f32, start.y as f32);
+            builder.line_to(end.x as f32, end.y as f32);
+
+            let dx = (end.x - start.x) as f32;
+            let dy = (end.y - start.y) as f32;
+            let angle = dy.atan2(dx);
+            let head_length = (annotation.style.stroke_width * 3.5).max(10.0);
+            let spread = 0.55;
+            let left = (
+                end.x as f32 - head_length * (angle - spread).cos(),
+                end.y as f32 - head_length * (angle - spread).sin(),
+            );
+            let right = (
+                end.x as f32 - head_length * (angle + spread).cos(),
+                end.y as f32 - head_length * (angle + spread).sin(),
+            );
+            builder.move_to(left.0, left.1);
+            builder.line_to(end.x as f32, end.y as f32);
+            builder.line_to(right.0, right.1);
+            builder.finish().ok_or(RasterError::InvalidGeometry)
+        }
+        Shape::Highlighter { points } => {
+            let Some(first) = points.first() else {
+                return Err(RasterError::InvalidGeometry);
+            };
+            let mut builder = PathBuilder::new();
+            builder.move_to(first.x as f32, first.y as f32);
+            for next in &points[1..] {
+                builder.line_to(next.x as f32, next.y as f32);
+            }
+            builder.finish().ok_or(RasterError::InvalidGeometry)
+        }
+        Shape::Blur(_) => Err(RasterError::Unsupported(annotation.id)),
+        Shape::Spotlight(_) => Err(RasterError::Unsupported(annotation.id)),
+        Shape::Text { .. } => Err(RasterError::Unsupported(annotation.id)),
+        Shape::Number { .. } => Err(RasterError::Unsupported(annotation.id)),
+    }
+}
+
+fn draw_text(pixmap: &mut Pixmap, annotation: &Annotation) {
+    let Shape::Text { bounds, text } = &annotation.shape else {
+        return;
+    };
+    if text.is_empty() || bounds.size.width == 0 || bounds.size.height == 0 {
+        return;
+    }
+
+    TEXT_ENGINE.with(|engine| {
+        let mut engine = engine.borrow_mut();
+        let engine = engine.get_or_insert_with(|| TextEngine {
+            font_system: FontSystem::new(),
+            swash_cache: SwashCache::new(),
+        });
+        if engine.font_system.db_mut().is_empty() {
+            return;
+        }
+        let font_size = annotation.style.font_size.max(1.0);
+        let mut buffer = Buffer::new(
+            &mut engine.font_system,
+            Metrics::new(font_size, font_size * 1.3),
+        );
+        buffer.set_size(Some(bounds.size.width as f32), None);
+        buffer.set_text(
+            text,
+            &Attrs::new().family(Family::SansSerif),
+            Shaping::Advanced,
+            None,
+        );
+
+        let (red, green, blue, alpha) = unpack(annotation.style.color);
+        let width = pixmap.width() as i32;
+        let height = pixmap.height() as i32;
+        let origin = bounds.origin;
+        let data = pixmap.data_mut();
+        buffer.draw(
+            &mut engine.font_system,
+            &mut engine.swash_cache,
+            TextColor::rgba(red, green, blue, alpha),
+            |x, y, rect_width, rect_height, color| {
+                let mask = f32::from((color.0 >> 24) as u8) / 255.0;
+                let coverage = mask * (f32::from(alpha) / 255.0);
+                if coverage <= 0.0 {
+                    return;
+                }
+                let source_red = f32::from(((color.0 >> 16) & 0xFF) as u8);
+                let source_green = f32::from(((color.0 >> 8) & 0xFF) as u8);
+                let source_blue = f32::from((color.0 & 0xFF) as u8);
+                let inverse = 1.0 - coverage;
+                for row in 0..rect_height as i32 {
+                    let pixel_y = origin.y + y + row;
+                    if !(0..height).contains(&pixel_y) {
+                        continue;
+                    }
+                    for column in 0..rect_width as i32 {
+                        let pixel_x = origin.x + x + column;
+                        if !(0..width).contains(&pixel_x) {
+                            continue;
+                        }
+                        let index = ((pixel_y * width + pixel_x) * 4) as usize;
+                        data[index] = blend_channel(source_red, coverage, data[index], inverse);
+                        data[index + 1] =
+                            blend_channel(source_green, coverage, data[index + 1], inverse);
+                        data[index + 2] =
+                            blend_channel(source_blue, coverage, data[index + 2], inverse);
+                        data[index + 3] = blend_channel(255.0, coverage, data[index + 3], inverse);
+                    }
+                }
+            },
+        );
+    });
+}
+
+fn blend_channel(source: f32, coverage: f32, destination: u8, inverse: f32) -> u8 {
+    (source * coverage + f32::from(destination) * inverse)
+        .round()
+        .clamp(0.0, 255.0) as u8
+}
+
+fn draw_number(pixmap: &mut Pixmap, annotation: &Annotation) {
+    let Shape::Number { bounds, value } = &annotation.shape else {
+        return;
+    };
+    if bounds.size.width < 2 || bounds.size.height < 2 {
+        return;
+    }
+    let (red, green, blue, alpha) = unpack(annotation.style.color);
+    let rgb = (u32::from(red) << 16) | (u32::from(green) << 8) | u32::from(blue);
+    let foreground = if prefers_dark_foreground(rgb) {
+        0x111111FF
+    } else {
+        0xFFFFFFFF
+    };
+
+    if let Ok(rect) = to_skia_rect(*bounds) {
+        let mut builder = PathBuilder::new();
+        builder.push_oval(rect);
+        if let Some(path) = builder.finish() {
+            let mut paint = Paint::default();
+            paint.set_color_rgba8(red, green, blue, alpha);
+            pixmap.as_mut().fill_path(
+                &path,
+                &paint,
+                tiny_skia::FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
+        }
+    }
+
+    let font_size = (bounds.size.height as f32 * 0.54).max(10.0);
+    let text = value.to_string();
+    let estimated_width = (font_size * 0.62 * text.chars().count() as f32).max(font_size);
+    let text_bounds = PhysicalRect::new(
+        bounds.origin.x + ((bounds.size.width as f32 - estimated_width) / 2.0).round() as i32,
+        bounds.origin.y + ((bounds.size.height as f32 - font_size * 1.3) / 2.0).round() as i32,
+        estimated_width.ceil() as u32 + 2,
+        (font_size * 1.3).ceil() as u32,
+    );
+    let text_annotation = Annotation {
+        id: annotation.id,
+        shape: Shape::Text {
+            bounds: text_bounds,
+            text,
+        },
+        style: AnnotationStyle {
+            color: foreground,
+            stroke_width: 0.0,
+            font_size,
+        },
+    };
+    draw_text(pixmap, &text_annotation);
+}
+
+fn draw_spotlight(pixmap: &mut Pixmap, size: PhysicalSize, rect: PhysicalRect) {
+    let image_width = size.width as i64;
+    let image_height = size.height as i64;
+    let left = i64::from(rect.origin.x).clamp(0, image_width);
+    let top = i64::from(rect.origin.y).clamp(0, image_height);
+    let right = rect.right().clamp(0, image_width);
+    let bottom = rect.bottom().clamp(0, image_height);
+    if right <= left || bottom <= top {
+        return;
+    }
+
+    let color = (0, 0, 0, 140);
+    fill_rect(pixmap, 0, 0, image_width, top, color);
+    fill_rect(pixmap, 0, bottom, image_width, image_height - bottom, color);
+    fill_rect(pixmap, 0, top, left, bottom - top, color);
+    fill_rect(pixmap, right, top, image_width - right, bottom - top, color);
+}
+
+fn fill_rect(
+    pixmap: &mut Pixmap,
+    x: i64,
+    y: i64,
+    width: i64,
+    height: i64,
+    color: (u8, u8, u8, u8),
+) {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    let Some(rect) = Rect::from_xywh(x as f32, y as f32, width as f32, height as f32) else {
+        return;
+    };
+    let mut builder = PathBuilder::new();
+    builder.push_rect(rect);
+    let Some(path) = builder.finish() else {
+        return;
+    };
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(color.0, color.1, color.2, color.3);
+    pixmap.as_mut().fill_path(
+        &path,
+        &paint,
+        tiny_skia::FillRule::Winding,
+        Transform::identity(),
+        None,
+    );
+}
+
+thread_local! {
+    static TEXT_ENGINE: RefCell<Option<TextEngine>> = const { RefCell::new(None) };
+}
+
+struct TextEngine {
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+}
+
+fn blur_region(data: &mut [u8], width: u32, height: u32, rect: PhysicalRect) {
+    if rect.is_empty() {
+        return;
+    }
+    let x0 = rect.origin.x.max(0) as usize;
+    let y0 = rect.origin.y.max(0) as usize;
+    let x1 = rect.right().clamp(0, i64::from(width)) as usize;
+    let y1 = rect.bottom().clamp(0, i64::from(height)) as usize;
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+
+    let region_width = x1 - x0;
+    let region_height = y1 - y0;
+    let radius = (region_width.min(region_height) / 12).clamp(2, 32);
+    let mut scratch = vec![0u8; region_width * region_height * 4];
+
+    // Three box passes are a close, separable approximation of a Gaussian blur.
+    for _ in 0..3 {
+        box_blur_horizontal(
+            data,
+            &mut scratch,
+            width as usize,
+            x0,
+            y0,
+            region_width,
+            region_height,
+            radius,
+        );
+        box_blur_vertical(
+            &scratch,
+            data,
+            width as usize,
+            x0,
+            y0,
+            region_width,
+            region_height,
+            radius,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn box_blur_horizontal(
+    source: &[u8],
+    target: &mut [u8],
+    image_width: usize,
+    x0: usize,
+    y0: usize,
+    width: usize,
+    height: usize,
+    radius: usize,
+) {
+    for row in 0..height {
+        let source_row = (y0 + row) * image_width + x0;
+        let mut sums = [0u32; 4];
+        for column in 0..=radius.min(width - 1) {
+            let index = (source_row + column) * 4;
+            for channel in 0..4 {
+                sums[channel] += u32::from(source[index + channel]);
+            }
+        }
+        for column in 0..width {
+            if column > 0 {
+                let remove = column as isize - radius as isize - 1;
+                if remove >= 0 {
+                    let index = (source_row + remove as usize) * 4;
+                    for channel in 0..4 {
+                        sums[channel] -= u32::from(source[index + channel]);
+                    }
+                }
+                let add = column + radius;
+                if add < width {
+                    let index = (source_row + add) * 4;
+                    for channel in 0..4 {
+                        sums[channel] += u32::from(source[index + channel]);
+                    }
+                }
+            }
+            let low = column.saturating_sub(radius);
+            let high = (column + radius).min(width - 1);
+            let count = (high - low + 1) as u32;
+            let target_index = (row * width + column) * 4;
+            for channel in 0..4 {
+                target[target_index + channel] = (sums[channel] / count) as u8;
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn box_blur_vertical(
+    source: &[u8],
+    target: &mut [u8],
+    image_width: usize,
+    x0: usize,
+    y0: usize,
+    width: usize,
+    height: usize,
+    radius: usize,
+) {
+    for column in 0..width {
+        let mut sums = [0u32; 4];
+        for row in 0..=radius.min(height - 1) {
+            let index = (row * width + column) * 4;
+            for channel in 0..4 {
+                sums[channel] += u32::from(source[index + channel]);
+            }
+        }
+        for row in 0..height {
+            if row > 0 {
+                let remove = row as isize - radius as isize - 1;
+                if remove >= 0 {
+                    let index = (remove as usize * width + column) * 4;
+                    for channel in 0..4 {
+                        sums[channel] -= u32::from(source[index + channel]);
+                    }
+                }
+                let add = row + radius;
+                if add < height {
+                    let index = (add * width + column) * 4;
+                    for channel in 0..4 {
+                        sums[channel] += u32::from(source[index + channel]);
+                    }
+                }
+            }
+            let low = row.saturating_sub(radius);
+            let high = (row + radius).min(height - 1);
+            let count = (high - low + 1) as u32;
+            let target_index = ((y0 + row) * image_width + x0 + column) * 4;
+            for channel in 0..4 {
+                target[target_index + channel] = (sums[channel] / count) as u8;
+            }
+        }
+    }
+}
+
+fn to_skia_rect(rect: PhysicalRect) -> Result<Rect, RasterError> {
+    Rect::from_xywh(
+        rect.origin.x as f32,
+        rect.origin.y as f32,
+        rect.size.width as f32,
+        rect.size.height as f32,
+    )
+    .ok_or(RasterError::InvalidGeometry)
+}
+
+fn unpack(color: u32) -> (u8, u8, u8, u8) {
+    (
+        ((color >> 24) & 0xFF) as u8,
+        ((color >> 16) & 0xFF) as u8,
+        ((color >> 8) & 0xFF) as u8,
+        (color & 0xFF) as u8,
+    )
+}
+
+fn premultiply(pixels: &mut [u8]) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        let alpha = u16::from(pixel[3]);
+        if alpha == 0 {
+            pixel.fill(0);
+        } else if alpha < 255 {
+            for channel in &mut pixel[..3] {
+                *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
+            }
+        }
+    }
+}
+
+fn unpremultiply(pixels: &mut [u8]) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        let alpha = u16::from(pixel[3]);
+        if alpha > 0 && alpha < 255 {
+            for channel in &mut pixel[..3] {
+                *channel = ((u16::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum RasterError {
+    #[error("frame size mismatch: expected {expected:?}, got {actual:?}")]
+    SizeMismatch {
+        expected: PhysicalSize,
+        actual: PhysicalSize,
+    },
+    #[error("annotation {0:?} cannot be rasterized yet")]
+    Unsupported(AnnotationId),
+    #[error("annotation geometry cannot be rasterized")]
+    InvalidGeometry,
+    #[error("failed to allocate a raster pixmap")]
+    Pixmap,
+    #[error(transparent)]
+    Frame(#[from] FrameError),
+}
+
+#[cfg(test)]
+mod tests {
+    use core_types::PhysicalPoint;
+
+    use super::*;
+    use crate::{AnnotationDocument, AnnotationStyle, Shape};
+
+    fn black_frame(width: u32, height: u32) -> RgbaFrame {
+        RgbaFrame::from_pixels(
+            width,
+            height,
+            [0, 0, 0, 255].repeat((width * height) as usize),
+        )
+        .unwrap()
+    }
+
+    fn pixel(frame: &RgbaFrame, x: u32, y: u32) -> [u8; 4] {
+        frame.pixel(x, y).unwrap()
+    }
+
+    fn document(width: u32, height: u32) -> AnnotationDocument {
+        AnnotationDocument::new(PhysicalSize::new(width, height))
+    }
+
+    #[test]
+    fn no_annotations_preserves_pixels() {
+        let frame = black_frame(20, 20);
+        let document = document(20, 20);
+        let output = rasterize(&document, &frame).unwrap();
+        assert_eq!(pixel(&output, 5, 5), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn rectangle_outline_is_drawn() {
+        let frame = black_frame(100, 100);
+        let mut document = document(100, 100);
+        document.add(
+            Shape::Rect(PhysicalRect::new(10, 10, 80, 80)),
+            AnnotationStyle {
+                color: 0xFF0000FF,
+                stroke_width: 4.0,
+                ..Default::default()
+            },
+        );
+        let output = rasterize(&document, &frame).unwrap();
+        let border = pixel(&output, 10, 50);
+        assert!(border[0] > 120, "border should be red: {border:?}");
+        assert_eq!(pixel(&output, 50, 50), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn ellipse_and_arrow_render_without_error() {
+        let frame = black_frame(80, 80);
+        let mut document = document(80, 80);
+        document.add(
+            Shape::Ellipse(PhysicalRect::new(10, 10, 50, 50)),
+            AnnotationStyle::default(),
+        );
+        document.add(
+            Shape::Arrow {
+                start: PhysicalPoint::new(10, 70),
+                end: PhysicalPoint::new(70, 20),
+            },
+            AnnotationStyle::default(),
+        );
+        let output = rasterize(&document, &frame).unwrap();
+        assert_eq!(output.width(), 80);
+    }
+
+    #[test]
+    fn highlighter_blends_over_background() {
+        let frame = black_frame(60, 20);
+        let mut document = document(60, 20);
+        document.add(
+            Shape::Highlighter {
+                points: vec![PhysicalPoint::new(5, 10), PhysicalPoint::new(55, 10)],
+            },
+            AnnotationStyle {
+                color: 0xFFFF0080,
+                stroke_width: 8.0,
+                ..Default::default()
+            },
+        );
+        let output = rasterize(&document, &frame).unwrap();
+        let center = pixel(&output, 30, 10);
+        assert!(
+            center[0] > 0 && center[1] > 0,
+            "highlight missing: {center:?}"
+        );
+    }
+
+    #[test]
+    fn size_mismatch_is_rejected() {
+        let frame = black_frame(20, 20);
+        let document = document(30, 20);
+        assert!(matches!(
+            rasterize(&document, &frame),
+            Err(RasterError::SizeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn blur_region_blends_pixels() {
+        let width = 30;
+        let height = 20;
+        let mut pixels = [0, 0, 0, 255].repeat((width * height) as usize);
+        let center = (10 * width + 10) as usize * 4;
+        pixels[center..center + 4].copy_from_slice(&[255, 0, 0, 255]);
+        let frame = RgbaFrame::from_pixels(width, height, pixels).unwrap();
+
+        let mut document = document(width, height);
+        document.add(
+            Shape::Blur(PhysicalRect::new(5, 5, 20, 10)),
+            AnnotationStyle::default(),
+        );
+        let output = rasterize(&document, &frame).unwrap();
+        let blurred = pixel(&output, 10, 10);
+        assert!(
+            blurred[0] > 0 && blurred[0] < 255,
+            "pixel was not blurred: {blurred:?}"
+        );
+        assert_eq!(pixel(&output, 0, 0), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn empty_text_is_a_noop() {
+        let frame = black_frame(20, 20);
+        let mut document = document(20, 20);
+        document.add(
+            Shape::Text {
+                bounds: PhysicalRect::new(0, 0, 10, 10),
+                text: String::new(),
+            },
+            AnnotationStyle::default(),
+        );
+        let output = rasterize(&document, &frame).unwrap();
+        assert_eq!(pixel(&output, 0, 0), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn text_is_rasterized_without_error() {
+        let frame = black_frame(120, 60);
+        let mut document = document(120, 60);
+        document.add(
+            Shape::Text {
+                bounds: PhysicalRect::new(4, 4, 110, 40),
+                text: "Capin text".to_owned(),
+            },
+            AnnotationStyle::default(),
+        );
+        let output = rasterize(&document, &frame).unwrap();
+        assert_eq!(output.width(), 120);
+    }
+
+    #[test]
+    fn number_badge_paints_its_circle() {
+        let frame = black_frame(80, 80);
+        let mut document = document(80, 80);
+        document.add(
+            Shape::Number {
+                bounds: PhysicalRect::new(20, 20, 36, 36),
+                value: 1,
+            },
+            AnnotationStyle {
+                color: 0xFF0000FF,
+                ..Default::default()
+            },
+        );
+        let output = rasterize(&document, &frame).unwrap();
+        let center = pixel(&output, 38, 38);
+        assert!(center[0] > 120, "badge should be red: {center:?}");
+        assert_eq!(pixel(&output, 2, 2), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn spotlight_dims_outside_and_keeps_the_hole_clear() {
+        let frame = RgbaFrame::from_pixels(60, 60, [255, 255, 255, 255].repeat(60 * 60)).unwrap();
+        let mut document = document(60, 60);
+        document.add(
+            Shape::Spotlight(PhysicalRect::new(20, 20, 20, 20)),
+            AnnotationStyle::default(),
+        );
+        let output = rasterize(&document, &frame).unwrap();
+        let outside = pixel(&output, 5, 5);
+        assert!(
+            outside[0] < 180,
+            "spotlight should dim the outside: {outside:?}"
+        );
+        assert_eq!(pixel(&output, 30, 30), [255, 255, 255, 255]);
+    }
+}

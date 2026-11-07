@@ -1,0 +1,26 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+repository = "https://github.com/fynhq/capin"
+
+[workspace.dependencies]
+core-annotate = { path = "crates/core-annotate" }
+core-capture = { path = "crates/core-capture" }
+core-compose = { path = "crates/core-compose" }
+core-record = { path = "crates/core-record" }
+core-stitch = { path = "crates/core-stitch" }
+core-types = { path = "crates/core-types" }
+gpui-kit = { version = "0.9.0", default-features = false }
+platform-ocr = { path = "crates/platform-ocr" }
+platform-record = { path = "crates/platform-record" }
+platform-window = { path = "crates/platform-window" }
+thiserror = "2.0.21"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

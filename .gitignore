@@ -1,0 +1,11 @@
+# Rust build output
+/target/
+**/target/
+*.rs.bk
+
+# Local build output
+/dist/
+
+# Python cache
+__pycache__/
+*.pyc

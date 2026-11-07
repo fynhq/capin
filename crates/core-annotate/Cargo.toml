@@ -1,0 +1,17 @@
+[package]
+name = "core-annotate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+core-types.workspace = true
+cosmic-text = "0.19.0"
+thiserror.workspace = true
+tiny-skia = "0.11.4"
+
+[lints]
+workspace = true
