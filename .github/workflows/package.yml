@@ -1,0 +1,333 @@
+name: Package
+
+on:
+  workflow_call:
+    inputs:
+      release:
+        description: Use formal release asset names
+        required: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows ${{ matrix.arch }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked -p app --target ${{ matrix.target }}
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco upgrade innosetup --no-progress -y
+      - name: Package portable zip and installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $arch = "${{ matrix.arch }}"
+          $target = "${{ matrix.target }}"
+          $release = "${{ inputs.release }}".Trim().ToLowerInvariant() -eq "true"
+          if ($release) {
+            $assetBase = "Capin_Windows_${arch}_v${version}"
+          } else {
+            $commit = (git rev-parse --short HEAD)
+            $assetBase = "Capin_Windows_${arch}_v${version}_${commit}_dev"
+          }
+          $zip = "${assetBase}.zip"
+          $setupBase = "${assetBase}_setup"
+          $stage = "Capin"
+          Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          $files = @(
+            "target/$target/release/capin.exe",
+            "README.md",
+            "LICENSE",
+            "THIRD_PARTY_NOTICES.md"
+          )
+          foreach ($f in $files) {
+            if (!(Test-Path $f)) { throw "missing build output: $f" }
+            Copy-Item -Path $f -Destination $stage
+          }
+          Compress-Archive -Path $stage -DestinationPath $zip -Force
+          $repoRoot = (Get-Location).Path
+          $sourceDir = (Resolve-Path $stage).Path
+          $iscc = $null
+          $isccCommand = Get-Command iscc -ErrorAction SilentlyContinue
+          if ($isccCommand) { $iscc = $isccCommand.Source }
+          if (-not $iscc) {
+            $iscc = @(
+              (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 7\ISCC.exe"),
+              (Join-Path $env:ProgramFiles "Inno Setup 7\ISCC.exe"),
+              (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
+              (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
+            ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $iscc) { throw "ISCC.exe not found" }
+          $numeric = ($version -replace '[^0-9.].*$', '')
+          $parts = @($numeric.Split('.') | Where-Object { $_ -ne '' })
+          while ($parts.Count -lt 4) { $parts += '0' }
+          $versionInfo = ($parts[0..3] -join '.')
+          # x64os keeps the x64 installer off Arm64 machines; the Arm64
+          # installer is a separate asset.
+          $archAllowed = if ($arch -eq "x64") { "x64os" } else { "arm64" }
+          & $iscc `
+            "/DAppVersion=$version" `
+            "/DVersionInfoVersion=$versionInfo" `
+            "/DArch=$arch" `
+            "/DArchAllowed=$archAllowed" `
+            "/DArchMode=$archAllowed" `
+            "/DSourceDir=$sourceDir" `
+            "/DOutputDir=$repoRoot" `
+            "/DOutputBaseFilename=$setupBase" `
+            "/DRepoRoot=$repoRoot" `
+            ".github/installer/Capin.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          if (!(Test-Path (Join-Path $repoRoot "$setupBase.exe"))) {
+            throw "missing installer output: $setupBase.exe"
+          }
+          Write-Host "Packaged $zip and $setupBase.exe"
+          python .github/scripts/check_public_surface.py --assets $stage --assets $zip --assets "$setupBase.exe"
+          if ($LASTEXITCODE -ne 0) { throw "public surface check failed" }
+      - name: Smoke-test Windows installer
+        if: matrix.arch == 'x64'
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          function Invoke-Setup {
+            param(
+              [string]$Label,
+              [string]$FilePath,
+              [string[]]$SetupArgs,
+              [int]$TimeoutSeconds = 180
+            )
+            $log = Join-Path $env:TEMP "capin-$Label.log"
+            Write-Host "[smoke] ${Label}: start"
+            $proc = Start-Process -FilePath $FilePath `
+              -ArgumentList ($SetupArgs + "/LOG=`"$log`"") -PassThru
+            if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
+              Write-Host "[smoke] ${Label}: TIMEOUT after $TimeoutSeconds s"
+              if (Test-Path $log) { Get-Content -Path $log -Tail 80 }
+              throw "$Label timed out after $TimeoutSeconds s"
+            }
+            Write-Host "[smoke] ${Label}: exit $($proc.ExitCode)"
+            return $proc.ExitCode
+          }
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\Capin"
+          if (Test-Path $installDir) { Remove-Item -Recurse -Force $installDir }
+          $setup = Get-ChildItem -Path . -Filter "Capin_Windows_x64_*_setup.exe" |
+            Select-Object -First 1
+          if (-not $setup) { throw "setup file not found" }
+          $exit = Invoke-Setup -Label "install" -FilePath $setup.FullName `
+            -SetupArgs @("/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART")
+          if ($exit -ne 0) {
+            throw "installer failed with exit code $exit"
+          }
+          Write-Host "[smoke] clean install verified"
+          # Apps & features must show the bare app name; the version has
+          # its own DisplayVersion line.
+          $uninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{4F2A7C9D-6E31-4B58-9A0C-7D5E3B1F8A62}_is1"
+          $displayName = (Get-ItemProperty -Path $uninstallKey -Name DisplayName).DisplayName
+          if ($displayName -ne "Capin") {
+            throw "Apps & features DisplayName is '$displayName', expected 'Capin'"
+          }
+          Write-Host "[smoke] Apps & features display name verified"
+          $installed = @(
+            "capin.exe",
+            "README.md",
+            "LICENSE",
+            "THIRD_PARTY_NOTICES.md"
+          )
+          foreach ($f in $installed) {
+            if (!(Test-Path (Join-Path $installDir $f))) {
+              throw "missing installed file: $f"
+            }
+          }
+          # The executable must carry the app icon and version resource, not
+          # only the installer. This also feeds the uninstall entry's icon and
+          # the installer's version comparison.
+          $exeInfo = (Get-Item (Join-Path $installDir "capin.exe")).VersionInfo
+          if ($exeInfo.ProductName -ne "Capin") {
+            throw "capin.exe ProductName is '$($exeInfo.ProductName)', expected 'Capin'"
+          }
+          if ($exeInfo.FileDescription -ne "Capin") {
+            throw "capin.exe FileDescription is '$($exeInfo.FileDescription)', expected 'Capin'"
+          }
+          if ($exeInfo.ProductVersion -notlike "$version*") {
+            throw "capin.exe ProductVersion is '$($exeInfo.ProductVersion)', expected '$version'"
+          }
+          Write-Host "[smoke] executable resources verified"
+          $uninstaller = Join-Path $installDir "unins000.exe"
+          if (!(Test-Path $uninstaller)) { throw "uninstaller not found" }
+          $exit = Invoke-Setup -Label "uninstall" -FilePath $uninstaller `
+            -SetupArgs @("/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART")
+          if ($exit -ne 0) {
+            throw "uninstaller failed with exit code $exit"
+          }
+          foreach ($f in $installed) {
+            if (Test-Path (Join-Path $installDir $f)) {
+              throw "uninstall left $f behind"
+            }
+          }
+          Write-Host "[smoke] uninstall verified"
+      - name: Upload Windows packages
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Capin-windows-${{ matrix.arch }}
+          path: |
+            Capin_Windows_${{ matrix.arch }}_*.zip
+            Capin_Windows_${{ matrix.arch }}_*.exe
+          if-no-files-found: error
+
+  macos:
+    name: macOS ${{ matrix.arch }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-apple-darwin
+          - arch: x64
+            target: x86_64-apple-darwin
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked -p app --target ${{ matrix.target }}
+      - name: Package app bundle and dmg
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          short_version="${version%%-*}"
+          arch="${{ matrix.arch }}"
+          target="${{ matrix.target }}"
+          release="${{ inputs.release }}"
+          if [ "$release" = "true" ]; then
+            assetBase="Capin_macOS_${arch}_v${version}"
+          else
+            commit="$(git rev-parse --short HEAD)"
+            assetBase="Capin_macOS_${arch}_v${version}_${commit}_dev"
+          fi
+          app="Capin.app"
+          rm -rf "$app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp "target/$target/release/capin" "$app/Contents/MacOS/Capin"
+          cp README.md LICENSE THIRD_PARTY_NOTICES.md "$app/Contents/Resources/"
+          cp assets/icon/capin_icon.icns "$app/Contents/Resources/AppIcon.icns"
+          cat > "$app/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDevelopmentRegion</key>
+            <string>en</string>
+            <key>CFBundleExecutable</key>
+            <string>Capin</string>
+            <key>CFBundleIconFile</key>
+            <string>AppIcon</string>
+            <key>CFBundleIdentifier</key>
+            <string>io.github.fynhq.capin</string>
+            <key>CFBundleInfoDictionaryVersion</key>
+            <string>6.0</string>
+            <key>CFBundleName</key>
+            <string>Capin</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${short_version}</string>
+            <key>CFBundleVersion</key>
+            <string>${{ github.run_number }}</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+            <key>NSScreenCaptureUsageDescription</key>
+            <string>Capin needs screen recording access to take screenshots and record the screen.</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>13.0</string>
+            <key>LSUIElement</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+          bash .github/scripts/sign_macos_bundle.sh "$app"
+          python3 .github/scripts/check_public_surface.py --assets "$app"
+          dmg="${assetBase}.dmg"
+          dmg_root="dmg-root"
+          rm -rf "$dmg_root"
+          mkdir -p "$dmg_root"
+          cp -R "$app" "$dmg_root/"
+          ln -s /Applications "$dmg_root/Applications"
+          hdiutil create -volname "Capin" -srcfolder "$dmg_root" \
+            -ov -format UDZO -fs HFS+ "$dmg"
+          rm -rf "$dmg_root"
+          # Mount the image and verify the bundle and the drag target before
+          # the artifact is uploaded. The release job runs on Linux and cannot
+          # mount a dmg, so this is the content gate for macOS assets.
+          mount_point="$RUNNER_TEMP/CapinDmg"
+          rm -rf "$mount_point"
+          mkdir -p "$mount_point"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount_point" "$dmg" >/dev/null
+          trap 'hdiutil detach "$mount_point" >/dev/null 2>&1 || true' EXIT
+          for f in \
+            "Capin.app/Contents/MacOS/Capin" \
+            "Capin.app/Contents/Info.plist" \
+            "Capin.app/Contents/Resources/AppIcon.icns" \
+            "Capin.app/Contents/Resources/README.md" \
+            "Capin.app/Contents/Resources/LICENSE" \
+            "Capin.app/Contents/Resources/THIRD_PARTY_NOTICES.md"; do
+            test -f "$mount_point/$f" \
+              || { echo "missing in $dmg: $f" >&2; exit 1; }
+          done
+          test -L "$mount_point/Applications" \
+            || { echo "missing Applications link in $dmg" >&2; exit 1; }
+          test "$(readlink "$mount_point/Applications")" = "/Applications" \
+            || { echo "Applications link must target /Applications" >&2; exit 1; }
+          plist_version=$(plutil -extract CFBundleShortVersionString raw -o - \
+            "$mount_point/Capin.app/Contents/Info.plist")
+          test "$plist_version" = "$short_version" \
+            || { echo "plist version mismatch: $plist_version != $short_version" >&2; exit 1; }
+          codesign --verify --deep --strict "$mount_point/Capin.app"
+          mount_sig=$(codesign -dv --verbose=4 "$mount_point/Capin.app" 2>&1 \
+            | sed -n 's/^Identifier=//p')
+          test "$mount_sig" = "io.github.fynhq.capin" \
+            || { echo "signature identifier changed in $dmg: $mount_sig" >&2; exit 1; }
+          hdiutil detach "$mount_point" >/dev/null
+          trap - EXIT
+          echo "Packaged $dmg"
+      - name: Upload macOS dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: Capin-macos-${{ matrix.arch }}
+          path: Capin_macOS_${{ matrix.arch }}_*.dmg
+          if-no-files-found: error

@@ -1,0 +1,46 @@
+name: Dev build
+
+on:
+  push:
+    tags:
+      - "build-*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Build dev packages
+    uses: ./.github/workflows/package.yml
+    with:
+      release: false
+
+  prune-build-tags:
+    name: Prune previous build tags
+    if: startsWith(github.ref, 'refs/tags/build-')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: prune-build-tags
+      cancel-in-progress: false
+    steps:
+      - name: Delete previous build tags
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/build-" \
+            --jq '.[].ref' |
+            sed 's#^refs/tags/##' |
+            while IFS= read -r tag; do
+              if [ "$tag" = "$KEEP_TAG" ]; then
+                continue
+              fi
+              echo "deleting tag $tag"
+              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${tag}"
+            done

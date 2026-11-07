@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy -p core-types -p core-capture -p core-compose -p core-annotate -p core-record -p core-stitch -p platform-record --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test -p core-types -p core-capture -p core-compose -p core-annotate -p core-record -p core-stitch -p platform-record --locked
+      - name: Release build
+        run: cargo build -p core-types -p core-capture -p core-compose -p core-annotate -p core-record -p core-stitch --release --locked
+
+  platform-check:
+    name: Platform check
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+      - uses: Swatinem/rust-cache@v2
+      - name: Check platform crates
+        run: cargo check -p platform-window -p platform-ocr -p platform-record -p app --locked
+
+  third-party:
+    name: Third-party notices
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+      - name: Check notices
+        run: python3 .github/scripts/check_third_party_notices.py
+
+  public-surface:
+    name: Public surface
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check public surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          range=""
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            range="${{ github.event.pull_request.base.sha }}..${{ github.sha }}"
+          elif [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            range="${{ github.event.before }}..${{ github.sha }}"
+          fi
+          args=(--repo . --tree)
+          if [ -n "$range" ]; then args+=(--range "$range"); fi
+          python3 .github/scripts/check_public_surface.py "${args[@]}"
+
+  tag-surface:
+    name: Tag surface
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check tag message
+        run: python3 .github/scripts/check_public_surface.py --repo . --tree --tag "$GITHUB_REF_NAME"

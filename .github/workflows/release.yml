@@ -1,0 +1,231 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check release tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify tag, version and main ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match workspace version v$version" >&2
+            exit 1
+          fi
+          if [ "$(git cat-file -t "$GITHUB_REF_NAME")" != "tag" ]; then
+            echo "tag $GITHUB_REF_NAME must be annotated" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo "tag $GITHUB_REF_NAME is not on main" >&2
+            exit 1
+          fi
+          echo "release tag verified: $GITHUB_REF_NAME"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy -p core-types -p core-capture -p core-compose -p core-annotate -p core-record -p core-stitch -p platform-record --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test -p core-types -p core-capture -p core-compose -p core-annotate -p core-record -p core-stitch -p platform-record --locked
+      - name: Third-party notices
+        run: python3 .github/scripts/check_third_party_notices.py
+      - name: Public surface
+        run: python3 .github/scripts/check_public_surface.py --repo . --tree --tag "$GITHUB_REF_NAME"
+
+  package:
+    name: Build packages
+    needs: check
+    uses: ./.github/workflows/package.yml
+    with:
+      release: true
+
+  release:
+    name: Publish release
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Read release metadata
+        id: meta
+        shell: bash
+        run: |
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match workspace version v$version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          case "$version" in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Capin-*
+          path: release-assets
+          merge-multiple: true
+      - name: Validate release assets
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+
+          expected=(
+            "Capin_Windows_x64_v${VERSION}_setup.exe"
+            "Capin_Windows_x64_v${VERSION}.zip"
+            "Capin_Windows_arm64_v${VERSION}_setup.exe"
+            "Capin_Windows_arm64_v${VERSION}.zip"
+            "Capin_macOS_arm64_v${VERSION}.dmg"
+            "Capin_macOS_x64_v${VERSION}.dmg"
+          )
+          for f in "${expected[@]}"; do
+            test -f "$f" || { echo "missing asset: $f" >&2; exit 1; }
+          done
+          if find . -maxdepth 1 -type f -name '*_dev*' | grep -q .; then
+            echo "development assets must not be published" >&2
+            exit 1
+          fi
+
+          find . -maxdepth 1 -type f -name 'Capin_*' -printf '%f\n' | LC_ALL=C sort > /tmp/actual-assets
+          printf '%s\n' "${expected[@]}" | LC_ALL=C sort > /tmp/expected-assets
+          diff -u /tmp/expected-assets /tmp/actual-assets
+
+          windows_zip="Capin_Windows_x64_v${VERSION}.zip"
+          for entry in \
+            "Capin/capin.exe" \
+            "Capin/README.md" \
+            "Capin/LICENSE" \
+            "Capin/THIRD_PARTY_NOTICES.md"; do
+            unzip -Z1 "$windows_zip" | tr '\\' '/' | grep -Fxq "$entry" \
+              || { echo "missing in $windows_zip: $entry" >&2; exit 1; }
+          done
+
+          # The Windows build job installs and uninstalls the x64 setup before
+          # uploading it; this job only checks presence. Each macOS dmg is
+          # mounted and checked in its build job (Linux cannot mount one here).
+          windows_setup="Capin_Windows_x64_v${VERSION}_setup.exe"
+          test -s "$windows_setup" \
+            || { echo "empty asset: $windows_setup" >&2; exit 1; }
+          : > SHA256SUMS
+          for asset in "${expected[@]}"; do
+            sha256sum "$asset" >> SHA256SUMS
+          done
+          LC_ALL=C sort -k 2,2 SHA256SUMS -o SHA256SUMS
+          echo "SHA256SUMS written for ${#expected[@]} assets"
+      - name: Create draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            is_draft=$(gh release view "$TAG" --json isDraft --jq .isDraft)
+            if [ "$is_draft" != "true" ]; then
+              echo "release $TAG is already published" >&2
+              exit 1
+            fi
+            gh release upload "$TAG" release-assets/* --clobber
+          else
+            args=( "$TAG" --title "capin v$VERSION" --draft --verify-tag --notes-from-tag )
+            if [ "$PRERELEASE" = "true" ]; then
+              args+=(--prerelease)
+            fi
+            gh release create "${args[@]}" release-assets/*
+          fi
+      - name: Verify uploaded assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p verify
+          gh release download "$TAG" --dir verify
+          cd verify
+          test -f SHA256SUMS || { echo "missing asset: SHA256SUMS" >&2; exit 1; }
+          if compgen -G '*.sha256' > /dev/null; then
+            echo "per-archive .sha256 files must not be published" >&2
+            exit 1
+          fi
+          awk '{print $2}' SHA256SUMS | LC_ALL=C sort > /tmp/sums-assets
+          find . -maxdepth 1 -type f -name 'Capin_*' -printf '%f\n' | LC_ALL=C sort > /tmp/published-assets
+          diff -u /tmp/sums-assets /tmp/published-assets
+          sha256sum -c --strict SHA256SUMS
+          echo "uploaded assets verified"
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if [ "$PRERELEASE" = "true" ]; then
+            gh release edit "$TAG" --draft=false --prerelease
+          else
+            gh release edit "$TAG" --draft=false
+          fi
+          gh release view "$TAG" --json tagName,isDraft,isPrerelease
+      - name: Show release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release view "$TAG"
+
+  prune-build-tags:
+    name: Prune build tags after release
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: prune-build-tags
+      cancel-in-progress: false
+    steps:
+      - name: Delete all build tags
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/build-" \
+            --jq '.[].ref' |
+            sed 's#^refs/tags/##' |
+            while IFS= read -r tag; do
+              echo "deleting tag $tag"
+              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${tag}"
+            done
