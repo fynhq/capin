@@ -46,7 +46,12 @@ pub fn rasterize(
             continue;
         }
         if let Shape::Spotlight(rect) = annotation.shape {
-            draw_spotlight(&mut pixmap, expected, rect);
+            draw_spotlight(
+                &mut pixmap,
+                expected,
+                rect,
+                annotation.style.spotlight_intensity,
+            );
             continue;
         }
 
@@ -54,14 +59,24 @@ pub fn rasterize(
         let (red, green, blue, alpha) = unpack(annotation.style.color);
         let mut paint = Paint::default();
         paint.set_color_rgba8(red, green, blue, alpha);
-        let stroke = Stroke {
-            width: annotation.style.stroke_width.max(1.0),
-            line_cap: LineCap::Round,
-            line_join: LineJoin::Round,
-            ..Default::default()
-        };
         let mut target = pixmap.as_mut();
-        target.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+        if fills_shape(annotation) {
+            target.fill_path(
+                &path,
+                &paint,
+                tiny_skia::FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
+        } else {
+            let stroke = Stroke {
+                width: annotation.style.stroke_width.max(1.0),
+                line_cap: LineCap::Round,
+                line_join: LineJoin::Round,
+                ..Default::default()
+            };
+            target.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+        }
     }
 
     let mut pixels = pixmap.data().to_vec();
@@ -73,6 +88,14 @@ pub fn rasterize(
     )?)
 }
 
+fn fills_shape(annotation: &Annotation) -> bool {
+    match &annotation.shape {
+        Shape::HighlighterBox(_) => true,
+        Shape::Rect(_) | Shape::Ellipse(_) => annotation.style.filled,
+        _ => false,
+    }
+}
+
 fn build_path(annotation: &Annotation) -> Result<Path, RasterError> {
     match &annotation.shape {
         Shape::Rect(rect) => rounded_rect_path(*rect, annotation.style.corner_radius),
@@ -81,6 +104,7 @@ fn build_path(annotation: &Annotation) -> Result<Path, RasterError> {
             builder.push_oval(to_skia_rect(*rect)?);
             builder.finish().ok_or(RasterError::InvalidGeometry)
         }
+        Shape::HighlighterBox(rect) => rounded_rect_path(*rect, 0.0),
         Shape::Arrow { start, end } => {
             let mut builder = PathBuilder::new();
             builder.move_to(start.x as f32, start.y as f32);
@@ -102,17 +126,6 @@ fn build_path(annotation: &Annotation) -> Result<Path, RasterError> {
             builder.move_to(left.0, left.1);
             builder.line_to(end.x as f32, end.y as f32);
             builder.line_to(right.0, right.1);
-            builder.finish().ok_or(RasterError::InvalidGeometry)
-        }
-        Shape::Highlighter { points } => {
-            let Some(first) = points.first() else {
-                return Err(RasterError::InvalidGeometry);
-            };
-            let mut builder = PathBuilder::new();
-            builder.move_to(first.x as f32, first.y as f32);
-            for next in &points[1..] {
-                builder.line_to(next.x as f32, next.y as f32);
-            }
             builder.finish().ok_or(RasterError::InvalidGeometry)
         }
         Shape::Blur(_) => Err(RasterError::Unsupported(annotation.id)),
@@ -318,7 +331,7 @@ fn draw_number(pixmap: &mut Pixmap, annotation: &Annotation) {
     draw_text(pixmap, &text_annotation);
 }
 
-fn draw_spotlight(pixmap: &mut Pixmap, size: PhysicalSize, rect: PhysicalRect) {
+fn draw_spotlight(pixmap: &mut Pixmap, size: PhysicalSize, rect: PhysicalRect, intensity: u8) {
     let image_width = size.width as i64;
     let image_height = size.height as i64;
     let left = i64::from(rect.origin.x).clamp(0, image_width);
@@ -329,7 +342,8 @@ fn draw_spotlight(pixmap: &mut Pixmap, size: PhysicalSize, rect: PhysicalRect) {
         return;
     }
 
-    let color = (0, 0, 0, 140);
+    let alpha = (u32::from(intensity.min(100)) * 255 / 100) as u8;
+    let color = (0, 0, 0, alpha);
     fill_rect(pixmap, 0, 0, image_width, top, color);
     fill_rect(pixmap, 0, bottom, image_width, image_height - bottom, color);
     fill_rect(pixmap, 0, top, left, bottom - top, color);
@@ -626,6 +640,48 @@ mod tests {
     }
 
     #[test]
+    fn filled_rectangle_covers_the_interior() {
+        let frame = black_frame(100, 100);
+        let mut document = document(100, 100);
+        document.add(
+            Shape::Rect(PhysicalRect::new(10, 10, 80, 80)),
+            AnnotationStyle {
+                color: 0xFF0000FF,
+                filled: true,
+                ..Default::default()
+            },
+        );
+        let output = rasterize(&document, &frame).unwrap();
+        let center = pixel(&output, 50, 50);
+        assert!(
+            center[0] > 200,
+            "filled rectangle should be red: {center:?}"
+        );
+        assert_eq!(pixel(&output, 2, 2), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn filled_ellipse_covers_the_center() {
+        let frame = black_frame(80, 80);
+        let mut document = document(80, 80);
+        document.add(
+            Shape::Ellipse(PhysicalRect::new(10, 10, 60, 60)),
+            AnnotationStyle {
+                color: 0x00FF00FF,
+                filled: true,
+                ..Default::default()
+            },
+        );
+        let output = rasterize(&document, &frame).unwrap();
+        let center = pixel(&output, 40, 40);
+        assert!(
+            center[1] > 200,
+            "filled ellipse should be green: {center:?}"
+        );
+        assert_eq!(pixel(&output, 12, 12), [0, 0, 0, 255]);
+    }
+
+    #[test]
     fn rectangle_corner_radius_keeps_the_corner_clear() {
         let frame = black_frame(100, 100);
         let mut document = document(100, 100);
@@ -695,25 +751,23 @@ mod tests {
     }
 
     #[test]
-    fn highlighter_blends_over_background() {
-        let frame = black_frame(60, 20);
-        let mut document = document(60, 20);
+    fn highlighter_box_fills_with_translucent_color() {
+        let frame = black_frame(60, 40);
+        let mut document = document(60, 40);
         document.add(
-            Shape::Highlighter {
-                points: vec![PhysicalPoint::new(5, 10), PhysicalPoint::new(55, 10)],
-            },
+            Shape::HighlighterBox(PhysicalRect::new(10, 10, 40, 20)),
             AnnotationStyle {
                 color: 0xFFFF0080,
-                stroke_width: 8.0,
                 ..Default::default()
             },
         );
         let output = rasterize(&document, &frame).unwrap();
-        let center = pixel(&output, 30, 10);
+        let center = pixel(&output, 30, 20);
         assert!(
-            center[0] > 0 && center[1] > 0,
-            "highlight missing: {center:?}"
+            center[0] > 80 && center[1] > 80 && center[3] == 255,
+            "highlighter box should tint the background: {center:?}"
         );
+        assert_eq!(pixel(&output, 2, 2), [0, 0, 0, 255]);
     }
 
     #[test]
@@ -814,5 +868,27 @@ mod tests {
             "spotlight should dim the outside: {outside:?}"
         );
         assert_eq!(pixel(&output, 30, 30), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn spotlight_intensity_controls_the_dim_level() {
+        let frame = RgbaFrame::from_pixels(60, 60, [255, 255, 255, 255].repeat(60 * 60)).unwrap();
+        let outside_for = |intensity: u8| {
+            let mut document = document(60, 60);
+            document.add(
+                Shape::Spotlight(PhysicalRect::new(20, 20, 20, 20)),
+                AnnotationStyle {
+                    spotlight_intensity: intensity,
+                    ..Default::default()
+                },
+            );
+            let output = rasterize(&document, &frame).unwrap();
+            pixel(&output, 5, 5)[0]
+        };
+
+        assert!(
+            outside_for(20) > outside_for(80),
+            "higher intensity should dim the outside more"
+        );
     }
 }

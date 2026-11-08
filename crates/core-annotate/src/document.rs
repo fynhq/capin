@@ -15,6 +15,10 @@ pub struct AnnotationStyle {
     pub corner_radius: f32,
     /// Box-blur radius in image pixels for `Shape::Blur`.
     pub blur_radius: u32,
+    /// Whether `Shape::Rect` and `Shape::Ellipse` render as solid fills.
+    pub filled: bool,
+    /// Spotlight dimming strength in percent (0-100).
+    pub spotlight_intensity: u8,
 }
 
 impl Default for AnnotationStyle {
@@ -25,6 +29,8 @@ impl Default for AnnotationStyle {
             font_size: 20.0,
             corner_radius: 0.0,
             blur_radius: 16,
+            filled: false,
+            spotlight_intensity: 60,
         }
     }
 }
@@ -37,9 +43,8 @@ pub enum Shape {
         start: PhysicalPoint,
         end: PhysicalPoint,
     },
-    Highlighter {
-        points: Vec<PhysicalPoint>,
-    },
+    /// Rectangular highlighter stroke, filled with the highlighter color.
+    HighlighterBox(PhysicalRect),
     Blur(PhysicalRect),
     Text {
         bounds: PhysicalRect,
@@ -57,18 +62,22 @@ impl Shape {
         match self {
             Self::Rect(rect)
             | Self::Ellipse(rect)
+            | Self::HighlighterBox(rect)
             | Self::Blur(rect)
             | Self::Spotlight(rect)
             | Self::Text { bounds: rect, .. }
             | Self::Number { bounds: rect, .. } => *rect,
             Self::Arrow { start, end } => points_bounds(&[*start, *end]),
-            Self::Highlighter { points } => points_bounds(points),
         }
     }
 
     fn translate(&mut self, dx: i32, dy: i32) {
         match self {
-            Self::Rect(rect) | Self::Ellipse(rect) | Self::Blur(rect) | Self::Spotlight(rect) => {
+            Self::Rect(rect)
+            | Self::Ellipse(rect)
+            | Self::HighlighterBox(rect)
+            | Self::Blur(rect)
+            | Self::Spotlight(rect) => {
                 rect.origin.x += dx;
                 rect.origin.y += dy;
             }
@@ -82,12 +91,6 @@ impl Shape {
                 end.x += dx;
                 end.y += dy;
             }
-            Self::Highlighter { points } => {
-                for point in points {
-                    point.x += dx;
-                    point.y += dy;
-                }
-            }
         }
     }
 
@@ -95,6 +98,7 @@ impl Shape {
         match self {
             Self::Rect(rect)
             | Self::Ellipse(rect)
+            | Self::HighlighterBox(rect)
             | Self::Blur(rect)
             | Self::Spotlight(rect)
             | Self::Text { bounds: rect, .. }
@@ -103,13 +107,6 @@ impl Shape {
                 expanded.contains(point)
             }
             Self::Arrow { start, end } => distance_to_segment(point, *start, *end) <= tolerance,
-            Self::Highlighter { points } => match points.as_slice() {
-                [] => false,
-                [only] => distance(point, *only) <= tolerance,
-                _ => points
-                    .windows(2)
-                    .any(|pair| distance_to_segment(point, pair[0], pair[1]) <= tolerance),
-            },
         }
     }
 }
@@ -490,6 +487,23 @@ mod tests {
         assert_eq!(doc.hit_test(PhysicalPoint::new(75, 75)), Some(top));
         assert_eq!(doc.hit_test(PhysicalPoint::new(25, 25)), Some(bottom));
         assert_eq!(doc.hit_test(PhysicalPoint::new(300, 300)), None);
+    }
+
+    #[test]
+    fn highlighter_box_hit_test_and_move_follow_the_bounds() {
+        let mut doc = document();
+        let id = doc.add(
+            Shape::HighlighterBox(PhysicalRect::new(10, 10, 40, 20)),
+            AnnotationStyle::default(),
+        );
+        assert_eq!(doc.hit_test(PhysicalPoint::new(30, 20)), Some(id));
+        assert_eq!(doc.hit_test(PhysicalPoint::new(80, 80)), None);
+        doc.select(Some(id));
+        assert!(doc.move_selected(5, 5));
+        assert_eq!(
+            doc.object(id).unwrap().bounds().origin,
+            PhysicalPoint::new(15, 15)
+        );
     }
 
     #[test]

@@ -137,6 +137,12 @@ pub struct AppSettings {
     /// Per-tool colors used when `annotation_uniform_color` is disabled.
     pub annotation_colors: [u32; ANNOTATION_COLOR_TOOL_COUNT],
     pub annotation_uniform_color: bool,
+    pub annotation_stroke_width: f32,
+    pub annotation_corner_radius: f32,
+    pub annotation_blur_radius: u32,
+    pub annotation_rect_filled: bool,
+    pub annotation_ellipse_filled: bool,
+    pub annotation_spotlight_intensity: u8,
     pub pin_text_ocr: bool,
     pub pin_qr: bool,
 }
@@ -186,6 +192,12 @@ impl Default for AppSettings {
             annotation_color: DEFAULT_ANNOTATION_COLOR,
             annotation_colors: [DEFAULT_ANNOTATION_COLOR; ANNOTATION_COLOR_TOOL_COUNT],
             annotation_uniform_color: true,
+            annotation_stroke_width: 4.0,
+            annotation_corner_radius: 0.0,
+            annotation_blur_radius: 16,
+            annotation_rect_filled: false,
+            annotation_ellipse_filled: false,
+            annotation_spotlight_intensity: 60,
             pin_text_ocr: true,
             pin_qr: true,
         }
@@ -291,6 +303,32 @@ fn parse(text: &str) -> AppSettings {
             "annotation_uniform_color" => {
                 settings.annotation_uniform_color = value != "false";
             }
+            "annotation_stroke_width" => {
+                if let Ok(width) = value.parse::<f32>()
+                    && width.is_finite()
+                {
+                    settings.annotation_stroke_width = width.clamp(1.0, 32.0);
+                }
+            }
+            "annotation_corner_radius" => {
+                if let Ok(radius) = value.parse::<f32>()
+                    && radius.is_finite()
+                {
+                    settings.annotation_corner_radius = radius.clamp(0.0, 64.0);
+                }
+            }
+            "annotation_blur_radius" => {
+                if let Ok(radius) = value.parse::<u32>() {
+                    settings.annotation_blur_radius = radius.clamp(1, 64);
+                }
+            }
+            "annotation_rect_filled" => settings.annotation_rect_filled = value != "false",
+            "annotation_ellipse_filled" => settings.annotation_ellipse_filled = value != "false",
+            "annotation_spotlight_intensity" => {
+                if let Ok(intensity) = value.parse::<u8>() {
+                    settings.annotation_spotlight_intensity = intensity.min(100);
+                }
+            }
             key if key.starts_with("annotation_color_") => {
                 let code = &key["annotation_color_".len()..];
                 if let (Some(tool), Some(color)) =
@@ -333,6 +371,13 @@ fn persist(settings: &AppSettings) {
         eprintln!("capin: failed to create settings directory: {error}");
         return;
     }
+    let text = serialize(settings);
+    if let Err(error) = std::fs::write(&path, text) {
+        eprintln!("capin: failed to save settings: {error}");
+    }
+}
+
+fn serialize(settings: &AppSettings) -> String {
     let frame_rate = match settings.record_frame_rate {
         FrameRate::Fps30 => "30",
         FrameRate::Fps60 => "60",
@@ -380,8 +425,14 @@ fn persist(settings: &AppSettings) {
         settings.pin_qr,
     );
     text.push_str(&format!(
-        "annotation_uniform_color={}\n",
-        settings.annotation_uniform_color
+        "annotation_uniform_color={}\nannotation_stroke_width={}\nannotation_corner_radius={}\nannotation_blur_radius={}\nannotation_rect_filled={}\nannotation_ellipse_filled={}\nannotation_spotlight_intensity={}\n",
+        settings.annotation_uniform_color,
+        settings.annotation_stroke_width,
+        settings.annotation_corner_radius,
+        settings.annotation_blur_radius,
+        settings.annotation_rect_filled,
+        settings.annotation_ellipse_filled,
+        settings.annotation_spotlight_intensity,
     ));
     for tool in AnnotationColorTool::ALL {
         text.push_str(&format!(
@@ -390,9 +441,7 @@ fn persist(settings: &AppSettings) {
             settings.annotation_colors[tool.index()]
         ));
     }
-    if let Err(error) = std::fs::write(&path, text) {
-        eprintln!("capin: failed to save settings: {error}");
-    }
+    text
 }
 
 #[cfg(target_os = "windows")]
@@ -473,6 +522,45 @@ mod tests {
                 tool.code()
             );
         }
+    }
+
+    #[test]
+    fn annotation_options_default_and_parse() {
+        let defaults = AppSettings::default();
+        assert_eq!(defaults.annotation_stroke_width, 4.0);
+        assert_eq!(defaults.annotation_corner_radius, 0.0);
+        assert_eq!(defaults.annotation_blur_radius, 16);
+        assert!(!defaults.annotation_rect_filled);
+        assert!(!defaults.annotation_ellipse_filled);
+        assert_eq!(defaults.annotation_spotlight_intensity, 60);
+
+        let settings = parse(
+            "annotation_stroke_width=8\nannotation_corner_radius=16\nannotation_blur_radius=32\nannotation_rect_filled=true\nannotation_ellipse_filled=true\nannotation_spotlight_intensity=80\n",
+        );
+        assert_eq!(settings.annotation_stroke_width, 8.0);
+        assert_eq!(settings.annotation_corner_radius, 16.0);
+        assert_eq!(settings.annotation_blur_radius, 32);
+        assert!(settings.annotation_rect_filled);
+        assert!(settings.annotation_ellipse_filled);
+        assert_eq!(settings.annotation_spotlight_intensity, 80);
+    }
+
+    #[test]
+    fn serialized_annotation_options_round_trip() {
+        let mut settings = AppSettings {
+            annotation_uniform_color: false,
+            annotation_stroke_width: 8.0,
+            annotation_corner_radius: 16.0,
+            annotation_blur_radius: 32,
+            annotation_rect_filled: true,
+            annotation_ellipse_filled: true,
+            annotation_spotlight_intensity: 80,
+            ..Default::default()
+        };
+        settings.apply_annotation_color(AnnotationColorTool::Rect, 0xFFCC00FF);
+        settings.apply_annotation_color(AnnotationColorTool::Text, 0x0A84FFFF);
+
+        assert_eq!(parse(&serialize(&settings)), settings);
     }
 
     #[test]
