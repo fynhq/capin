@@ -684,6 +684,15 @@ impl SettingsView {
             ))
             .child(group_header(
                 theme,
+                t(language, "settings.group.annotation"),
+                t(language, "settings.group.annotation_desc"),
+            ))
+            .child(card(
+                theme,
+                vec![div().child(self.annotation_color_row(theme, cx))],
+            ))
+            .child(group_header(
+                theme,
                 t(language, "settings.group.window"),
                 t(language, "settings.group.window_desc"),
             ))
@@ -744,6 +753,39 @@ impl SettingsView {
                 t(language, "settings.pin_qr_desc"),
             ))
             .child(toggle(theme, value))
+    }
+
+    fn annotation_color_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = self.settings.language;
+        let accent = theme.accent;
+        let mut swatches = div().flex().flex_row().items_center().gap(px(8.0));
+        for (color, name, _) in settings_state::ANNOTATION_COLORS {
+            let selected = (self.settings.annotation_color & 0xFFFFFF00) == (color & 0xFFFFFF00);
+            let swatch = div()
+                .id(format!("settings-annotation-color-{name}"))
+                .w(px(24.0))
+                .h(px(24.0))
+                .rounded(px(12.0))
+                .bg(rgb((color >> 8) & 0x00FF_FFFF))
+                .border_2()
+                .border_color(if selected { accent } else { rgba(0x00000000) })
+                .hover(move |style| style.border_color(accent))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.settings.annotation_color = color;
+                    settings_state::update(|settings| settings.annotation_color = color);
+                    this.status = None;
+                    cx.notify();
+                }));
+            swatches = swatches.child(swatch);
+        }
+
+        row_shell(theme)
+            .child(label_block(
+                theme,
+                t(language, "settings.annotation_color"),
+                t(language, "settings.annotation_color_desc"),
+            ))
+            .child(swatches)
     }
 
     fn capture_cursor_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1290,7 +1332,14 @@ impl SettingsView {
                         theme,
                         t(language, "shortcuts.window_capture"),
                         t(language, "shortcuts.window_capture_desc"),
-                        t(language, "shortcuts.value.alt_click"),
+                        t(language, "shortcuts.value.auto"),
+                        None,
+                    ),
+                    info_row(
+                        theme,
+                        t(language, "shortcuts.adjust_target"),
+                        t(language, "shortcuts.adjust_target_desc"),
+                        t(language, "shortcuts.value.wheel"),
                         None,
                     ),
                     info_row(

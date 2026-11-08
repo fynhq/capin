@@ -9,6 +9,17 @@ use crate::i18n::Language;
 
 pub const DEFAULT_CAPTURE_HOTKEY: &str = "shift+meta+KeyS";
 pub const DEFAULT_PIN_HOTKEY: &str = "shift+meta+KeyD";
+pub const DEFAULT_ANNOTATION_COLOR: u32 = 0xFF3B30FF;
+
+/// Palette shared by the settings page and the annotation toolbar. The first
+/// item is the default color; each entry carries its stable id and i18n key.
+pub const ANNOTATION_COLORS: [(u32, &str, &str); 5] = [
+    (0xFF3B30FF, "red", "color.red"),
+    (0xFFCC00FF, "yellow", "color.yellow"),
+    (0x34C759FF, "green", "color.green"),
+    (0x0A84FFFF, "blue", "color.blue"),
+    (0xFFFFFFFF, "white", "color.white"),
+];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WindowBackground {
@@ -70,6 +81,7 @@ pub struct AppSettings {
     pub window_shadow: bool,
     pub window_wallpaper: Option<PathBuf>,
     pub capture_cursor: bool,
+    pub annotation_color: u32,
     pub pin_text_ocr: bool,
     pub pin_qr: bool,
 }
@@ -94,6 +106,7 @@ impl Default for AppSettings {
             window_shadow: true,
             window_wallpaper: None,
             capture_cursor: false,
+            annotation_color: DEFAULT_ANNOTATION_COLOR,
             pin_text_ocr: true,
             pin_qr: true,
         }
@@ -189,6 +202,11 @@ fn parse(text: &str) -> AppSettings {
             "window_shadow" => settings.window_shadow = value != "false",
             "window_wallpaper" => settings.window_wallpaper = parse_directory(value),
             "capture_cursor" => settings.capture_cursor = value != "false",
+            "annotation_color" => {
+                if let Some(color) = parse_rgba(value) {
+                    settings.annotation_color = color;
+                }
+            }
             "pin_text_ocr" => settings.pin_text_ocr = value != "false",
             "pin_qr" => settings.pin_qr = value != "false",
             _ => {}
@@ -200,6 +218,17 @@ fn parse(text: &str) -> AppSettings {
 fn parse_directory(value: &str) -> Option<PathBuf> {
     let path = PathBuf::from(value);
     path.is_absolute().then_some(path)
+}
+
+/// Parses `RRGGBB` or `RRGGBBAA`; six-digit values are opaque.
+fn parse_rgba(value: &str) -> Option<u32> {
+    let hex = value.trim().strip_prefix('#').unwrap_or(value.trim());
+    let value = u32::from_str_radix(hex, 16).ok()?;
+    match hex.len() {
+        6 => Some((value << 8) | 0xFF),
+        8 => Some(value),
+        _ => None,
+    }
 }
 
 fn persist(settings: &AppSettings) {
@@ -236,7 +265,7 @@ fn persist(settings: &AppSettings) {
         .map(|path| path.display().to_string())
         .unwrap_or_default();
     let text = format!(
-        "language={}\nauto_start={}\nauto_start_explicit={}\ncopy_to_clipboard={}\nrecord_format={}\nrecord_frame_rate={}\nrecord_cursor={}\ncapture_hotkey={}\npin_hotkey={}\nscreenshot_dir={}\nrecording_dir={}\nwindow_composition={}\nwindow_background={}\nwindow_padding={}\nwindow_shadow={}\nwindow_wallpaper={}\ncapture_cursor={}\npin_text_ocr={}\npin_qr={}\n",
+        "language={}\nauto_start={}\nauto_start_explicit={}\ncopy_to_clipboard={}\nrecord_format={}\nrecord_frame_rate={}\nrecord_cursor={}\ncapture_hotkey={}\npin_hotkey={}\nscreenshot_dir={}\nrecording_dir={}\nwindow_composition={}\nwindow_background={}\nwindow_padding={}\nwindow_shadow={}\nwindow_wallpaper={}\ncapture_cursor={}\nannotation_color={:08x}\npin_text_ocr={}\npin_qr={}\n",
         settings.language.code(),
         settings.auto_start,
         settings.auto_start_explicit,
@@ -254,6 +283,7 @@ fn persist(settings: &AppSettings) {
         settings.window_shadow,
         window_wallpaper,
         settings.capture_cursor,
+        settings.annotation_color,
         settings.pin_text_ocr,
         settings.pin_qr,
     );
@@ -286,4 +316,25 @@ fn config_path() -> Option<PathBuf> {
             .join("capin")
             .join("settings.conf")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_opaque_and_alpha_annotation_colors() {
+        assert_eq!(parse_rgba("ff3b30"), Some(0xFF3B30FF));
+        assert_eq!(parse_rgba("#0a84ffcc"), Some(0x0A84FFCC));
+        assert_eq!(parse_rgba("not-a-color"), None);
+    }
+
+    #[test]
+    fn annotation_color_defaults_to_red() {
+        assert_eq!(
+            AppSettings::default().annotation_color,
+            DEFAULT_ANNOTATION_COLOR
+        );
+        assert_eq!(DEFAULT_ANNOTATION_COLOR, 0xFF3B30FF);
+    }
 }

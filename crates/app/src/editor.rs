@@ -1,7 +1,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use core_annotate::{AnnotationDocument, AnnotationStyle, Shape, rasterize};
+use core_annotate::{Annotation, AnnotationDocument, AnnotationStyle, Shape, rasterize};
 use core_types::{PhysicalPoint, PhysicalRect, PhysicalSize, RgbaFrame, prefers_dark_foreground};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -23,14 +23,6 @@ const HOVER: u32 = 0xFFFFFF14;
 const TOOLBAR_SIZE: u32 = 32;
 const BADGE_SIZE: u32 = 32;
 
-const COLORS: [(u32, &str); 5] = [
-    (0xFF3B30, "red"),
-    (0xFFCC00, "yellow"),
-    (0x34C759, "green"),
-    (0x0A84FF, "blue"),
-    (0xFFFFFF, "white"),
-];
-
 const STROKE_WIDTHS: [f32; 3] = [2.0, 4.0, 8.0];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,11 +36,10 @@ enum Tool {
     Text,
     Number,
     Spotlight,
-    Eraser,
 }
 
 impl Tool {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 9] = [
         Self::Select,
         Self::Rect,
         Self::Ellipse,
@@ -58,7 +49,6 @@ impl Tool {
         Self::Text,
         Self::Number,
         Self::Spotlight,
-        Self::Eraser,
     ];
 
     fn id(self) -> &'static str {
@@ -72,7 +62,6 @@ impl Tool {
             Self::Text => "editor-tool-text",
             Self::Number => "editor-tool-number",
             Self::Spotlight => "editor-tool-spotlight",
-            Self::Eraser => "editor-tool-eraser",
         }
     }
 
@@ -87,7 +76,6 @@ impl Tool {
             Self::Text => icons::TEXT,
             Self::Number => icons::NUMBER,
             Self::Spotlight => icons::SPOTLIGHT,
-            Self::Eraser => icons::ERASER,
         }
     }
 
@@ -102,18 +90,7 @@ impl Tool {
             Self::Text => "editor.tool.text",
             Self::Number => "editor.tool.number",
             Self::Spotlight => "editor.tool.spotlight",
-            Self::Eraser => "editor.tool.eraser",
         }
-    }
-}
-
-fn color_label_key(name: &str) -> &'static str {
-    match name {
-        "red" => "color.red",
-        "yellow" => "color.yellow",
-        "green" => "color.green",
-        "blue" => "color.blue",
-        _ => "color.white",
     }
 }
 
@@ -375,6 +352,7 @@ struct EditorView {
     style: AnnotationStyle,
     draft: Option<Draft>,
     move_draft: Option<MoveDraft>,
+    annotation_clipboard: Option<Annotation>,
     text_edit: Option<TextEdit>,
     text_edit_screen: Option<Bounds<Pixels>>,
     accent: Rgba,
@@ -399,12 +377,13 @@ impl EditorView {
             image_size,
             tool: Tool::Select,
             style: AnnotationStyle {
-                color: 0xFF3B30FF,
+                color: settings_state::get().annotation_color,
                 stroke_width: 4.0,
                 font_size: 20.0,
             },
             draft: None,
             move_draft: None,
+            annotation_clipboard: None,
             text_edit: None,
             text_edit_screen: None,
             accent: rgb(accent_hex),
@@ -477,6 +456,50 @@ impl EditorView {
         if let Some(annotation) = id.and_then(|id| self.document.object(id)) {
             self.style = annotation.style;
         }
+    }
+
+    fn copy_selected_annotation(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(annotation) = self
+            .document
+            .selected()
+            .and_then(|id| self.document.object(id))
+            .cloned()
+        else {
+            return false;
+        };
+        self.annotation_clipboard = Some(annotation);
+        self.status =
+            Some(t(settings_state::get().language, "editor.annotation_copied").to_owned());
+        cx.notify();
+        true
+    }
+
+    fn paste_annotation(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(annotation) = self.annotation_clipboard.clone() else {
+            return false;
+        };
+        let id = self.document.paste(&annotation, 16, 16);
+        self.tool = Tool::Select;
+        if let Some(annotation) = self.document.object(id) {
+            self.style = annotation.style;
+        }
+        self.status =
+            Some(t(settings_state::get().language, "editor.annotation_pasted").to_owned());
+        cx.notify();
+        true
+    }
+
+    fn delete_selected_annotation(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(id) = self.document.selected() else {
+            return false;
+        };
+        if !self.document.remove(id) {
+            return false;
+        }
+        self.status =
+            Some(t(settings_state::get().language, "editor.annotation_deleted").to_owned());
+        cx.notify();
+        true
     }
 
     fn edit_text_at(&mut self, point: PhysicalPoint, cx: &mut Context<Self>) -> bool {
@@ -645,16 +668,16 @@ impl EditorView {
         }
 
         let mut swatches = Vec::new();
-        for (color, name) in COLORS {
-            let selected = (self.style.color & 0xFFFFFF00) == (color << 8);
-            let label = t(language, color_label_key(name)).to_owned();
+        for (color, name, label_key) in settings_state::ANNOTATION_COLORS {
+            let selected = (self.style.color & 0xFFFFFF00) == (color & 0xFFFFFF00);
+            let label = t(language, label_key).to_owned();
             let swatch = div()
                 .id(name)
                 .tooltip(move |_, cx| tooltip_view(label.clone(), cx))
                 .w(px(18.0))
                 .h(px(18.0))
                 .rounded(px(9.0))
-                .bg(rgb(color))
+                .bg(rgb((color >> 8) & 0x00FF_FFFF))
                 .border_2()
                 .border_color(if selected {
                     rgb(0xFFFFFF)
@@ -664,7 +687,7 @@ impl EditorView {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.commit_text(cx);
                     this.update_style(|style| {
-                        style.color = (color << 8) | (style.color & 0xFF);
+                        style.color = (color & 0xFFFFFF00) | (style.color & 0xFF);
                     });
                     this.status = None;
                     cx.notify();
@@ -762,6 +785,36 @@ impl EditorView {
                 .justify_center()
                 .opacity(0.35)
                 .child(icons::icon(icons::REDO, 18.0, muted))
+                .into_any_element()
+        };
+
+        let delete_label = t(language, "editor.delete").to_owned();
+        let delete = if self.document.selected().is_some() {
+            div()
+                .id("editor-delete")
+                .tooltip(move |_, cx| tooltip_view(delete_label.clone(), cx))
+                .w(px(TOOLBAR_SIZE as f32))
+                .h(px(TOOLBAR_SIZE as f32))
+                .rounded(px(7.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .hover(move |style| style.bg(hover))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.commit_text(cx);
+                    this.delete_selected_annotation(cx);
+                }))
+                .child(icons::icon(icons::TRASH, 18.0, muted))
+                .into_any_element()
+        } else {
+            div()
+                .w(px(TOOLBAR_SIZE as f32))
+                .h(px(TOOLBAR_SIZE as f32))
+                .flex()
+                .items_center()
+                .justify_center()
+                .opacity(0.35)
+                .child(icons::icon(icons::TRASH, 18.0, muted))
                 .into_any_element()
         };
 
@@ -872,7 +925,8 @@ impl EditorView {
                     .gap(px(2.0))
                     .child(undo)
                     .child(redo)
-                    .child(div().w(px(8.0)))
+                    .child(delete)
+                    .child(div().w(px(6.0)))
                     .child(pin)
                     .child(copy)
                     .child(save)
@@ -1306,14 +1360,6 @@ impl Render for EditorView {
                         cx.notify();
                         return;
                     }
-                    if this.tool == Tool::Eraser {
-                        if let Some(id) = this.document.hit_test(point) {
-                            this.document.remove(id);
-                        }
-                        this.status = None;
-                        cx.notify();
-                        return;
-                    }
                     if this.tool == Tool::Number {
                         let max_left = (this.image_size.width.saturating_sub(BADGE_SIZE)) as i32;
                         let max_top = (this.image_size.height.saturating_sub(BADGE_SIZE)) as i32;
@@ -1502,16 +1548,34 @@ impl Render for EditorView {
                     window.remove_window();
                     return;
                 }
-                if (key == "delete" || key == "backspace")
-                    && let Some(id) = this.document.selected()
-                {
-                    this.document.remove(id);
-                    this.status = None;
-                    cx.notify();
+                if key == "delete" || key == "backspace" {
+                    this.delete_selected_annotation(cx);
                     return;
                 }
                 if command && key == "c" {
-                    this.export(true, cx);
+                    if !this.copy_selected_annotation(cx) {
+                        this.export(true, cx);
+                    }
+                    return;
+                }
+                if command && key == "v" {
+                    this.paste_annotation(cx);
+                    return;
+                }
+                if command && key == "d" {
+                    if let Some(id) = this.document.selected()
+                        && let Some(pasted) = this.document.duplicate(id, 16, 16)
+                    {
+                        if let Some(annotation) = this.document.object(pasted) {
+                            this.style = annotation.style;
+                        }
+                        this.tool = Tool::Select;
+                        this.status = Some(
+                            t(settings_state::get().language, "editor.annotation_pasted")
+                                .to_owned(),
+                        );
+                        cx.notify();
+                    }
                     return;
                 }
                 if command && key == "s" {
@@ -1634,7 +1698,7 @@ fn finalize_shape(draft: &Draft, end: PhysicalPoint) -> Option<Shape> {
             }
             (points.len() >= 2).then_some(Shape::Highlighter { points })
         }
-        Tool::Text | Tool::Select | Tool::Number | Tool::Eraser => None,
+        Tool::Text | Tool::Select | Tool::Number => None,
     }
 }
 

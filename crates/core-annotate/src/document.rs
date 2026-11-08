@@ -186,8 +186,12 @@ impl AnnotationDocument {
         else {
             return false;
         };
+        let was_number = matches!(self.objects[index].shape, Shape::Number { .. });
         self.record_before_edit();
         self.objects.remove(index);
+        if was_number {
+            self.renumber_numbers();
+        }
         if self.selected == Some(id) {
             self.selected = None;
         }
@@ -269,8 +273,49 @@ impl AnnotationDocument {
         true
     }
 
-    /// Returns the next sequence badge number. Numbers stay monotonic for the
-    /// current document while deleted tail values can be reused.
+    /// Clones an existing object, offsets it, and selects the copy. Sequence
+    /// badges always receive a fresh number instead of duplicating the source.
+    pub fn duplicate(&mut self, id: AnnotationId, dx: i32, dy: i32) -> Option<AnnotationId> {
+        let annotation = self.object(id)?.clone();
+        Some(self.paste(&annotation, dx, dy))
+    }
+
+    /// Pastes a copied annotation at the given offset and selects it.
+    pub fn paste(&mut self, annotation: &Annotation, dx: i32, dy: i32) -> AnnotationId {
+        self.record_before_edit();
+        let id = AnnotationId(self.next_id);
+        self.next_id += 1;
+        let mut pasted = annotation.clone().translated(dx, dy);
+        pasted.id = id;
+        if let Shape::Number { value, .. } = &mut pasted.shape {
+            *value = self.next_number();
+        }
+        self.objects.push(pasted);
+        self.selected = Some(id);
+        id
+    }
+
+    /// Keeps sequence badges contiguous after deleting one of them.
+    fn renumber_numbers(&mut self) {
+        let mut numbers: Vec<(u32, usize)> = self
+            .objects
+            .iter()
+            .enumerate()
+            .filter_map(|(index, annotation)| match annotation.shape {
+                Shape::Number { value, .. } => Some((value, index)),
+                _ => None,
+            })
+            .collect();
+        numbers.sort_by_key(|(value, index)| (*value, *index));
+        for (position, (_, index)) in numbers.into_iter().enumerate() {
+            if let Shape::Number { value, .. } = &mut self.objects[index].shape {
+                *value = position as u32 + 1;
+            }
+        }
+    }
+
+    /// Returns the next sequence badge number. Sequence badges are kept
+    /// contiguous, so this is the highest badge plus one.
     pub fn next_number(&self) -> u32 {
         self.objects
             .iter()
@@ -529,6 +574,84 @@ mod tests {
             AnnotationStyle::default(),
         );
         assert_eq!(doc.next_number(), 3);
+    }
+
+    #[test]
+    fn removing_a_number_compacts_the_following_numbers() {
+        let mut doc = document();
+        let first = doc.add(
+            Shape::Number {
+                bounds: PhysicalRect::new(0, 0, 30, 30),
+                value: 1,
+            },
+            AnnotationStyle::default(),
+        );
+        let second = doc.add(
+            Shape::Number {
+                bounds: PhysicalRect::new(40, 0, 30, 30),
+                value: 2,
+            },
+            AnnotationStyle::default(),
+        );
+        let third = doc.add(
+            Shape::Number {
+                bounds: PhysicalRect::new(80, 0, 30, 30),
+                value: 3,
+            },
+            AnnotationStyle::default(),
+        );
+
+        assert!(doc.remove(second));
+        assert_eq!(number_value(&doc, first), 1);
+        assert_eq!(number_value(&doc, third), 2);
+        assert!(doc.undo());
+        assert_eq!(number_value(&doc, second), 2);
+        assert_eq!(number_value(&doc, third), 3);
+    }
+
+    #[test]
+    fn pasting_an_annotation_offsets_and_assigns_a_new_number() {
+        let mut doc = document();
+        let first = doc.add(
+            Shape::Number {
+                bounds: PhysicalRect::new(0, 0, 30, 30),
+                value: 1,
+            },
+            AnnotationStyle::default(),
+        );
+        assert_eq!(doc.next_number(), 2);
+        let annotation = doc.object(first).unwrap().clone();
+        let pasted = doc.paste(&annotation, 20, 10);
+
+        assert_eq!(doc.objects().len(), 2);
+        assert_eq!(doc.selected(), Some(pasted));
+        assert_eq!(
+            doc.object(pasted).unwrap().bounds().origin,
+            PhysicalPoint::new(20, 10)
+        );
+        assert_eq!(number_value(&doc, pasted), 2);
+        assert_ne!(first, pasted);
+    }
+
+    #[test]
+    fn pasted_annotation_is_undoable() {
+        let mut doc = document();
+        let source = doc.add(
+            Shape::Rect(PhysicalRect::new(10, 10, 30, 30)),
+            AnnotationStyle::default(),
+        );
+        let annotation = doc.object(source).unwrap().clone();
+        doc.paste(&annotation, 10, 10);
+        assert_eq!(doc.objects().len(), 2);
+        assert!(doc.undo());
+        assert_eq!(doc.objects().len(), 1);
+    }
+
+    fn number_value(doc: &AnnotationDocument, id: AnnotationId) -> u32 {
+        match doc.object(id).unwrap().shape {
+            Shape::Number { value, .. } => value,
+            _ => panic!("expected a sequence badge"),
+        }
     }
 
     #[test]
