@@ -40,8 +40,8 @@ const FALLBACK_ACCENT_LIGHT: u32 = 0x0067C0;
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 const FALLBACK_ACCENT_DARK: u32 = 0x4CC2FF;
 
-/// Native window metrics. Windows follows WinUI 3 / Settings, macOS follows
-/// System Settings, so paddings, corner radii and type sizes match the host.
+/// Native window metrics. Windows follows the system Settings layout, macOS
+/// follows System Settings, so paddings, corner radii and type sizes match the host.
 #[cfg(target_os = "windows")]
 mod layout {
     pub const WINDOW_WIDTH: f32 = 1000.0;
@@ -416,7 +416,7 @@ impl Theme {
 }
 
 /// Label color on the system accent. macOS keeps white-on-accent like the
-/// system controls and SysVitals; Windows switches to a dark label on bright
+/// system controls; Windows switches to a dark label on bright
 /// accents (gold, lime) so the text stays readable.
 fn accent_text_color(hex: u32) -> Rgba {
     #[cfg(target_os = "macos")]
@@ -494,7 +494,7 @@ fn native_palette(dark: bool) -> Palette {
             hover: rgba(0xFFFFFF14),
             selected: rgba(0xFFFFFF1F),
             toggle_off: rgba(0xFFFFFF1F),
-            // SysVitals settings tint: 0.72 dark / 0.82 light over the live
+            // Native settings tint: 0.72 dark / 0.82 light over the live
             // window blur, using the same neutral-950 / white base palette as
             // the system popovers instead of a lighter custom grey.
             page: Some(rgba(0x0A0A0AB8)),
@@ -545,14 +545,14 @@ fn native_palette(dark: bool) -> Palette {
 
 #[cfg(target_os = "windows")]
 fn card_color(dark: bool) -> Rgba {
-    // Opaque WinUI cards: GPUI's Windows alpha blending accumulates
+    // Opaque Windows cards: GPUI's Windows alpha blending accumulates
     // translucency across layers, so opaque cards are the stable surface.
     if dark { rgb(0x2B2B2B) } else { rgb(0xFAFAFA) }
 }
 
 #[cfg(target_os = "macos")]
 fn card_color(dark: bool) -> Rgba {
-    // SysVitals macOS grouped cards: a translucent lift over the page tint.
+    // macOS grouped cards: a translucent lift over the page tint.
     if dark {
         rgba(0xFFFFFF1A)
     } else {
@@ -3068,9 +3068,9 @@ fn info_row(
 }
 
 fn toggle(theme: &Theme, value: bool) -> Div {
-    // gpui-component's Switch, which SysVitals uses on both platforms: a
-    // 36x20 track with a 16px white thumb, 1px transparent border and 2px
-    // travel. The unchecked track is a neutral translucent fill.
+    // Native-style 36x20 switch used on both platforms: a 16px white thumb,
+    // 1px transparent border and 2px travel. The unchecked track is a neutral
+    // translucent fill.
     let accent = theme.accent;
     let off = theme.toggle_off;
     let knob = theme.knob;
@@ -3127,7 +3127,7 @@ fn action_button(theme: &Theme, label: String) -> Div {
         .child(label)
 }
 
-/// Flattened option buttons, following SysVitals: each choice is its own
+/// Flattened option buttons following the system Settings style: each choice is its own
 /// control, and the selected tile carries the system accent instead of a
 /// nested segmented track.
 fn segmented() -> Div {
