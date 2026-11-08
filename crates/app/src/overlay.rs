@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -5,7 +6,7 @@ use core_capture::{
     CaptureTarget, MonitorInfo, SelectionAction, SelectionOutcome, SelectionSession, WindowInfo,
     platform_backend,
 };
-use core_types::{MonitorId, PhysicalPoint, PhysicalRect, RgbaFrame};
+use core_types::{MonitorId, PhysicalPoint, PhysicalRect, RgbaFrame, WindowId};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use platform_window::{WindowStyle, apply as apply_window_style, system_accent_hex};
@@ -227,13 +228,17 @@ struct OverlayView {
     magnifier: Option<Magnifier>,
     copy_serial: u64,
     copied: bool,
+    element_cache: HashMap<WindowId, Vec<PhysicalRect>>,
+    element_window: Option<WindowId>,
+    element_candidates: Vec<PhysicalRect>,
+    element_level: usize,
     focus_handle: FocusHandle,
 }
 
 impl OverlayView {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        session: SelectionSession,
+        mut session: SelectionSession,
         image: Arc<RenderImage>,
         frame: Arc<RgbaFrame>,
         scale: f32,
@@ -242,6 +247,9 @@ impl OverlayView {
         mode: OverlayMode,
         cx: &mut Context<Self>,
     ) -> Self {
+        // Windows and elements are recognized by hovering; dragging is still
+        // reserved for a free region.
+        session.set_window_targeting(true);
         Self {
             session,
             image,
@@ -258,6 +266,10 @@ impl OverlayView {
             magnifier: None,
             copy_serial: 0,
             copied: false,
+            element_cache: HashMap::new(),
+            element_window: None,
+            element_candidates: Vec::new(),
+            element_level: 0,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -334,14 +346,56 @@ impl OverlayView {
             .map(|[red, green, blue, _]| (red, green, blue))
     }
 
-    fn set_window_targeting(&mut self, enabled: bool) {
-        if self.session.window_targeting() == enabled {
+    fn refresh_auto_target(&mut self, point: PhysicalPoint) {
+        if self.session.is_dragging() {
             return;
         }
-        self.session.set_window_targeting(enabled);
-        if let Some(point) = self.cursor {
-            self.session.pointer_moved(point);
+        let Some(window) = self.session.hovered_window().cloned() else {
+            self.element_window = None;
+            self.element_candidates.clear();
+            self.element_level = 0;
+            self.session.set_hovered_element(None);
+            return;
+        };
+        if self.element_window != Some(window.id) {
+            self.element_cache
+                .entry(window.id)
+                .or_insert_with(|| core_capture::ui_elements(window.id));
+            self.element_window = Some(window.id);
+            self.element_level = 0;
         }
+
+        let candidates = core_capture::element_candidates(
+            self.element_cache
+                .get(&window.id)
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+            window.bounds,
+            point,
+        );
+        if self.element_level > candidates.len() {
+            self.element_level = candidates.len();
+        }
+        let selected = candidates.get(self.element_level).copied();
+        self.element_candidates = candidates;
+        self.session.set_hovered_element(selected);
+    }
+
+    fn adjust_auto_target(&mut self, delta: f32) {
+        if delta == 0.0 || self.session.has_drag() || self.session.hovered_window().is_none() {
+            return;
+        }
+        if self.element_candidates.is_empty() {
+            return;
+        }
+        let max = self.element_candidates.len();
+        if delta > 0.0 {
+            self.element_level = (self.element_level + 1).min(max);
+        } else {
+            self.element_level = self.element_level.saturating_sub(1);
+        }
+        let selected = self.element_candidates.get(self.element_level).copied();
+        self.session.set_hovered_element(selected);
     }
 
     fn toggle_color_format(&mut self, cx: &mut Context<Self>) {
@@ -418,13 +472,19 @@ impl OverlayView {
     }
 
     fn window_label(&self, window: &WindowInfo, rect: Bounds<Pixels>) -> Div {
+        let language = settings_state::get().language;
         let title = if window.title.is_empty() {
-            t(settings_state::get().language, "overlay.window")
+            t(language, "overlay.untitled")
         } else {
             window.title.as_str()
         };
+        let kind = if self.session.hovered_element().is_some() {
+            t(language, "overlay.element")
+        } else {
+            t(language, "overlay.window")
+        };
         let text = format!(
-            "{title}  {}x{}",
+            "{title} · {kind}  {}x{}",
             window.bounds.size.width, window.bounds.size.height
         );
         let top = (f32::from(rect.origin.y) - 26.0).max(0.0);
@@ -768,10 +828,15 @@ impl Render for OverlayView {
             .session
             .selection_rect()
             .and_then(|rect| self.local_bounds(rect));
-        let hovered = self
+        let hovered_window = self
             .session
             .hovered_window()
             .and_then(|window| self.local_bounds(window.bounds));
+        let hovered_element = self
+            .session
+            .hovered_element()
+            .and_then(|element| self.local_bounds(element));
+        let hovered = hovered_element.or(hovered_window);
         let hole = selection.or(hovered);
 
         let hint_key = match self.mode {
@@ -848,7 +913,7 @@ impl Render for OverlayView {
         }
 
         if let Some(window) = self.session.hovered_window()
-            && let Some(rect) = self.local_bounds(window.bounds)
+            && let Some(rect) = hovered
         {
             layers.push(self.window_label(window, rect));
         }
@@ -859,7 +924,6 @@ impl Render for OverlayView {
             .track_focus(&self.focus_handle)
             .on_modifiers_changed(cx.listener(
                 |this, event: &ModifiersChangedEvent, _window, cx| {
-                    this.set_window_targeting(event.modifiers.alt);
                     let shift = event.modifiers.shift;
                     if shift
                         && !this.shift_held
@@ -887,7 +951,6 @@ impl Render for OverlayView {
                 }
             }))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                this.set_window_targeting(event.modifiers.alt);
                 let point = this.to_physical(event.position);
                 this.cursor = Some(point);
                 if this.session.has_drag() && event.pressed_button.is_none() {
@@ -897,15 +960,30 @@ impl Render for OverlayView {
                     this.session.cancel();
                 } else {
                     this.session.pointer_moved(point);
+                    if !this.session.has_drag() {
+                        this.refresh_auto_target(point);
+                    }
                 }
+                cx.notify();
+            }))
+            .on_scroll(cx.listener(|this, event: &ScrollEvent, _window, cx| {
+                let delta = match event.delta {
+                    ScrollDelta::Lines(delta) => delta.y,
+                    ScrollDelta::Pixels(delta) => f32::from(delta.y),
+                };
+                if let Some(point) = this.cursor {
+                    this.refresh_auto_target(point);
+                }
+                this.adjust_auto_target(delta);
                 cx.notify();
             }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                    this.set_window_targeting(event.modifiers.alt);
                     let point = this.to_physical(event.position);
                     this.cursor = Some(point);
+                    this.session.pointer_moved(point);
+                    this.refresh_auto_target(point);
                     this.session.pointer_pressed(point);
                     cx.notify();
                 }),
@@ -930,6 +1008,9 @@ impl Render for OverlayView {
             )
             .on_mouse_exit(cx.listener(|this, _event: &MouseExitEvent, _window, cx| {
                 this.cursor = None;
+                this.element_window = None;
+                this.element_candidates.clear();
+                this.element_level = 0;
                 this.session.pointer_left();
                 cx.notify();
             }))

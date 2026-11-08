@@ -15,7 +15,8 @@ pub use backend::{CaptureBackend, platform_backend};
 pub use error::{CaptureError, Result};
 pub use info::{MonitorInfo, WindowInfo};
 pub use selection::{
-    DRAG_THRESHOLD_PX, SelectionAction, SelectionOutcome, SelectionSession, region_from_drag,
+    DRAG_THRESHOLD_PX, SelectionAction, SelectionOutcome, SelectionSession, element_candidates,
+    region_from_drag,
 };
 pub use target::CaptureTarget;
 

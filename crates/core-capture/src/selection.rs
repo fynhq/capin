@@ -34,9 +34,9 @@ struct Drag {
 /// Window bounds arrive in z-order from the backend, topmost first. Selection
 /// geometry is exposed in monitor-local physical pixels for rendering.
 ///
-/// Region selection is the default. `window_targeting` is enabled only while
-/// the window-pick modifier (Alt) is held; plain clicks over a window do not
-/// capture it.
+/// Region selection is the default. The screenshot overlay enables
+/// `window_targeting` for the whole session so hovering identifies a window or
+/// element and clicking captures it; dragging still produces a free region.
 pub struct SelectionSession {
     monitor: MonitorId,
     monitor_bounds: PhysicalRect,
@@ -93,9 +93,9 @@ impl SelectionSession {
         &self.windows
     }
 
-    /// Enables window picking while the window modifier is held. Disabling it
-    /// clears any window/element highlight so the default region mode has no
-    /// implicit window under the pointer.
+    /// Enables automatic window picking. Disabling it clears any
+    /// window/element highlight so the caller can fall back to pure region
+    /// selection.
     pub fn set_window_targeting(&mut self, enabled: bool) {
         self.window_targeting = enabled;
         if !enabled {
@@ -253,8 +253,8 @@ impl SelectionSession {
         if let Some(window) = drag.start_window {
             SelectionAction::Capture(SelectionOutcome::Window(window))
         } else if drag.over_window {
-            // A plain click on a window no longer captures it; only the
-            // explicit window modifier does.
+            // Window targeting is disabled, so a click over a window does not
+            // implicitly capture it.
             SelectionAction::None
         } else {
             SelectionAction::Capture(SelectionOutcome::Monitor(self.monitor))
@@ -272,6 +272,29 @@ impl SelectionSession {
             .iter()
             .find(|window| window.bounds.contains(point))
     }
+}
+
+/// Returns the accessible elements under `point`, smallest first. This is the
+/// element hierarchy used by the overlay's scroll-wheel targeting.
+pub fn element_candidates(
+    elements: &[PhysicalRect],
+    window: PhysicalRect,
+    point: PhysicalPoint,
+) -> Vec<PhysicalRect> {
+    let mut candidates: Vec<PhysicalRect> = elements
+        .iter()
+        .copied()
+        .filter(|rect| {
+            *rect != window
+                && rect.size.width > 4
+                && rect.size.height > 4
+                && rect.size.width <= window.size.width
+                && rect.size.height <= window.size.height
+                && rect.contains(point)
+        })
+        .collect();
+    candidates.sort_by_key(|rect| u64::from(rect.size.width) * u64::from(rect.size.height));
+    candidates
 }
 
 fn is_past_threshold(origin: PhysicalPoint, current: PhysicalPoint, threshold: i32) -> bool {
@@ -430,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn alt_click_on_a_window_captures_that_window() {
+    fn targeted_click_on_a_window_captures_that_window() {
         let mut session = session();
         session.set_window_targeting(true);
         session.pointer_pressed(PhysicalPoint::new(120, 120));
@@ -634,6 +657,20 @@ mod tests {
         assert!(!session.is_dragging());
         session.pointer_moved(PhysicalPoint::new(110, 100));
         assert!(session.is_dragging());
+    }
+
+    #[test]
+    fn element_candidates_prefer_the_smallest_nested_rect() {
+        let window = PhysicalRect::new(0, 0, 1000, 800);
+        let large = PhysicalRect::new(100, 100, 500, 400);
+        let small = PhysicalRect::new(150, 150, 200, 100);
+        let outside = PhysicalRect::new(900, 700, 200, 100);
+        let candidates = element_candidates(
+            &[large, small, outside],
+            window,
+            PhysicalPoint::new(200, 180),
+        );
+        assert_eq!(candidates, vec![small, large]);
     }
 
     #[test]
