@@ -1,5 +1,7 @@
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,6 +17,13 @@ use crate::settings_state::{self, AppSettings, WindowBackground};
 use crate::storage;
 
 const PROJECT_URL: &str = "https://github.com/fynhq/capin";
+
+thread_local! {
+    /// Status handed to the next settings window when a tray or hotkey action
+    /// fails before it can open its own surface (for example a denied screen
+    /// recording permission), so the click never ends as a silent no-op.
+    static PENDING_STATUS: RefCell<Option<String>> = const { RefCell::new(None) };
+}
 
 #[cfg(target_os = "windows")]
 const FALLBACK_ACCENT_LIGHT: u32 = 0x0067C0;
@@ -77,8 +86,6 @@ mod layout {
     pub const MIN_WIDTH: f32 = 760.0;
     pub const MIN_HEIGHT: f32 = 520.0;
     pub const TITLEBAR_HEIGHT: f32 = 52.0;
-    pub const CAPTION_BUTTON_WIDTH: f32 = 0.0;
-    pub const CAPTION_BUTTON_HEIGHT: f32 = 0.0;
     pub const SIDEBAR_WIDTH: f32 = 200.0;
     pub const SIDEBAR_PAD: f32 = 10.0;
     pub const SIDEBAR_DIVIDER: bool = true;
@@ -90,7 +97,7 @@ mod layout {
     pub const NAV_FONT: f32 = 13.0;
     pub const CONTENT_MAX_WIDTH: f32 = 680.0;
     pub const CONTENT_PAD_X: f32 = 28.0;
-    pub const CONTENT_PAD_TOP: f32 = 16.0;
+    pub const CONTENT_PAD_TOP: f32 = 24.0;
     pub const CONTENT_PAD_BOTTOM: f32 = 24.0;
     pub const CONTENT_GAP: f32 = 20.0;
     pub const GROUP_GAP: f32 = 22.0;
@@ -114,8 +121,6 @@ mod layout {
     pub const MIN_WIDTH: f32 = 760.0;
     pub const MIN_HEIGHT: f32 = 520.0;
     pub const TITLEBAR_HEIGHT: f32 = 0.0;
-    pub const CAPTION_BUTTON_WIDTH: f32 = 0.0;
-    pub const CAPTION_BUTTON_HEIGHT: f32 = 0.0;
     pub const SIDEBAR_WIDTH: f32 = 200.0;
     pub const SIDEBAR_PAD: f32 = 10.0;
     pub const SIDEBAR_DIVIDER: bool = true;
@@ -323,6 +328,22 @@ struct ToggleRow {
     refresh_pin: bool,
 }
 
+/// Popup menus replace segmented controls once a choice set grows past three
+/// options. The anchor is the trigger's window-space bounds captured during
+/// paint; the menu itself renders at the window root so it is not clipped by
+/// the card or the scrolling page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectKind {
+    WindowBackground,
+    WindowPadding,
+}
+
+#[derive(Clone, Copy)]
+struct SelectMenu {
+    kind: SelectKind,
+    anchor: Bounds<Pixels>,
+}
+
 #[derive(Clone, Copy)]
 struct Theme {
     text: Rgba,
@@ -332,13 +353,14 @@ struct Theme {
     page: Option<Rgba>,
     border: Rgba,
     accent: Rgba,
+    accent_text: Rgba,
     hover: Rgba,
     selected: Rgba,
     control: Rgba,
-    segment_track: Rgba,
-    segment_selected: Rgba,
+    control_hover: Rgba,
     toggle_off: Rgba,
     knob: Rgba,
+    #[cfg(target_os = "windows")]
     close_hover: Rgba,
     hairline: f32,
 }
@@ -348,10 +370,9 @@ struct Palette {
     muted: Rgba,
     border: Rgba,
     control: Rgba,
+    control_hover: Rgba,
     hover: Rgba,
     selected: Rgba,
-    segment_track: Rgba,
-    segment_selected: Rgba,
     toggle_off: Rgba,
     page: Option<Rgba>,
 }
@@ -380,17 +401,56 @@ impl Theme {
             page: palette.page,
             border: palette.border,
             accent: rgb(accent_hex),
+            accent_text: accent_text_color(accent_hex),
             hover: palette.hover,
             selected: palette.selected,
             control: palette.control,
-            segment_track: palette.segment_track,
-            segment_selected: palette.segment_selected,
+            control_hover: palette.control_hover,
             toggle_off: palette.toggle_off,
             knob: rgb(0xFFFFFF),
+            #[cfg(target_os = "windows")]
             close_hover: rgb(0xC42B1C),
             hairline: 1.0 / scale_factor.max(1.0),
         }
     }
+}
+
+/// Label color on the system accent. macOS keeps white-on-accent like the
+/// system controls and SysVitals; Windows switches to a dark label on bright
+/// accents (gold, lime) so the text stays readable.
+fn accent_text_color(hex: u32) -> Rgba {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = hex;
+        rgb(0xFFFFFF)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if prefers_dark_foreground(hex) {
+            rgb(0x1A1A1A)
+        } else {
+            rgb(0xFFFFFF)
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn prefers_dark_foreground(hex: u32) -> bool {
+    fn linearize(channel: u8) -> f64 {
+        let value = f64::from(channel) / 255.0;
+        if value <= 0.040_45 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    let r = linearize(((hex >> 16) & 0xFF) as u8);
+    let g = linearize(((hex >> 8) & 0xFF) as u8);
+    let b = linearize((hex & 0xFF) as u8);
+    let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    let dark = (luminance + 0.05) / 0.05;
+    let light = 1.05 / (luminance + 0.05);
+    dark > light * 1.15
 }
 
 #[cfg(target_os = "windows")]
@@ -401,10 +461,9 @@ fn native_palette(dark: bool) -> Palette {
             muted: rgb(0xA8A8A8),
             border: rgba(0xFFFFFF18),
             control: rgb(0x383838),
+            control_hover: rgb(0x424242),
             hover: rgba(0xFFFFFF10),
             selected: rgba(0xFFFFFF14),
-            segment_track: rgb(0x383838),
-            segment_selected: rgb(0x4D4D4D),
             toggle_off: rgba(0xFFFFFF1F),
             page: None,
         }
@@ -414,10 +473,9 @@ fn native_palette(dark: bool) -> Palette {
             muted: rgb(0x5D5D5D),
             border: rgba(0x0000000F),
             control: rgb(0xFCFCFC),
+            control_hover: rgb(0xF2F2F2),
             hover: rgba(0x00000008),
             selected: rgba(0x0000000A),
-            segment_track: rgb(0xF0F0F0),
-            segment_selected: rgb(0xFFFFFF),
             toggle_off: rgba(0x0000001A),
             page: None,
         }
@@ -432,14 +490,14 @@ fn native_palette(dark: bool) -> Palette {
             muted: rgb(0x98989D),
             border: rgba(0xFFFFFF1F),
             control: rgb(0x3A3A3C),
+            control_hover: rgb(0x464648),
             hover: rgba(0xFFFFFF14),
             selected: rgba(0xFFFFFF1F),
-            segment_track: rgba(0xFFFFFF0F),
-            segment_selected: rgba(0xFFFFFF29),
             toggle_off: rgba(0xFFFFFF1F),
             // SysVitals settings tint: 0.72 dark / 0.82 light over the live
-            // window blur. Higher than Mica so text keeps native contrast.
-            page: Some(rgba(0x1E1E1EB8)),
+            // window blur, using the same neutral-950 / white base palette as
+            // the system popovers instead of a lighter custom grey.
+            page: Some(rgba(0x0A0A0AB8)),
         }
     } else {
         Palette {
@@ -447,12 +505,11 @@ fn native_palette(dark: bool) -> Palette {
             muted: rgb(0x6E6E73),
             border: rgba(0x00000014),
             control: rgb(0xFFFFFF),
+            control_hover: rgb(0xF1F1F1),
             hover: rgba(0x0000000A),
             selected: rgba(0x0000000F),
-            segment_track: rgba(0x00000012),
-            segment_selected: rgb(0xFFFFFF),
             toggle_off: rgba(0x0000001A),
-            page: Some(rgba(0xF2F2F2D1)),
+            page: Some(rgba(0xFFFFFFD1)),
         }
     }
 }
@@ -465,10 +522,9 @@ fn native_palette(dark: bool) -> Palette {
             muted: rgb(0x98989D),
             border: rgba(0xFFFFFF1F),
             control: rgb(0x3A3A3C),
+            control_hover: rgb(0x464648),
             hover: rgba(0xFFFFFF14),
             selected: rgba(0xFFFFFF1F),
-            segment_track: rgba(0xFFFFFF0F),
-            segment_selected: rgba(0xFFFFFF29),
             toggle_off: rgba(0xFFFFFF4D),
             page: Some(rgb(0x1E1E1E)),
         }
@@ -478,10 +534,9 @@ fn native_palette(dark: bool) -> Palette {
             muted: rgb(0x6E6E73),
             border: rgba(0x00000014),
             control: rgb(0xFFFFFF),
+            control_hover: rgb(0xF1F1F1),
             hover: rgba(0x0000000A),
             selected: rgba(0x0000000F),
-            segment_track: rgba(0x00000012),
-            segment_selected: rgb(0xFFFFFF),
             toggle_off: rgba(0x00000026),
             page: Some(rgb(0xF2F2F2)),
         }
@@ -657,6 +712,7 @@ struct SettingsView {
     filename_focus: FocusHandle,
     focus_handle: FocusHandle,
     titlebar_drag: bool,
+    select_menu: Option<SelectMenu>,
     logo: Option<Arc<RenderImage>>,
     #[cfg(target_os = "macos")]
     permission_screen: bool,
@@ -671,12 +727,13 @@ impl SettingsView {
             settings: settings_state::get(),
             accent: system_accent_hex(),
             last_accent: None,
-            status: None,
+            status: PENDING_STATUS.with(|slot| slot.borrow_mut().take()),
             recording_shortcut: None,
             filename_edit: None,
             filename_focus: cx.focus_handle(),
             focus_handle: cx.focus_handle(),
             titlebar_drag: false,
+            select_menu: None,
             logo: crate::image_util::render_png(include_bytes!(
                 "../../../assets/icon/capin_icon_1024.png"
             )),
@@ -752,7 +809,7 @@ impl SettingsView {
         .detach();
     }
 
-    fn sidebar(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    fn sidebar(&self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let mut nav: Vec<AnyElement> = Vec::new();
         for section in SettingsSection::ALL {
             let selected = self.section == section;
@@ -775,6 +832,7 @@ impl SettingsView {
                 .id(section.id())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.section = section;
+                    this.select_menu = None;
                     cx.notify();
                 }))
                 .child(icons::icon(
@@ -792,17 +850,44 @@ impl SettingsView {
             nav.push(item.into_any_element());
         }
 
-        let sidebar = div()
+        let nav = div().w_full().flex().flex_col().gap(px(2.0)).children(nav);
+        let mut sidebar = div()
             .w(px(layout::SIDEBAR_WIDTH))
             .h_full()
             .flex()
             .flex_col()
             .flex_shrink_0()
             .px(px(layout::SIDEBAR_PAD))
-            .pt(px(layout::TITLEBAR_HEIGHT + 8.0))
-            .pb(px(layout::SIDEBAR_PAD))
-            .child(div().flex().flex_col().gap(px(2.0)).children(nav));
+            .pb(px(layout::SIDEBAR_PAD));
 
+        // macOS puts the traffic lights over the sidebar, so the title sits
+        // below them at the top of the pane. The strip around the lights and
+        // the title itself move the window; the content page starts at the
+        // very top of the window to the right.
+        #[cfg(target_os = "macos")]
+        {
+            sidebar = sidebar
+                .child(self.macos_drag_area(
+                    "settings-sidebar-drag-strip",
+                    div().w_full().h(px(layout::TITLEBAR_HEIGHT)),
+                    cx,
+                ))
+                .child(self.macos_drag_area(
+                    "settings-sidebar-drag-title",
+                    self.sidebar_title(theme),
+                    cx,
+                ))
+                .child(div().w_full().mt(px(18.0)).child(nav));
+        }
+        // Windows keeps the system caption buttons and drag strip, so the
+        // navigation starts below the 48pt caption as before.
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = window;
+            sidebar = sidebar.pt(px(layout::TITLEBAR_HEIGHT + 8.0)).child(nav);
+        }
+
+        sidebar = sidebar.child(self.sidebar_footer(theme, cx));
         if layout::SIDEBAR_DIVIDER {
             sidebar.border_r_1().border_color(theme.border)
         } else {
@@ -810,65 +895,110 @@ impl SettingsView {
         }
     }
 
-    /// A title bar drawn inside the client area so it shares the window
-    /// backdrop with the navigation pane and page instead of sitting on a
-    /// separate native strip. Windows keeps the system caption hit-testing
-    /// (drag, snap, double-click); macOS moves the window explicitly.
-    fn titlebar(&self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let windows = cfg!(target_os = "windows");
-        let macos = cfg!(target_os = "macos");
-        let mut leading = div()
+    #[cfg(target_os = "macos")]
+    fn sidebar_title(&self, theme: &Theme) -> Div {
+        let mut title = div()
+            .w_full()
+            .h(px(24.0))
+            .px(px(layout::NAV_ITEM_PAD_X))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0));
+        if let Some(logo) = self.logo.clone() {
+            title = title.child(img(logo).w(px(18.0)).h(px(18.0)));
+        }
+        title.child(
+            div()
+                .text_size(px(15.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text)
+                .child(t(self.settings.language, "settings.title")),
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn macos_drag_area(
+        &self,
+        id: &'static str,
+        area: Div,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        area.id(id)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, _| {
+                    if event.click_count == 2 {
+                        this.titlebar_drag = false;
+                        window.titlebar_double_click();
+                    } else {
+                        this.titlebar_drag = true;
+                    }
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.titlebar_drag = false),
+            )
+            .on_mouse_down_out(cx.listener(|this, _, _, _| this.titlebar_drag = false))
+            .on_mouse_move(cx.listener(|this, _, window, _| {
+                if this.titlebar_drag {
+                    this.titlebar_drag = false;
+                    window.start_window_move();
+                }
+            }))
+    }
+
+    fn sidebar_footer(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let accent = theme.accent;
+        div()
+            .mt_auto()
+            .w_full()
+            .pt(px(16.0))
+            .pb(px(2.0))
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .id("settings-version-link")
+                    .text_size(px(layout::CAPTION))
+                    .text_color(theme.muted)
+                    .cursor_pointer()
+                    .hover(move |style| style.text_color(accent))
+                    .on_click(cx.listener(|this, _, _, cx| this.open_project(cx)))
+                    .child(format!("Capin v{}", env!("CARGO_PKG_VERSION"))),
+            )
+    }
+
+    /// The Windows caption is drawn inside the client area so it shares the
+    /// window backdrop with the page while keeping the system caption hit
+    /// testing (drag, snap, double-click). macOS uses the native title bar;
+    /// its drag surface lives in the sidebar.
+    #[cfg(target_os = "windows")]
+    fn titlebar(&self, theme: &Theme, window: &mut Window, _cx: &mut Context<Self>) -> Div {
+        let mut brand = div().flex().flex_row().items_center().gap(px(8.0));
+        if let Some(logo) = self.logo.clone() {
+            brand = brand.child(img(logo).w(px(18.0)).h(px(18.0)));
+        }
+        brand = brand.child(
+            div()
+                .text_size(px(13.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text)
+                .child(t(self.settings.language, "settings.title")),
+        );
+        let leading = div()
             .id("settings-titlebar-drag")
             .flex_1()
             .h_full()
+            .pl(px(16.0))
             .flex()
             .flex_row()
-            .items_center();
-        let make_brand = || {
-            let mut brand = div().flex().flex_row().items_center().gap(px(8.0));
-            if let Some(logo) = self.logo.clone() {
-                brand = brand.child(img(logo).w(px(18.0)).h(px(18.0)));
-            }
-            brand.child(
-                div()
-                    .text_size(px(13.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child(t(self.settings.language, "settings.title")),
-            )
-        };
-        if windows {
-            leading = leading.pl(px(16.0)).child(make_brand());
-            leading = leading.window_control_area(WindowControlArea::Drag);
-        }
-        if macos {
-            leading = leading.pl(px(84.0)).child(make_brand());
-            leading = leading
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, event: &MouseDownEvent, window, _| {
-                        if event.click_count == 2 {
-                            this.titlebar_drag = false;
-                            window.titlebar_double_click();
-                        } else {
-                            this.titlebar_drag = true;
-                        }
-                    }),
-                )
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, _| this.titlebar_drag = false),
-                )
-                .on_mouse_down_out(cx.listener(|this, _, _, _| this.titlebar_drag = false))
-                .on_mouse_move(cx.listener(|this, _, window, _| {
-                    if this.titlebar_drag {
-                        this.titlebar_drag = false;
-                        window.start_window_move();
-                    }
-                }));
-        }
+            .items_center()
+            .window_control_area(WindowControlArea::Drag)
+            .child(brand);
 
-        let mut bar = div()
+        div()
             .absolute()
             .top_0()
             .left_0()
@@ -877,76 +1007,70 @@ impl SettingsView {
             .flex()
             .flex_row()
             .items_start()
-            .child(leading);
-        if windows {
-            bar = bar
-                .child(window_control_button(
-                    theme,
-                    "settings-window-minimize",
-                    icons::MINIMIZE,
-                    WindowControlArea::Min,
-                    false,
-                ))
-                .child(window_control_button(
-                    theme,
-                    "settings-window-maximize",
-                    if window.is_maximized() {
-                        icons::RESTORE
-                    } else {
-                        icons::MAXIMIZE
-                    },
-                    WindowControlArea::Max,
-                    false,
-                ))
-                .child(window_control_button(
-                    theme,
-                    "settings-window-close",
-                    icons::WINDOW_CLOSE,
-                    WindowControlArea::Close,
-                    true,
-                ));
-        }
-        bar
+            .child(leading)
+            .child(window_control_button(
+                theme,
+                "settings-window-minimize",
+                icons::MINIMIZE,
+                WindowControlArea::Min,
+                false,
+            ))
+            .child(window_control_button(
+                theme,
+                "settings-window-maximize",
+                if window.is_maximized() {
+                    icons::RESTORE
+                } else {
+                    icons::MAXIMIZE
+                },
+                WindowControlArea::Max,
+                false,
+            ))
+            .child(window_control_button(
+                theme,
+                "settings-window-close",
+                icons::WINDOW_CLOSE,
+                WindowControlArea::Close,
+                true,
+            ))
     }
 
     fn content(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        // The page background reaches the window edge so it fuses with the
-        // custom title bar; the scroll viewport itself starts below the bar so
-        // scrolled rows never slide underneath the caption buttons.
-        div()
-            .flex_1()
-            .h_full()
-            .flex()
-            .flex_col()
-            .pt(px(layout::TITLEBAR_HEIGHT))
-            .child(
-                div()
-                    .flex_1()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .px(px(layout::CONTENT_PAD_X))
-                    .pt(px(layout::CONTENT_PAD_TOP))
-                    .pb(px(layout::CONTENT_PAD_BOTTOM))
-                    .id("settings-content")
-                    .overflow_y_scroll()
-                    .child(
-                        div()
-                            .w_full()
-                            .max_w(px(layout::CONTENT_MAX_WIDTH))
-                            .flex()
-                            .flex_col()
-                            .gap(px(layout::CONTENT_GAP))
-                            .child(self.section_header(theme))
-                            .child(match self.section {
-                                SettingsSection::General => self.general(theme, cx),
-                                SettingsSection::Capture => self.capture_settings(theme, cx),
-                                SettingsSection::Recording => self.recording(theme, cx),
-                                SettingsSection::Shortcuts => self.shortcuts(theme, cx),
-                            }),
-                    ),
-            )
+        // macOS draws the settings title in the sidebar, so the page reaches
+        // the top edge; Windows keeps the caption strip clear of scrolling
+        // content so rows never slide under the caption buttons.
+        #[cfg(target_os = "macos")]
+        let top = 0.0;
+        #[cfg(not(target_os = "macos"))]
+        let top = layout::TITLEBAR_HEIGHT;
+        div().flex_1().h_full().flex().flex_col().pt(px(top)).child(
+            div()
+                .flex_1()
+                .w_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .px(px(layout::CONTENT_PAD_X))
+                .pt(px(layout::CONTENT_PAD_TOP))
+                .pb(px(layout::CONTENT_PAD_BOTTOM))
+                .id("settings-content")
+                .overflow_y_scroll()
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(layout::CONTENT_MAX_WIDTH))
+                        .flex()
+                        .flex_col()
+                        .gap(px(layout::CONTENT_GAP))
+                        .child(self.section_header(theme))
+                        .child(match self.section {
+                            SettingsSection::General => self.general(theme, cx),
+                            SettingsSection::Capture => self.capture_settings(theme, cx),
+                            SettingsSection::Recording => self.recording(theme, cx),
+                            SettingsSection::Shortcuts => self.shortcuts(theme, cx),
+                        }),
+                ),
+        )
     }
 
     fn section_header(&self, theme: &Theme) -> Div {
@@ -970,42 +1094,13 @@ impl SettingsView {
     }
 
     fn general(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        #[cfg(target_os = "macos")]
         let language = self.settings.language;
-        let version = row_shell()
-            .id("settings-version-link")
-            .hover(move |style| style.bg(theme.hover))
-            .on_click(cx.listener(|this, _, _, cx| this.open_project(cx)))
-            .child(row_label(
-                theme,
-                t(language, "settings.version"),
-                t(language, "settings.version_desc"),
-            ))
-            .child(
-                div()
-                    .flex()
-                    .flex_shrink_0()
-                    .flex_col()
-                    .items_end()
-                    .gap(px(2.0))
-                    .child(
-                        div()
-                            .text_size(px(layout::CAPTION))
-                            .text_color(theme.muted)
-                            .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(layout::CAPTION))
-                            .text_color(theme.accent)
-                            .child("github.com/fynhq/capin"),
-                    ),
-            );
         let content = card(
             theme,
             vec![
                 div().child(self.language_row(theme, cx)),
                 div().child(self.auto_start_row(theme, cx)),
-                div().child(version),
             ],
         );
         let page = div()
@@ -1018,9 +1113,43 @@ impl SettingsView {
             theme,
             t(language, "settings.group.permissions"),
             t(language, "settings.group.permissions_desc"),
-            self.permissions_card(theme, cx),
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(self.permissions_card(theme, cx))
+                .when(
+                    !(self.permission_screen && self.permission_accessibility),
+                    |body| body.child(self.permission_hint(theme, cx)),
+                ),
         ));
         page
+    }
+
+    /// Rebuilds the permission guidance that accompanies the status rows.
+    /// macOS binds TCC grants to the ad-hoc code signature, and screen
+    /// recording only takes effect after a relaunch, so an existing System
+    /// Settings entry can look enabled while this process is still denied.
+    #[cfg(target_os = "macos")]
+    fn permission_hint(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let language = self.settings.language;
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap(px(16.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(note(theme, t(language, "settings.permission_hint"))),
+            )
+            .child(
+                action_button(theme, t(language, "settings.permission_restart").to_owned())
+                    .id("settings-permission-restart")
+                    .on_click(cx.listener(|_, _, _, cx| crate::tray::restart(cx))),
+            )
     }
 
     #[cfg(target_os = "macos")]
@@ -1106,7 +1235,7 @@ impl SettingsView {
 
     fn language_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let language = self.settings.language;
-        let mut control = segmented(theme);
+        let mut control = segmented();
         for option in Language::ALL {
             let selected = language == option;
             let label = option.label();
@@ -1135,60 +1264,63 @@ impl SettingsView {
     fn auto_start_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let language = self.settings.language;
         let value = self.settings.auto_start;
-        let hover = theme.hover;
 
         row_shell()
-            .id("settings-auto-start")
-            .hover(move |style| style.bg(hover))
-            .on_click(cx.listener(|this, _, _, cx| {
-                let language = this.settings.language;
-                let desired = !this.settings.auto_start;
-                match set_autostart(desired) {
-                    Ok(AutostartState::Unsupported) => {
-                        this.status =
-                            Some(t(language, "settings.status_autostart_failed").to_owned());
-                    }
-                    Ok(state) => {
-                        this.settings.auto_start = desired;
-                        this.settings.auto_start_explicit = true;
-                        settings_state::update(|settings| {
-                            settings.auto_start = desired;
-                            settings.auto_start_explicit = true;
-                        });
-                        this.status = Some(
-                            match state {
-                                AutostartState::Enabled => {
-                                    t(language, "settings.status_autostart_enabled")
-                                }
-                                AutostartState::Disabled => {
-                                    t(language, "settings.status_autostart_disabled")
-                                }
-                                AutostartState::RequiresApproval => {
-                                    t(language, "settings.status_autostart_approval")
-                                }
-                                AutostartState::Unsupported => {
-                                    t(language, "settings.status_autostart_failed")
-                                }
-                            }
-                            .to_owned(),
-                        );
-                    }
-                    Err(error) => {
-                        this.status = Some(format!(
-                            "{}{}",
-                            t(language, "settings.status_autostart_failed"),
-                            error
-                        ));
-                    }
-                }
-                cx.notify();
-            }))
             .child(row_label(
                 theme,
                 t(language, "settings.auto_start"),
                 t(language, "settings.auto_start_desc"),
             ))
-            .child(toggle(theme, value))
+            .child(
+                div()
+                    .id("settings-auto-start")
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let language = this.settings.language;
+                        let desired = !this.settings.auto_start;
+                        match set_autostart(desired) {
+                            Ok(AutostartState::Unsupported) => {
+                                this.status = Some(
+                                    t(language, "settings.status_autostart_failed").to_owned(),
+                                );
+                            }
+                            Ok(state) => {
+                                this.settings.auto_start = desired;
+                                this.settings.auto_start_explicit = true;
+                                settings_state::update(|settings| {
+                                    settings.auto_start = desired;
+                                    settings.auto_start_explicit = true;
+                                });
+                                this.status = Some(
+                                    match state {
+                                        AutostartState::Enabled => {
+                                            t(language, "settings.status_autostart_enabled")
+                                        }
+                                        AutostartState::Disabled => {
+                                            t(language, "settings.status_autostart_disabled")
+                                        }
+                                        AutostartState::RequiresApproval => {
+                                            t(language, "settings.status_autostart_approval")
+                                        }
+                                        AutostartState::Unsupported => {
+                                            t(language, "settings.status_autostart_failed")
+                                        }
+                                    }
+                                    .to_owned(),
+                                );
+                            }
+                            Err(error) => {
+                                this.status = Some(format!(
+                                    "{}{}",
+                                    t(language, "settings.status_autostart_failed"),
+                                    error
+                                ));
+                            }
+                        }
+                        cx.notify();
+                    }))
+                    .child(toggle(theme, value)),
+            )
     }
 
     fn capture_settings(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
@@ -1334,100 +1466,241 @@ impl SettingsView {
             ))
     }
 
-    /// One clickable on/off row. Hover covers the whole row because the whole
-    /// row is the hit target; `refresh_pin` reapplies pin recognition when a
-    /// recognition toggle changes.
+    /// One on/off row. Only the switch is a hit target; the label and the row
+    /// background stay inert like the native settings lists. `refresh_pin`
+    /// reapplies pin recognition when a recognition toggle changes.
     fn toggle_row(&self, theme: &Theme, cx: &mut Context<Self>, row: ToggleRow) -> Div {
         let language = self.settings.language;
-        let hover = theme.hover;
         div().child(
             row_shell()
-                .id(row.id)
-                .hover(move |style| style.bg(hover))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let value = !row.value;
-                    (row.set)(&mut this.settings, value);
-                    settings_state::update(|settings| (row.set)(settings, value));
-                    if row.refresh_pin {
-                        cx.defer(crate::pin::refresh_recognition);
-                    }
-                    this.status = None;
-                    cx.notify();
-                }))
                 .child(row_label(
                     theme,
                     t(language, row.title_key),
                     t(language, row.description_key),
                 ))
-                .child(toggle(theme, row.value)),
+                .child(
+                    div()
+                        .id(row.id)
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let value = !row.value;
+                            (row.set)(&mut this.settings, value);
+                            settings_state::update(|settings| (row.set)(settings, value));
+                            if row.refresh_pin {
+                                cx.defer(crate::pin::refresh_recognition);
+                            }
+                            this.status = None;
+                            cx.notify();
+                        }))
+                        .child(toggle(theme, row.value)),
+                ),
         )
     }
 
     fn window_background_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
-        let mut control = segmented(theme);
-        for background in WindowBackground::ALL {
-            let selected = self.settings.window_background == background;
-            control = control.child(
-                segment(
-                    theme,
-                    t(language, background_label_key(background)),
-                    selected,
-                )
-                .id(background_id(background))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.settings.window_background = background;
-                    settings_state::update(|settings| settings.window_background = background);
-                    this.status = None;
-                    cx.notify();
-                })),
-            );
-        }
-
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .px(px(layout::ROW_PAD_X))
-            .py(px(layout::ROW_PAD_Y))
-            .child(label_block(
+        let current = t(
+            language,
+            background_label_key(self.settings.window_background),
+        );
+        row_shell()
+            .child(row_label(
                 theme,
                 t(language, "settings.window_background"),
                 t(language, "settings.window_background_desc"),
             ))
-            .child(control)
+            .child(self.select_trigger(
+                theme,
+                current,
+                "settings-window-background",
+                SelectKind::WindowBackground,
+                cx,
+            ))
     }
 
     fn window_padding_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
-        let mut control = segmented(theme);
-        for (padding, label) in [
-            (0u32, t(language, "padding.0")),
-            (24, t(language, "padding.24")),
-            (48, t(language, "padding.48")),
-            (96, t(language, "padding.96")),
-        ] {
-            let selected = self.settings.window_padding == padding;
-            control = control.child(
-                segment(theme, label, selected)
-                    .id(padding_id(padding))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.settings.window_padding = padding;
-                        settings_state::update(|settings| settings.window_padding = padding);
-                        this.status = None;
-                        cx.notify();
-                    })),
-            );
-        }
-
+        let current = t(language, padding_key(self.settings.window_padding));
         row_shell()
             .child(row_label(
                 theme,
                 t(language, "settings.window_padding"),
                 t(language, "settings.window_padding_desc"),
             ))
-            .child(control)
+            .child(self.select_trigger(
+                theme,
+                current,
+                "settings-window-padding",
+                SelectKind::WindowPadding,
+                cx,
+            ))
+    }
+
+    /// A macOS-style popup button: the current value on the left, a chevron
+    /// on the right. The trigger records its window-space bounds while it
+    /// paints so the popup can be placed below it at the window root.
+    fn select_trigger(
+        &self,
+        theme: &Theme,
+        label: &str,
+        id: &'static str,
+        kind: SelectKind,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let anchor: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
+        let anchor_for_paint = anchor.clone();
+        let probe = canvas(
+            move |bounds, _, _| anchor_for_paint.set(Some(bounds)),
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0()
+        .into_any_element();
+        let hover = theme.control_hover;
+        let chevron = theme.muted;
+        div()
+            .id(id)
+            .relative()
+            .w(px(160.0))
+            .h(px(layout::BUTTON_HEIGHT))
+            .flex_shrink_0()
+            .px(px(10.0))
+            .rounded(px(layout::BUTTON_RADIUS))
+            .bg(theme.control)
+            .border_1()
+            .border_color(theme.border)
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap(px(8.0))
+            .text_size(px(layout::CONTROL_TEXT))
+            .text_color(theme.text)
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(anchor) = anchor.get() {
+                    this.select_menu = Some(SelectMenu { kind, anchor });
+                }
+                cx.notify();
+            }))
+            .child(label.to_owned())
+            .child(icons::icon(icons::CHEVRON_DOWN, 10.0, chevron))
+            .child(probe)
+    }
+
+    /// The popup layer for the two long option lists. Rendering it at the
+    /// window root keeps it above the card and outside the scrolling page.
+    fn select_popup(
+        &self,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        let menu = self.select_menu?;
+        let language = self.settings.language;
+        let mut entries: Vec<(String, u32, bool)> = Vec::new();
+        match menu.kind {
+            SelectKind::WindowBackground => {
+                for (index, background) in WindowBackground::ALL.into_iter().enumerate() {
+                    entries.push((
+                        t(language, background_label_key(background)).to_owned(),
+                        index as u32,
+                        self.settings.window_background == background,
+                    ));
+                }
+            }
+            SelectKind::WindowPadding => {
+                for padding in [0u32, 24, 48, 96] {
+                    entries.push((
+                        t(language, padding_key(padding)).to_owned(),
+                        padding,
+                        self.settings.window_padding == padding,
+                    ));
+                }
+            }
+        }
+
+        let width = 160.0;
+        let item_height = 26.0;
+        let padding = 4.0;
+        let height = entries.len() as f32 * item_height + padding * 2.0;
+        let viewport = window.viewport_size();
+        let viewport_width = f32::from(viewport.width);
+        let viewport_height = f32::from(viewport.height);
+        let anchor_x = f32::from(menu.anchor.origin.x);
+        let anchor_y = f32::from(menu.anchor.origin.y);
+        let anchor_width = f32::from(menu.anchor.size.width);
+        let anchor_height = f32::from(menu.anchor.size.height);
+        let mut x = anchor_x + anchor_width - width;
+        let mut y = anchor_y + anchor_height + 4.0;
+        if y + height > viewport_height - 8.0 {
+            y = (anchor_y - height - 4.0).max(8.0);
+        }
+        x = x.clamp(8.0, (viewport_width - width - 8.0).max(8.0));
+
+        let mut popup = div()
+            .id("settings-select-popup")
+            .absolute()
+            .left(px(x))
+            .top(px(y))
+            .w(px(width))
+            .p(px(padding))
+            .rounded(px(6.0))
+            .bg(theme.control)
+            .border_1()
+            .border_color(theme.border)
+            .flex()
+            .flex_col()
+            .gap(px(1.0))
+            .occlude();
+        for (index, (label, value, selected)) in entries.into_iter().enumerate() {
+            let accent = theme.accent;
+            let accent_text = theme.accent_text;
+            let text = theme.text;
+            let hover = theme.hover;
+            popup = popup.child(
+                div()
+                    .id(("settings-select-item", index))
+                    .h(px(item_height))
+                    .px(px(8.0))
+                    .rounded(px(4.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(px(layout::CONTROL_TEXT))
+                    .when(selected, |item| item.bg(accent).text_color(accent_text))
+                    .when(!selected, |item| {
+                        item.text_color(text).hover(move |style| style.bg(hover))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        match menu.kind {
+                            SelectKind::WindowBackground => {
+                                let background = WindowBackground::ALL[value as usize];
+                                this.settings.window_background = background;
+                                settings_state::update(|settings| {
+                                    settings.window_background = background
+                                });
+                            }
+                            SelectKind::WindowPadding => {
+                                this.settings.window_padding = value;
+                                settings_state::update(|settings| settings.window_padding = value);
+                            }
+                        }
+                        this.select_menu = None;
+                        this.status = None;
+                        cx.notify();
+                    }))
+                    .child(div().w(px(12.0)).flex_shrink_0().child(if selected {
+                        "✓"
+                    } else {
+                        ""
+                    }))
+                    .child(label),
+            );
+        }
+        Some(popup)
     }
 
     fn window_wallpaper_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
@@ -1549,26 +1822,32 @@ impl SettingsView {
                 .on_click(cx.listener(move |this, _, _, cx| this.reset_directory(target, cx)))
         });
 
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .px(px(layout::ROW_PAD_X))
-            .py(px(layout::ROW_PAD_Y))
+        row_shell()
+            .child(row_label(
+                theme,
+                t(language, target.title_key()),
+                t(language, target.description_key()),
+            ))
             .child(
                 div()
-                    .w_full()
                     .flex()
                     .flex_row()
+                    .flex_shrink_1()
+                    .min_w(px(0.0))
                     .items_center()
-                    .justify_between()
-                    .gap(px(24.0))
-                    .child(row_label(
-                        theme,
-                        t(language, target.title_key()),
-                        t(language, target.description_key()),
-                    ))
+                    .gap(px(10.0))
+                    .child(
+                        div()
+                            .flex_shrink_1()
+                            .min_w(px(0.0))
+                            .max_w(px(230.0))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis_middle()
+                            .text_size(px(layout::CAPTION))
+                            .text_color(theme.muted)
+                            .child(directory),
+                    )
                     .child(
                         div()
                             .flex()
@@ -1580,16 +1859,6 @@ impl SettingsView {
                             .child(change)
                             .children(reset),
                     ),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis_start()
-                    .text_size(px(layout::CAPTION))
-                    .text_color(theme.muted)
-                    .child(directory),
             )
     }
 
@@ -2044,7 +2313,7 @@ impl SettingsView {
 
     fn recording_format_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
-        let mut control = segmented(theme);
+        let mut control = segmented();
         for (format, label) in [
             (RecordFormat::Mp4, t(language, "format.mp4")),
             (RecordFormat::WebP, t(language, "format.webp")),
@@ -2079,7 +2348,7 @@ impl SettingsView {
 
     fn recording_frame_rate_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
-        let mut control = segmented(theme);
+        let mut control = segmented();
         for (frame_rate, label) in [
             (FrameRate::Fps30, t(language, "fps.30")),
             (FrameRate::Fps60, t(language, "fps.60")),
@@ -2117,7 +2386,7 @@ impl SettingsView {
 
     fn recording_quality_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
-        let mut control = segmented(theme);
+        let mut control = segmented();
         for quality in core_record::RecordQuality::ALL {
             let selected = self.settings.record_quality == quality;
             let label = t(
@@ -2240,20 +2509,12 @@ impl SettingsView {
         let accent = theme.accent;
         let selected = theme.selected;
         let control = theme.control;
+        let control_hover = theme.control_hover;
         let border = theme.border;
         let text = theme.text;
-        let hover = theme.hover;
 
         div().child(
             row_shell()
-                .id(slot.id())
-                .hover(move |style| style.bg(hover))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.recording_shortcut = Some(slot);
-                    this.status = None;
-                    window.focus(&this.focus_handle, cx);
-                    cx.notify();
-                }))
                 .child(row_label(
                     theme,
                     t(language, slot.title_key()),
@@ -2261,17 +2522,28 @@ impl SettingsView {
                 ))
                 .child(
                     div()
+                        .id(slot.id())
                         .h(px(layout::BUTTON_HEIGHT))
                         .px(px(12.0))
                         .rounded(px(layout::BUTTON_RADIUS))
                         .flex()
                         .flex_shrink_0()
                         .items_center()
+                        .cursor_pointer()
                         .bg(if recording { selected } else { control })
                         .border_1()
                         .border_color(if recording { accent } else { border })
                         .text_size(px(layout::CONTROL_TEXT))
                         .text_color(if recording { accent } else { text })
+                        .when(!recording, |pill| {
+                            pill.hover(move |style| style.bg(control_hover))
+                        })
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.recording_shortcut = Some(slot);
+                            this.status = None;
+                            window.focus(&this.focus_handle, cx);
+                            cx.notify();
+                        }))
                         .child(display),
                 ),
         )
@@ -2476,7 +2748,24 @@ impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::for_window(window, self.accent);
         let status = self.status.clone();
-        let titlebar = custom_titlebar().then(|| self.titlebar(&theme, window, cx));
+        #[cfg(target_os = "windows")]
+        let titlebar = Some(self.titlebar(&theme, window, cx));
+        #[cfg(not(target_os = "windows"))]
+        let titlebar: Option<Div> = None;
+        let select_backdrop = self.select_menu.map(|_| {
+            div()
+                .id("settings-select-backdrop")
+                .absolute()
+                .inset_0()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.select_menu = None;
+                        cx.notify();
+                    }),
+                )
+        });
+        let select_popup = self.select_popup(&theme, window, cx);
         div()
             .relative()
             .size_full()
@@ -2488,6 +2777,11 @@ impl Render for SettingsView {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let command =
                     event.keystroke.modifiers.platform || event.keystroke.modifiers.control;
+                if this.select_menu.is_some() && event.keystroke.key == "escape" {
+                    this.select_menu = None;
+                    cx.notify();
+                    return;
+                }
                 // Cmd/Ctrl+W and Cmd/Ctrl+Q close only the settings window;
                 // quitting the menu-bar app stays on the tray menu.
                 if command && matches!(event.keystroke.key.as_str(), "w" | "q") {
@@ -2500,9 +2794,11 @@ impl Render for SettingsView {
                 }
                 this.handle_shortcut_key(event, window, cx);
             }))
-            .child(self.sidebar(&theme, cx))
+            .child(self.sidebar(&theme, window, cx))
             .child(self.content(&theme, cx))
             .children(titlebar)
+            .children(select_backdrop)
+            .children(select_popup)
             .children(status.map(|message| {
                 div()
                     .absolute()
@@ -2569,6 +2865,17 @@ pub fn open_settings(cx: &mut App) {
     }
 }
 
+/// A tray or hotkey capture attempt that dies on macOS TCC would otherwise
+/// be a silent no-op. Surface the reason in the settings window instead of
+/// leaving the user with no visible response.
+#[cfg(target_os = "macos")]
+pub fn report_capture_permission_denied(cx: &mut App) {
+    let language = settings_state::get().language;
+    let message = t(language, "settings.status_capture_permission").to_owned();
+    PENDING_STATUS.with(|slot| *slot.borrow_mut() = Some(message));
+    open_settings(cx);
+}
+
 fn settings_bounds(cx: &App) -> Bounds<Pixels> {
     crate::ui::centered_bounds(cx, layout::WINDOW_WIDTH, layout::WINDOW_HEIGHT)
 }
@@ -2588,6 +2895,7 @@ fn settings_background() -> WindowBackgroundAppearance {
     }
 }
 
+#[cfg(target_os = "windows")]
 fn window_control_button(
     theme: &Theme,
     id: &'static str,
@@ -2792,27 +3100,17 @@ fn background_label_key(background: WindowBackground) -> &'static str {
     }
 }
 
-fn background_id(background: WindowBackground) -> &'static str {
-    match background {
-        WindowBackground::Transparent => "window-background-transparent",
-        WindowBackground::Light => "window-background-light",
-        WindowBackground::Dark => "window-background-dark",
-        WindowBackground::Gradient => "window-background-gradient",
-        WindowBackground::Wallpaper => "window-background-wallpaper",
-    }
-}
-
-fn padding_id(padding: u32) -> &'static str {
+fn padding_key(padding: u32) -> &'static str {
     match padding {
-        0 => "window-padding-0",
-        24 => "window-padding-24",
-        48 => "window-padding-48",
-        _ => "window-padding-96",
+        0 => "padding.0",
+        24 => "padding.24",
+        48 => "padding.48",
+        _ => "padding.96",
     }
 }
 
 fn action_button(theme: &Theme, label: String) -> Div {
-    let hover = theme.hover;
+    let hover = theme.control_hover;
     div()
         .h(px(layout::BUTTON_HEIGHT))
         .px(px(12.0))
@@ -2829,28 +3127,37 @@ fn action_button(theme: &Theme, label: String) -> Div {
         .child(label)
 }
 
-fn segmented(theme: &Theme) -> Div {
-    div()
-        .flex()
-        .flex_row()
-        .flex_shrink_0()
-        .gap(px(2.0))
-        .p(px(2.0))
-        .rounded(px(layout::BUTTON_RADIUS))
-        .bg(theme.segment_track)
-        .border_1()
-        .border_color(theme.border)
+/// Flattened option buttons, following SysVitals: each choice is its own
+/// control, and the selected tile carries the system accent instead of a
+/// nested segmented track.
+fn segmented() -> Div {
+    div().flex().flex_row().flex_shrink_0().gap(px(4.0))
 }
 
 fn segment(theme: &Theme, label: &str, selected: bool) -> Div {
+    let hover = theme.control_hover;
     div()
-        .h(px(layout::BUTTON_HEIGHT - 6.0))
-        .px(px(10.0))
-        .rounded(px(layout::BUTTON_RADIUS - 1.0))
+        .h(px(layout::BUTTON_HEIGHT))
+        .px(px(12.0))
+        .rounded(px(layout::BUTTON_RADIUS))
         .flex()
+        .flex_shrink_0()
         .items_center()
         .text_size(px(layout::CONTROL_TEXT))
-        .text_color(if selected { theme.text } else { theme.muted })
-        .when(selected, |button| button.bg(theme.segment_selected))
+        .text_color(if selected {
+            theme.accent_text
+        } else {
+            theme.text
+        })
+        .bg(if selected {
+            theme.accent
+        } else {
+            theme.control
+        })
+        .border_1()
+        .border_color(if selected { theme.accent } else { theme.border })
+        .when(!selected, |button| {
+            button.hover(move |style| style.bg(hover))
+        })
         .child(label.to_owned())
 }

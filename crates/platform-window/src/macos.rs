@@ -63,6 +63,10 @@ pub(super) fn screen_capture_trusted() -> bool {
     core_graphics::access::ScreenCaptureAccess::default().preflight()
 }
 
+pub(super) fn request_screen_capture_permission() -> bool {
+    core_graphics::access::ScreenCaptureAccess::default().request()
+}
+
 pub(super) fn set_accessory_activation_policy() {
     set_activation_policy(NSApplicationActivationPolicy::Accessory);
 }

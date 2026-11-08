@@ -42,6 +42,20 @@ pub fn screen_capture_trusted() -> bool {
     }
 }
 
+/// Asks macOS to list the app under Screen Recording. The system shows the
+/// prompt only while the app is not yet listed; later calls just return the
+/// current decision. No-op on other platforms.
+pub fn request_screen_capture_permission() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos::request_screen_capture_permission()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
 /// Hides the macOS Dock icon so the app behaves as a menu-bar utility.
 /// No-op on other platforms.
 pub fn set_macos_accessory_activation_policy() {
@@ -72,14 +86,19 @@ pub enum PrivacyPane {
     Accessibility,
 }
 
-/// Opens the matching pane of System Settings. On macOS, requesting the
-/// accessibility pane also triggers the system permission prompt so Capin is
-/// added to the list instead of leaving the user with an empty toggle.
+/// Opens the matching pane of System Settings. On macOS each pane first
+/// triggers its own permission prompt so Capin is added to the list instead
+/// of leaving the user with an empty toggle.
 pub fn open_privacy_settings(pane: PrivacyPane) {
     #[cfg(target_os = "macos")]
     {
-        if pane == PrivacyPane::Accessibility {
-            let _ = macos::request_accessibility_permission();
+        match pane {
+            PrivacyPane::ScreenCapture => {
+                let _ = macos::request_screen_capture_permission();
+            }
+            PrivacyPane::Accessibility => {
+                let _ = macos::request_accessibility_permission();
+            }
         }
         macos::open_privacy_settings(pane);
     }

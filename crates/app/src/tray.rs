@@ -194,7 +194,7 @@ mod imp {
         });
     }
 
-    fn restart(cx: &mut App) {
+    pub fn restart(cx: &mut App) {
         match relaunch() {
             Ok(()) => cx.quit(),
             Err(error) => eprintln!("capin: failed to restart: {error}"),
@@ -224,12 +224,15 @@ mod imp {
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-pub use imp::{install, refresh_menu, replace_windows};
+pub use imp::{install, refresh_menu, replace_windows, restart};
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn install(_cx: &mut gpui_kit::App) -> bool {
     false
 }
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn restart(_cx: &mut gpui_kit::App) {}
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn refresh_menu() {}

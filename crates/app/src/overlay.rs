@@ -148,6 +148,15 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
             Ok(frame) => frame,
             Err(error) => {
                 eprintln!("capin: failed to capture monitor {:?}: {error}", monitor.id);
+                // On macOS a denied screen recording grant makes the menu and
+                // shortcut look dead: the overlays never open and stderr is
+                // invisible for a bundled app. Route that case to settings,
+                // where the permission rows and guidance are visible.
+                #[cfg(target_os = "macos")]
+                if matches!(error, core_capture::CaptureError::PermissionDenied) {
+                    crate::settings::report_capture_permission_denied(cx);
+                    return;
+                }
                 continue;
             }
         };
