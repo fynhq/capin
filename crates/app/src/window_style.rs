@@ -32,6 +32,7 @@ pub fn compose_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> Rgb
             opacity: SHADOW_OPACITY,
         }),
         background: background(&settings),
+        border: None,
     };
 
     match compose_window(&frame, &canvas) {

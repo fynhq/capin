@@ -33,6 +33,15 @@ impl Default for Shadow {
     }
 }
 
+/// A border painted inside the window edges.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Border {
+    /// Border width in physical pixels.
+    pub width: u32,
+    /// Non-premultiplied border color.
+    pub color: [u8; 4],
+}
+
 /// The background painted behind the window.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Background {
@@ -56,6 +65,7 @@ pub struct WindowCanvas {
     pub corner_radius: u32,
     pub shadow: Option<Shadow>,
     pub background: Background,
+    pub border: Option<Border>,
 }
 
 impl Default for WindowCanvas {
@@ -65,6 +75,7 @@ impl Default for WindowCanvas {
             corner_radius: 12,
             shadow: Some(Shadow::default()),
             background: Background::Transparent,
+            border: None,
         }
     }
 }
@@ -131,6 +142,16 @@ pub fn compose_window(
     }
 
     paint_window(&mut pixels, width, padding, window, canvas.corner_radius);
+    if let Some(border) = &canvas.border {
+        paint_border(
+            &mut pixels,
+            width,
+            padding,
+            window,
+            canvas.corner_radius,
+            border,
+        );
+    }
 
     RgbaFrame::from_pixels(width, height, pixels).map_err(|_| ComposeError::SizeOverflow)
 }
@@ -331,6 +352,65 @@ fn paint_window(
     }
 }
 
+fn paint_border(
+    pixels: &mut [u8],
+    canvas_width: u32,
+    padding: u32,
+    window: &RgbaFrame,
+    corner_radius: u32,
+    border: &Border,
+) {
+    let width = border.width;
+    let color_alpha = f32::from(border.color[3]);
+    if width == 0 || color_alpha <= 0.0 {
+        return;
+    }
+    let window_width = window.width();
+    let window_height = window.height();
+    let inner_width = window_width.saturating_sub(width.saturating_mul(2));
+    let inner_height = window_height.saturating_sub(width.saturating_mul(2));
+    if inner_width == 0 || inner_height == 0 {
+        return;
+    }
+    let inner_radius = corner_radius.saturating_sub(width);
+
+    for y in 0..window_height {
+        for x in 0..window_width {
+            let outer = rounded_coverage(x, y, window_width, window_height, corner_radius);
+            if outer <= 0.0 {
+                continue;
+            }
+            let inner = if x >= width
+                && y >= width
+                && x < width + inner_width
+                && y < width + inner_height
+            {
+                rounded_coverage(
+                    x - width,
+                    y - width,
+                    inner_width,
+                    inner_height,
+                    inner_radius,
+                )
+            } else {
+                0.0
+            };
+            let coverage = (outer - inner).clamp(0.0, 1.0);
+            if coverage <= 0.0 {
+                continue;
+            }
+            let target_x = padding + x;
+            let target_y = padding + y;
+            let target_offset = (target_y as usize * canvas_width as usize + target_x as usize) * 4;
+            let alpha = (color_alpha * coverage).round().clamp(0.0, 255.0) as u8;
+            blend_pixel(
+                &mut pixels[target_offset..target_offset + 4],
+                [border.color[0], border.color[1], border.color[2], alpha],
+            );
+        }
+    }
+}
+
 fn rounded_coverage(x: u32, y: u32, width: u32, height: u32, radius: u32) -> f32 {
     if width == 0 || height == 0 {
         return 0.0;
@@ -450,6 +530,7 @@ mod tests {
             corner_radius: 4,
             shadow: None,
             background,
+            border: None,
         }
     }
 
@@ -500,10 +581,52 @@ mod tests {
             corner_radius: 0,
             shadow: None,
             background: Background::Transparent,
+            border: None,
         };
         let output = compose_window(&window, &options).unwrap();
 
         assert_eq!(output.pixel(2, 2).unwrap(), [200, 50, 50, 255]);
+    }
+
+    #[test]
+    fn border_paints_inside_the_window_edges() {
+        let window = solid_frame(10, 10, [200, 50, 50, 255]);
+        let options = WindowCanvas {
+            padding: 0,
+            corner_radius: 0,
+            shadow: None,
+            background: Background::Transparent,
+            border: Some(Border {
+                width: 2,
+                color: [0, 255, 0, 255],
+            }),
+        };
+        let output = compose_window(&window, &options).unwrap();
+
+        assert_eq!(output.pixel(1, 5).unwrap(), [0, 255, 0, 255]);
+        assert_eq!(output.pixel(5, 5).unwrap(), [200, 50, 50, 255]);
+    }
+
+    #[test]
+    fn rounded_border_keeps_transparent_corners() {
+        let window = solid_frame(12, 12, [200, 50, 50, 255]);
+        let options = WindowCanvas {
+            padding: 0,
+            corner_radius: 4,
+            shadow: None,
+            background: Background::Transparent,
+            border: Some(Border {
+                width: 1,
+                color: [0, 0, 0, 255],
+            }),
+        };
+        let output = compose_window(&window, &options).unwrap();
+
+        assert_eq!(output.pixel(0, 0).unwrap()[3], 0);
+        let border = output.pixel(2, 1).unwrap();
+        assert_eq!(border[3], 255);
+        assert!(border[0] < 200, "border should darken the edge pixel");
+        assert_eq!(output.pixel(6, 6).unwrap(), [200, 50, 50, 255]);
     }
 
     #[test]
@@ -514,6 +637,7 @@ mod tests {
             corner_radius: 0,
             shadow: None,
             background: Background::VerticalGradient([10, 20, 30, 255], [40, 50, 60, 255]),
+            border: None,
         };
         let output = compose_window(&window, &options).unwrap();
 
@@ -531,6 +655,7 @@ mod tests {
             corner_radius: 0,
             shadow: None,
             background: Background::Image(background),
+            border: None,
         };
         let output = compose_window(&window, &options).unwrap();
 

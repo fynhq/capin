@@ -13,21 +13,22 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use platform_window::system_accent_hex;
 
+use crate::chrome_theme::ChromeTheme;
+use crate::effects::RegionEffects;
 use crate::settings_state::AnnotationColorTool;
 use crate::{i18n::t, icons, image_util, settings_state};
 
 const TOOLBAR_HEIGHT: f32 = 48.0;
+const COMPACT_TOOLBAR_HEIGHT: f32 = 40.0;
+const COMPACT_TOOLBAR_WIDTH: f32 = 640.0;
+const OPTIONS_PANEL_HEIGHT: f32 = 46.0;
+const INFO_BAR_HEIGHT: f32 = 28.0;
+const INFO_BAR_WIDTH: f32 = 360.0;
 const PADDING: f32 = 16.0;
 const MAX_IMAGE_WIDTH: f32 = 1200.0;
 const MAX_IMAGE_HEIGHT: f32 = 800.0;
 const MIN_WINDOW_WIDTH: f32 = 1024.0;
-const BACKGROUND: u32 = 0x141414FF;
-const TOOLBAR_BG: u32 = 0x202020FF;
-const TEXT: u32 = 0xF2F2F2FF;
-const MUTED: u32 = 0x9A9A9AFF;
-const BORDER: u32 = 0xFFFFFF1A;
-const HOVER: u32 = 0xFFFFFF14;
-const TOOLBAR_SIZE: u32 = 32;
+const TOOLBAR_SIZE: u32 = 30;
 const BADGE_SIZE: u32 = 32;
 
 const STROKE_WIDTHS: [f32; 3] = [2.0, 4.0, 8.0];
@@ -43,7 +44,7 @@ thread_local! {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Tool {
+pub(crate) enum Tool {
     Select,
     Rect,
     Ellipse,
@@ -58,7 +59,7 @@ enum Tool {
 }
 
 impl Tool {
-    const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 11] = [
         Self::Select,
         Self::Rect,
         Self::Ellipse,
@@ -72,7 +73,7 @@ impl Tool {
         Self::Spotlight,
     ];
 
-    fn id(self) -> &'static str {
+    pub(crate) fn id(self) -> &'static str {
         match self {
             Self::Select => "editor-tool-select",
             Self::Rect => "editor-tool-rect",
@@ -88,7 +89,7 @@ impl Tool {
         }
     }
 
-    fn icon(self) -> &'static [u8] {
+    pub(crate) fn icon(self) -> &'static [u8] {
         match self {
             Self::Select => icons::SELECT,
             Self::Rect => icons::RECT,
@@ -104,7 +105,7 @@ impl Tool {
         }
     }
 
-    fn label_key(self) -> &'static str {
+    pub(crate) fn label_key(self) -> &'static str {
         match self {
             Self::Select => "editor.tool.select",
             Self::Rect => "editor.tool.rect",
@@ -120,7 +121,7 @@ impl Tool {
         }
     }
 
-    fn color_tool(self) -> Option<AnnotationColorTool> {
+    pub(crate) fn color_tool(self) -> Option<AnnotationColorTool> {
         match self {
             Self::Rect => Some(AnnotationColorTool::Rect),
             Self::Ellipse => Some(AnnotationColorTool::Ellipse),
@@ -170,19 +171,23 @@ struct TooltipLabel {
 }
 
 impl Render for TooltipLabel {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let chrome = ChromeTheme::for_window(window, None);
         div()
             .px(px(8.0))
             .py(px(4.0))
             .rounded(px(6.0))
-            .bg(rgba(0x000000E6))
+            .bg(chrome.surface_strong)
+            .border_1()
+            .border_color(chrome.border)
+            .shadow(chrome.shadow())
             .text_size(px(11.5))
-            .text_color(rgb(0xFFFFFF))
+            .text_color(chrome.text)
             .child(self.text.clone())
     }
 }
 
-fn tooltip_view(text: String, cx: &mut App) -> AnyView {
+pub(crate) fn tooltip_view(text: String, cx: &mut App) -> AnyView {
     cx.new(|_| TooltipLabel { text: text.into() }).into()
 }
 
@@ -251,7 +256,6 @@ struct EditorSnapshot {
 #[derive(Clone, Copy)]
 struct InlineHost {
     image_rect: Bounds<Pixels>,
-    toolbar_top: f32,
     capture: Option<InlineCapture>,
 }
 
@@ -259,6 +263,9 @@ struct InlineHost {
 pub(crate) struct InlineCapture {
     pub(crate) region: CaptureRegion,
     pub(crate) target: CaptureTarget,
+    pub(crate) scale: f32,
+    pub(crate) monitor_origin: PhysicalPoint,
+    pub(crate) effects: RegionEffects,
 }
 
 struct TextEdit {
@@ -503,9 +510,14 @@ pub(crate) struct EditorView {
     annotation_clipboard: Option<Annotation>,
     text_edit: Option<TextEdit>,
     text_edit_screen: Option<Bounds<Pixels>>,
-    accent: Rgba,
     accent_hex: u32,
-    accent_selected: Rgba,
+    chrome: ChromeTheme,
+    appearance_subscription: Option<Subscription>,
+    effects: RegionEffects,
+    effects_open: bool,
+    more_open: bool,
+    toolbar_hidden: bool,
+    hints_visible: bool,
     status: Option<String>,
     pub(crate) focus_handle: FocusHandle,
     inline: Option<InlineHost>,
@@ -583,13 +595,26 @@ impl EditorView {
             annotation_clipboard: None,
             text_edit: None,
             text_edit_screen: None,
-            accent: rgb(accent_hex),
             accent_hex,
-            accent_selected: rgba((accent_hex << 8) | 0x33),
+            chrome: ChromeTheme::for_appearance(false, Some(accent_hex)),
+            appearance_subscription: None,
+            effects: RegionEffects::default(),
+            effects_open: false,
+            more_open: false,
+            toolbar_hidden: false,
+            hints_visible: false,
             status: None,
             focus_handle: cx.focus_handle(),
             inline: None,
         }
+    }
+
+    pub(crate) fn observe_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.appearance_subscription =
+            Some(cx.observe_window_appearance(window, |this, window, cx| {
+                this.chrome = ChromeTheme::for_window(window, Some(this.accent_hex));
+                cx.notify();
+            }));
     }
 
     /// Builds an editor that paints directly inside the full-screen capture
@@ -598,27 +623,42 @@ impl EditorView {
     pub(crate) fn new_inline(
         frame: RgbaFrame,
         image_rect: Bounds<Pixels>,
-        toolbar_top: f32,
+        initial_tool: Tool,
         capture: InlineCapture,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut view = Self::new(frame, None, cx);
+        view.effects = capture.effects;
+        view.tool = initial_tool;
+        if let Some(color_tool) = initial_tool.color_tool() {
+            view.active_color_tool = color_tool;
+            view.style.color = view.tool_color(color_tool);
+        }
+        match initial_tool {
+            Tool::Rect => {
+                view.style.corner_radius = view.corner_radius;
+                view.style.filled = view.rect_filled;
+            }
+            Tool::Ellipse => view.style.filled = view.ellipse_filled,
+            Tool::Blur => view.style.blur_radius = view.blur_radius,
+            Tool::Spotlight => view.style.spotlight_intensity = view.spotlight_intensity,
+            _ => {}
+        }
         view.inline = Some(InlineHost {
             image_rect,
-            toolbar_top,
             capture: Some(capture),
         });
         view
     }
 
-    fn image_view_rect(&self, window: &Window) -> Bounds<Pixels> {
+    pub(crate) fn image_view_rect(&self, window: &Window) -> Bounds<Pixels> {
         if let Some(inline) = &self.inline {
             return inline.image_rect;
         }
         let viewport = window.viewport_size();
         let available_width = (f32::from(viewport.width) - PADDING * 2.0).max(1.0);
         let available_height =
-            (f32::from(viewport.height) - TOOLBAR_HEIGHT - PADDING * 2.0).max(1.0);
+            (f32::from(viewport.height) - COMPACT_TOOLBAR_HEIGHT - PADDING * 2.0).max(1.0);
         let image_width = self.image_size.width as f32;
         let image_height = self.image_size.height as f32;
         let fit_scale = (available_width / image_width)
@@ -629,15 +669,12 @@ impl EditorView {
         let display_height = image_height * scale;
         let min_x = PADDING + (available_width - display_width).min(0.0);
         let max_x = PADDING + (available_width - display_width).max(0.0);
-        let min_y = TOOLBAR_HEIGHT + PADDING + (available_height - display_height).min(0.0);
-        let max_y = TOOLBAR_HEIGHT + PADDING + (available_height - display_height).max(0.0);
+        let min_y = PADDING + (available_height - display_height).min(0.0);
+        let max_y = PADDING + (available_height - display_height).max(0.0);
         let x = (PADDING + (available_width - display_width) / 2.0 + f32::from(self.view_pan.x))
             .clamp(min_x, max_x);
-        let y = (TOOLBAR_HEIGHT
-            + PADDING
-            + (available_height - display_height) / 2.0
-            + f32::from(self.view_pan.y))
-        .clamp(min_y, max_y);
+        let y = (PADDING + (available_height - display_height) / 2.0 + f32::from(self.view_pan.y))
+            .clamp(min_y, max_y);
         Bounds {
             origin: point(px(x), px(y)),
             size: size(px(display_width), px(display_height)),
@@ -651,6 +688,130 @@ impl EditorView {
 
     fn fit_scale(&self, window: &Window) -> f32 {
         (self.image_scale(window) / self.view_zoom.max(0.01)).max(0.01)
+    }
+
+    /// The selection area inside the displayed image. A composed window frame
+    /// has transparent padding around the captured content, so the info bar and
+    /// toolbar anchor to the content rect, not the padded frame.
+    pub(crate) fn inline_selection_rect(&self, window: &Window) -> Option<Bounds<Pixels>> {
+        let inline = self.inline?;
+        let capture = inline.capture?;
+        let image = self.image_view_rect(window);
+        let scale = capture.scale.max(0.1);
+        let width = capture.region.rect.size.width as f32 / scale;
+        let height = capture.region.rect.size.height as f32 / scale;
+        let center_x = f32::from(image.origin.x) + f32::from(image.size.width) / 2.0;
+        let center_y = f32::from(image.origin.y) + f32::from(image.size.height) / 2.0;
+        Some(Bounds {
+            origin: point(px(center_x - width / 2.0), px(center_y - height / 2.0)),
+            size: size(px(width), px(height)),
+        })
+    }
+
+    fn toolbar_anchor(&self, window: &Window) -> Bounds<Pixels> {
+        self.inline_selection_rect(window)
+            .unwrap_or_else(|| self.image_view_rect(window))
+    }
+
+    fn toolbar_rect(&self, window: &Window) -> Bounds<Pixels> {
+        let anchor = self.toolbar_anchor(window);
+        let window_width = f32::from(window.viewport_size().width);
+        let window_height = f32::from(window.viewport_size().height);
+        let width = COMPACT_TOOLBAR_WIDTH.min((window_width - 16.0).max(120.0));
+        let anchor_left = f32::from(anchor.origin.x);
+        let anchor_top = f32::from(anchor.origin.y);
+        let anchor_right = anchor_left + f32::from(anchor.size.width);
+        let anchor_bottom = anchor_top + f32::from(anchor.size.height);
+        let left = ((anchor_left + anchor_right) / 2.0 - width / 2.0)
+            .clamp(8.0, (window_width - width - 8.0).max(8.0));
+        let below = anchor_bottom + 8.0;
+        let above = anchor_top - COMPACT_TOOLBAR_HEIGHT - 8.0;
+        let top = if below + COMPACT_TOOLBAR_HEIGHT <= window_height - 8.0 {
+            below
+        } else if above >= 8.0 {
+            above
+        } else {
+            (window_height - COMPACT_TOOLBAR_HEIGHT - 8.0).max(8.0)
+        };
+        Bounds {
+            origin: point(px(left), px(top)),
+            size: size(px(width), px(COMPACT_TOOLBAR_HEIGHT)),
+        }
+    }
+
+    fn options_rect(&self, window: &Window, toolbar: Bounds<Pixels>) -> Bounds<Pixels> {
+        let window_width = f32::from(window.viewport_size().width);
+        let width = 560.0_f32.min((window_width - 16.0).max(120.0));
+        let left = f32::from(toolbar.origin.x).clamp(8.0, (window_width - width - 8.0).max(8.0));
+        let mut top = f32::from(toolbar.origin.y) - OPTIONS_PANEL_HEIGHT - 6.0;
+        if top < 8.0 {
+            top = f32::from(toolbar.origin.y) + f32::from(toolbar.size.height) + 6.0;
+        }
+        Bounds {
+            origin: point(px(left), px(top)),
+            size: size(px(width), px(OPTIONS_PANEL_HEIGHT)),
+        }
+    }
+
+    fn info_rect(&self, window: &Window) -> Option<Bounds<Pixels>> {
+        let anchor = self.inline_selection_rect(window)?;
+        let window_width = f32::from(window.viewport_size().width);
+        let window_height = f32::from(window.viewport_size().height);
+        let width = INFO_BAR_WIDTH.min((window_width - 16.0).max(120.0));
+        let left = f32::from(anchor.origin.x).clamp(8.0, (window_width - width - 8.0).max(8.0));
+        let mut top = f32::from(anchor.origin.y) - INFO_BAR_HEIGHT - 8.0;
+        let toolbar = self.toolbar_rect(window);
+        let inside_top = f32::from(anchor.origin.y) + 8.0;
+        let below = f32::from(anchor.origin.y) + f32::from(anchor.size.height) + 8.0;
+        if top < 8.0 {
+            top = inside_top;
+        } else if f32::from(toolbar.origin.y) < f32::from(anchor.origin.y) {
+            top = if below + INFO_BAR_HEIGHT <= window_height - 8.0 {
+                below
+            } else {
+                inside_top
+            };
+        }
+        top = top.clamp(8.0, (window_height - INFO_BAR_HEIGHT - 8.0).max(8.0));
+        Some(Bounds {
+            origin: point(px(left), px(top)),
+            size: size(px(width), px(INFO_BAR_HEIGHT)),
+        })
+    }
+
+    fn more_rect(&self, window: &Window, toolbar: Bounds<Pixels>) -> Bounds<Pixels> {
+        let window_width = f32::from(window.viewport_size().width);
+        let window_height = f32::from(window.viewport_size().height);
+        let width = 196.0;
+        let height = if self.inline.is_some() { 238.0 } else { 172.0 };
+        let left = (f32::from(toolbar.origin.x) + f32::from(toolbar.size.width) - width)
+            .clamp(8.0, (window_width - width - 8.0).max(8.0));
+        let mut top = f32::from(toolbar.origin.y) + f32::from(toolbar.size.height) + 6.0;
+        if top + height > window_height - 8.0 {
+            top = (f32::from(toolbar.origin.y) - height - 6.0).max(8.0);
+        }
+        Bounds {
+            origin: point(px(left), px(top)),
+            size: size(px(width), px(height)),
+        }
+    }
+
+    fn effects_rect(&self, window: &Window) -> Option<Bounds<Pixels>> {
+        let info = self.info_rect(window)?;
+        let window_width = f32::from(window.viewport_size().width);
+        let window_height = f32::from(window.viewport_size().height);
+        let width = 250.0_f32.min((window_width - 16.0).max(120.0));
+        let height = 84.0;
+        let left = f32::from(info.origin.x).clamp(8.0, (window_width - width - 8.0).max(8.0));
+        let mut top = f32::from(info.origin.y) - height - 6.0;
+        if top < 8.0 {
+            top = (f32::from(info.origin.y) + f32::from(info.size.height) + 6.0)
+                .min((window_height - height - 8.0).max(8.0));
+        }
+        Some(Bounds {
+            origin: point(px(left), px(top)),
+            size: size(px(width), px(height)),
+        })
     }
 
     fn zoom_at(
@@ -1341,14 +1502,19 @@ impl EditorView {
         cx.notify();
     }
 
-    fn toolbar(&self, cx: &mut Context<Self>) -> Div {
+    fn toolbar(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> (AnyElement, Option<AnyElement>, Option<AnyElement>) {
         let language = settings_state::get().language;
-        let text = rgb(TEXT);
-        let muted = rgb(MUTED);
-        let accent = self.accent;
-        let accent_selected = self.accent_selected;
-        let hover = rgba(HOVER);
-        let border = rgba(BORDER);
+        let chrome = self.chrome;
+        let text = chrome.text;
+        let muted = chrome.muted;
+        let accent = chrome.accent;
+        let accent_selected = chrome.accent_tint;
+        let hover = chrome.hover;
+        let border = chrome.border;
 
         let mut tools = Vec::new();
         for tool in Tool::ALL {
@@ -1448,11 +1614,7 @@ impl EditorView {
                     .rounded(px(9.0))
                     .bg(rgb((color >> 8) & 0x00FF_FFFF))
                     .border_2()
-                    .border_color(if selected {
-                        rgb(0xFFFFFF)
-                    } else {
-                        rgba(0x00000000)
-                    })
+                    .border_color(if selected { text } else { rgba(0x00000000) })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.commit_text(cx);
                         this.apply_color(color);
@@ -1965,71 +2127,6 @@ impl EditorView {
             config_children.push(group);
         }
 
-        let crop_label = t(language, "editor.crop").to_owned();
-        let crop = div()
-            .id("editor-crop")
-            .tooltip(move |_, cx| tooltip_view(crop_label.clone(), cx))
-            .w(px(26.0))
-            .h(px(26.0))
-            .rounded(px(6.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .when(self.crop_mode, |button| button.bg(accent_selected))
-            .hover(move |style| style.bg(hover))
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_crop(cx)))
-            .child(icons::icon(
-                icons::CROP,
-                16.0,
-                if self.crop_mode { accent } else { muted },
-            ))
-            .into_any_element();
-
-        let rotate_label = t(language, "editor.rotate").to_owned();
-        let rotate = div()
-            .id("editor-rotate")
-            .tooltip(move |_, cx| tooltip_view(rotate_label.clone(), cx))
-            .w(px(26.0))
-            .h(px(26.0))
-            .rounded(px(6.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .hover(move |style| style.bg(hover))
-            .on_click(cx.listener(|this, _, _, cx| this.rotate_canvas(cx)))
-            .child(icons::icon(icons::ROTATE, 16.0, muted))
-            .into_any_element();
-
-        let flip_h_label = t(language, "editor.flip_horizontal").to_owned();
-        let flip_h = div()
-            .id("editor-flip-horizontal")
-            .tooltip(move |_, cx| tooltip_view(flip_h_label.clone(), cx))
-            .w(px(26.0))
-            .h(px(26.0))
-            .rounded(px(6.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .hover(move |style| style.bg(hover))
-            .on_click(cx.listener(|this, _, _, cx| this.flip_canvas(true, cx)))
-            .child(icons::icon(icons::FLIP_H, 16.0, muted))
-            .into_any_element();
-
-        let flip_v_label = t(language, "editor.flip_vertical").to_owned();
-        let flip_v = div()
-            .id("editor-flip-vertical")
-            .tooltip(move |_, cx| tooltip_view(flip_v_label.clone(), cx))
-            .w(px(26.0))
-            .h(px(26.0))
-            .rounded(px(6.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .hover(move |style| style.bg(hover))
-            .on_click(cx.listener(|this, _, _, cx| this.flip_canvas(false, cx)))
-            .child(icons::icon(icons::FLIP_V, 16.0, muted))
-            .into_any_element();
-
         let undo_label = t(language, "editor.undo").to_owned();
         let undo = if self.document.can_undo() || !self.canvas_undo.is_empty() {
             div()
@@ -2151,9 +2248,10 @@ impl EditorView {
             .flex()
             .items_center()
             .justify_center()
-            .hover(move |style| style.bg(hover))
+            .bg(accent)
+            .hover(move |style| style.opacity(0.86))
             .on_click(cx.listener(|this, _, _, cx| this.export(true, cx)))
-            .child(icons::icon(icons::COPY, 18.0, text))
+            .child(icons::icon(icons::COPY, 18.0, chrome.accent_text))
             .into_any_element();
 
         let save_label = t(language, "editor.save").to_owned();
@@ -2172,6 +2270,28 @@ impl EditorView {
             .into_any_element();
 
         let close_label = t(language, "editor.close").to_owned();
+        let inline = self.inline.is_some();
+        let more_label = t(language, "editor.more").to_owned();
+        let more = div()
+            .id("editor-more")
+            .tooltip(move |_, cx| tooltip_view(more_label.clone(), cx))
+            .w(px(TOOLBAR_SIZE as f32))
+            .h(px(TOOLBAR_SIZE as f32))
+            .rounded(px(7.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(self.more_open, |button| button.bg(chrome.selected))
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.more_open = !this.more_open;
+                this.effects_open = false;
+                this.hints_visible = false;
+                cx.notify();
+            }))
+            .child(icons::icon(icons::MORE, 18.0, muted))
+            .into_any_element();
+
         let close = div()
             .id("editor-close")
             .tooltip(move |_, cx| tooltip_view(close_label.clone(), cx))
@@ -2182,119 +2302,635 @@ impl EditorView {
             .items_center()
             .justify_center()
             .hover(move |style| style.bg(hover))
-            .on_click(cx.listener(|_, _, window, _| window.remove_window()))
+            .on_click(cx.listener(|this, _, window, cx| {
+                if this.inline.is_some() {
+                    let handles = cx.window_stack().unwrap_or_default();
+                    cx.defer(move |cx| crate::windows::close_auxiliary(cx, handles));
+                } else {
+                    window.remove_window();
+                }
+            }))
             .child(icons::icon(icons::CLOSE, 18.0, muted))
             .into_any_element();
 
-        let inline_actions = self.inline.and_then(|inline| inline.capture).is_some();
-        let scroll_label = t(language, "menu.scroll_capture").to_owned();
-        let scroll = div()
-            .id("editor-scroll-capture")
-            .tooltip(move |_, cx| tooltip_view(scroll_label.clone(), cx))
-            .w(px(TOOLBAR_SIZE as f32))
-            .h(px(TOOLBAR_SIZE as f32))
-            .rounded(px(7.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .hover(move |style| style.bg(hover))
-            .on_click(cx.listener(|this, _, _, cx| this.start_scroll_capture(cx)))
-            .child(icons::icon(icons::SCROLL, 18.0, text))
-            .into_any_element();
-        let ocr_label = t(language, "editor.ocr").to_owned();
-        let ocr = div()
-            .id("editor-ocr")
-            .tooltip(move |_, cx| tooltip_view(ocr_label.clone(), cx))
-            .w(px(TOOLBAR_SIZE as f32))
-            .h(px(TOOLBAR_SIZE as f32))
-            .rounded(px(7.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .hover(move |style| style.bg(hover))
-            .on_click(cx.listener(|this, _, _, cx| this.start_ocr(cx)))
-            .child(icons::icon(icons::OCR, 18.0, text))
-            .into_any_element();
-        let record_label = t(language, "menu.record").to_owned();
-        let record = div()
-            .id("editor-record")
-            .tooltip(move |_, cx| tooltip_view(record_label.clone(), cx))
-            .w(px(TOOLBAR_SIZE as f32))
-            .h(px(TOOLBAR_SIZE as f32))
-            .rounded(px(7.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .hover(move |style| style.bg(hover))
-            .on_click(cx.listener(|this, _, _, cx| this.start_recording(cx)))
-            .child(icons::icon(icons::RECORDING, 18.0, text))
-            .into_any_element();
-
-        let inline = self.inline.is_some();
-        let inline_toolbar_top = self.inline.map(|host| host.toolbar_top);
-        let mut bar = div()
-            .absolute()
-            .left(px(0.0))
-            .w_full()
-            .h(px(TOOLBAR_HEIGHT))
-            .px(px(12.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .bg(rgb(TOOLBAR_BG))
-            .border_color(border);
-        if let Some(top) = inline_toolbar_top {
-            bar = bar.top(px(top)).border_1().occlude();
-        } else {
-            bar = bar.top(px(0.0)).border_b_1();
-        }
-        bar.child(
+        let bar_rect = self.toolbar_rect(window);
+        let options_rect = self.options_rect(window, bar_rect);
+        let options_right = f32::from(window.viewport_size().width)
+            - (f32::from(bar_rect.origin.x) + f32::from(bar_rect.size.width));
+        let options_panel = (!config_children.is_empty() && !self.toolbar_hidden).then(|| {
             div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.0))
-                .children(tools),
-        )
-        .child(
-            div()
+                .id("editor-options-panel")
+                .absolute()
+                .right(px(options_right.max(8.0)))
+                .top(options_rect.origin.y)
+                .h(options_rect.size.height)
+                .px(px(10.0))
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(6.0))
-                .children(config_children),
-        )
-        .child(
-            div()
+                .rounded(px(chrome.radius))
+                .bg(chrome.surface_strong)
+                .border_1()
+                .border_color(border)
+                .shadow(chrome.shadow())
+                .occlude()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                )
+                .children(config_children)
+                .into_any_element()
+        });
+
+        let more_panel = (self.more_open && !self.toolbar_hidden).then(|| {
+            let more_rect = self.more_rect(window, bar_rect);
+            let mut panel = div()
+                .id("editor-more-panel")
+                .absolute()
+                .left(more_rect.origin.x)
+                .top(more_rect.origin.y)
+                .w(more_rect.size.width)
                 .flex()
-                .flex_row()
-                .items_center()
+                .flex_col()
                 .gap(px(2.0))
-                .when(inline_actions, |group| {
-                    group
-                        .child(scroll)
-                        .child(record)
-                        .child(ocr)
-                        .child(div().w(px(6.0)))
+                .p(px(5.0))
+                .rounded(px(chrome.radius))
+                .bg(chrome.surface_strong)
+                .border_1()
+                .border_color(border)
+                .shadow(chrome.shadow())
+                .occlude()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                );
+
+            if inline {
+                panel = panel
+                    .child(self.more_row(
+                        "editor-more-scroll",
+                        icons::SCROLL,
+                        t(language, "menu.scroll_capture"),
+                        cx,
+                        |this, cx| this.start_scroll_capture(cx),
+                    ))
+                    .child(self.more_row(
+                        "editor-more-record",
+                        icons::RECORDING,
+                        t(language, "menu.record"),
+                        cx,
+                        |this, cx| this.start_recording(cx),
+                    ))
+                    .child(self.more_row(
+                        "editor-more-ocr",
+                        icons::OCR,
+                        t(language, "editor.ocr"),
+                        cx,
+                        |this, cx| this.start_ocr(cx),
+                    ))
+                    .child(div().h(px(1.0)).bg(border));
+            }
+            panel
+                .child(self.more_row(
+                    "editor-more-crop",
+                    icons::CROP,
+                    t(language, "editor.crop"),
+                    cx,
+                    |this, cx| this.toggle_crop(cx),
+                ))
+                .child(self.more_row(
+                    "editor-more-rotate",
+                    icons::ROTATE,
+                    t(language, "editor.rotate"),
+                    cx,
+                    |this, cx| this.rotate_canvas(cx),
+                ))
+                .child(self.more_row(
+                    "editor-more-flip-horizontal",
+                    icons::FLIP_H,
+                    t(language, "editor.flip_horizontal"),
+                    cx,
+                    |this, cx| this.flip_canvas(true, cx),
+                ))
+                .child(self.more_row(
+                    "editor-more-flip-vertical",
+                    icons::FLIP_V,
+                    t(language, "editor.flip_vertical"),
+                    cx,
+                    |this, cx| this.flip_canvas(false, cx),
+                ))
+        });
+
+        let more_panel = more_panel.map(|panel| {
+            let more_rect = self.more_rect(window, bar_rect);
+            div()
+                .id("editor-more-layer")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.more_open = false;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+                .child(panel.h(more_rect.size.height))
+                .into_any_element()
+        });
+
+        if self.toolbar_hidden {
+            return (div().into_any_element(), None, more_panel);
+        }
+
+        let bar = div()
+            .id("editor-toolbar")
+            .absolute()
+            .left(bar_rect.origin.x)
+            .top(bar_rect.origin.y)
+            .w(bar_rect.size.width)
+            .h(bar_rect.size.height)
+            .px(px(8.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .rounded(px(chrome.radius))
+            .bg(chrome.surface)
+            .border_1()
+            .border_color(border)
+            .shadow(chrome.shadow())
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(1.0))
+                    .children(tools)
+                    .child(div().w(px(5.0)))
+                    .child(div().w(px(1.0)).h(px(18.0)).bg(border))
+                    .child(div().w(px(5.0)))
+                    .child(undo)
+                    .child(redo)
+                    .child(delete),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(1.0))
+                    .child(pin)
+                    .child(copy)
+                    .child(save)
+                    .child(more)
+                    .child(close),
+            );
+        (bar.into_any_element(), options_panel, more_panel)
+    }
+
+    fn more_row(
+        &self,
+        id: &'static str,
+        icon: &'static [u8],
+        label: &'static str,
+        cx: &mut Context<Self>,
+        action: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        div()
+            .id(id)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(8.0))
+            .py(px(6.0))
+            .rounded(px(5.0))
+            .hover(|style| style.bg(self.chrome.hover))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.more_open = false;
+                action(this, cx);
+                cx.notify();
+            }))
+            .child(icons::icon(icon, 15.0, self.chrome.icon))
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(self.chrome.text)
+                    .child(label),
+            )
+            .into_any_element()
+    }
+
+    fn region_effects_active(&self) -> bool {
+        self.inline
+            .and_then(|inline| inline.capture)
+            .is_some_and(|capture| {
+                !matches!(capture.target, CaptureTarget::Window(_)) && self.effects.active()
+            })
+    }
+
+    fn region_effects_scale(&self) -> f32 {
+        self.inline
+            .and_then(|inline| inline.capture)
+            .map(|capture| capture.scale)
+            .unwrap_or(1.0)
+            .max(0.1)
+    }
+
+    fn info_bar(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let inline = self.inline?;
+        let capture = inline.capture?;
+        let rect = self.info_rect(window)?;
+        let language = settings_state::get().language;
+        let absolute_x = capture.monitor_origin.x + capture.region.rect.origin.x;
+        let absolute_y = capture.monitor_origin.y + capture.region.rect.origin.y;
+        let width = capture.region.rect.size.width;
+        let height = capture.region.rect.size.height;
+        let mut bar = div()
+            .id("editor-info-bar")
+            .absolute()
+            .left(rect.origin.x)
+            .top(rect.origin.y)
+            .w(rect.size.width)
+            .h(rect.size.height)
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(8.0))
+            .rounded(px(self.chrome.radius))
+            .bg(self.chrome.surface_strong)
+            .border_1()
+            .border_color(self.chrome.border)
+            .shadow(self.chrome.shadow())
+            .text_size(px(11.0))
+            .child(
+                div()
+                    .text_color(self.chrome.muted)
+                    .child(format!("{absolute_x}, {absolute_y}")),
+            )
+            .child(div().w(px(1.0)).h(px(14.0)).bg(self.chrome.separator))
+            .child(
+                div()
+                    .text_color(self.chrome.text)
+                    .child(format!("{width} x {height} px")),
+            );
+
+        if !matches!(capture.target, CaptureTarget::Window(_)) {
+            let effects_active = self.effects.active();
+            bar = bar.child(
+                div()
+                    .id("editor-info-effects")
+                    .px(px(6.0))
+                    .py(px(3.0))
+                    .rounded(px(5.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.0))
+                    .when(self.effects_open, |chip| chip.bg(self.chrome.selected))
+                    .hover(|style| style.bg(self.chrome.hover))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.effects_open = !this.effects_open;
+                        this.more_open = false;
+                        this.hints_visible = false;
+                        cx.notify();
+                    }))
+                    .child(t(language, "overlay.info_effects"))
+                    .when(effects_active, |chip| {
+                        chip.child(
+                            div()
+                                .w(px(5.0))
+                                .h(px(5.0))
+                                .rounded(px(3.0))
+                                .bg(self.chrome.accent),
+                        )
+                    }),
+            );
+        }
+
+        bar = bar.child(
+            div()
+                .id("editor-info-refresh")
+                .tooltip(move |_, cx| {
+                    tooltip_view(t(language, "overlay.info_refresh").to_owned(), cx)
                 })
-                .when(!inline, |group| {
-                    group
-                        .child(crop)
-                        .child(rotate)
-                        .child(flip_h)
-                        .child(flip_v)
-                        .child(div().w(px(6.0)))
-                })
-                .child(undo)
-                .child(redo)
-                .child(delete)
-                .child(div().w(px(6.0)))
-                .child(pin)
-                .child(copy)
-                .child(save)
-                .child(close),
+                .w(px(22.0))
+                .h(px(22.0))
+                .rounded(px(5.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .hover(|style| style.bg(self.chrome.hover))
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| this.refresh_capture(cx)))
+                .child(icons::icon(icons::REFRESH, 14.0, self.chrome.icon)),
+        );
+
+        Some(bar.into_any_element())
+    }
+
+    fn effects_panel(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.effects_open {
+            return None;
+        }
+        let rect = self.effects_rect(window)?;
+        let language = settings_state::get().language;
+        let mut corner_row = div().flex().flex_row().items_center().gap(px(3.0));
+        for radius in [0u32, 8, 16, 24] {
+            let selected_radius = self.effects.corner_radius == radius;
+            let label = if radius == 0 {
+                t(language, "overlay.effects_off").to_owned()
+            } else {
+                radius.to_string()
+            };
+            corner_row = corner_row.child(
+                div()
+                    .id(format!("editor-radius-{radius}"))
+                    .px(px(7.0))
+                    .py(px(3.0))
+                    .rounded(px(5.0))
+                    .when(selected_radius, |chip| chip.bg(self.chrome.accent))
+                    .hover(|style| style.bg(self.chrome.hover))
+                    .text_size(px(10.5))
+                    .text_color(if selected_radius {
+                        self.chrome.accent_text
+                    } else {
+                        self.chrome.muted
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.effects.corner_radius = radius;
+                        cx.notify();
+                    }))
+                    .child(label),
+            );
+        }
+        let shadow = self.effects.shadow;
+        let border = self.effects.border;
+        let panel = div()
+            .id("editor-effects-panel")
+            .absolute()
+            .left(rect.origin.x)
+            .top(rect.origin.y)
+            .w(rect.size.width)
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .p(px(8.0))
+            .rounded(px(self.chrome.radius))
+            .bg(self.chrome.surface_strong)
+            .border_1()
+            .border_color(self.chrome.border)
+            .shadow(self.chrome.shadow())
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .text_color(self.chrome.muted)
+                    .child(t(language, "overlay.effects_corner")),
+            )
+            .child(corner_row)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .id("editor-effects-shadow")
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded(px(5.0))
+                            .when(shadow, |chip| chip.bg(self.chrome.accent))
+                            .hover(|style| style.bg(self.chrome.hover))
+                            .text_size(px(10.5))
+                            .text_color(if shadow {
+                                self.chrome.accent_text
+                            } else {
+                                self.chrome.muted
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.effects.shadow = !this.effects.shadow;
+                                cx.notify();
+                            }))
+                            .child(t(language, "overlay.effects_shadow")),
+                    )
+                    .child(
+                        div()
+                            .id("editor-effects-border")
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded(px(5.0))
+                            .when(border, |chip| chip.bg(self.chrome.accent))
+                            .hover(|style| style.bg(self.chrome.hover))
+                            .text_size(px(10.5))
+                            .text_color(if border {
+                                self.chrome.accent_text
+                            } else {
+                                self.chrome.muted
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.effects.border = !this.effects.border;
+                                cx.notify();
+                            }))
+                            .child(t(language, "overlay.effects_border")),
+                    ),
+            );
+
+        Some(
+            div()
+                .id("editor-effects-layer")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.effects_open = false;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+                .child(panel)
+                .into_any_element(),
         )
+    }
+
+    fn hints_panel(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.hints_visible {
+            return None;
+        }
+        let language = settings_state::get().language;
+        let window_width = f32::from(window.viewport_size().width);
+        let window_height = f32::from(window.viewport_size().height);
+        let width = 340.0_f32.min((window_width - 16.0).max(120.0));
+        let height = 220.0;
+        let panel = div()
+            .id("editor-hints-panel")
+            .absolute()
+            .left(px((window_width - width) / 2.0))
+            .top(px((window_height - height) / 2.0))
+            .w(px(width))
+            .p(px(12.0))
+            .flex()
+            .flex_col()
+            .gap(px(5.0))
+            .rounded(px(self.chrome.radius))
+            .bg(self.chrome.surface_strong)
+            .border_1()
+            .border_color(self.chrome.border)
+            .shadow(self.chrome.shadow())
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(self.chrome.text)
+                    .child(t(language, "editor.hints_title")),
+            );
+        let rows = [
+            (
+                t(language, "editor.hint_key_copy"),
+                t(language, "editor.hint_copy"),
+            ),
+            ("Cmd/Ctrl+S", t(language, "editor.hint_save")),
+            ("Cmd/Ctrl+T", t(language, "editor.hint_pin")),
+            ("Space", t(language, "editor.hint_space")),
+            ("R / F5", t(language, "editor.hint_ratio_refresh")),
+            ("Esc", t(language, "editor.hint_cancel")),
+        ];
+        let mut panel = panel;
+        for (key, description) in rows {
+            panel = panel.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(self.chrome.muted)
+                            .child(key),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(self.chrome.text)
+                            .child(description),
+                    ),
+            );
+        }
+        Some(
+            div()
+                .id("editor-hints-layer")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.hints_visible = false;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+                .child(panel)
+                .into_any_element(),
+        )
+    }
+
+    fn refresh_capture(&mut self, cx: &mut Context<Self>) {
+        let Some(capture) = self.inline.and_then(|inline| inline.capture) else {
+            return;
+        };
+        let mut backend = core_capture::platform_backend();
+        let captured = if settings_state::get().capture_cursor {
+            backend.capture_with_cursor(capture.target)
+        } else {
+            backend.capture(capture.target)
+        };
+        let frame = match captured {
+            Ok(frame) => match capture.target {
+                CaptureTarget::Window(id) => {
+                    crate::window_style::compose_window_capture(id, frame, capture.scale)
+                }
+                _ => frame,
+            },
+            Err(error) => {
+                self.status = Some(format!(
+                    "{} {}",
+                    t(settings_state::get().language, "editor.refresh_failed"),
+                    error
+                ));
+                cx.notify();
+                return;
+            }
+        };
+        let image_size = PhysicalSize::new(frame.width(), frame.height());
+        let size_changed = image_size != self.image_size;
+        self.blur_images = BLUR_RADII.map(|radius| image_util::blurred_image(&frame, radius));
+        self.image = image_util::render_image(&frame);
+        self.frame = frame;
+        self.image_size = image_size;
+        if size_changed {
+            self.document = AnnotationDocument::new(image_size);
+            self.canvas_undo.clear();
+            self.canvas_redo.clear();
+            self.text_edit = None;
+            self.draft = None;
+            self.move_draft = None;
+            self.resize_draft = None;
+            self.crop_mode = false;
+            self.crop_draft = None;
+            self.polyline_draft = None;
+        }
+        if let Some(inline) = self.inline.as_mut() {
+            let scale = capture.scale.max(0.1);
+            let center_x = (capture.region.rect.origin.x as f32
+                + capture.region.rect.size.width as f32 / 2.0)
+                / scale;
+            let center_y = (capture.region.rect.origin.y as f32
+                + capture.region.rect.size.height as f32 / 2.0)
+                / scale;
+            let image_width = self.image_size.width as f32 / scale;
+            let image_height = self.image_size.height as f32 / scale;
+            inline.image_rect = Bounds {
+                origin: point(
+                    px(center_x - image_width / 2.0),
+                    px(center_y - image_height / 2.0),
+                ),
+                size: size(px(image_width), px(image_height)),
+            };
+        }
+        self.status = Some(t(settings_state::get().language, "editor.refreshed").to_owned());
+        cx.notify();
     }
 
     fn start_scroll_capture(&mut self, cx: &mut Context<Self>) {
@@ -2340,6 +2976,11 @@ impl EditorView {
         self.commit_text(cx);
         match rasterize(&self.document, &self.frame) {
             Ok(output) => {
+                let output = if self.region_effects_active() {
+                    self.effects.apply(&output, self.region_effects_scale())
+                } else {
+                    output
+                };
                 if self.pin_target.is_none() {
                     crate::capture_history::record(&output);
                 }
@@ -2361,14 +3002,22 @@ impl EditorView {
         self.commit_text(cx);
         let language = settings_state::get().language;
         let mut messages = Vec::new();
+        let mut copy_ok = false;
+        let mut save_ok = false;
         match rasterize(&self.document, &self.frame) {
             Ok(output) => {
+                let output = if self.region_effects_active() {
+                    self.effects.apply(&output, self.region_effects_scale())
+                } else {
+                    output
+                };
                 crate::pin::remember(&output);
                 let mut exported = false;
                 if copy_only || settings_state::get().copy_to_clipboard {
                     match image_util::copy_png(&output, cx) {
                         Ok(()) => {
                             exported = true;
+                            copy_ok = true;
                             messages.push(t(language, "editor.copied").to_owned());
                         }
                         Err(error) => {
@@ -2387,6 +3036,7 @@ impl EditorView {
                         match image_util::save_png(&output) {
                             Ok(path) => {
                                 exported = true;
+                                save_ok = true;
                                 messages.push(format!(
                                     "{} {}",
                                     t(language, "editor.saved"),
@@ -2410,7 +3060,19 @@ impl EditorView {
             }
         }
         self.status = Some(messages.join(" · "));
-        cx.notify();
+        let close = if copy_only {
+            copy_ok
+        } else if self.pin_target.is_some() {
+            false
+        } else {
+            save_ok
+        };
+        if close && self.inline.is_some() {
+            let handles = cx.window_stack().unwrap_or_default();
+            cx.defer(move |cx| crate::windows::close_auxiliary(cx, handles));
+        } else {
+            cx.notify();
+        }
     }
 }
 
@@ -2535,6 +3197,7 @@ impl EntityInputHandler for EditorView {
 
 impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.chrome = ChromeTheme::for_window(window, Some(self.accent_hex));
         let image_rect = self.image_view_rect(window);
         let scale = f32::from(image_rect.size.width) / self.image_size.width as f32;
         self.text_edit_screen = self.text_edit.as_ref().map(|edit| Bounds {
@@ -2826,12 +3489,34 @@ impl Render for EditorView {
                 .into_any_element()
         });
 
+        let effects_active = self.region_effects_active();
+        let effects_scale = self.region_effects_scale();
+        let image_cursor = if self.tool == Tool::Select {
+            CursorStyle::Arrow
+        } else {
+            CursorStyle::Crosshair
+        };
         let image_layer = div()
             .absolute()
             .left(image_rect.origin.x)
             .top(image_rect.origin.y)
             .w(image_rect.size.width)
             .h(image_rect.size.height)
+            .cursor(image_cursor)
+            .rounded(px(if effects_active {
+                self.effects.corner_radius as f32 * effects_scale
+            } else {
+                0.0
+            }))
+            .when(effects_active && self.effects.border, |layer| {
+                layer.border_1().border_color(rgba(0xFFFFFFCC))
+            })
+            .when(effects_active && self.effects.shadow, |layer| {
+                layer.shadow(vec![
+                    BoxShadow::new(px(0.0), px(8.0 * effects_scale), hsla(0.0, 0.0, 0.0, 0.35))
+                        .blur_radius(px(20.0 * effects_scale)),
+                ])
+            })
             .overflow_hidden()
             .child(
                 img(self.image.clone())
@@ -2883,6 +3568,15 @@ impl Render for EditorView {
                             current: point,
                         });
                         cx.notify();
+                        return;
+                    }
+                    if event.click_count >= 2
+                        && this.inline.is_some()
+                        && this.polyline_draft.is_none()
+                        && this.text_edit.is_none()
+                        && this.document.hit_test(point).is_none()
+                    {
+                        this.export(true, cx);
                         return;
                     }
                     if this.tool == Tool::Polyline {
@@ -3103,31 +3797,41 @@ impl Render for EditorView {
             }));
 
         let inline = self.inline.is_some();
-        let inline_toolbar_top = self.inline.map(|host| host.toolbar_top);
+        let toolbar_rect = self.toolbar_rect(window);
+        let (toolbar, options_panel, more_panel) = self.toolbar(window, cx);
+        let info_bar = if inline {
+            self.info_bar(window, cx)
+        } else {
+            None
+        };
+        let effects_panel = if inline {
+            self.effects_panel(window, cx)
+        } else {
+            None
+        };
+        let hints_panel = self.hints_panel(window, cx);
         let status_toast = status.map(|message| {
-            let mut toast = div()
+            div()
                 .absolute()
                 .right(px(16.0))
+                .top(px((f32::from(toolbar_rect.origin.y) - 38.0).max(0.0)))
                 .px(px(10.0))
                 .py(px(6.0))
                 .rounded(px(6.0))
-                .bg(rgba(0x000000CC))
+                .bg(self.chrome.surface_strong)
+                .border_1()
+                .border_color(self.chrome.border)
+                .shadow(self.chrome.shadow())
                 .text_size(px(12.0))
-                .text_color(rgb(0xFFFFFF))
-                .child(message);
-            if let Some(top) = inline_toolbar_top {
-                toast = toast.top(px((top - 38.0).max(0.0)));
-            } else {
-                toast = toast.bottom(px(16.0));
-            }
-            toast
+                .text_color(self.chrome.text)
+                .child(message)
         });
 
         div()
             .relative()
             .size_full()
-            .when(!inline, |root| root.bg(rgb(BACKGROUND)))
-            .text_color(rgb(TEXT))
+            .when(!inline, |root| root.bg(self.chrome.canvas))
+            .text_color(self.chrome.text)
             .track_focus(&self.focus_handle)
             .when(inline, |root| {
                 root.on_mouse_down(
@@ -3197,7 +3901,7 @@ impl Render for EditorView {
                         this.copy_text_selection(cx);
                         return;
                     }
-                    if command && key == "s" {
+                    if command && key == "s" && !event.keystroke.modifiers.shift {
                         this.commit_text(cx);
                         this.export(false, cx);
                         return;
@@ -3227,9 +3931,42 @@ impl Render for EditorView {
                         return;
                     }
                 }
-                if key == "space" {
-                    this.space_down = true;
+                if key == "escape" && (this.more_open || this.effects_open || this.hints_visible) {
+                    this.more_open = false;
+                    this.effects_open = false;
+                    this.hints_visible = false;
                     cx.notify();
+                    return;
+                }
+                if key == "f1" {
+                    this.hints_visible = !this.hints_visible;
+                    this.more_open = false;
+                    this.effects_open = false;
+                    cx.notify();
+                    return;
+                }
+                if key == "space" {
+                    if this.inline.is_some() {
+                        this.toolbar_hidden = !this.toolbar_hidden;
+                        this.more_open = false;
+                        this.effects_open = false;
+                        this.hints_visible = false;
+                    } else {
+                        this.space_down = true;
+                    }
+                    cx.notify();
+                    return;
+                }
+                if key == "f5" {
+                    this.refresh_capture(cx);
+                    return;
+                }
+                if key == "enter" {
+                    this.export(true, cx);
+                    return;
+                }
+                if command && key == "t" && !event.keystroke.modifiers.shift {
+                    this.pin(cx);
                     return;
                 }
                 if command && key == "0" {
@@ -3263,7 +4000,7 @@ impl Render for EditorView {
                     this.delete_selected_annotation(cx);
                     return;
                 }
-                if command && key == "c" {
+                if command && key == "c" && !event.keystroke.modifiers.shift {
                     if !this.copy_selected_annotation(cx) {
                         this.export(true, cx);
                     }
@@ -3287,7 +4024,7 @@ impl Render for EditorView {
                     }
                     return;
                 }
-                if command && key == "s" {
+                if command && key == "s" && !event.keystroke.modifiers.shift {
                     this.export(false, cx);
                     return;
                 }
@@ -3310,7 +4047,12 @@ impl Render for EditorView {
                 }
             }))
             .child(image_layer)
-            .child(self.toolbar(cx))
+            .children(info_bar)
+            .child(toolbar)
+            .children(options_panel)
+            .children(more_panel)
+            .children(effects_panel)
+            .children(hints_panel)
             .children(status_toast)
             .children((!inline).then(|| {
                 div()
@@ -3318,7 +4060,7 @@ impl Render for EditorView {
                     .left(px(12.0))
                     .bottom(px(8.0))
                     .text_size(px(10.5))
-                    .text_color(rgba(0xFFFFFF66))
+                    .text_color(self.chrome.muted)
                     .child(format!(
                         "{} x {} · {:.0}%",
                         self.image_size.width,
@@ -3374,6 +4116,7 @@ fn open_editor_with_pin(frame: RgbaFrame, pin_target: Option<u64>, cx: &mut App)
     match gpui_kit::open_window(options, cx, move |window, cx| {
         let view = cx.new(|cx| EditorView::new(frame, pin_target, cx));
         let focus = view.read(cx).focus_handle.clone();
+        let _ = view.update(cx, |this, cx| this.observe_appearance(window, cx));
         window.defer(cx, move |window, cx| {
             window.focus(&focus, cx);
             window.activate_window();

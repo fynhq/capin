@@ -13,18 +13,26 @@ use gpui_kit::*;
 use platform_window::{WindowStyle, apply as apply_window_style, system_accent_hex};
 
 use crate::{
-    editor::{EditorView, InlineCapture},
+    chrome_theme::ChromeTheme,
+    editor::{EditorView, InlineCapture, Tool, tooltip_view},
+    effects::RegionEffects,
     i18n::{Language, t},
     icons, image_util, settings_state,
 };
 
 const DIM: u32 = 0x0000004d;
 const FALLBACK_HOVER_ACCENT: u32 = 0x4c9aff;
-const REGION_BORDER: u32 = 0xffffff;
 const MAGNIFIER_SIZE: u32 = 144;
 const MAGNIFIER_SOURCE: u32 = 24;
 const MAGNIFIER_PANEL: f32 = 160.0;
 const MAGNIFIER_PANEL_HEIGHT: f32 = 228.0;
+const INFO_BAR_HEIGHT: f32 = 30.0;
+const INFO_BAR_WIDTH: f32 = 440.0;
+const SELECTION_TOOLBAR_HEIGHT: f32 = 40.0;
+const SELECTION_TOOLBAR_WIDTH: f32 = 520.0;
+const HANDLE_SIZE: f32 = 7.0;
+const REGION_GAP: f32 = 8.0;
+const MIN_REGION_SIZE: i32 = 2;
 
 /// Number of live overlay views. The global capture shortcut uses this to
 /// close an overlay even when keyboard focus was lost, which is the safety
@@ -55,11 +63,99 @@ enum ColorFormat {
     Rgb,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SizeUnit {
+    Px,
+    Dp,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InfoField {
+    X,
+    Y,
+    Width,
+    Height,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResizeHandle {
+    North,
+    South,
+    East,
+    West,
+    NorthEast,
+    NorthWest,
+    SouthEast,
+    SouthWest,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RegionDragKind {
+    Move,
+    Resize(ResizeHandle),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RegionDrag {
+    kind: RegionDragKind,
+    start: PhysicalPoint,
+    original: PhysicalRect,
+}
+
+#[derive(Clone, Debug)]
+struct FieldEdit {
+    field: InfoField,
+    buffer: String,
+    fresh: bool,
+}
+
+#[derive(Clone, Debug)]
+struct Selected {
+    target: CaptureTarget,
+    rect: PhysicalRect,
+    scale: f32,
+    ratio: AspectPreset,
+    unit: SizeUnit,
+    drag: Option<RegionDrag>,
+    edit: Option<FieldEdit>,
+    effects_open: bool,
+    more_open: bool,
+    hints_open: bool,
+    space_down: bool,
+}
+
 impl ColorFormat {
     fn next(self) -> Self {
         match self {
             Self::Hex => Self::Rgb,
             Self::Rgb => Self::Hex,
+        }
+    }
+}
+
+impl SizeUnit {
+    fn next(self) -> Self {
+        match self {
+            Self::Px => Self::Dp,
+            Self::Dp => Self::Px,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Px => "px",
+            Self::Dp => "dp",
+        }
+    }
+}
+
+impl InfoField {
+    fn next(self) -> Self {
+        match self {
+            Self::X => Self::Y,
+            Self::Y => Self::Width,
+            Self::Width => Self::Height,
+            Self::Height => Self::X,
         }
     }
 }
@@ -91,15 +187,6 @@ impl AspectPreset {
             .position(|preset| *preset == self)
             .unwrap_or(0);
         Self::ALL[(index + 1) % Self::ALL.len()]
-    }
-
-    fn id(self) -> &'static str {
-        match self {
-            Self::Free => "overlay-ratio-free",
-            Self::Square => "overlay-ratio-square",
-            Self::FourThree => "overlay-ratio-four-three",
-            Self::SixteenNine => "overlay-ratio-sixteen-nine",
-        }
     }
 }
 
@@ -139,9 +226,8 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
         }
     };
 
-    let accent = system_accent_hex()
-        .map(rgb)
-        .unwrap_or(rgb(FALLBACK_HOVER_ACCENT));
+    let accent_hex = system_accent_hex().unwrap_or(FALLBACK_HOVER_ACCENT);
+    let accent = rgb(accent_hex);
     let mut opened = 0usize;
     for monitor in monitors {
         let frame = match backend.capture(CaptureTarget::Monitor(monitor.id)) {
@@ -179,9 +265,20 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
                 eprintln!("capin: failed to style overlay: {error}");
             }
             let view = cx.new(|cx| {
-                OverlayView::new(session, image, frame, scale, window_size, accent, mode, cx)
+                OverlayView::new(
+                    session,
+                    image,
+                    frame,
+                    scale,
+                    window_size,
+                    accent,
+                    accent_hex,
+                    mode,
+                    cx,
+                )
             });
             let focus = view.read(cx).focus_handle.clone();
+            view.update(cx, |this, cx| this.observe_appearance(window, cx));
             window.defer(cx, move |window, cx| {
                 window.focus(&focus, cx);
                 window.activate_window();
@@ -259,15 +356,21 @@ struct OverlayView {
     scale: f32,
     window_size: Size<Pixels>,
     cursor: Option<PhysicalPoint>,
-    suppress_capture: bool,
     accent: Rgba,
+    accent_hex: u32,
+    chrome: ChromeTheme,
+    appearance_subscription: Option<Subscription>,
     mode: OverlayMode,
     aspect: AspectPreset,
     color_format: ColorFormat,
     shift_held: bool,
+    alt_held: bool,
+    element_targeting: bool,
     magnifier: Option<Magnifier>,
     copy_serial: u64,
     copied: bool,
+    notice: Option<String>,
+    notice_serial: u64,
     element_cache: HashMap<WindowId, Vec<PhysicalRect>>,
     element_window: Option<WindowId>,
     element_candidates: Vec<PhysicalRect>,
@@ -275,6 +378,8 @@ struct OverlayView {
     focus_handle: FocusHandle,
     editor: Option<Entity<EditorView>>,
     editing_rect: Option<Bounds<Pixels>>,
+    selected: Option<Selected>,
+    effects: RegionEffects,
 }
 
 impl OverlayView {
@@ -286,6 +391,7 @@ impl OverlayView {
         scale: f32,
         window_size: Size<Pixels>,
         accent: Rgba,
+        accent_hex: u32,
         mode: OverlayMode,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -299,15 +405,21 @@ impl OverlayView {
             scale,
             window_size,
             cursor: None,
-            suppress_capture: false,
             accent,
+            accent_hex,
+            chrome: ChromeTheme::for_appearance(false, Some(accent_hex)),
+            appearance_subscription: None,
             mode,
             aspect: AspectPreset::Free,
             color_format: ColorFormat::Hex,
             shift_held: false,
+            alt_held: false,
+            element_targeting: true,
             magnifier: None,
             copy_serial: 0,
             copied: false,
+            notice: None,
+            notice_serial: 0,
             element_cache: HashMap::new(),
             element_window: None,
             element_candidates: Vec::new(),
@@ -315,7 +427,17 @@ impl OverlayView {
             focus_handle: cx.focus_handle(),
             editor: None,
             editing_rect: None,
+            selected: None,
+            effects: RegionEffects::default(),
         }
+    }
+
+    fn observe_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.appearance_subscription =
+            Some(cx.observe_window_appearance(window, |this, window, cx| {
+                this.chrome = ChromeTheme::for_window(window, Some(this.accent_hex));
+                cx.notify();
+            }));
     }
 
     fn to_physical(&self, position: Point<Pixels>) -> PhysicalPoint {
@@ -410,7 +532,7 @@ impl OverlayView {
     }
 
     fn refresh_auto_target(&mut self, point: PhysicalPoint) {
-        if self.session.is_dragging() {
+        if self.session.is_dragging() || self.selected.is_some() {
             return;
         }
         let Some(window) = self.session.hovered_window().cloned() else {
@@ -420,6 +542,12 @@ impl OverlayView {
             self.session.set_hovered_element(None);
             return;
         };
+        if !self.element_targeting {
+            self.element_candidates.clear();
+            self.element_level = 0;
+            self.session.set_hovered_element(None);
+            return;
+        }
         if self.element_window != Some(window.id) {
             self.element_cache
                 .entry(window.id)
@@ -474,7 +602,10 @@ impl OverlayView {
     }
 
     fn update_magnifier(&mut self) {
-        if self.mode != OverlayMode::Capture {
+        if self.mode != OverlayMode::Capture
+            || self.selected.is_some()
+            || (!self.session.is_dragging() && !self.alt_held)
+        {
             self.magnifier = None;
             return;
         }
@@ -534,22 +665,31 @@ impl OverlayView {
         cx.notify();
     }
 
-    fn window_label(&self, window: &WindowInfo, rect: Bounds<Pixels>) -> Div {
+    fn window_label(
+        &self,
+        window: &WindowInfo,
+        rect: Bounds<Pixels>,
+        element: Option<PhysicalRect>,
+    ) -> Div {
         let language = settings_state::get().language;
         let title = if window.title.is_empty() {
             t(language, "overlay.untitled")
         } else {
             window.title.as_str()
         };
-        let kind = if self.session.hovered_element().is_some() {
-            t(language, "overlay.element")
-        } else {
-            t(language, "overlay.window")
+        let (kind, width, height) = match element {
+            Some(element) => (
+                t(language, "overlay.element"),
+                element.size.width,
+                element.size.height,
+            ),
+            None => (
+                t(language, "overlay.window"),
+                window.bounds.size.width,
+                window.bounds.size.height,
+            ),
         };
-        let text = format!(
-            "{title} · {kind}  {}x{}",
-            window.bounds.size.width, window.bounds.size.height
-        );
+        let text = format!("{title} · {kind}  {width}x{height}");
         let top = (f32::from(rect.origin.y) - 26.0).max(0.0);
 
         div()
@@ -558,70 +698,25 @@ impl OverlayView {
             .top(px(top))
             .px_2()
             .py_1()
-            .bg(rgba(0x000000cc))
-            .rounded_lg()
+            .bg(self.chrome.surface)
+            .border_1()
+            .border_color(self.chrome.border)
+            .shadow(self.chrome.shadow())
+            .rounded(px(6.0))
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap(px(6.0))
-                    .child(icons::icon(icons::WINDOW, 12.0, rgb(0xffffff)))
+                    .child(icons::icon(icons::WINDOW, 12.0, self.chrome.icon))
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .text_color(rgb(0xffffff))
+                            .text_color(self.chrome.text)
                             .child(text),
                     ),
             )
-    }
-
-    fn ratio_bar(&self, language: Language, cx: &mut Context<Self>) -> Div {
-        let mut control = div()
-            .id("overlay-ratios")
-            .occlude()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_, _, _, cx| cx.stop_propagation()),
-            )
-            .flex()
-            .flex_row()
-            .gap(px(2.0))
-            .p(px(3.0))
-            .rounded(px(9.0))
-            .bg(rgba(0x000000CC));
-        for preset in AspectPreset::ALL {
-            let selected = self.aspect == preset;
-            control = control.child(
-                div()
-                    .id(preset.id())
-                    .px(px(10.0))
-                    .py(px(5.0))
-                    .rounded(px(7.0))
-                    .when(selected, |button| button.bg(self.accent))
-                    .text_size(px(11.5))
-                    .text_color(if selected {
-                        rgb(0xFFFFFF)
-                    } else {
-                        rgba(0xFFFFFFAA)
-                    })
-                    .hover(move |style| style.bg(rgba(0xFFFFFF1A)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.aspect = preset;
-                        this.session.set_aspect_ratio(preset.ratio());
-                        cx.notify();
-                    }))
-                    .child(preset.label(language)),
-            );
-        }
-        div()
-            .absolute()
-            .top(px(16.0))
-            .left(px(0.0))
-            .right(px(0.0))
-            .flex()
-            .justify_center()
-            .child(control)
     }
 
     fn magnifier_panel(
@@ -658,7 +753,7 @@ impl OverlayView {
                     .top(px(0.0))
                     .w(px(1.0))
                     .h(px(MAGNIFIER_SIZE as f32))
-                    .bg(rgba(0xFFFFFF30)),
+                    .bg(self.chrome.grid),
             );
             lines.push(
                 div()
@@ -667,7 +762,7 @@ impl OverlayView {
                     .top(px(offset))
                     .w(px(MAGNIFIER_SIZE as f32))
                     .h(px(1.0))
-                    .bg(rgba(0xFFFFFF30)),
+                    .bg(self.chrome.grid),
             );
         }
         lines.push(
@@ -677,7 +772,7 @@ impl OverlayView {
                 .top(px(0.0))
                 .w(px(1.0))
                 .h(px(MAGNIFIER_SIZE as f32))
-                .bg(rgba(0xFFFFFFAA)),
+                .bg(self.chrome.grid_strong),
         );
         lines.push(
             div()
@@ -686,7 +781,7 @@ impl OverlayView {
                 .top(px(MAGNIFIER_SIZE as f32 / 2.0))
                 .w(px(MAGNIFIER_SIZE as f32))
                 .h(px(1.0))
-                .bg(rgba(0xFFFFFFAA)),
+                .bg(self.chrome.grid_strong),
         );
 
         let color_row = color.map(|(red, green, blue)| {
@@ -705,7 +800,9 @@ impl OverlayView {
                         .rounded(px(3.0))
                         .bg(rgb((u32::from(red) << 16)
                             | (u32::from(green) << 8)
-                            | u32::from(blue))),
+                            | u32::from(blue)))
+                        .border_1()
+                        .border_color(self.chrome.border),
                 )
                 .child(
                     div()
@@ -716,9 +813,9 @@ impl OverlayView {
                             div()
                                 .text_size(px(11.0))
                                 .text_color(if hex_active {
-                                    rgb(0xFFFFFF)
+                                    self.chrome.text
                                 } else {
-                                    rgba(0xFFFFFF88)
+                                    self.chrome.muted
                                 })
                                 .child(hex),
                         )
@@ -726,9 +823,9 @@ impl OverlayView {
                             div()
                                 .text_size(px(10.0))
                                 .text_color(if hex_active {
-                                    rgba(0xFFFFFF88)
+                                    self.chrome.muted
                                 } else {
-                                    rgb(0xFFFFFF)
+                                    self.chrome.text
                                 })
                                 .child(format!("rgb({rgb_text})")),
                         ),
@@ -740,7 +837,7 @@ impl OverlayView {
             let height = (f32::from(selection.size.height) * self.scale).round() as u32;
             div()
                 .text_size(px(10.0))
-                .text_color(rgba(0xFFFFFF99))
+                .text_color(self.chrome.muted)
                 .child(format!("{width} x {height}"))
         });
 
@@ -754,10 +851,11 @@ impl OverlayView {
                 .flex_col()
                 .gap(px(6.0))
                 .p(px(8.0))
-                .rounded(px(10.0))
-                .bg(rgba(0x000000E6))
+                .rounded(px(self.chrome.radius))
+                .bg(self.chrome.surface_strong)
                 .border_1()
-                .border_color(rgba(0xFFFFFF33))
+                .border_color(self.chrome.border)
+                .shadow(self.chrome.shadow())
                 .child(
                     div()
                         .relative()
@@ -766,7 +864,7 @@ impl OverlayView {
                         .rounded(px(6.0))
                         .overflow_hidden()
                         .border_1()
-                        .border_color(rgba(0xFFFFFF44))
+                        .border_color(self.chrome.border)
                         .child(
                             img(magnifier.image.clone())
                                 .absolute()
@@ -781,30 +879,38 @@ impl OverlayView {
                 .child(
                     div()
                         .text_size(px(9.5))
-                        .text_color(rgba(0xFFFFFF77))
+                        .text_color(self.chrome.muted)
                         .child(t(language, "overlay.magnifier_hint")),
                 ),
         )
     }
 
-    fn finish(&mut self, outcome: SelectionOutcome, window: &mut Window, cx: &mut Context<Self>) {
+    fn finish_mode(
+        &mut self,
+        outcome: SelectionOutcome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let monitor_bounds = self.session.monitor_bounds();
-        let window_region = |id| -> Option<CaptureRegion> {
-            let window = self.session.window(id)?;
-            let clipped = window.bounds.intersection(monitor_bounds)?;
-            Some(CaptureRegion::new(
-                self.session.monitor(),
-                PhysicalRect::new(
-                    clipped.origin.x - monitor_bounds.origin.x,
-                    clipped.origin.y - monitor_bounds.origin.y,
-                    clipped.size.width,
-                    clipped.size.height,
-                ),
-            ))
-        };
         let region = match &outcome {
             SelectionOutcome::Region(region) => Some(*region),
-            SelectionOutcome::Window(id) => window_region(*id),
+            SelectionOutcome::Window(id) => {
+                let Some(window) = self.session.window(*id) else {
+                    return;
+                };
+                let Some(clipped) = window.bounds.intersection(monitor_bounds) else {
+                    return;
+                };
+                Some(CaptureRegion::new(
+                    self.session.monitor(),
+                    PhysicalRect::new(
+                        clipped.origin.x - monitor_bounds.origin.x,
+                        clipped.origin.y - monitor_bounds.origin.y,
+                        clipped.size.width,
+                        clipped.size.height,
+                    ),
+                ))
+            }
             SelectionOutcome::Monitor(_) => Some(CaptureRegion::new(
                 self.session.monitor(),
                 PhysicalRect::new(0, 0, monitor_bounds.size.width, monitor_bounds.size.height),
@@ -819,29 +925,12 @@ impl OverlayView {
             return;
         }
         let handles = cx.window_stack().unwrap_or_default();
-        let current = window.window_handle();
-        let view = cx.entity();
-        let scale = match &outcome {
-            SelectionOutcome::Window(id) => self
-                .session
-                .window(*id)
-                .map(|window| window.scale.get())
-                .unwrap_or(self.scale),
-            _ => self.scale,
-        };
         let target = match outcome {
             SelectionOutcome::Monitor(id) => CaptureTarget::Monitor(id),
             SelectionOutcome::Window(id) => CaptureTarget::Window(id),
             SelectionOutcome::Region(region) => CaptureTarget::Region(region),
         };
         let mode = self.mode;
-        let window_size = self.window_size;
-        if mode == OverlayMode::Capture {
-            // Keep the hole visible while the capture and editor entity are
-            // being prepared; `pointer_released` has already consumed the drag.
-            self.editing_rect = region.and_then(|region| self.local_rect(region.rect));
-        }
-
         cx.defer(move |cx| {
             if mode == OverlayMode::Record {
                 crate::windows::close_auxiliary(cx, handles);
@@ -861,93 +950,1398 @@ impl OverlayView {
                     Ok(frame) => crate::ocr::start(frame, cx),
                     Err(error) => eprintln!("capin: capture failed: {error}"),
                 }
+            }
+        });
+        let _ = window;
+    }
+
+    fn begin_selection(&mut self, outcome: SelectionOutcome, cx: &mut Context<Self>) {
+        let monitor = self.session.monitor_bounds();
+        let (target, rect, scale, ratio) = match outcome {
+            SelectionOutcome::Region(region) => (
+                CaptureTarget::Region(region),
+                region.rect,
+                self.scale,
+                self.aspect,
+            ),
+            SelectionOutcome::Window(id) => {
+                let Some(window) = self.session.window(id) else {
+                    return;
+                };
+                let Some(clipped) = window.bounds.intersection(monitor) else {
+                    return;
+                };
+                (
+                    CaptureTarget::Window(id),
+                    PhysicalRect::new(
+                        clipped.origin.x - monitor.origin.x,
+                        clipped.origin.y - monitor.origin.y,
+                        clipped.size.width,
+                        clipped.size.height,
+                    ),
+                    window.scale.get(),
+                    AspectPreset::Free,
+                )
+            }
+            SelectionOutcome::Monitor(id) => (
+                CaptureTarget::Monitor(id),
+                PhysicalRect::new(0, 0, monitor.size.width, monitor.size.height),
+                self.scale,
+                AspectPreset::Free,
+            ),
+        };
+        self.session.cancel();
+        self.selected = Some(Selected {
+            target,
+            rect,
+            scale,
+            ratio,
+            unit: SizeUnit::Px,
+            drag: None,
+            edit: None,
+            effects_open: false,
+            more_open: false,
+            hints_open: false,
+            space_down: false,
+        });
+        self.aspect = ratio;
+        self.magnifier = None;
+        cx.notify();
+    }
+
+    fn selection_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.selected
+            .as_ref()
+            .and_then(|selected| self.local_rect(selected.rect))
+    }
+
+    fn selection_region(&self, selected: &Selected) -> CaptureRegion {
+        CaptureRegion::new(self.session.monitor(), selected.rect)
+    }
+
+    fn capture_selected_raw(&self) -> Result<RgbaFrame, String> {
+        let selected = self
+            .selected
+            .as_ref()
+            .ok_or_else(|| "no selection".to_owned())?;
+        let frame = match selected.target {
+            CaptureTarget::Window(id) => {
+                let mut backend = platform_backend();
+                let captured = if settings_state::get().capture_cursor {
+                    backend.capture_with_cursor(CaptureTarget::Window(id))
+                } else {
+                    backend.capture(CaptureTarget::Window(id))
+                };
+                let frame = captured.map_err(|error| error.to_string())?;
+                crate::window_style::compose_window_capture(id, frame, selected.scale)
+            }
+            _ if !settings_state::get().capture_cursor => self.crop_selected_frame(selected)?,
+            _ => {
+                let mut backend = platform_backend();
+                backend
+                    .capture_with_cursor(selected.target)
+                    .map_err(|error| error.to_string())?
+            }
+        };
+        Ok(frame)
+    }
+
+    fn crop_selected_frame(&self, selected: &Selected) -> Result<RgbaFrame, String> {
+        let frame = &*self.frame;
+        let rect = selected.rect;
+        let left = rect.origin.x.max(0) as u32;
+        let top = rect.origin.y.max(0) as u32;
+        let width = rect.size.width.min(frame.width().saturating_sub(left));
+        let height = rect.size.height.min(frame.height().saturating_sub(top));
+        if width == 0 || height == 0 {
+            return Err("empty selection".to_owned());
+        }
+        let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
+        for y in 0..height {
+            let row = frame
+                .row(top + y)
+                .ok_or_else(|| "selection outside the frame".to_owned())?;
+            let start = left as usize * 4;
+            let end = start + width as usize * 4;
+            let slice = row
+                .get(start..end)
+                .ok_or_else(|| "selection outside the frame".to_owned())?;
+            pixels.extend_from_slice(slice);
+        }
+        RgbaFrame::from_pixels(width, height, pixels).map_err(|error| error.to_string())
+    }
+
+    fn selected_output(&self) -> Result<RgbaFrame, String> {
+        let selected = self
+            .selected
+            .as_ref()
+            .ok_or_else(|| "no selection".to_owned())?;
+        let frame = self.capture_selected_raw()?;
+        if matches!(selected.target, CaptureTarget::Window(_)) {
+            Ok(frame)
+        } else {
+            Ok(self.effects.apply(&frame, selected.scale))
+        }
+    }
+
+    fn open_editor_for_selected(
+        &mut self,
+        tool: Tool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.commit_edit(cx);
+        let Some(selected) = self.selected.clone() else {
+            return;
+        };
+        let frame = match self.capture_selected_raw() {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.set_notice(error, cx);
                 return;
             }
+        };
+        let region = self.selection_region(&selected);
+        let scale = selected.scale;
+        let center_x = (region.rect.origin.x as f32 + region.rect.size.width as f32 / 2.0) / scale;
+        let center_y = (region.rect.origin.y as f32 + region.rect.size.height as f32 / 2.0) / scale;
+        let image_width = frame.width() as f32 / scale;
+        let image_height = frame.height() as f32 / scale;
+        let editor_rect = Bounds {
+            origin: point(
+                px(center_x - image_width / 2.0),
+                px(center_y - image_height / 2.0),
+            ),
+            size: size(px(image_width), px(image_height)),
+        };
+        let monitor_origin = self.session.monitor_bounds().origin;
+        let inline_capture = InlineCapture {
+            region,
+            target: selected.target,
+            scale,
+            monitor_origin,
+            effects: self.effects,
+        };
+        self.editing_rect = Some(editor_rect);
+        self.selected = None;
+        self.session.cancel();
 
-            // The capture overlay turned into the inline editor. Only the
-            // overlay on the selection's monitor survives; the other
-            // monitors' overlays disappear before the frozen frame is
-            // replaced by the editable one.
+        let handles = cx.window_stack().unwrap_or_default();
+        let current = window.window_handle();
+        let view = cx.entity();
+        cx.defer(move |cx| {
             crate::windows::close_auxiliary_except(cx, handles, current);
-
-            let Some(region) = region else {
-                return;
-            };
-            let mut backend = platform_backend();
-            let captured = if settings_state::get().capture_cursor {
-                backend.capture_with_cursor(target)
-            } else {
-                backend.capture(target)
-            };
-            let frame = match captured {
-                Ok(frame) => match target {
-                    CaptureTarget::Window(id) => {
-                        crate::window_style::compose_window_capture(id, frame, scale)
-                    }
-                    _ => frame,
-                },
-                Err(error) => {
-                    eprintln!("capin: capture failed: {error}");
-                    let _ = view.update(cx, |this, cx| {
-                        this.editing_rect = None;
-                        cx.notify();
-                    });
-                    return;
-                }
-            };
-            let center_x =
-                (region.rect.origin.x as f32 + region.rect.size.width as f32 / 2.0) / scale;
-            let center_y =
-                (region.rect.origin.y as f32 + region.rect.size.height as f32 / 2.0) / scale;
-            let image_width = frame.width() as f32 / scale;
-            let image_height = frame.height() as f32 / scale;
-            let editor_rect = Bounds {
-                origin: point(
-                    px(center_x - image_width / 2.0),
-                    px(center_y - image_height / 2.0),
-                ),
-                size: size(px(image_width), px(image_height)),
-            };
-            let window_height = f32::from(window_size.height);
-            let top = f32::from(editor_rect.origin.y);
-            let bottom = top + image_height;
-            let toolbar_top = if bottom + 8.0 + 48.0 <= window_height {
-                bottom + 8.0
-            } else if top >= 56.0 {
-                top - 56.0
-            } else {
-                (window_height - 48.0).max(0.0)
-            };
-            let inline_capture = InlineCapture { region, target };
             let _ = current.update(cx, |_, window, cx| {
                 let editor = view.update(cx, |this, cx| {
                     let editor = cx.new(|cx| {
-                        EditorView::new_inline(frame, editor_rect, toolbar_top, inline_capture, cx)
+                        EditorView::new_inline(frame, editor_rect, tool, inline_capture, cx)
                     });
                     this.editor = Some(editor.clone());
                     this.editing_rect = Some(editor_rect);
-                    this.session.cancel();
                     cx.notify();
                     editor
                 });
                 let focus = editor.read(cx).focus_handle.clone();
                 window.focus(&focus, cx);
+                let _ = editor.update(cx, |this, cx| this.observe_appearance(window, cx));
             });
         });
+    }
+
+    fn copy_selected(&mut self, cx: &mut Context<Self>) {
+        self.commit_edit(cx);
+        let output = match self.selected_output() {
+            Ok(output) => output,
+            Err(error) => {
+                self.set_notice(error, cx);
+                return;
+            }
+        };
+        match image_util::copy_png(&output, cx) {
+            Ok(()) => {
+                crate::pin::remember(&output);
+                crate::capture_history::record(&output);
+                self.close_overlays(cx);
+            }
+            Err(error) => self.set_notice(error.to_string(), cx),
+        }
+    }
+
+    fn save_selected(&mut self, cx: &mut Context<Self>) {
+        self.commit_edit(cx);
+        let output = match self.selected_output() {
+            Ok(output) => output,
+            Err(error) => {
+                self.set_notice(error, cx);
+                return;
+            }
+        };
+        match image_util::save_png(&output) {
+            Ok(_) => {
+                crate::pin::remember(&output);
+                crate::capture_history::record(&output);
+                self.close_overlays(cx);
+            }
+            Err(error) => self.set_notice(error.to_string(), cx),
+        }
+    }
+
+    fn pin_selected(&mut self, cx: &mut Context<Self>) {
+        self.commit_edit(cx);
+        let output = match self.selected_output() {
+            Ok(output) => output,
+            Err(error) => {
+                self.set_notice(error, cx);
+                return;
+            }
+        };
+        crate::capture_history::record(&output);
+        crate::pin::open_frame(output, cx);
+        self.close_overlays(cx);
+    }
+
+    fn ocr_selected(&mut self, cx: &mut Context<Self>) {
+        self.commit_edit(cx);
+        let frame = match self.capture_selected_raw() {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.set_notice(error, cx);
+                return;
+            }
+        };
+        self.close_overlays(cx);
+        cx.defer(move |cx| crate::ocr::start(frame, cx));
+    }
+
+    fn scroll_selected(&mut self, cx: &mut Context<Self>) {
+        self.commit_edit(cx);
+        let Some(selected) = self.selected.clone() else {
+            return;
+        };
+        let frame = match self.capture_selected_raw() {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.set_notice(error, cx);
+                return;
+            }
+        };
+        let region = self.selection_region(&selected);
+        self.close_overlays(cx);
+        cx.defer(move |cx| crate::scroll::open_session(region, frame, cx));
+    }
+
+    fn record_selected(&mut self, cx: &mut Context<Self>) {
+        self.commit_edit(cx);
+        let Some(selected) = self.selected.clone() else {
+            return;
+        };
+        self.close_overlays(cx);
+        cx.defer(move |cx| crate::record::start(selected.target, cx));
+    }
+
+    fn refresh_frame(&mut self, cx: &mut Context<Self>) {
+        let mut backend = platform_backend();
+        let monitor = self.session.monitor();
+        let frame = match backend.capture(CaptureTarget::Monitor(monitor)) {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.set_notice(error.to_string(), cx);
+                return;
+            }
+        };
+        let image = image_util::render_image(&frame);
+        self.frame = Arc::new(frame);
+        self.image = image;
+        self.magnifier = None;
+        self.element_cache.clear();
+        self.element_window = None;
+        self.element_candidates.clear();
+        self.element_level = 0;
+        let monitor_bounds = self.session.monitor_bounds();
+        if let Ok(windows) = backend.windows() {
+            self.session =
+                SelectionSession::with_scale(monitor, monitor_bounds, windows, self.scale);
+            self.session.set_window_targeting(true);
+            self.session.set_aspect_ratio(self.aspect.ratio());
+        }
+        cx.notify();
+    }
+
+    fn set_notice(&mut self, message: String, cx: &mut Context<Self>) {
+        self.notice = Some(message);
+        self.notice_serial = self.notice_serial.wrapping_add(1);
+        let serial = self.notice_serial;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1800))
+                .await;
+            this.update(cx, |this, cx| {
+                if this.notice_serial == serial {
+                    this.notice = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn info_rect(&self) -> Option<Bounds<Pixels>> {
+        let selection = self.selection_bounds()?;
+        let window_width = f32::from(self.window_size.width);
+        let window_height = f32::from(self.window_size.height);
+        let width = INFO_BAR_WIDTH.min(window_width - 16.0);
+        let left =
+            (f32::from(selection.origin.x)).clamp(8.0, (window_width - width - 8.0).max(8.0));
+        let mut top = f32::from(selection.origin.y) - INFO_BAR_HEIGHT - REGION_GAP;
+        let toolbar = self.toolbar_rect();
+        let inside_top = f32::from(selection.origin.y) + REGION_GAP;
+        let below = f32::from(selection.origin.y) + f32::from(selection.size.height) + REGION_GAP;
+        if top < 8.0 {
+            top = inside_top;
+        } else if toolbar
+            .is_some_and(|toolbar| f32::from(toolbar.origin.y) < f32::from(selection.origin.y))
+        {
+            top = if below + INFO_BAR_HEIGHT <= window_height - 8.0 {
+                below
+            } else {
+                inside_top
+            };
+        }
+        top = top.clamp(8.0, (window_height - INFO_BAR_HEIGHT - 8.0).max(8.0));
+        Some(Bounds {
+            origin: point(px(left), px(top)),
+            size: size(px(width), px(INFO_BAR_HEIGHT)),
+        })
+    }
+
+    fn toolbar_rect(&self) -> Option<Bounds<Pixels>> {
+        let selection = self.selection_bounds()?;
+        let window_width = f32::from(self.window_size.width);
+        let window_height = f32::from(self.window_size.height);
+        let width = SELECTION_TOOLBAR_WIDTH.min(window_width - 16.0);
+        let selection_left = f32::from(selection.origin.x);
+        let selection_top = f32::from(selection.origin.y);
+        let selection_right = selection_left + f32::from(selection.size.width);
+        let selection_bottom = selection_top + f32::from(selection.size.height);
+        let left = ((selection_left + selection_right) / 2.0 - width / 2.0)
+            .clamp(8.0, (window_width - width - 8.0).max(8.0));
+        let below = selection_bottom + REGION_GAP;
+        let above = selection_top - SELECTION_TOOLBAR_HEIGHT - REGION_GAP;
+        let top = if below + SELECTION_TOOLBAR_HEIGHT <= window_height - 8.0 {
+            below
+        } else if above >= 8.0 {
+            above
+        } else {
+            (window_height - SELECTION_TOOLBAR_HEIGHT - 8.0).max(8.0)
+        };
+        Some(Bounds {
+            origin: point(px(left), px(top)),
+            size: size(px(width), px(SELECTION_TOOLBAR_HEIGHT)),
+        })
+    }
+
+    fn info_field_value(&self, selected: &Selected, field: InfoField) -> i64 {
+        let monitor = self.session.monitor_bounds().origin;
+        let scale = selected.scale;
+        let value = match field {
+            InfoField::X => monitor.x + selected.rect.origin.x,
+            InfoField::Y => monitor.y + selected.rect.origin.y,
+            InfoField::Width => selected.rect.size.width as i32,
+            InfoField::Height => selected.rect.size.height as i32,
+        };
+        match selected.unit {
+            SizeUnit::Px => i64::from(value),
+            SizeUnit::Dp => (value as f32 / scale).round() as i64,
+        }
+    }
+
+    fn info_field_display(&self, selected: &Selected, field: InfoField) -> String {
+        self.info_field_value(selected, field).to_string()
+    }
+
+    fn start_edit(&mut self, field: InfoField, cx: &mut Context<Self>) {
+        let Some(selected) = self.selected.as_ref() else {
+            return;
+        };
+        let value = self.info_field_display(selected, field);
+        let Some(selected) = self.selected.as_mut() else {
+            return;
+        };
+        selected.edit = Some(FieldEdit {
+            field,
+            buffer: value,
+            fresh: true,
+        });
+        selected.effects_open = false;
+        selected.more_open = false;
+        cx.notify();
+    }
+
+    fn cancel_edit(&mut self, cx: &mut Context<Self>) {
+        if let Some(selected) = self.selected.as_mut() {
+            selected.edit = None;
+            cx.notify();
+        }
+    }
+
+    fn commit_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(selected) = self.selected.clone() else {
+            return;
+        };
+        let Some(edit) = selected.edit.clone() else {
+            return;
+        };
+        let Ok(value) = edit.buffer.trim().parse::<f32>() else {
+            self.cancel_edit(cx);
+            return;
+        };
+        let scale = selected.scale.max(0.1);
+        let physical = match selected.unit {
+            SizeUnit::Px => value.round() as i32,
+            SizeUnit::Dp => (value * scale).round() as i32,
+        };
+        let monitor = self.session.monitor_bounds();
+        let mut rect = selected.rect;
+        let ratio = selected.ratio.ratio();
+        match edit.field {
+            InfoField::X => {
+                rect.origin.x = (physical - monitor.origin.x).clamp(
+                    0,
+                    (monitor.size.width as i32 - rect.size.width as i32).max(0),
+                );
+            }
+            InfoField::Y => {
+                rect.origin.y = (physical - monitor.origin.y).clamp(
+                    0,
+                    (monitor.size.height as i32 - rect.size.height as i32).max(0),
+                );
+            }
+            InfoField::Width => {
+                let mut width = physical.max(MIN_REGION_SIZE);
+                let max_width = monitor.size.width as i32 - rect.origin.x;
+                width = width.clamp(MIN_REGION_SIZE, max_width.max(MIN_REGION_SIZE));
+                rect.size.width = width as u32;
+                if let Some(ratio) = ratio {
+                    let height = (width as f32 / ratio).round().max(1.0) as i32;
+                    let max_height = monitor.size.height as i32 - rect.origin.y;
+                    rect.size.height =
+                        height.clamp(MIN_REGION_SIZE, max_height.max(MIN_REGION_SIZE)) as u32;
+                }
+            }
+            InfoField::Height => {
+                let mut height = physical.max(MIN_REGION_SIZE);
+                let max_height = monitor.size.height as i32 - rect.origin.y;
+                height = height.clamp(MIN_REGION_SIZE, max_height.max(MIN_REGION_SIZE));
+                rect.size.height = height as u32;
+                if let Some(ratio) = ratio {
+                    let width = (height as f32 * ratio).round().max(1.0) as i32;
+                    let max_width = monitor.size.width as i32 - rect.origin.x;
+                    rect.size.width =
+                        width.clamp(MIN_REGION_SIZE, max_width.max(MIN_REGION_SIZE)) as u32;
+                }
+            }
+        }
+        if let Some(selected) = self.selected.as_mut() {
+            selected.rect = rect;
+            selected.edit = None;
+            selected.target =
+                CaptureTarget::Region(CaptureRegion::new(self.session.monitor(), rect));
+        }
+        cx.notify();
+    }
+
+    fn next_edit_field(&mut self, cx: &mut Context<Self>) {
+        let Some(selected) = self.selected.clone() else {
+            return;
+        };
+        let Some(edit) = selected.edit.clone() else {
+            return;
+        };
+        self.commit_edit(cx);
+        self.start_edit(edit.field.next(), cx);
+    }
+
+    fn cycle_ratio(&mut self, cx: &mut Context<Self>) {
+        let next = self.aspect.next();
+        self.aspect = next;
+        if let Some(selected) = self.selected.as_mut() {
+            selected.ratio = next;
+            selected.edit = None;
+            if let Some(ratio) = next.ratio() {
+                let monitor = self.session.monitor_bounds();
+                selected.rect = fit_ratio_rect(selected.rect, ratio, monitor.size);
+                selected.target = CaptureTarget::Region(CaptureRegion::new(
+                    self.session.monitor(),
+                    selected.rect,
+                ));
+            }
+        }
+        self.session.set_aspect_ratio(next.ratio());
+        cx.notify();
+    }
+
+    fn nudge_selection(
+        &mut self,
+        dx: i32,
+        dy: i32,
+        shrink: bool,
+        expand: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(selected) = self.selected.as_mut() else {
+            return;
+        };
+        let monitor = self.session.monitor_bounds();
+        let mut rect = selected.rect;
+        if shrink || expand {
+            let delta_x = if dx > 0 { dx } else { -dx };
+            let delta_y = if dy > 0 { dy } else { -dy };
+            if shrink {
+                rect.size.width = rect.size.width.saturating_sub(delta_x as u32);
+                rect.size.height = rect.size.height.saturating_sub(delta_y as u32);
+            } else {
+                rect.size.width = rect.size.width.saturating_add(delta_x as u32);
+                rect.size.height = rect.size.height.saturating_add(delta_y as u32);
+            }
+        } else {
+            rect.origin.x += dx;
+            rect.origin.y += dy;
+        }
+        rect = clamp_to_monitor(rect, monitor.size);
+        selected.rect = rect;
+        selected.target = CaptureTarget::Region(CaptureRegion::new(self.session.monitor(), rect));
+        cx.notify();
+    }
+
+    fn update_region_drag(
+        &mut self,
+        point: PhysicalPoint,
+        modifiers: Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(selected) = self.selected.as_mut() else {
+            return;
+        };
+        let Some(drag) = selected.drag else {
+            return;
+        };
+        let monitor = self.session.monitor_bounds();
+        let local = PhysicalPoint::new(point.x - monitor.origin.x, point.y - monitor.origin.y);
+        let rect = match drag.kind {
+            RegionDragKind::Move => {
+                let mut dx = local.x - (drag.start.x - monitor.origin.x);
+                let mut dy = local.y - (drag.start.y - monitor.origin.y);
+                if modifiers.shift {
+                    if dx.abs() >= dy.abs() {
+                        dy = 0;
+                    } else {
+                        dx = 0;
+                    }
+                }
+                let mut rect = drag.original;
+                rect.origin.x += dx;
+                rect.origin.y += dy;
+                clamp_to_monitor(rect, monitor.size)
+            }
+            RegionDragKind::Resize(handle) => resize_rect(
+                drag.original,
+                handle,
+                local,
+                selected.ratio.ratio(),
+                modifiers.shift,
+                modifiers.alt,
+                monitor.size,
+            ),
+        };
+        selected.rect = rect;
+        selected.target = CaptureTarget::Region(CaptureRegion::new(self.session.monitor(), rect));
+        cx.notify();
+    }
+
+    fn finish_region_drag(&mut self, cx: &mut Context<Self>) {
+        if let Some(selected) = self.selected.as_mut() {
+            let changed = selected
+                .drag
+                .is_some_and(|drag| drag.original != selected.rect);
+            selected.drag = None;
+            if changed {
+                selected.target = CaptureTarget::Region(CaptureRegion::new(
+                    self.session.monitor(),
+                    selected.rect,
+                ));
+            }
+        }
+        cx.notify();
+    }
+
+    fn info_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let selected = self.selected.as_ref()?;
+        let rect = self.info_rect()?;
+        let language = settings_state::get().language;
+        let mut bar = div()
+            .id("overlay-info-bar")
+            .absolute()
+            .left(rect.origin.x)
+            .top(rect.origin.y)
+            .w(rect.size.width)
+            .h(rect.size.height)
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0))
+            .px(px(7.0))
+            .rounded(px(self.chrome.radius))
+            .bg(self.chrome.surface_strong)
+            .border_1()
+            .border_color(self.chrome.border)
+            .shadow(self.chrome.shadow())
+            .cursor(CursorStyle::Arrow)
+            .text_size(px(11.0));
+
+        for field in [
+            InfoField::X,
+            InfoField::Y,
+            InfoField::Width,
+            InfoField::Height,
+        ] {
+            let label = match field {
+                InfoField::X => "X",
+                InfoField::Y => "Y",
+                InfoField::Width => "W",
+                InfoField::Height => "H",
+            };
+            let editing = selected
+                .edit
+                .as_ref()
+                .is_some_and(|edit| edit.field == field);
+            let value = if let Some(edit) = selected.edit.as_ref().filter(|_| editing) {
+                format!("{}|", edit.buffer)
+            } else {
+                self.info_field_display(selected, field)
+            };
+            bar = bar.child(
+                div()
+                    .id(format!("overlay-info-{label}"))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(3.0))
+                    .px(px(4.0))
+                    .py(px(3.0))
+                    .rounded(px(5.0))
+                    .when(editing, |chip| chip.bg(self.chrome.selected))
+                    .hover(|style| style.bg(self.chrome.hover))
+                    .cursor_text()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.start_edit(field, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(div().text_color(self.chrome.muted).child(label))
+                    .child(div().text_color(self.chrome.text).child(value)),
+            );
+        }
+
+        let unit_label = selected.unit.label();
+        let ratio_label = selected.ratio.label(language);
+        bar = bar
+            .child(
+                div()
+                    .id("overlay-info-unit")
+                    .px(px(5.0))
+                    .py(px(3.0))
+                    .rounded(px(5.0))
+                    .text_color(self.chrome.muted)
+                    .hover(|style| style.bg(self.chrome.hover))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(selected) = this.selected.as_mut() {
+                            selected.unit = selected.unit.next();
+                            selected.edit = None;
+                        }
+                        cx.notify();
+                    }))
+                    .child(unit_label),
+            )
+            .child(div().w(px(1.0)).h(px(14.0)).bg(self.chrome.separator))
+            .child(
+                div()
+                    .id("overlay-info-ratio")
+                    .px(px(6.0))
+                    .py(px(3.0))
+                    .rounded(px(5.0))
+                    .text_color(self.chrome.text)
+                    .hover(|style| style.bg(self.chrome.hover))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| this.cycle_ratio(cx)))
+                    .child(ratio_label),
+            );
+
+        if !matches!(selected.target, CaptureTarget::Window(_)) {
+            let effects_active = self.effects.active();
+            bar = bar.child(
+                div()
+                    .id("overlay-info-effects")
+                    .px(px(6.0))
+                    .py(px(3.0))
+                    .rounded(px(5.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.0))
+                    .when(selected.effects_open, |chip| chip.bg(self.chrome.selected))
+                    .hover(|style| style.bg(self.chrome.hover))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(selected) = this.selected.as_mut() {
+                            selected.effects_open = !selected.effects_open;
+                            selected.more_open = false;
+                            selected.hints_open = false;
+                            selected.edit = None;
+                        }
+                        cx.notify();
+                    }))
+                    .child(t(language, "overlay.info_effects"))
+                    .when(effects_active, |chip| {
+                        chip.child(
+                            div()
+                                .w(px(5.0))
+                                .h(px(5.0))
+                                .rounded(px(3.0))
+                                .bg(self.chrome.accent),
+                        )
+                    }),
+            );
+        }
+
+        bar = bar.child(
+            div()
+                .id("overlay-info-refresh")
+                .tooltip(move |_, cx| {
+                    tooltip_view(t(language, "overlay.info_refresh").to_owned(), cx)
+                })
+                .w(px(22.0))
+                .h(px(22.0))
+                .rounded(px(5.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .hover(|style| style.bg(self.chrome.hover))
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| this.refresh_frame(cx)))
+                .child(icons::icon(icons::REFRESH, 14.0, self.chrome.icon)),
+        );
+
+        Some(bar.into_any_element())
+    }
+
+    fn effects_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let selected = self.selected.as_ref()?;
+        if !selected.effects_open {
+            return None;
+        }
+        let info = self.info_rect()?;
+        let language = settings_state::get().language;
+        let width = 246.0_f32.min(f32::from(self.window_size.width) - 16.0);
+        let height = 84.0;
+        let left = f32::from(info.origin.x).clamp(
+            8.0,
+            (f32::from(self.window_size.width) - width - 8.0).max(8.0),
+        );
+        let mut top = f32::from(info.origin.y) - height - 6.0;
+        if top < 8.0 {
+            top = (f32::from(info.origin.y) + f32::from(info.size.height) + 6.0)
+                .min((f32::from(self.window_size.height) - height - 8.0).max(8.0));
+        }
+
+        let mut corner_row = div().flex().flex_row().items_center().gap(px(3.0));
+        for radius in [0u32, 8, 16, 24] {
+            let selected_radius = self.effects.corner_radius == radius;
+            let label = if radius == 0 {
+                t(language, "overlay.effects_off").to_owned()
+            } else {
+                radius.to_string()
+            };
+            corner_row = corner_row.child(
+                div()
+                    .id(format!("overlay-radius-{radius}"))
+                    .px(px(7.0))
+                    .py(px(3.0))
+                    .rounded(px(5.0))
+                    .when(selected_radius, |chip| chip.bg(self.chrome.accent))
+                    .hover(|style| style.bg(self.chrome.hover))
+                    .text_size(px(10.5))
+                    .text_color(if selected_radius {
+                        self.chrome.accent_text
+                    } else {
+                        self.chrome.muted
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.effects.corner_radius = radius;
+                        cx.notify();
+                    }))
+                    .child(label),
+            );
+        }
+
+        let shadow = self.effects.shadow;
+        let border = self.effects.border;
+        let panel = div()
+            .id("overlay-effects-panel")
+            .absolute()
+            .left(px(left))
+            .top(px(top))
+            .w(px(width))
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .p(px(8.0))
+            .rounded(px(self.chrome.radius))
+            .bg(self.chrome.surface_strong)
+            .border_1()
+            .border_color(self.chrome.border)
+            .shadow(self.chrome.shadow())
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .text_color(self.chrome.muted)
+                    .child(t(language, "overlay.effects_corner")),
+            )
+            .child(corner_row)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .id("overlay-effects-shadow")
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded(px(5.0))
+                            .when(shadow, |chip| chip.bg(self.chrome.accent))
+                            .hover(|style| style.bg(self.chrome.hover))
+                            .text_size(px(10.5))
+                            .text_color(if shadow {
+                                self.chrome.accent_text
+                            } else {
+                                self.chrome.muted
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.effects.shadow = !this.effects.shadow;
+                                cx.notify();
+                            }))
+                            .child(t(language, "overlay.effects_shadow")),
+                    )
+                    .child(
+                        div()
+                            .id("overlay-effects-border")
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded(px(5.0))
+                            .when(border, |chip| chip.bg(self.chrome.accent))
+                            .hover(|style| style.bg(self.chrome.hover))
+                            .text_size(px(10.5))
+                            .text_color(if border {
+                                self.chrome.accent_text
+                            } else {
+                                self.chrome.muted
+                            })
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.effects.border = !this.effects.border;
+                                cx.notify();
+                            }))
+                            .child(t(language, "overlay.effects_border")),
+                    ),
+            );
+
+        Some(
+            div()
+                .id("overlay-effects-layer")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        if let Some(selected) = this.selected.as_mut() {
+                            selected.effects_open = false;
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+                .child(panel)
+                .into_any_element(),
+        )
+    }
+
+    fn selection_toolbar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let selected = self.selected.as_ref()?;
+        if selected.space_down {
+            return None;
+        }
+        let rect = self.toolbar_rect()?;
+        let language = settings_state::get().language;
+        let mut tools = div().flex().flex_row().items_center().gap(px(1.0));
+        for tool in Tool::ALL.into_iter().filter(|tool| *tool != Tool::Select) {
+            let label = t(language, tool.label_key()).to_owned();
+            tools = tools.child(
+                div()
+                    .id(format!("overlay-tool-{}", tool.id()))
+                    .tooltip(move |_, cx| tooltip_view(label.clone(), cx))
+                    .w(px(30.0))
+                    .h(px(30.0))
+                    .rounded(px(6.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .hover(|style| style.bg(self.chrome.hover))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_editor_for_selected(tool, window, cx);
+                    }))
+                    .child(icons::icon(tool.icon(), 17.0, self.chrome.icon)),
+            );
+        }
+
+        let mut actions = div().flex().flex_row().items_center().gap(px(1.0));
+        let pin_label = t(language, "editor.pin").to_owned();
+        actions = actions.child(
+            div()
+                .id("overlay-action-pin")
+                .tooltip(move |_, cx| tooltip_view(pin_label.clone(), cx))
+                .w(px(30.0))
+                .h(px(30.0))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .hover(|style| style.bg(self.chrome.hover))
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| this.pin_selected(cx)))
+                .child(icons::icon(icons::PIN, 17.0, self.chrome.icon)),
+        );
+        let copy_label = t(language, "editor.copy").to_owned();
+        actions = actions.child(
+            div()
+                .id("overlay-action-copy")
+                .tooltip(move |_, cx| tooltip_view(copy_label.clone(), cx))
+                .w(px(30.0))
+                .h(px(30.0))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(self.chrome.accent)
+                .hover(|style| style.opacity(0.86))
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| this.copy_selected(cx)))
+                .child(icons::icon(icons::COPY, 17.0, self.chrome.accent_text)),
+        );
+        let save_label = t(language, "editor.save").to_owned();
+        actions = actions.child(
+            div()
+                .id("overlay-action-save")
+                .tooltip(move |_, cx| tooltip_view(save_label.clone(), cx))
+                .w(px(30.0))
+                .h(px(30.0))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .hover(|style| style.bg(self.chrome.hover))
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| this.save_selected(cx)))
+                .child(icons::icon(icons::SAVE, 17.0, self.chrome.icon)),
+        );
+        let more_label = t(language, "editor.more").to_owned();
+        actions = actions.child(
+            div()
+                .id("overlay-action-more")
+                .tooltip(move |_, cx| tooltip_view(more_label.clone(), cx))
+                .w(px(30.0))
+                .h(px(30.0))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(selected.more_open, |button| button.bg(self.chrome.selected))
+                .hover(|style| style.bg(self.chrome.hover))
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(selected) = this.selected.as_mut() {
+                        selected.more_open = !selected.more_open;
+                        selected.effects_open = false;
+                        selected.hints_open = false;
+                        selected.edit = None;
+                    }
+                    cx.notify();
+                }))
+                .child(icons::icon(icons::MORE, 17.0, self.chrome.icon)),
+        );
+        let close_label = t(language, "editor.close").to_owned();
+        actions = actions.child(
+            div()
+                .id("overlay-action-close")
+                .tooltip(move |_, cx| tooltip_view(close_label.clone(), cx))
+                .w(px(30.0))
+                .h(px(30.0))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .hover(|style| style.bg(self.chrome.hover))
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| this.close_overlays(cx)))
+                .child(icons::icon(icons::CLOSE, 17.0, self.chrome.muted)),
+        );
+
+        Some(
+            div()
+                .id("overlay-toolbar")
+                .absolute()
+                .left(rect.origin.x)
+                .top(rect.origin.y)
+                .w(rect.size.width)
+                .h(rect.size.height)
+                .occlude()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                )
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .px(px(8.0))
+                .rounded(px(self.chrome.radius))
+                .bg(self.chrome.surface)
+                .border_1()
+                .border_color(self.chrome.border)
+                .cursor(CursorStyle::Arrow)
+                .shadow(self.chrome.shadow())
+                .child(tools)
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(1.0))
+                        .child(actions),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn more_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let selected = self.selected.as_ref()?;
+        if !selected.more_open || selected.space_down {
+            return None;
+        }
+        let toolbar = self.toolbar_rect()?;
+        let language = settings_state::get().language;
+        let width = 180.0;
+        let height = 106.0;
+        let left = (f32::from(toolbar.origin.x) + f32::from(toolbar.size.width) - width).clamp(
+            8.0,
+            (f32::from(self.window_size.width) - width - 8.0).max(8.0),
+        );
+        let mut top = f32::from(toolbar.origin.y) + f32::from(toolbar.size.height) + 6.0;
+        if top + height > f32::from(self.window_size.height) - 8.0 {
+            top = (f32::from(toolbar.origin.y) - height - 6.0).max(8.0);
+        }
+        let items = [
+            (
+                "overlay-more-scroll",
+                icons::SCROLL,
+                t(language, "menu.scroll_capture"),
+                0,
+            ),
+            (
+                "overlay-more-record",
+                icons::RECORDING,
+                t(language, "menu.record"),
+                1,
+            ),
+            ("overlay-more-ocr", icons::OCR, t(language, "editor.ocr"), 2),
+        ];
+        let mut panel = div()
+            .id("overlay-more-panel")
+            .absolute()
+            .left(px(left))
+            .top(px(top))
+            .w(px(width))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .p(px(5.0))
+            .rounded(px(self.chrome.radius))
+            .bg(self.chrome.surface_strong)
+            .border_1()
+            .border_color(self.chrome.border)
+            .shadow(self.chrome.shadow())
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            );
+        for (id, icon, label, action) in items {
+            panel = panel.child(
+                div()
+                    .id(id)
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(7.0))
+                    .px(px(7.0))
+                    .py(px(6.0))
+                    .rounded(px(5.0))
+                    .hover(|style| style.bg(self.chrome.hover))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(selected) = this.selected.as_mut() {
+                            selected.more_open = false;
+                        }
+                        match action {
+                            0 => this.scroll_selected(cx),
+                            1 => this.record_selected(cx),
+                            _ => this.ocr_selected(cx),
+                        }
+                    }))
+                    .child(icons::icon(icon, 15.0, self.chrome.icon))
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(self.chrome.text)
+                            .child(label),
+                    ),
+            );
+        }
+        Some(
+            div()
+                .id("overlay-more-layer")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        if let Some(selected) = this.selected.as_mut() {
+                            selected.more_open = false;
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+                .child(panel)
+                .into_any_element(),
+        )
+    }
+
+    fn hints_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let selected = self.selected.as_ref()?;
+        if !selected.hints_open {
+            return None;
+        }
+        let language = settings_state::get().language;
+        let width = 330.0_f32.min(f32::from(self.window_size.width) - 16.0);
+        let height = 154.0;
+        let left = (f32::from(self.window_size.width) - width) / 2.0;
+        let top = (f32::from(self.window_size.height) - height) / 2.0;
+        let rows = [
+            (
+                t(language, "editor.hint_key_copy"),
+                t(language, "editor.hint_copy"),
+            ),
+            ("Cmd/Ctrl+S", t(language, "editor.hint_save")),
+            ("Cmd/Ctrl+T", t(language, "editor.hint_pin")),
+            ("Space", t(language, "editor.hint_space")),
+            ("R / F5", t(language, "editor.hint_ratio_refresh")),
+            ("Esc", t(language, "editor.hint_cancel")),
+        ];
+        let mut panel = div()
+            .id("overlay-hints-panel")
+            .absolute()
+            .left(px(left))
+            .top(px(top))
+            .w(px(width))
+            .flex()
+            .flex_col()
+            .gap(px(5.0))
+            .p(px(12.0))
+            .rounded(px(self.chrome.radius))
+            .bg(self.chrome.surface_strong)
+            .border_1()
+            .border_color(self.chrome.border)
+            .shadow(self.chrome.shadow())
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(self.chrome.text)
+                    .child(t(language, "editor.hints_title")),
+            );
+        for (key, description) in rows {
+            panel = panel.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(self.chrome.muted)
+                            .child(key),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(self.chrome.text)
+                            .child(description),
+                    ),
+            );
+        }
+        Some(
+            div()
+                .id("overlay-hints-layer")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        if let Some(selected) = this.selected.as_mut() {
+                            selected.hints_open = false;
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+                .child(panel)
+                .into_any_element(),
+        )
+    }
+
+    fn selection_handles(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some(selection) = self.selection_bounds() else {
+            return Vec::new();
+        };
+        let mut handles = Vec::new();
+        for (handle, position) in handle_positions(selection) {
+            let cursor = match handle {
+                ResizeHandle::North | ResizeHandle::South => CursorStyle::ResizeUpDown,
+                ResizeHandle::East | ResizeHandle::West => CursorStyle::ResizeLeftRight,
+                ResizeHandle::NorthEast | ResizeHandle::SouthWest => {
+                    CursorStyle::ResizeUpRightDownLeft
+                }
+                ResizeHandle::NorthWest | ResizeHandle::SouthEast => {
+                    CursorStyle::ResizeUpLeftDownRight
+                }
+            };
+            handles.push(
+                div()
+                    .id(format!("overlay-handle-{:?}", handle))
+                    .absolute()
+                    .left(px(f32::from(position.x) - HANDLE_SIZE / 2.0))
+                    .top(px(f32::from(position.y) - HANDLE_SIZE / 2.0))
+                    .w(px(HANDLE_SIZE))
+                    .h(px(HANDLE_SIZE))
+                    .rounded(px(1.5))
+                    .bg(self.chrome.handle_fill)
+                    .border_1()
+                    .border_color(self.chrome.handle_border)
+                    .shadow(vec![
+                        BoxShadow::new(px(0.0), px(1.0), hsla(0.0, 0.0, 0.0, 0.28))
+                            .blur_radius(px(2.0)),
+                    ])
+                    .cursor(cursor)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            let point = this.to_physical(event.position);
+                            if let Some(selected) = this.selected.as_mut() {
+                                selected.drag = Some(RegionDrag {
+                                    kind: RegionDragKind::Resize(handle),
+                                    start: point,
+                                    original: selected.rect,
+                                });
+                                selected.edit = None;
+                                selected.effects_open = false;
+                                selected.more_open = false;
+                                selected.hints_open = false;
+                            }
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+            );
+        }
+        handles
+    }
+
+    fn selection_size_tag(&self, language: Language) -> Option<Div> {
+        if self.selected.is_some() || self.mode != OverlayMode::Capture {
+            return None;
+        }
+        let rect = self
+            .session
+            .selection_rect()
+            .and_then(|rect| self.local_rect(rect))?;
+        let width = (f32::from(rect.size.width) * self.scale).round() as u32;
+        let height = (f32::from(rect.size.height) * self.scale).round() as u32;
+        let ratio = self.aspect.ratio().map(|_| self.aspect.label(language));
+        let text = match ratio {
+            Some(ratio) => format!("{width} x {height}  {ratio}"),
+            None => format!("{width} x {height}"),
+        };
+        let top = (f32::from(rect.origin.y) - 26.0).max(0.0);
+        Some(
+            div()
+                .absolute()
+                .left(rect.origin.x)
+                .top(px(top))
+                .px_2()
+                .py_1()
+                .rounded(px(6.0))
+                .bg(self.chrome.surface)
+                .border_1()
+                .border_color(self.chrome.border)
+                .shadow(self.chrome.shadow())
+                .text_size(px(11.0))
+                .text_color(self.chrome.text)
+                .child(text),
+        )
     }
 
     fn close_overlays(&self, cx: &mut Context<Self>) {
         let handles = cx.window_stack().unwrap_or_default();
         cx.defer(move |cx| {
             crate::windows::close_auxiliary(cx, handles);
-        });
-    }
-
-    fn open_settings(&self, cx: &mut Context<Self>) {
-        let handles = cx.window_stack().unwrap_or_default();
-        cx.defer(move |cx| {
-            crate::windows::close_auxiliary(cx, handles);
-            crate::settings::open_settings(cx);
         });
     }
 }
@@ -963,13 +2357,11 @@ impl Drop for OverlayView {
 }
 
 impl OverlayView {
-    fn render_inner(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_inner(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.chrome = ChromeTheme::for_window(window, Some(self.accent_hex));
         if let Some(editor) = self.editor.clone() {
-            let rect = self.editing_rect;
-            let mut layers = self.dim_layers(rect);
-            if let Some(rect) = rect {
-                layers.push(border(rect, rgb(REGION_BORDER)));
-            }
+            let rect = Some(editor.read(cx).image_view_rect(window));
+            let layers = self.dim_layers(rect);
             return div()
                 .relative()
                 .size_full()
@@ -986,7 +2378,8 @@ impl OverlayView {
         }
         self.update_magnifier();
         let language = settings_state::get().language;
-        let selection = self
+        let selected_bounds = self.selection_bounds();
+        let drag_selection = self
             .session
             .selection_rect()
             .and_then(|rect| self.local_rect(rect));
@@ -999,7 +2392,11 @@ impl OverlayView {
             .hovered_element()
             .and_then(|element| self.local_bounds(element));
         let hovered = hovered_element.or(hovered_window);
-        let hole = selection.or(hovered).or(self.editing_rect);
+        let selected = self.selected.is_some();
+        let hole = selected_bounds
+            .or(drag_selection)
+            .or(hovered)
+            .or(self.editing_rect);
 
         let hint_key = match self.mode {
             OverlayMode::Capture => None,
@@ -1007,46 +2404,59 @@ impl OverlayView {
             OverlayMode::Ocr => Some("overlay.ocr_hint"),
             OverlayMode::Record => Some("overlay.record_hint"),
         };
-        let mode_hint = hint_key.map(|key| {
-            div()
-                .absolute()
-                .top(px(16.0))
-                .left(px(0.0))
-                .right(px(0.0))
-                .flex()
-                .justify_center()
-                .child(
+        let mode_hint = (!selected)
+            .then(|| {
+                hint_key.map(|key| {
                     div()
-                        .px(px(12.0))
-                        .py(px(7.0))
-                        .rounded(px(8.0))
-                        .bg(rgba(0x000000CC))
-                        .text_size(px(12.5))
-                        .text_color(rgb(0xFFFFFF))
-                        .child(t(language, key)),
-                )
-        });
-        let ratio_bar = (self.mode == OverlayMode::Capture).then(|| self.ratio_bar(language, cx));
-        let magnifier = self.magnifier_panel(selection, language);
-        let capture_hint = (self.mode == OverlayMode::Capture).then(|| {
-            div()
-                .absolute()
-                .bottom(px(16.0))
-                .left(px(0.0))
-                .right(px(0.0))
-                .flex()
-                .justify_center()
-                .child(
-                    div()
-                        .px(px(12.0))
-                        .py(px(6.0))
-                        .rounded(px(8.0))
-                        .bg(rgba(0x000000B8))
-                        .text_size(px(11.0))
-                        .text_color(rgba(0xFFFFFFCC))
-                        .child(t(language, "overlay.capture_hint")),
-                )
-        });
+                        .absolute()
+                        .top(px(16.0))
+                        .left(px(0.0))
+                        .right(px(0.0))
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .px(px(12.0))
+                                .py(px(7.0))
+                                .rounded(px(self.chrome.radius))
+                                .bg(self.chrome.surface)
+                                .border_1()
+                                .border_color(self.chrome.border)
+                                .shadow(self.chrome.shadow())
+                                .text_size(px(12.5))
+                                .text_color(self.chrome.text)
+                                .child(t(language, key)),
+                        )
+                })
+            })
+            .flatten();
+        let magnifier = (!selected)
+            .then(|| self.magnifier_panel(drag_selection, language))
+            .flatten();
+        let size_tag = self.selection_size_tag(language);
+        let capture_hint =
+            (self.mode == OverlayMode::Capture && !selected && self.cursor.is_none()).then(|| {
+                div()
+                    .absolute()
+                    .bottom(px(16.0))
+                    .left(px(0.0))
+                    .right(px(0.0))
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .px(px(11.0))
+                            .py(px(5.0))
+                            .rounded(px(6.0))
+                            .bg(self.chrome.surface)
+                            .border_1()
+                            .border_color(self.chrome.border)
+                            .shadow(self.chrome.shadow())
+                            .text_size(px(10.5))
+                            .text_color(self.chrome.muted)
+                            .child(t(language, "overlay.capture_hint")),
+                    )
+            });
         let copied = self.copied.then(|| {
             div()
                 .absolute()
@@ -1059,30 +2469,70 @@ impl OverlayView {
                     div()
                         .px(px(12.0))
                         .py(px(6.0))
-                        .rounded(px(8.0))
-                        .bg(rgba(0x000000CC))
+                        .rounded(px(6.0))
+                        .bg(self.chrome.surface_strong)
+                        .border_1()
+                        .border_color(self.chrome.border)
+                        .shadow(self.chrome.shadow())
                         .text_size(px(11.0))
-                        .text_color(rgb(0xFFFFFF))
+                        .text_color(self.chrome.text)
                         .child(t(language, "overlay.color_copied")),
+                )
+        });
+        let notice = self.notice.clone().map(|message| {
+            div()
+                .absolute()
+                .bottom(px(46.0))
+                .left(px(0.0))
+                .right(px(0.0))
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .px(px(12.0))
+                        .py(px(6.0))
+                        .rounded(px(6.0))
+                        .bg(self.chrome.surface_strong)
+                        .border_1()
+                        .border_color(self.chrome.border)
+                        .shadow(self.chrome.shadow())
+                        .text_size(px(11.0))
+                        .text_color(self.chrome.text)
+                        .child(message),
                 )
         });
 
         let mut layers = self.dim_layers(hole);
-        if let Some(rect) = selection.or(self.editing_rect) {
-            layers.push(border(rect, rgb(REGION_BORDER)));
+        if let Some(rect) = selected_bounds {
+            layers.push(border(rect, self.accent));
+        } else if let Some(rect) = drag_selection {
+            layers.push(border(rect, self.chrome.accent));
         } else if let Some(rect) = hovered {
             layers.push(border(rect, self.accent));
         }
 
-        if let Some(window) = self.session.hovered_window()
+        if !selected
+            && let Some(window) = self.session.hovered_window()
             && let Some(rect) = hovered
         {
-            layers.push(self.window_label(window, rect));
+            layers.push(self.window_label(window, rect, self.session.hovered_element()));
         }
+
+        let handles = if selected {
+            self.selection_handles(cx)
+        } else {
+            Vec::new()
+        };
+        let info_bar = self.info_bar(cx);
+        let toolbar = self.selection_toolbar(cx);
+        let effects_panel = self.effects_panel(cx);
+        let more_panel = self.more_panel(cx);
+        let hints_panel = self.hints_panel(cx);
 
         div()
             .relative()
             .size_full()
+            .cursor(CursorStyle::Crosshair)
             .track_focus(&self.focus_handle)
             .on_modifiers_changed(cx.listener(
                 |this, event: &ModifiersChangedEvent, _window, cx| {
@@ -1091,33 +2541,189 @@ impl OverlayView {
                         && !this.shift_held
                         && this.cursor.is_some()
                         && this.mode == OverlayMode::Capture
+                        && this.selected.is_none()
                     {
                         this.toggle_color_format(cx);
                     }
                     this.shift_held = shift;
+                    this.alt_held = event.modifiers.alt;
                     cx.notify();
                 },
             ))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
                 let command =
                     event.keystroke.modifiers.platform || event.keystroke.modifiers.control;
+
+                if let Some(selected) = this.selected.as_mut() {
+                    if selected.edit.is_some() {
+                        match key {
+                            "escape" => {
+                                this.cancel_edit(cx);
+                                return;
+                            }
+                            "enter" => {
+                                this.commit_edit(cx);
+                                return;
+                            }
+                            "tab" => {
+                                this.next_edit_field(cx);
+                                return;
+                            }
+                            "backspace" | "delete" => {
+                                if let Some(selected) = this.selected.as_mut()
+                                    && let Some(edit) = selected.edit.as_mut()
+                                {
+                                    edit.fresh = false;
+                                    edit.buffer.pop();
+                                }
+                                cx.notify();
+                                return;
+                            }
+                            _ => {}
+                        }
+                        if let Some(ch) = event.keystroke.key.chars().next()
+                            && (ch.is_ascii_digit() || ch == '-')
+                        {
+                            if let Some(selected) = this.selected.as_mut()
+                                && let Some(edit) = selected.edit.as_mut()
+                            {
+                                if edit.fresh {
+                                    edit.buffer.clear();
+                                    edit.fresh = false;
+                                }
+                                edit.buffer.push(ch);
+                            }
+                            cx.notify();
+                            return;
+                        }
+                        if !command {
+                            return;
+                        }
+                    }
+                    if key == "escape" {
+                        if selected.hints_open || selected.effects_open || selected.more_open {
+                            selected.hints_open = false;
+                            selected.effects_open = false;
+                            selected.more_open = false;
+                            cx.notify();
+                            return;
+                        }
+                        this.close_overlays(cx);
+                        return;
+                    }
+                    if command && matches!(key, "w" | "q") {
+                        this.close_overlays(cx);
+                        return;
+                    }
+                    if key == "enter" || (command && key == "c" && !event.keystroke.modifiers.shift)
+                    {
+                        this.copy_selected(cx);
+                        return;
+                    }
+                    if command && key == "s" && !event.keystroke.modifiers.shift {
+                        this.save_selected(cx);
+                        return;
+                    }
+                    if command && key == "t" && !event.keystroke.modifiers.shift {
+                        this.pin_selected(cx);
+                        return;
+                    }
+                    if key == "f5" {
+                        this.refresh_frame(cx);
+                        return;
+                    }
+                    if key == "f1" {
+                        if let Some(selected) = this.selected.as_mut() {
+                            selected.hints_open = !selected.hints_open;
+                            selected.effects_open = false;
+                            selected.more_open = false;
+                        }
+                        cx.notify();
+                        return;
+                    }
+                    if key.eq_ignore_ascii_case("r") {
+                        this.cycle_ratio(cx);
+                        return;
+                    }
+                    if key == "space" {
+                        if let Some(selected) = this.selected.as_mut() {
+                            selected.space_down = true;
+                            selected.effects_open = false;
+                            selected.more_open = false;
+                            selected.hints_open = false;
+                        }
+                        cx.notify();
+                        return;
+                    }
+                    if key == "delete" || key == "backspace" {
+                        this.selected = None;
+                        this.session.cancel();
+                        cx.notify();
+                        return;
+                    }
+                    if let Some((dx, dy)) = match key {
+                        "left" => Some((-1, 0)),
+                        "right" => Some((1, 0)),
+                        "up" => Some((0, -1)),
+                        "down" => Some((0, 1)),
+                        _ => None,
+                    } {
+                        this.nudge_selection(dx, dy, event.keystroke.modifiers.shift, command, cx);
+                        return;
+                    }
+                    return;
+                }
+
                 if key == "escape" || (command && matches!(key, "w" | "q")) {
                     this.session.cancel();
                     this.close_overlays(cx);
                     return;
                 }
                 if this.mode == OverlayMode::Capture {
-                    if event.keystroke.key.eq_ignore_ascii_case("r") {
+                    if key.eq_ignore_ascii_case("r") {
                         this.cycle_aspect(cx);
-                    } else if event.keystroke.key.eq_ignore_ascii_case("c") {
+                    } else if key.eq_ignore_ascii_case("c") {
                         this.copy_color(cx);
+                    } else if key == "tab" {
+                        this.element_targeting = !this.element_targeting;
+                        this.element_candidates.clear();
+                        this.element_level = 0;
+                        this.session.set_hovered_element(None);
+                        cx.notify();
+                    } else if key == "f5" {
+                        this.refresh_frame(cx);
                     }
+                }
+                let _ = window;
+            }))
+            .on_key_up(cx.listener(|this, event: &KeyUpEvent, _window, cx| {
+                if event.keystroke.key == "space"
+                    && let Some(selected) = this.selected.as_mut()
+                {
+                    selected.space_down = false;
+                    cx.notify();
                 }
             }))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 let point = this.to_physical(event.position);
                 this.cursor = Some(point);
+                if this
+                    .selected
+                    .as_ref()
+                    .is_some_and(|selected| selected.drag.is_some())
+                {
+                    if event.pressed_button.is_none() {
+                        this.finish_region_drag(cx);
+                    } else {
+                        this.update_region_drag(point, event.modifiers, cx);
+                    }
+                    return;
+                }
+                if this.selected.is_some() {
+                    cx.notify();
+                    return;
+                }
                 if this.session.has_drag() && event.pressed_button.is_none() {
                     // The mouse-up happened outside this overlay. Drop the
                     // stale press instead of turning the next click into a
@@ -1132,6 +2738,9 @@ impl OverlayView {
                 cx.notify();
             }))
             .on_scroll(cx.listener(|this, event: &ScrollEvent, _window, cx| {
+                if this.selected.is_some() {
+                    return;
+                }
                 let delta = match event.delta {
                     ScrollDelta::Lines(delta) => delta.y,
                     ScrollDelta::Pixels(delta) => f32::from(delta.y),
@@ -1154,6 +2763,39 @@ impl OverlayView {
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                     let point = this.to_physical(event.position);
                     this.cursor = Some(point);
+                    if let Some(selected) = this.selected.clone() {
+                        if selected.edit.is_some() {
+                            this.commit_edit(cx);
+                        }
+                        let monitor = this.session.monitor_bounds();
+                        let local = PhysicalPoint::new(
+                            point.x - monitor.origin.x,
+                            point.y - monitor.origin.y,
+                        );
+                        if local.x >= selected.rect.origin.x
+                            && local.y >= selected.rect.origin.y
+                            && local.x <= selected.rect.origin.x + selected.rect.size.width as i32
+                            && local.y <= selected.rect.origin.y + selected.rect.size.height as i32
+                        {
+                            if event.click_count >= 2 {
+                                this.copy_selected(cx);
+                                return;
+                            }
+                            if let Some(selected) = this.selected.as_mut() {
+                                selected.drag = Some(RegionDrag {
+                                    kind: RegionDragKind::Move,
+                                    start: point,
+                                    original: selected.rect,
+                                });
+                                selected.effects_open = false;
+                                selected.more_open = false;
+                                selected.hints_open = false;
+                            }
+                            cx.notify();
+                            return;
+                        }
+                        this.selected = None;
+                    }
                     this.session.pointer_moved(point);
                     this.refresh_auto_target(point);
                     this.session.pointer_pressed(point);
@@ -1163,22 +2805,38 @@ impl OverlayView {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseUpEvent, window, cx| {
-                    if this.suppress_capture {
-                        this.suppress_capture = false;
-                        this.session.cancel();
-                        cx.notify();
+                    if this
+                        .selected
+                        .as_ref()
+                        .is_some_and(|selected| selected.drag.is_some())
+                    {
+                        this.finish_region_drag(cx);
+                        return;
+                    }
+                    if this.selected.is_some() {
                         return;
                     }
                     let point = this.to_physical(event.position);
                     this.cursor = Some(point);
                     let action = this.session.pointer_released(point);
                     if let SelectionAction::Capture(outcome) = action {
-                        this.finish(outcome, window, cx);
+                        if this.mode == OverlayMode::Capture {
+                            this.begin_selection(outcome, cx);
+                        } else {
+                            this.finish_mode(outcome, window, cx);
+                        }
                     }
                     cx.notify();
                 }),
             )
             .on_mouse_exit(cx.listener(|this, _event: &MouseExitEvent, _window, cx| {
+                if this
+                    .selected
+                    .as_ref()
+                    .is_some_and(|selected| selected.drag.is_some())
+                {
+                    this.finish_region_drag(cx);
+                }
                 this.cursor = None;
                 this.element_window = None;
                 this.element_candidates.clear();
@@ -1194,35 +2852,18 @@ impl OverlayView {
                     .object_fit(ObjectFit::Fill),
             )
             .children(layers)
-            .children(ratio_bar)
+            .children(handles)
+            .children(info_bar)
+            .children(toolbar)
             .children(magnifier)
+            .children(size_tag)
             .children(mode_hint)
             .children(capture_hint)
             .children(copied)
-            .child(
-                div()
-                    .absolute()
-                    .top(px(16.0))
-                    .right(px(16.0))
-                    .w(px(36.0))
-                    .h(px(36.0))
-                    .rounded(px(10.0))
-                    .bg(rgba(0x00000099))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .id("overlay-settings")
-                    .occlude()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.suppress_capture = true;
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx)))
-                    .child(icons::icon(icons::SETTINGS, 18.0, rgb(0xffffff))),
-            )
+            .children(notice)
+            .children(effects_panel)
+            .children(more_panel)
+            .children(hints_panel)
             .into_any_element()
     }
 }
@@ -1231,6 +2872,197 @@ impl Render for OverlayView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.render_inner(window, cx)
     }
+}
+
+fn clamp_to_monitor(rect: PhysicalRect, size: core_types::PhysicalSize) -> PhysicalRect {
+    let width = rect.size.width.clamp(1, size.width);
+    let height = rect.size.height.clamp(1, size.height);
+    let max_x = size.width.saturating_sub(width) as i32;
+    let max_y = size.height.saturating_sub(height) as i32;
+    PhysicalRect::new(
+        rect.origin.x.clamp(0, max_x.max(0)),
+        rect.origin.y.clamp(0, max_y.max(0)),
+        width,
+        height,
+    )
+}
+
+fn fit_ratio_rect(rect: PhysicalRect, ratio: f32, size: core_types::PhysicalSize) -> PhysicalRect {
+    let max_width = (size.width as f32).min(size.height as f32 * ratio).max(1.0);
+    let width = (rect.size.width as f32).min(max_width).max(1.0);
+    let height = (width / ratio).max(1.0);
+    let center_x = rect.origin.x as f32 + rect.size.width as f32 / 2.0;
+    let center_y = rect.origin.y as f32 + rect.size.height as f32 / 2.0;
+    let clamped = PhysicalRect::new(
+        (center_x - width / 2.0).round() as i32,
+        (center_y - height / 2.0).round() as i32,
+        width.round() as u32,
+        height.round() as u32,
+    );
+    clamp_to_monitor(clamped, size)
+}
+
+fn handle_has_west(handle: ResizeHandle) -> bool {
+    matches!(
+        handle,
+        ResizeHandle::West | ResizeHandle::NorthWest | ResizeHandle::SouthWest
+    )
+}
+
+fn handle_has_east(handle: ResizeHandle) -> bool {
+    matches!(
+        handle,
+        ResizeHandle::East | ResizeHandle::NorthEast | ResizeHandle::SouthEast
+    )
+}
+
+fn handle_has_north(handle: ResizeHandle) -> bool {
+    matches!(
+        handle,
+        ResizeHandle::North | ResizeHandle::NorthEast | ResizeHandle::NorthWest
+    )
+}
+
+fn handle_has_south(handle: ResizeHandle) -> bool {
+    matches!(
+        handle,
+        ResizeHandle::South | ResizeHandle::SouthEast | ResizeHandle::SouthWest
+    )
+}
+
+fn resize_rect(
+    original: PhysicalRect,
+    handle: ResizeHandle,
+    cursor: PhysicalPoint,
+    ratio: Option<f32>,
+    shift: bool,
+    alt: bool,
+    size: core_types::PhysicalSize,
+) -> PhysicalRect {
+    let original_left = i64::from(original.origin.x);
+    let original_top = i64::from(original.origin.y);
+    let original_right = original_left + i64::from(original.size.width);
+    let original_bottom = original_top + i64::from(original.size.height);
+    let center_x = (original_left + original_right) / 2;
+    let center_y = (original_top + original_bottom) / 2;
+    let cursor_x = i64::from(cursor.x).clamp(0, i64::from(size.width));
+    let cursor_y = i64::from(cursor.y).clamp(0, i64::from(size.height));
+
+    let mut left = original_left;
+    let mut top = original_top;
+    let mut right = original_right;
+    let mut bottom = original_bottom;
+    if handle_has_west(handle) {
+        left = cursor_x;
+    }
+    if handle_has_east(handle) {
+        right = cursor_x;
+    }
+    if handle_has_north(handle) {
+        top = cursor_y;
+    }
+    if handle_has_south(handle) {
+        bottom = cursor_y;
+    }
+
+    if alt {
+        if handle_has_west(handle) {
+            left = center_x * 2 - right;
+        } else if handle_has_east(handle) {
+            right = center_x * 2 - left;
+        }
+        if handle_has_north(handle) {
+            top = center_y * 2 - bottom;
+        } else if handle_has_south(handle) {
+            bottom = center_y * 2 - top;
+        }
+    }
+
+    if right < left + i64::from(MIN_REGION_SIZE) {
+        if handle_has_west(handle) {
+            left = right - i64::from(MIN_REGION_SIZE);
+        } else {
+            right = left + i64::from(MIN_REGION_SIZE);
+        }
+    }
+    if bottom < top + i64::from(MIN_REGION_SIZE) {
+        if handle_has_north(handle) {
+            top = bottom - i64::from(MIN_REGION_SIZE);
+        } else {
+            bottom = top + i64::from(MIN_REGION_SIZE);
+        }
+    }
+
+    let ratio = ratio.or_else(|| shift.then_some(1.0));
+    if let Some(ratio) = ratio {
+        let anchor_right = handle_has_west(handle);
+        let anchor_bottom = handle_has_north(handle);
+        let horizontal = handle_has_west(handle) || handle_has_east(handle);
+        let mut width = (right - left).max(i64::from(MIN_REGION_SIZE));
+        let mut height = (bottom - top).max(i64::from(MIN_REGION_SIZE));
+        if horizontal {
+            height = (width as f32 / ratio).round().max(1.0) as i64;
+        } else {
+            width = (height as f32 * ratio).round().max(1.0) as i64;
+        }
+        let max_width = if anchor_right {
+            right
+        } else {
+            i64::from(size.width) - left
+        };
+        let max_height = if anchor_bottom {
+            bottom
+        } else {
+            i64::from(size.height) - top
+        };
+        if width > max_width.max(1) || height > max_height.max(1) {
+            let scale = (max_width as f32 / width as f32)
+                .min(max_height as f32 / height as f32)
+                .max(0.0);
+            width = (width as f32 * scale).max(1.0) as i64;
+            height = (height as f32 * scale).max(1.0) as i64;
+        }
+        if anchor_right {
+            left = right - width;
+        } else {
+            right = left + width;
+        }
+        if anchor_bottom {
+            top = bottom - height;
+        } else {
+            bottom = top + height;
+        }
+    }
+
+    left = left.clamp(0, i64::from(size.width).saturating_sub(1));
+    top = top.clamp(0, i64::from(size.height).saturating_sub(1));
+    right = right.clamp(left + 1, i64::from(size.width));
+    bottom = bottom.clamp(top + 1, i64::from(size.height));
+    PhysicalRect::new(
+        left as i32,
+        top as i32,
+        (right - left) as u32,
+        (bottom - top) as u32,
+    )
+}
+
+fn handle_positions(rect: Bounds<Pixels>) -> Vec<(ResizeHandle, Point<Pixels>)> {
+    let left = f32::from(rect.origin.x);
+    let top = f32::from(rect.origin.y);
+    let right = left + f32::from(rect.size.width);
+    let bottom = top + f32::from(rect.size.height);
+    let mid_x = (left + right) / 2.0;
+    let mid_y = (top + bottom) / 2.0;
+    vec![
+        (ResizeHandle::North, point(px(mid_x), px(top))),
+        (ResizeHandle::South, point(px(mid_x), px(bottom))),
+        (ResizeHandle::West, point(px(left), px(mid_y))),
+        (ResizeHandle::East, point(px(right), px(mid_y))),
+        (ResizeHandle::NorthWest, point(px(left), px(top))),
+        (ResizeHandle::NorthEast, point(px(right), px(top))),
+        (ResizeHandle::SouthWest, point(px(left), px(bottom))),
+        (ResizeHandle::SouthEast, point(px(right), px(bottom))),
+    ]
 }
 
 fn dim_rect(left: f32, top: f32, width: f32, height: f32) -> Div {

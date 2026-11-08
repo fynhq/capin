@@ -1,5 +1,7 @@
 mod capture_history;
+mod chrome_theme;
 mod editor;
+mod effects;
 mod hotkey;
 mod i18n;
 mod icons;
