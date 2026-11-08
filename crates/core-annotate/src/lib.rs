@@ -3,5 +3,8 @@
 mod document;
 mod raster;
 
-pub use document::{Annotation, AnnotationDocument, AnnotationId, AnnotationStyle, Shape};
+pub use document::{
+    Annotation, AnnotationDocument, AnnotationId, AnnotationStyle, NumberStyle, Shape,
+    TextAlignment,
+};
 pub use raster::{RasterError, measure_text_height, rasterize};

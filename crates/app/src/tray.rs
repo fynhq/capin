@@ -15,6 +15,7 @@ mod imp {
     const MENU_OCR: &str = "ocr";
     const MENU_FOLDER: &str = "folder";
     const MENU_RECORD: &str = "record";
+    const MENU_RECOVER: &str = "recover-recording";
     const MENU_SETTINGS: &str = "settings";
     const MENU_RELEASE_PINS: &str = "release-pins";
     const MENU_RESTART: &str = "restart";
@@ -74,6 +75,13 @@ mod imp {
             None,
         );
         let settings = MenuItem::with_id(MENU_SETTINGS, t(language, "menu.settings"), true, None);
+        let recover_enabled = !crate::record_session::pending_sessions().is_empty();
+        let recover = MenuItem::with_id(
+            MENU_RECOVER,
+            t(language, "menu.recover_recording"),
+            recover_enabled,
+            None,
+        );
         let release_pins = MenuItem::with_id(
             MENU_RELEASE_PINS,
             t(language, "menu.release_pins"),
@@ -90,6 +98,7 @@ mod imp {
             &ocr,
             &folder,
             &settings,
+            &recover,
             &release_pins,
             &separator,
             &restart,
@@ -164,6 +173,12 @@ mod imp {
                     eprintln!("capin: failed to create the screenshot folder: {error}");
                 } else {
                     cx.open_with_system(&directory);
+                }
+            }
+            MENU_RECOVER => {
+                if let Some(directory) = crate::record_session::pending_sessions().last() {
+                    cx.open_with_system(directory);
+                    crate::record_session::mark_recovered(directory);
                 }
             }
             MENU_SETTINGS => replace_windows(cx, crate::settings::open_settings),

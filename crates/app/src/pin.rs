@@ -253,12 +253,15 @@ pub fn pin_last(cx: &mut App) {
     }
 }
 
-/// Pins an image, or cycles the recent-pin history when the same image is
+/// Pins an image, or cycles recent screenshots when the same screenshot is
 /// triggered again without a new clipboard source.
 fn pin_image(frame: RgbaFrame, cx: &mut App) {
-    let hash = crate::pin_history::hash_frame(&frame);
+    let hash = crate::capture_history::hash_frame(&frame);
     let repeated = LAST_PIN_TRIGGER.with(|slot| slot.get() == Some(hash));
-    if repeated && let Some(history_frame) = crate::pin_history::cycle(hash) {
+    if repeated
+        && crate::capture_history::contains(hash)
+        && let Some(history_frame) = crate::capture_history::cycle(hash)
+    {
         remember(&history_frame);
         open_pin_content(PinContent::from_frame(history_frame), cx);
         LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
@@ -272,9 +275,8 @@ pub fn open_frame(frame: RgbaFrame, cx: &mut App) {
 }
 
 fn open_image_pin(frame: RgbaFrame, cx: &mut App) {
-    crate::pin_history::record(&frame);
     remember(&frame);
-    LAST_PIN_TRIGGER.with(|slot| slot.set(Some(crate::pin_history::hash_frame(&frame))));
+    LAST_PIN_TRIGGER.with(|slot| slot.set(Some(crate::capture_history::hash_frame(&frame))));
     open_pin_content(PinContent::from_frame(frame), cx);
 }
 
@@ -516,7 +518,6 @@ pub fn replace_image(id: u64, frame: &RgbaFrame, cx: &mut App) -> bool {
             };
         }
     });
-    crate::pin_history::record(frame);
     save_manifest();
     true
 }

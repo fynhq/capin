@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use core_capture::CaptureTarget;
 use core_record::{
-    FrameDecision, FrameRate, FrameTimeline, RecordConfig, WebpEncoder, webp_output_size,
+    FrameDecision, FrameRate, FrameTimeline, RecordConfig, RecordQuality, WebpEncoder,
+    webp_output_size,
 };
 use core_types::{PhysicalRect, PhysicalSize, RecordFormat};
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
@@ -39,6 +40,7 @@ struct CaptureInfo {
     final_output: PathBuf,
     format: RecordFormat,
     fps: u32,
+    quality: RecordQuality,
     include_cursor: bool,
     shared: Arc<Flags>,
 }
@@ -65,6 +67,7 @@ pub(crate) fn start(
                 final_output: output,
                 format: config.format,
                 fps,
+                quality: config.quality,
                 include_cursor: config.include_cursor,
                 shared,
             };
@@ -78,6 +81,7 @@ pub(crate) fn start(
                 final_output: output,
                 format: config.format,
                 fps,
+                quality: config.quality,
                 include_cursor: config.include_cursor,
                 shared,
             };
@@ -92,6 +96,7 @@ pub(crate) fn start(
                 final_output: output,
                 format: config.format,
                 fps,
+                quality: config.quality,
                 include_cursor: config.include_cursor,
                 shared,
             };
@@ -285,7 +290,12 @@ impl GraphicsCaptureApiHandler for Recorder {
             if self.webp.is_none() {
                 let input = PhysicalSize::new(width, height);
                 let output = webp_output_size(input);
-                match WebpEncoder::new(input, output, self.flags.fps) {
+                match WebpEncoder::new(
+                    input,
+                    output,
+                    self.flags.fps,
+                    self.flags.quality.webp_quality(),
+                ) {
                     Ok(encoder) => self.webp = Some(encoder),
                     Err(error) => {
                         self.flags.shared.fail(error.to_string());
@@ -306,8 +316,9 @@ impl GraphicsCaptureApiHandler for Recorder {
         }
 
         if self.encoder.is_none() {
-            let bitrate = ((u64::from(width) * u64::from(height) * u64::from(self.flags.fps)) / 4)
-                .clamp(4_000_000, 60_000_000) as u32;
+            let bitrate = ((u64::from(width) * u64::from(height) * u64::from(self.flags.fps)) / 4);
+            let bitrate = (bitrate as f32 * self.flags.quality.bitrate_multiplier())
+                .clamp(4_000_000.0, 60_000_000.0) as u32;
             let encoder = match VideoEncoder::new(
                 VideoSettingsBuilder::new(width, height)
                     .sub_type(VideoSettingsSubType::H264)

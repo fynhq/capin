@@ -5,6 +5,22 @@ const HISTORY_LIMIT: usize = 128;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AnnotationId(u64);
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextAlignment {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NumberStyle {
+    #[default]
+    Circle,
+    Square,
+    Plain,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AnnotationStyle {
     /// Packed straight-alpha RGBA (`0xRRGGBBAA`).
@@ -17,6 +33,18 @@ pub struct AnnotationStyle {
     pub blur_radius: u32,
     /// Whether `Shape::Rect` and `Shape::Ellipse` render as solid fills.
     pub filled: bool,
+    /// Draw an arrow head at the start of `Shape::Arrow`.
+    pub arrow_start: bool,
+    /// Draw an arrow head at the end of `Shape::Arrow`.
+    pub arrow_end: bool,
+    /// Draw a contrasting panel behind `Shape::Text`.
+    pub text_background: bool,
+    /// Draw a contrasting outline around `Shape::Text` glyphs.
+    pub text_outline: bool,
+    /// Horizontal alignment for `Shape::Text`.
+    pub text_alignment: TextAlignment,
+    /// Badge shape for `Shape::Number`.
+    pub number_style: NumberStyle,
     /// Spotlight dimming strength in percent (0-100).
     pub spotlight_intensity: u8,
 }
@@ -30,6 +58,12 @@ impl Default for AnnotationStyle {
             corner_radius: 0.0,
             blur_radius: 16,
             filled: false,
+            arrow_start: false,
+            arrow_end: true,
+            text_background: false,
+            text_outline: false,
+            text_alignment: TextAlignment::Left,
+            number_style: NumberStyle::Circle,
             spotlight_intensity: 60,
         }
     }
@@ -41,6 +75,14 @@ pub enum Shape {
     Ellipse(PhysicalRect),
     Arrow {
         start: PhysicalPoint,
+        end: PhysicalPoint,
+    },
+    Polyline {
+        points: Vec<PhysicalPoint>,
+    },
+    Curve {
+        start: PhysicalPoint,
+        control: PhysicalPoint,
         end: PhysicalPoint,
     },
     /// Rectangular highlighter stroke, filled with the highlighter color.
@@ -68,6 +110,12 @@ impl Shape {
             | Self::Text { bounds: rect, .. }
             | Self::Number { bounds: rect, .. } => *rect,
             Self::Arrow { start, end } => points_bounds(&[*start, *end]),
+            Self::Polyline { points } => points_bounds(points),
+            Self::Curve {
+                start,
+                control,
+                end,
+            } => points_bounds(&[*start, *control, *end]),
         }
     }
 
@@ -91,6 +139,24 @@ impl Shape {
                 end.x += dx;
                 end.y += dy;
             }
+            Self::Polyline { points } => {
+                for point in points {
+                    point.x += dx;
+                    point.y += dy;
+                }
+            }
+            Self::Curve {
+                start,
+                control,
+                end,
+            } => {
+                start.x += dx;
+                start.y += dy;
+                control.x += dx;
+                control.y += dy;
+                end.x += dx;
+                end.y += dy;
+            }
         }
     }
 
@@ -107,6 +173,25 @@ impl Shape {
                 expanded.contains(point)
             }
             Self::Arrow { start, end } => distance_to_segment(point, *start, *end) <= tolerance,
+            Self::Polyline { points } => points
+                .windows(2)
+                .any(|pair| distance_to_segment(point, pair[0], pair[1]) <= tolerance),
+            Self::Curve {
+                start,
+                control,
+                end,
+            } => {
+                let mut previous = *start;
+                for step in 1..=16 {
+                    let t = step as f32 / 16.0;
+                    let current = quadratic_point(*start, *control, *end, t);
+                    if distance_to_segment(point, previous, current) <= tolerance {
+                        return true;
+                    }
+                    previous = current;
+                }
+                false
+            }
         }
     }
 }
@@ -135,6 +220,7 @@ struct Snapshot {
     next_id: u64,
 }
 
+#[derive(Clone)]
 pub struct AnnotationDocument {
     image_size: PhysicalSize,
     objects: Vec<Annotation>,
@@ -339,6 +425,13 @@ impl AnnotationDocument {
         !self.redo.is_empty()
     }
 
+    /// Drops object-level history after rebuilding a document from an
+    /// external transform such as cropping. The editor owns that undo step.
+    pub fn clear_history(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+    }
+
     pub fn undo(&mut self) -> bool {
         let Some(snapshot) = self.undo.pop() else {
             return false;
@@ -418,6 +511,22 @@ fn distance(a: PhysicalPoint, b: PhysicalPoint) -> f32 {
     let dx = (a.x - b.x) as f32;
     let dy = (a.y - b.y) as f32;
     (dx * dx + dy * dy).sqrt()
+}
+
+fn quadratic_point(
+    start: PhysicalPoint,
+    control: PhysicalPoint,
+    end: PhysicalPoint,
+    t: f32,
+) -> PhysicalPoint {
+    let inverse = 1.0 - t;
+    let x = inverse * inverse * start.x as f32
+        + 2.0 * inverse * t * control.x as f32
+        + t * t * end.x as f32;
+    let y = inverse * inverse * start.y as f32
+        + 2.0 * inverse * t * control.y as f32
+        + t * t * end.y as f32;
+    PhysicalPoint::new(x.round() as i32, y.round() as i32)
 }
 
 fn distance_to_segment(point: PhysicalPoint, start: PhysicalPoint, end: PhysicalPoint) -> f32 {

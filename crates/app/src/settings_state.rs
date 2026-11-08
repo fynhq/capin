@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-use core_record::FrameRate;
+use core_annotate::{NumberStyle, TextAlignment};
+use core_record::{FrameRate, RecordQuality};
 use core_types::RecordFormat;
 use platform_window::{AutostartState, set_autostart};
 
@@ -10,15 +11,18 @@ use crate::i18n::Language;
 pub const DEFAULT_CAPTURE_HOTKEY: &str = "shift+meta+KeyS";
 pub const DEFAULT_PIN_HOTKEY: &str = "shift+meta+KeyD";
 pub const DEFAULT_ANNOTATION_COLOR: u32 = 0xFF3B30FF;
+pub const DEFAULT_ANNOTATION_FONT_SIZE: f32 = 20.0;
+pub const DEFAULT_FILENAME_TEMPLATE: &str = "Capin_{date}_{time}";
 
 /// Palette used by the annotation toolbar. The first item is the default
 /// color; each entry carries its stable id and i18n key.
-pub const ANNOTATION_COLORS: [(u32, &str, &str); 5] = [
+pub const ANNOTATION_COLORS: [(u32, &str, &str); 6] = [
     (0xFF3B30FF, "red", "color.red"),
     (0xFFCC00FF, "yellow", "color.yellow"),
     (0x34C759FF, "green", "color.green"),
     (0x0A84FFFF, "blue", "color.blue"),
     (0xFFFFFFFF, "white", "color.white"),
+    (0x000000FF, "black", "color.black"),
 ];
 
 pub const ANNOTATION_COLOR_TOOL_COUNT: usize = 6;
@@ -121,11 +125,14 @@ pub struct AppSettings {
     pub copy_to_clipboard: bool,
     pub record_format: RecordFormat,
     pub record_frame_rate: FrameRate,
+    pub record_quality: RecordQuality,
+    pub record_segments: bool,
     pub record_cursor: bool,
     pub capture_hotkey: String,
     pub pin_hotkey: String,
     pub screenshot_dir: Option<PathBuf>,
     pub recording_dir: Option<PathBuf>,
+    pub filename_template: String,
     pub window_composition: bool,
     pub window_background: WindowBackground,
     pub window_padding: u32,
@@ -138,6 +145,13 @@ pub struct AppSettings {
     pub annotation_colors: [u32; ANNOTATION_COLOR_TOOL_COUNT],
     pub annotation_uniform_color: bool,
     pub annotation_stroke_width: f32,
+    pub annotation_font_size: f32,
+    pub annotation_arrow_start: bool,
+    pub annotation_arrow_end: bool,
+    pub annotation_text_background: bool,
+    pub annotation_text_outline: bool,
+    pub annotation_text_alignment: TextAlignment,
+    pub annotation_number_style: NumberStyle,
     pub annotation_corner_radius: f32,
     pub annotation_blur_radius: u32,
     pub annotation_rect_filled: bool,
@@ -178,11 +192,14 @@ impl Default for AppSettings {
             copy_to_clipboard: true,
             record_format: RecordFormat::Mp4,
             record_frame_rate: FrameRate::Fps30,
+            record_quality: RecordQuality::Standard,
+            record_segments: false,
             record_cursor: true,
             capture_hotkey: DEFAULT_CAPTURE_HOTKEY.to_owned(),
             pin_hotkey: DEFAULT_PIN_HOTKEY.to_owned(),
             screenshot_dir: None,
             recording_dir: None,
+            filename_template: DEFAULT_FILENAME_TEMPLATE.to_owned(),
             window_composition: true,
             window_background: WindowBackground::Transparent,
             window_padding: 48,
@@ -193,6 +210,13 @@ impl Default for AppSettings {
             annotation_colors: [DEFAULT_ANNOTATION_COLOR; ANNOTATION_COLOR_TOOL_COUNT],
             annotation_uniform_color: true,
             annotation_stroke_width: 4.0,
+            annotation_font_size: DEFAULT_ANNOTATION_FONT_SIZE,
+            annotation_arrow_start: false,
+            annotation_arrow_end: true,
+            annotation_text_background: false,
+            annotation_text_outline: false,
+            annotation_text_alignment: TextAlignment::Left,
+            annotation_number_style: NumberStyle::Circle,
             annotation_corner_radius: 0.0,
             annotation_blur_radius: 16,
             annotation_rect_filled: false,
@@ -275,11 +299,22 @@ fn parse(text: &str) -> AppSettings {
                 "30" => settings.record_frame_rate = FrameRate::Fps30,
                 _ => {}
             },
+            "record_quality" => {
+                if let Some(quality) = RecordQuality::from_code(value) {
+                    settings.record_quality = quality;
+                }
+            }
+            "record_segments" => settings.record_segments = value != "false",
             "record_cursor" => settings.record_cursor = value != "false",
             "capture_hotkey" => settings.capture_hotkey = value.to_owned(),
             "pin_hotkey" => settings.pin_hotkey = value.to_owned(),
             "screenshot_dir" => settings.screenshot_dir = parse_directory(value),
             "recording_dir" => settings.recording_dir = parse_directory(value),
+            "filename_template" => {
+                if !value.trim().is_empty() {
+                    settings.filename_template = value.chars().take(120).collect();
+                }
+            }
             "window_composition" => settings.window_composition = value != "false",
             "window_background" => {
                 if let Some(background) = WindowBackground::from_code(value) {
@@ -309,6 +344,27 @@ fn parse(text: &str) -> AppSettings {
                     && width.is_finite()
                 {
                     settings.annotation_stroke_width = width.clamp(1.0, 32.0);
+                }
+            }
+            "annotation_font_size" => {
+                if let Ok(size) = value.parse::<f32>()
+                    && size.is_finite()
+                {
+                    settings.annotation_font_size = size.clamp(8.0, 96.0);
+                }
+            }
+            "annotation_arrow_start" => settings.annotation_arrow_start = value != "false",
+            "annotation_arrow_end" => settings.annotation_arrow_end = value != "false",
+            "annotation_text_background" => settings.annotation_text_background = value != "false",
+            "annotation_text_outline" => settings.annotation_text_outline = value != "false",
+            "annotation_text_alignment" => {
+                if let Some(alignment) = parse_text_alignment(value) {
+                    settings.annotation_text_alignment = alignment;
+                }
+            }
+            "annotation_number_style" => {
+                if let Some(style) = parse_number_style(value) {
+                    settings.annotation_number_style = style;
                 }
             }
             "annotation_corner_radius" => {
@@ -347,6 +403,40 @@ fn parse(text: &str) -> AppSettings {
         settings.record_frame_rate = FrameRate::Fps30;
     }
     settings
+}
+
+fn parse_text_alignment(value: &str) -> Option<TextAlignment> {
+    match value {
+        "left" => Some(TextAlignment::Left),
+        "center" => Some(TextAlignment::Center),
+        "right" => Some(TextAlignment::Right),
+        _ => None,
+    }
+}
+
+fn text_alignment_code(value: TextAlignment) -> &'static str {
+    match value {
+        TextAlignment::Left => "left",
+        TextAlignment::Center => "center",
+        TextAlignment::Right => "right",
+    }
+}
+
+fn parse_number_style(value: &str) -> Option<NumberStyle> {
+    match value {
+        "circle" => Some(NumberStyle::Circle),
+        "square" => Some(NumberStyle::Square),
+        "plain" => Some(NumberStyle::Plain),
+        _ => None,
+    }
+}
+
+fn number_style_code(value: NumberStyle) -> &'static str {
+    match value {
+        NumberStyle::Circle => "circle",
+        NumberStyle::Square => "square",
+        NumberStyle::Plain => "plain",
+    }
 }
 
 fn parse_directory(value: &str) -> Option<PathBuf> {
@@ -406,18 +496,21 @@ fn serialize(settings: &AppSettings) -> String {
         .map(|path| path.display().to_string())
         .unwrap_or_default();
     let mut text = format!(
-        "language={}\nauto_start={}\nauto_start_explicit={}\ncopy_to_clipboard={}\nrecord_format={}\nrecord_frame_rate={}\nrecord_cursor={}\ncapture_hotkey={}\npin_hotkey={}\nscreenshot_dir={}\nrecording_dir={}\nwindow_composition={}\nwindow_background={}\nwindow_padding={}\nwindow_shadow={}\nwindow_wallpaper={}\ncapture_cursor={}\nannotation_color={:08x}\npin_text_ocr={}\npin_qr={}\n",
+        "language={}\nauto_start={}\nauto_start_explicit={}\ncopy_to_clipboard={}\nrecord_format={}\nrecord_frame_rate={}\nrecord_quality={}\nrecord_segments={}\nrecord_cursor={}\ncapture_hotkey={}\npin_hotkey={}\nscreenshot_dir={}\nrecording_dir={}\nfilename_template={}\nwindow_composition={}\nwindow_background={}\nwindow_padding={}\nwindow_shadow={}\nwindow_wallpaper={}\ncapture_cursor={}\nannotation_color={:08x}\npin_text_ocr={}\npin_qr={}\n",
         settings.language.code(),
         settings.auto_start,
         settings.auto_start_explicit,
         settings.copy_to_clipboard,
         format,
         frame_rate,
+        settings.record_quality.code(),
+        settings.record_segments,
         settings.record_cursor,
         settings.capture_hotkey,
         settings.pin_hotkey,
         screenshot_dir,
         recording_dir,
+        settings.filename_template.replace(['\n', '\r'], " "),
         settings.window_composition,
         settings.window_background.code(),
         settings.window_padding,
@@ -429,9 +522,16 @@ fn serialize(settings: &AppSettings) -> String {
         settings.pin_qr,
     );
     text.push_str(&format!(
-        "annotation_uniform_color={}\nannotation_stroke_width={}\nannotation_corner_radius={}\nannotation_blur_radius={}\nannotation_rect_filled={}\nannotation_ellipse_filled={}\nannotation_spotlight_intensity={}\n",
+        "annotation_uniform_color={}\nannotation_stroke_width={}\nannotation_font_size={}\nannotation_arrow_start={}\nannotation_arrow_end={}\nannotation_text_background={}\nannotation_text_outline={}\nannotation_text_alignment={}\nannotation_number_style={}\nannotation_corner_radius={}\nannotation_blur_radius={}\nannotation_rect_filled={}\nannotation_ellipse_filled={}\nannotation_spotlight_intensity={}\n",
         settings.annotation_uniform_color,
         settings.annotation_stroke_width,
+        settings.annotation_font_size,
+        settings.annotation_arrow_start,
+        settings.annotation_arrow_end,
+        settings.annotation_text_background,
+        settings.annotation_text_outline,
+        text_alignment_code(settings.annotation_text_alignment),
+        number_style_code(settings.annotation_number_style),
         settings.annotation_corner_radius,
         settings.annotation_blur_radius,
         settings.annotation_rect_filled,
@@ -532,6 +632,13 @@ mod tests {
     fn annotation_options_default_and_parse() {
         let defaults = AppSettings::default();
         assert_eq!(defaults.annotation_stroke_width, 4.0);
+        assert_eq!(defaults.annotation_font_size, DEFAULT_ANNOTATION_FONT_SIZE);
+        assert!(!defaults.annotation_arrow_start);
+        assert!(defaults.annotation_arrow_end);
+        assert!(!defaults.annotation_text_background);
+        assert!(!defaults.annotation_text_outline);
+        assert_eq!(defaults.annotation_text_alignment, TextAlignment::Left);
+        assert_eq!(defaults.annotation_number_style, NumberStyle::Circle);
         assert_eq!(defaults.annotation_corner_radius, 0.0);
         assert_eq!(defaults.annotation_blur_radius, 16);
         assert!(!defaults.annotation_rect_filled);
@@ -539,9 +646,16 @@ mod tests {
         assert_eq!(defaults.annotation_spotlight_intensity, 60);
 
         let settings = parse(
-            "annotation_stroke_width=8\nannotation_corner_radius=16\nannotation_blur_radius=32\nannotation_rect_filled=true\nannotation_ellipse_filled=true\nannotation_spotlight_intensity=80\n",
+            "annotation_stroke_width=8\nannotation_font_size=32\nannotation_arrow_start=true\nannotation_arrow_end=false\nannotation_text_background=true\nannotation_text_outline=true\nannotation_text_alignment=center\nannotation_number_style=square\nannotation_corner_radius=16\nannotation_blur_radius=32\nannotation_rect_filled=true\nannotation_ellipse_filled=true\nannotation_spotlight_intensity=80\n",
         );
         assert_eq!(settings.annotation_stroke_width, 8.0);
+        assert_eq!(settings.annotation_font_size, 32.0);
+        assert!(settings.annotation_arrow_start);
+        assert!(!settings.annotation_arrow_end);
+        assert!(settings.annotation_text_background);
+        assert!(settings.annotation_text_outline);
+        assert_eq!(settings.annotation_text_alignment, TextAlignment::Center);
+        assert_eq!(settings.annotation_number_style, NumberStyle::Square);
         assert_eq!(settings.annotation_corner_radius, 16.0);
         assert_eq!(settings.annotation_blur_radius, 32);
         assert!(settings.annotation_rect_filled);
@@ -554,6 +668,13 @@ mod tests {
         let mut settings = AppSettings {
             annotation_uniform_color: false,
             annotation_stroke_width: 8.0,
+            annotation_font_size: 32.0,
+            annotation_arrow_start: true,
+            annotation_arrow_end: false,
+            annotation_text_background: true,
+            annotation_text_outline: true,
+            annotation_text_alignment: TextAlignment::Center,
+            annotation_number_style: NumberStyle::Square,
             annotation_corner_radius: 16.0,
             annotation_blur_radius: 32,
             annotation_rect_filled: true,
@@ -565,6 +686,19 @@ mod tests {
         settings.apply_annotation_color(AnnotationColorTool::Text, 0x0A84FFFF);
 
         assert_eq!(parse(&serialize(&settings)), settings);
+    }
+
+    #[test]
+    fn filename_template_defaults_and_round_trips() {
+        let defaults = AppSettings::default();
+        assert_eq!(defaults.filename_template, DEFAULT_FILENAME_TEMPLATE);
+
+        let settings = parse("filename_template=Shot_{date}_{width}x{height}\n");
+        assert_eq!(settings.filename_template, "Shot_{date}_{width}x{height}");
+        assert!(serialize(&settings).contains("filename_template=Shot_{date}_{width}x{height}"));
+
+        let empty = parse("filename_template=\n");
+        assert_eq!(empty.filename_template, DEFAULT_FILENAME_TEMPLATE);
     }
 
     #[test]

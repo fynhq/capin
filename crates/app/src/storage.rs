@@ -88,16 +88,96 @@ pub fn pins_dir() -> Option<PathBuf> {
 pub fn save_png(frame: &RgbaFrame) -> Result<PathBuf, std::io::Error> {
     let directory = screenshot_dir();
     ensure_directory(&directory)?;
-    let path = unique_path(&directory, "capin", "png");
-    image::save_buffer(
-        &path,
+    let template = settings_state::get().filename_template;
+    let stem = render_filename(&template, frame.width(), frame.height());
+    let (path, mut file) = create_unique_file(&directory, &stem, "png")?;
+    if let Err(error) = image::write_buffer_with_format(
+        &mut file,
         frame.pixels(),
         frame.width(),
         frame.height(),
         image::ColorType::Rgba8,
-    )
-    .map_err(std::io::Error::other)?;
+        image::ImageFormat::Png,
+    ) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(std::io::Error::other(error));
+    }
     Ok(path)
+}
+
+/// Expands the user filename template. `{date}` is local `YYYYMMDD`,
+/// `{time}` is local `HHMMSS`, and `{width}`/`{height}` are image pixels.
+pub fn render_filename(template: &str, width: u32, height: u32) -> String {
+    let template = if template.trim().is_empty() {
+        crate::settings_state::DEFAULT_FILENAME_TEMPLATE
+    } else {
+        template
+    };
+    let now = chrono::Local::now();
+    let rendered = template
+        .replace("{date}", &now.format("%Y%m%d").to_string())
+        .replace("{time}", &now.format("%H%M%S").to_string())
+        .replace("{width}", &width.to_string())
+        .replace("{height}", &height.to_string());
+    sanitize_file_stem(&rendered)
+}
+
+fn sanitize_file_stem(stem: &str) -> String {
+    let mut cleaned = String::with_capacity(stem.len());
+    for ch in stem.chars() {
+        if ch.is_control() || matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+            cleaned.push('_');
+        } else {
+            cleaned.push(ch);
+        }
+    }
+    let cleaned = cleaned
+        .trim()
+        .trim_end_matches([' ', '.'])
+        .chars()
+        .take(120)
+        .collect::<String>();
+    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+        return "Capin".to_owned();
+    }
+    let upper = cleaned.to_ascii_uppercase();
+    let reserved = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ["COM", "LPT"].iter().any(|prefix| {
+            upper
+                .strip_prefix(prefix)
+                .and_then(|suffix| suffix.parse::<u8>().ok())
+                .is_some_and(|number| (1..=9).contains(&number))
+        });
+    if reserved {
+        format!("_{cleaned}")
+    } else {
+        cleaned
+    }
+}
+
+fn create_unique_file(
+    directory: &Path,
+    stem: &str,
+    extension: &str,
+) -> Result<(PathBuf, File), std::io::Error> {
+    for suffix in 0..10_000u32 {
+        let name = if suffix == 0 {
+            format!("{stem}.{extension}")
+        } else {
+            format!("{stem}_{suffix}.{extension}")
+        };
+        let path = directory.join(name);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "filename template produced too many collisions",
+    ))
 }
 
 pub fn recording_path(format: core_types::RecordFormat) -> Result<PathBuf, std::io::Error> {
@@ -126,4 +206,34 @@ fn unique_path(directory: &Path, prefix: &str, extension: &str) -> PathBuf {
         suffix += 1;
     }
     path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filename_template_expands_tokens_and_dimensions() {
+        let rendered = render_filename("Capin_{date}_{time}_{width}x{height}", 1920, 1080);
+        assert!(rendered.starts_with("Capin_"));
+        assert!(rendered.ends_with("_1920x1080"));
+        assert!(!rendered.contains('{'));
+        assert!(!rendered.contains('}'));
+    }
+
+    #[test]
+    fn empty_filename_template_falls_back_to_default() {
+        let rendered = render_filename("", 1, 2);
+        assert!(rendered.starts_with("Capin_"));
+        assert!(!rendered.contains('{'));
+    }
+
+    #[test]
+    fn filename_stem_is_sanitized_for_windows() {
+        assert_eq!(sanitize_file_stem("a/b:c*?"), "a_b_c__");
+        assert_eq!(sanitize_file_stem("CON"), "_CON");
+        assert_eq!(sanitize_file_stem("   "), "Capin");
+        assert_eq!(sanitize_file_stem("name. "), "name");
+        assert_eq!(sanitize_file_stem(".."), "Capin");
+    }
 }

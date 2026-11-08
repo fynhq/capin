@@ -19,7 +19,6 @@ use libwebp_sys::{
 
 use crate::RecordError;
 
-const QUALITY: f32 = 72.0;
 const METHOD: i32 = 2;
 
 /// Encodes one animated WebP recording.
@@ -41,7 +40,12 @@ unsafe impl Send for WebpEncoder {}
 
 impl WebpEncoder {
     /// Creates an encoder for `input` frames scaled to `output`.
-    pub fn new(input: PhysicalSize, output: PhysicalSize, _fps: u32) -> Result<Self, RecordError> {
+    pub fn new(
+        input: PhysicalSize,
+        output: PhysicalSize,
+        _fps: u32,
+        quality: f32,
+    ) -> Result<Self, RecordError> {
         if input.is_empty() || output.is_empty() {
             return Err(RecordError::EmptyDimensions);
         }
@@ -58,7 +62,7 @@ impl WebpEncoder {
             WebPConfigInitInternal(
                 &mut config,
                 WebPPreset::WEBP_PRESET_PICTURE,
-                QUALITY,
+                quality.clamp(0.0, 100.0),
                 WEBP_ENCODER_ABI_VERSION as i32,
             )
         };
@@ -67,7 +71,7 @@ impl WebpEncoder {
                 "could not initialize the WebP configuration".to_owned(),
             ));
         }
-        config.quality = QUALITY;
+        config.quality = quality.clamp(0.0, 100.0);
         config.method = METHOD;
         config.thread_level = 1;
         config.alpha_quality = 100;
@@ -287,8 +291,13 @@ mod tests {
     #[test]
     fn writes_a_playable_animation() {
         let path = path("animation");
-        let mut encoder =
-            WebpEncoder::new(PhysicalSize::new(64, 32), PhysicalSize::new(64, 32), 30).unwrap();
+        let mut encoder = WebpEncoder::new(
+            PhysicalSize::new(64, 32),
+            PhysicalSize::new(64, 32),
+            30,
+            72.0,
+        )
+        .unwrap();
         encoder
             .push_bgra(&bgra(64, 32, [0, 0, 255, 255]), 0)
             .unwrap();
@@ -310,8 +319,13 @@ mod tests {
     #[test]
     fn scales_frames_to_the_output_canvas() {
         let path = path("scaled");
-        let mut encoder =
-            WebpEncoder::new(PhysicalSize::new(128, 64), PhysicalSize::new(64, 32), 30).unwrap();
+        let mut encoder = WebpEncoder::new(
+            PhysicalSize::new(128, 64),
+            PhysicalSize::new(64, 32),
+            30,
+            72.0,
+        )
+        .unwrap();
         encoder
             .push_bgra(&bgra(128, 64, [10, 20, 30, 255]), 0)
             .unwrap();
@@ -327,8 +341,13 @@ mod tests {
 
     #[test]
     fn rejects_an_empty_recording() {
-        let encoder =
-            WebpEncoder::new(PhysicalSize::new(64, 32), PhysicalSize::new(64, 32), 30).unwrap();
+        let encoder = WebpEncoder::new(
+            PhysicalSize::new(64, 32),
+            PhysicalSize::new(64, 32),
+            30,
+            72.0,
+        )
+        .unwrap();
         let error = encoder.finish(0, &path("empty")).unwrap_err();
         assert!(matches!(error, RecordError::Webp(_)));
     }

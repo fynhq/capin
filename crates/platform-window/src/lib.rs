@@ -18,6 +18,30 @@ pub use style::WindowStyle;
 
 use raw_window_handle::HasWindowHandle;
 
+/// Whether the process currently has macOS Accessibility permission.
+pub fn accessibility_trusted() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos::accessibility_trusted()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
+/// Whether the process currently has macOS screen-recording permission.
+pub fn screen_capture_trusted() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos::screen_capture_trusted()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
 /// Hides the macOS Dock icon so the app behaves as a menu-bar utility.
 /// No-op on other platforms.
 pub fn set_macos_accessory_activation_policy() {

@@ -7,12 +7,58 @@ use crate::FrameRate;
 const WEBP_MAX_LONG_EDGE: u32 = 1920;
 const WEBP_MAX_SHORT_EDGE: u32 = 1080;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RecordQuality {
+    Low,
+    #[default]
+    Standard,
+    High,
+}
+
+impl RecordQuality {
+    pub const ALL: [Self; 3] = [Self::Low, Self::Standard, Self::High];
+
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Standard => "standard",
+            Self::High => "high",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "low" => Some(Self::Low),
+            "standard" => Some(Self::Standard),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
+
+    pub const fn bitrate_multiplier(self) -> f32 {
+        match self {
+            Self::Low => 0.5,
+            Self::Standard => 1.0,
+            Self::High => 1.5,
+        }
+    }
+
+    pub const fn webp_quality(self) -> f32 {
+        match self {
+            Self::Low => 55.0,
+            Self::Standard => 72.0,
+            Self::High => 88.0,
+        }
+    }
+}
+
 /// Inputs for one recording session. Audio is intentionally absent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordConfig {
     pub target: CaptureTarget,
     pub format: RecordFormat,
     pub frame_rate: FrameRate,
+    pub quality: RecordQuality,
     pub include_cursor: bool,
 }
 
@@ -22,6 +68,7 @@ impl RecordConfig {
             target,
             format,
             frame_rate: FrameRate::Fps30,
+            quality: RecordQuality::Standard,
             include_cursor: true,
         }
     }

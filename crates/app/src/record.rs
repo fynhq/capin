@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use core_capture::{CaptureTarget, MonitorInfo, platform_backend};
-use core_record::{FrameRate, RecordConfig};
+use core_record::{FrameRate, RecordConfig, RecordQuality};
 use core_types::{PhysicalPoint, PhysicalRect, RecordFormat};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -10,21 +10,39 @@ use platform_record::Recorder;
 use platform_window::{WindowStyle, apply as apply_window_style, system_accent_hex};
 
 use crate::i18n::{Language, t};
+use crate::record_session::Session;
 use crate::settings_state;
 
 const BAR_WIDTH: f32 = 500.0;
 const BAR_HEIGHT: f32 = 68.0;
 const FALLBACK_ACCENT: u32 = 0x4c9aff;
+const COUNTDOWN: Duration = Duration::from_secs(3);
+const SEGMENT_DURATION: Duration = Duration::from_secs(10);
 
 pub fn start(target: CaptureTarget, cx: &mut App) {
     let settings = settings_state::get();
     let format = settings.record_format;
-    let output = match crate::storage::recording_path(format) {
-        Ok(path) => path,
-        Err(error) => {
-            eprintln!("capin: failed to prepare the recording output: {error}");
-            return;
-        }
+    let segment_mode = settings.record_segments;
+    let (output, current_output, session) = if segment_mode {
+        let session = match Session::create(format) {
+            Ok(session) => session,
+            Err(error) => {
+                eprintln!("capin: failed to create the recording session: {error}");
+                return;
+            }
+        };
+        let directory = session.directory().to_path_buf();
+        let current = session.segment_path(0, format.extension());
+        (directory, current, Some(session))
+    } else {
+        let output = match crate::storage::recording_path(format) {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("capin: failed to prepare the recording output: {error}");
+                return;
+            }
+        };
+        (output.clone(), output, None)
     };
     let config = RecordConfig {
         target,
@@ -34,6 +52,7 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
         } else {
             settings.record_frame_rate
         },
+        quality: settings.record_quality,
         include_cursor: settings.record_cursor,
     };
 
@@ -68,9 +87,18 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
         let excluded: Vec<u64> = platform_window::native_window_id(&*window)
             .into_iter()
             .collect();
-        let recorder = Recorder::start_excluding(config, output.clone(), &excluded)
-            .map_err(|error| error.to_string());
-        cx.new(|cx| RecordBar::new(output, recorder, format, exclusion_ok, cx))
+        cx.new(|cx| {
+            RecordBar::new(
+                output,
+                current_output,
+                session,
+                config,
+                excluded,
+                format,
+                exclusion_ok,
+                cx,
+            )
+        })
     }) {
         Ok(_) => {}
         Err(error) => eprintln!("capin: failed to open recording bar: {error}"),
@@ -79,10 +107,19 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
 
 struct RecordBar {
     output: PathBuf,
+    current_output: PathBuf,
+    session: Option<Session>,
+    segment_index: u32,
+    segment_started: Instant,
+    rotating: bool,
     recorder: Option<Recorder>,
+    config: RecordConfig,
+    excluded: Vec<u64>,
     format: RecordFormat,
     fps: u32,
-    started: Instant,
+    quality: RecordQuality,
+    started: Option<Instant>,
+    countdown_started: Instant,
     paused_total: Duration,
     pause_started: Option<Instant>,
     paused: bool,
@@ -93,76 +130,156 @@ struct RecordBar {
 }
 
 impl RecordBar {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         output: PathBuf,
-        recorder: Result<Recorder, String>,
+        current_output: PathBuf,
+        session: Option<Session>,
+        config: RecordConfig,
+        excluded: Vec<u64>,
         format: RecordFormat,
         exclusion_ok: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         let settings = settings_state::get();
-        let fps = settings.record_frame_rate.as_u32();
+        let fps = config.frame_rate.as_u32();
         let language = settings.language;
-        let (recorder, mut status, completed) = match recorder {
-            Ok(recorder) => (Some(recorder), None, false),
-            Err(error) => (
-                None,
-                Some(format!("{}{}", t(language, "record.failed"), error)),
-                true,
-            ),
-        };
-        if !exclusion_ok && !completed {
+        let mut status = None;
+        if !exclusion_ok {
             status = Some(t(language, "record.exclusion_failed").to_owned());
         }
 
         let bar = Self {
             output,
-            recorder,
+            current_output,
+            session,
+            segment_index: 0,
+            segment_started: Instant::now(),
+            rotating: false,
+            recorder: None,
+            config,
+            excluded,
             format,
             fps,
-            started: Instant::now(),
+            quality: settings.record_quality,
+            started: None,
+            countdown_started: Instant::now(),
             paused_total: Duration::ZERO,
             pause_started: None,
             paused: false,
             stopping: false,
-            completed,
+            completed: false,
             status,
             language,
         };
-        if bar.recorder.is_some() {
-            cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(200))
-                        .await;
-                    let alive = this
-                        .update(cx, |this, cx| {
-                            if this.completed {
-                                return false;
-                            }
-                            if this
-                                .recorder
-                                .as_ref()
-                                .is_some_and(|recorder| recorder.is_finished())
-                            {
-                                this.completed = true;
-                                this.stopping = false;
-                                this.apply_final_status();
-                                cx.notify();
-                                return false;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(200))
+                    .await;
+                let alive = this
+                    .update(cx, |this, cx| {
+                        if this.completed {
+                            return false;
+                        }
+                        if this.recorder.is_none() && this.countdown_started.elapsed() < COUNTDOWN {
+                            cx.notify();
+                            return true;
+                        }
+                        if this.recorder.is_none() && this.countdown_started.elapsed() >= COUNTDOWN
+                        {
+                            this.start_recording(cx);
+                        }
+                        if this.session.is_some()
+                            && this.recorder.is_some()
+                            && !this.paused
+                            && !this.stopping
+                            && !this.rotating
+                            && this.segment_started.elapsed() >= SEGMENT_DURATION
+                        {
+                            this.rotating = true;
+                            this.status = Some(t(this.language, "record.segmenting").to_owned());
+                            if let Some(recorder) = this.recorder.as_ref() {
+                                recorder.stop();
                             }
                             cx.notify();
-                            true
-                        })
-                        .unwrap_or(false);
-                    if !alive {
-                        break;
-                    }
+                            return true;
+                        }
+                        if this
+                            .recorder
+                            .as_ref()
+                            .is_some_and(|recorder| recorder.is_finished())
+                        {
+                            if this.rotating && !this.stopping {
+                                if let Some(session) = &mut this.session {
+                                    session.record_segment(&this.current_output);
+                                }
+                                this.segment_index = this.segment_index.saturating_add(1);
+                                this.current_output = this
+                                    .session
+                                    .as_ref()
+                                    .map(|session| {
+                                        session.segment_path(
+                                            this.segment_index,
+                                            this.format.extension(),
+                                        )
+                                    })
+                                    .unwrap_or_default();
+                                this.recorder = None;
+                                this.rotating = false;
+                                this.start_recording(cx);
+                                cx.notify();
+                                return true;
+                            }
+                            this.rotating = false;
+                            if let Some(session) = &mut this.session {
+                                session.record_segment(&this.current_output);
+                                session.finish();
+                            }
+                            this.completed = true;
+                            this.stopping = false;
+                            this.apply_final_status();
+                            cx.notify();
+                            return false;
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !alive {
+                    break;
                 }
-            })
-            .detach();
-        }
+            }
+        })
+        .detach();
         bar
+    }
+
+    fn start_recording(&mut self, cx: &mut Context<Self>) {
+        match Recorder::start_excluding(
+            self.config.clone(),
+            self.current_output.clone(),
+            &self.excluded,
+        ) {
+            Ok(recorder) => {
+                self.recorder = Some(recorder);
+                self.started.get_or_insert_with(Instant::now);
+                self.segment_started = Instant::now();
+                self.status = None;
+            }
+            Err(error) => {
+                self.completed = true;
+                self.status = Some(format!("{}{}", t(self.language, "record.failed"), error));
+            }
+        }
+        cx.notify();
+    }
+
+    fn countdown_remaining(&self) -> u64 {
+        COUNTDOWN
+            .as_secs()
+            .saturating_sub(self.countdown_started.elapsed().as_secs())
+            .max(1)
     }
 
     fn apply_final_status(&mut self) {
@@ -171,18 +288,31 @@ impl RecordBar {
         };
         self.status = Some(match recorder.error() {
             Some(error) => format!("{}{}", t(self.language, "record.failed"), error),
-            None => format!(
-                "{} {}",
-                t(self.language, "record.saved"),
-                self.output.display()
-            ),
+            None => {
+                let mut message = format!(
+                    "{} {}",
+                    t(self.language, "record.saved"),
+                    self.output.display()
+                );
+                if let Some(session) = &self.session {
+                    message.push_str(&format!(
+                        " · {} {}",
+                        session.segment_count(),
+                        t(self.language, "record.segments")
+                    ));
+                }
+                message
+            }
         });
     }
 
     fn elapsed(&self) -> Duration {
-        let mut elapsed = self.started.elapsed().saturating_sub(self.paused_total);
-        if let Some(started) = self.pause_started {
-            elapsed = elapsed.saturating_sub(started.elapsed());
+        let Some(started) = self.started else {
+            return Duration::ZERO;
+        };
+        let mut elapsed = started.elapsed().saturating_sub(self.paused_total);
+        if let Some(pause_started) = self.pause_started {
+            elapsed = elapsed.saturating_sub(pause_started.elapsed());
         }
         elapsed
     }
@@ -213,6 +343,12 @@ impl RecordBar {
             return;
         }
         let Some(recorder) = self.recorder.as_ref() else {
+            if let Some(session) = self.session.take() {
+                session.discard();
+            }
+            self.completed = true;
+            self.status = Some(t(self.language, "record.cancelled").to_owned());
+            cx.notify();
             return;
         };
         self.stopping = true;
@@ -235,27 +371,42 @@ impl Render for RecordBar {
         let muted = rgba(0xFFFFFF99);
         let language = self.language;
         let elapsed = self.elapsed();
-        let timer = format!(
-            "{:02}:{:02}",
-            elapsed.as_secs() / 60,
-            elapsed.as_secs() % 60
-        );
+        let counting_down = self.recorder.is_none() && !self.completed;
+        let timer = if counting_down {
+            format!("00:{:02}", self.countdown_remaining())
+        } else {
+            format!(
+                "{:02}:{:02}",
+                elapsed.as_secs() / 60,
+                elapsed.as_secs() % 60
+            )
+        };
         let state = if self.completed {
             t(language, "record.done")
         } else if self.stopping {
             t(language, "record.saving")
         } else if self.paused {
             t(language, "record.paused")
+        } else if counting_down {
+            t(language, "record.countdown")
         } else {
             t(language, "record.recording")
         };
         let status = self.status.clone();
+        let quality = t(
+            language,
+            match self.quality {
+                RecordQuality::Low => "quality.low",
+                RecordQuality::Standard => "quality.standard",
+                RecordQuality::High => "quality.high",
+            },
+        );
         let pause_label = if self.paused {
             t(language, "record.resume").to_owned()
         } else {
             t(language, "record.pause").to_owned()
         };
-        let pause = (!self.stopping && !self.completed).then(|| {
+        let pause = (self.recorder.is_some() && !self.stopping && !self.completed).then(|| {
             crate::ui::flat_button("record-pause", pause_label, accent, cx, Self::toggle_pause)
         });
         let stop = (!self.stopping && !self.completed).then(|| {
@@ -322,9 +473,10 @@ impl Render for RecordBar {
                                 )
                                 .child(div().text_size(px(12.0)).text_color(accent).child(timer))
                                 .child(div().text_size(px(10.5)).text_color(muted).child(format!(
-                                    "{} · {} fps",
+                                    "{} · {} fps · {}",
                                     self.format.display_name(),
-                                    self.fps
+                                    self.fps,
+                                    quality
                                 ))),
                         )
                         .child(

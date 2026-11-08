@@ -1,7 +1,10 @@
+use std::cell::Cell;
 use std::ops::Range;
 use std::sync::Arc;
 
-use core_annotate::{Annotation, AnnotationDocument, AnnotationStyle, Shape, rasterize};
+use core_annotate::{
+    Annotation, AnnotationDocument, AnnotationStyle, NumberStyle, Shape, TextAlignment, rasterize,
+};
 use core_types::{PhysicalPoint, PhysicalRect, PhysicalSize, RgbaFrame, prefers_dark_foreground};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -14,7 +17,7 @@ const TOOLBAR_HEIGHT: f32 = 48.0;
 const PADDING: f32 = 16.0;
 const MAX_IMAGE_WIDTH: f32 = 1200.0;
 const MAX_IMAGE_HEIGHT: f32 = 800.0;
-const MIN_WINDOW_WIDTH: f32 = 960.0;
+const MIN_WINDOW_WIDTH: f32 = 1024.0;
 const BACKGROUND: u32 = 0x141414FF;
 const TOOLBAR_BG: u32 = 0x202020FF;
 const TEXT: u32 = 0xF2F2F2FF;
@@ -25,9 +28,16 @@ const TOOLBAR_SIZE: u32 = 32;
 const BADGE_SIZE: u32 = 32;
 
 const STROKE_WIDTHS: [f32; 3] = [2.0, 4.0, 8.0];
+const FONT_SIZES: [f32; 4] = [14.0, 20.0, 28.0, 36.0];
 const CORNER_RADII: [f32; 4] = [0.0, 8.0, 16.0, 24.0];
 const BLUR_RADII: [u32; 4] = [8, 16, 24, 32];
 const SPOTLIGHT_INTENSITIES: [u8; 3] = [40, 60, 80];
+const CANVAS_HISTORY_LIMIT: usize = 3;
+
+thread_local! {
+    /// Continues numbered badges across editors in one app session.
+    static NEXT_SEQUENCE: Cell<u32> = const { Cell::new(1) };
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tool {
@@ -35,6 +45,8 @@ enum Tool {
     Rect,
     Ellipse,
     Arrow,
+    Polyline,
+    Curve,
     Highlighter,
     Blur,
     Text,
@@ -43,11 +55,13 @@ enum Tool {
 }
 
 impl Tool {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 11] = [
         Self::Select,
         Self::Rect,
         Self::Ellipse,
         Self::Arrow,
+        Self::Polyline,
+        Self::Curve,
         Self::Highlighter,
         Self::Blur,
         Self::Text,
@@ -61,6 +75,8 @@ impl Tool {
             Self::Rect => "editor-tool-rect",
             Self::Ellipse => "editor-tool-ellipse",
             Self::Arrow => "editor-tool-arrow",
+            Self::Polyline => "editor-tool-polyline",
+            Self::Curve => "editor-tool-curve",
             Self::Highlighter => "editor-tool-highlighter",
             Self::Blur => "editor-tool-blur",
             Self::Text => "editor-tool-text",
@@ -75,6 +91,8 @@ impl Tool {
             Self::Rect => icons::RECT,
             Self::Ellipse => icons::ELLIPSE,
             Self::Arrow => icons::ARROW,
+            Self::Polyline => icons::POLYLINE,
+            Self::Curve => icons::CURVE,
             Self::Highlighter => icons::HIGHLIGHTER,
             Self::Blur => icons::BLUR,
             Self::Text => icons::TEXT,
@@ -89,6 +107,8 @@ impl Tool {
             Self::Rect => "editor.tool.rect",
             Self::Ellipse => "editor.tool.ellipse",
             Self::Arrow => "editor.tool.arrow",
+            Self::Polyline => "editor.tool.polyline",
+            Self::Curve => "editor.tool.curve",
             Self::Highlighter => "editor.tool.highlighter",
             Self::Blur => "editor.tool.blur",
             Self::Text => "editor.tool.text",
@@ -101,7 +121,7 @@ impl Tool {
         match self {
             Self::Rect => Some(AnnotationColorTool::Rect),
             Self::Ellipse => Some(AnnotationColorTool::Ellipse),
-            Self::Arrow => Some(AnnotationColorTool::Arrow),
+            Self::Arrow | Self::Polyline | Self::Curve => Some(AnnotationColorTool::Arrow),
             Self::Highlighter => Some(AnnotationColorTool::Highlighter),
             Self::Text => Some(AnnotationColorTool::Text),
             Self::Number => Some(AnnotationColorTool::Number),
@@ -114,6 +134,8 @@ impl Tool {
             Shape::Rect(_) => Some(Self::Rect),
             Shape::Ellipse(_) => Some(Self::Ellipse),
             Shape::Arrow { .. } => Some(Self::Arrow),
+            Shape::Polyline { .. } => Some(Self::Polyline),
+            Shape::Curve { .. } => Some(Self::Curve),
             Shape::HighlighterBox(_) => Some(Self::Highlighter),
             Shape::Blur(_) => Some(Self::Blur),
             Shape::Text { .. } => Some(Self::Text),
@@ -171,6 +193,52 @@ struct MoveDraft {
     id: core_annotate::AnnotationId,
     start: PhysicalPoint,
     current: PhysicalPoint,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResizeHandle {
+    Nw,
+    N,
+    Ne,
+    E,
+    Se,
+    S,
+    Sw,
+    W,
+    ArrowStart,
+    ArrowEnd,
+    CurveStart,
+    CurveControl,
+    CurveEnd,
+}
+
+struct ResizeDraft {
+    id: core_annotate::AnnotationId,
+    handle: ResizeHandle,
+    start: PhysicalPoint,
+    current: PhysicalPoint,
+    original: Shape,
+}
+
+struct PanDraft {
+    start: Point<Pixels>,
+    start_pan: Point<Pixels>,
+}
+
+struct CropDraft {
+    start: PhysicalPoint,
+    current: PhysicalPoint,
+}
+
+struct PolylineDraft {
+    points: Vec<PhysicalPoint>,
+    current: PhysicalPoint,
+}
+
+struct EditorSnapshot {
+    frame: RgbaFrame,
+    image_size: PhysicalSize,
+    document: AnnotationDocument,
 }
 
 struct TextEdit {
@@ -387,6 +455,13 @@ struct EditorView {
     image_size: PhysicalSize,
     tool: Tool,
     style: AnnotationStyle,
+    font_size: f32,
+    arrow_start: bool,
+    arrow_end: bool,
+    text_background: bool,
+    text_outline: bool,
+    text_alignment: TextAlignment,
+    number_style: NumberStyle,
     corner_radius: f32,
     blur_radius: u32,
     rect_filled: bool,
@@ -395,6 +470,16 @@ struct EditorView {
     active_color_tool: AnnotationColorTool,
     draft: Option<Draft>,
     move_draft: Option<MoveDraft>,
+    resize_draft: Option<ResizeDraft>,
+    pan_draft: Option<PanDraft>,
+    view_zoom: f32,
+    view_pan: Point<Pixels>,
+    space_down: bool,
+    crop_mode: bool,
+    crop_draft: Option<CropDraft>,
+    polyline_draft: Option<PolylineDraft>,
+    canvas_undo: Vec<EditorSnapshot>,
+    canvas_redo: Vec<EditorSnapshot>,
     annotation_clipboard: Option<Annotation>,
     text_edit: Option<TextEdit>,
     text_edit_screen: Option<Bounds<Pixels>>,
@@ -414,6 +499,13 @@ impl EditorView {
         let settings = settings_state::get();
         let active_color_tool = AnnotationColorTool::Rect;
         let style_color = settings.annotation_color_for(active_color_tool);
+        let font_size = settings.annotation_font_size;
+        let arrow_start = settings.annotation_arrow_start;
+        let arrow_end = settings.annotation_arrow_end;
+        let text_background = settings.annotation_text_background;
+        let text_outline = settings.annotation_text_outline;
+        let text_alignment = settings.annotation_text_alignment;
+        let number_style = settings.annotation_number_style;
         let corner_radius = settings.annotation_corner_radius;
         let blur_radius = settings.annotation_blur_radius;
         let rect_filled = settings.annotation_rect_filled;
@@ -430,12 +522,25 @@ impl EditorView {
             style: AnnotationStyle {
                 color: style_color,
                 stroke_width: settings.annotation_stroke_width,
-                font_size: 20.0,
+                font_size,
                 corner_radius,
                 blur_radius,
                 filled: false,
+                arrow_start,
+                arrow_end,
+                text_background,
+                text_outline,
+                text_alignment,
+                number_style,
                 spotlight_intensity,
             },
+            font_size,
+            arrow_start,
+            arrow_end,
+            text_background,
+            text_outline,
+            text_alignment,
+            number_style,
             corner_radius,
             blur_radius,
             rect_filled,
@@ -444,6 +549,16 @@ impl EditorView {
             active_color_tool,
             draft: None,
             move_draft: None,
+            resize_draft: None,
+            pan_draft: None,
+            view_zoom: 1.0,
+            view_pan: point(px(0.0), px(0.0)),
+            space_down: false,
+            crop_mode: false,
+            crop_draft: None,
+            polyline_draft: None,
+            canvas_undo: Vec::new(),
+            canvas_redo: Vec::new(),
             annotation_clipboard: None,
             text_edit: None,
             text_edit_screen: None,
@@ -462,18 +577,252 @@ impl EditorView {
             (f32::from(viewport.height) - TOOLBAR_HEIGHT - PADDING * 2.0).max(1.0);
         let image_width = self.image_size.width as f32;
         let image_height = self.image_size.height as f32;
-        let scale = (available_width / image_width)
+        let fit_scale = (available_width / image_width)
             .min(available_height / image_height)
             .min(1.0);
+        let scale = fit_scale * self.view_zoom;
         let display_width = image_width * scale;
         let display_height = image_height * scale;
+        let min_x = PADDING + (available_width - display_width).min(0.0);
+        let max_x = PADDING + (available_width - display_width).max(0.0);
+        let min_y = TOOLBAR_HEIGHT + PADDING + (available_height - display_height).min(0.0);
+        let max_y = TOOLBAR_HEIGHT + PADDING + (available_height - display_height).max(0.0);
+        let x = (PADDING + (available_width - display_width) / 2.0 + f32::from(self.view_pan.x))
+            .clamp(min_x, max_x);
+        let y = (TOOLBAR_HEIGHT
+            + PADDING
+            + (available_height - display_height) / 2.0
+            + f32::from(self.view_pan.y))
+        .clamp(min_y, max_y);
         Bounds {
-            origin: point(
-                px(PADDING + (available_width - display_width) / 2.0),
-                px(TOOLBAR_HEIGHT + PADDING + (available_height - display_height) / 2.0),
-            ),
+            origin: point(px(x), px(y)),
             size: size(px(display_width), px(display_height)),
         }
+    }
+
+    fn image_scale(&self, window: &Window) -> f32 {
+        (f32::from(self.image_view_rect(window).size.width) / self.image_size.width.max(1) as f32)
+            .max(0.01)
+    }
+
+    fn fit_scale(&self, window: &Window) -> f32 {
+        (self.image_scale(window) / self.view_zoom.max(0.01)).max(0.01)
+    }
+
+    fn zoom_at(
+        &mut self,
+        factor: f32,
+        anchor: Point<Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.image_view_rect(window);
+        let before_scale = f32::from(before.size.width) / self.image_size.width.max(1) as f32;
+        if before_scale <= 0.0 {
+            return;
+        }
+        let image_x = (f32::from(anchor.x) - f32::from(before.origin.x)) / before_scale;
+        let image_y = (f32::from(anchor.y) - f32::from(before.origin.y)) / before_scale;
+        let zoom = (self.view_zoom * factor).clamp(0.25, 8.0);
+        if (zoom - self.view_zoom).abs() < f32::EPSILON {
+            return;
+        }
+        self.view_zoom = zoom;
+        let after = self.image_view_rect(window);
+        let after_scale = f32::from(after.size.width) / self.image_size.width.max(1) as f32;
+        let desired_x = f32::from(anchor.x) - image_x * after_scale;
+        let desired_y = f32::from(anchor.y) - image_y * after_scale;
+        self.view_pan.x += px(desired_x - f32::from(after.origin.x));
+        self.view_pan.y += px(desired_y - f32::from(after.origin.y));
+        cx.notify();
+    }
+
+    fn reset_view(&mut self, cx: &mut Context<Self>) {
+        self.view_zoom = 1.0;
+        self.view_pan = point(px(0.0), px(0.0));
+        cx.notify();
+    }
+
+    fn actual_size(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let fit = self.fit_scale(window);
+        self.view_zoom = (1.0 / fit).clamp(0.25, 8.0);
+        self.view_pan = point(px(0.0), px(0.0));
+        cx.notify();
+    }
+
+    fn push_canvas_snapshot(&mut self) {
+        self.canvas_undo.push(EditorSnapshot {
+            frame: self.frame.clone(),
+            image_size: self.image_size,
+            document: self.document.clone(),
+        });
+        if self.canvas_undo.len() > CANVAS_HISTORY_LIMIT {
+            self.canvas_undo.remove(0);
+        }
+        self.canvas_redo.clear();
+    }
+
+    fn restore_canvas_snapshot(&mut self, snapshot: EditorSnapshot, cx: &mut Context<Self>) {
+        self.frame = snapshot.frame;
+        self.image_size = snapshot.image_size;
+        self.document = snapshot.document;
+        self.image = image_util::render_image(&self.frame);
+        self.blur_images = BLUR_RADII.map(|radius| image_util::blurred_image(&self.frame, radius));
+        self.text_edit = None;
+        self.draft = None;
+        self.move_draft = None;
+        self.resize_draft = None;
+        self.pan_draft = None;
+        self.crop_mode = false;
+        self.crop_draft = None;
+        self.reset_view(cx);
+    }
+
+    fn undo_canvas(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(snapshot) = self.canvas_undo.pop() else {
+            return false;
+        };
+        self.canvas_redo.push(EditorSnapshot {
+            frame: self.frame.clone(),
+            image_size: self.image_size,
+            document: self.document.clone(),
+        });
+        self.restore_canvas_snapshot(snapshot, cx);
+        true
+    }
+
+    fn redo_canvas(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(snapshot) = self.canvas_redo.pop() else {
+            return false;
+        };
+        self.canvas_undo.push(EditorSnapshot {
+            frame: self.frame.clone(),
+            image_size: self.image_size,
+            document: self.document.clone(),
+        });
+        self.restore_canvas_snapshot(snapshot, cx);
+        true
+    }
+
+    fn replace_canvas(&mut self, frame: RgbaFrame, cx: &mut Context<Self>) {
+        self.frame = frame;
+        self.image_size = PhysicalSize::new(self.frame.width(), self.frame.height());
+        self.image = image_util::render_image(&self.frame);
+        self.blur_images = BLUR_RADII.map(|radius| image_util::blurred_image(&self.frame, radius));
+        self.document = AnnotationDocument::new(self.image_size);
+        self.text_edit = None;
+        self.draft = None;
+        self.move_draft = None;
+        self.resize_draft = None;
+        self.pan_draft = None;
+        self.crop_mode = false;
+        self.crop_draft = None;
+        self.reset_view(cx);
+    }
+
+    fn rotate_canvas(&mut self, cx: &mut Context<Self>) {
+        self.commit_text(cx);
+        let language = settings_state::get().language;
+        let Ok(output) = rasterize(&self.document, &self.frame) else {
+            self.status = Some(t(language, "editor.export_failed").to_owned());
+            cx.notify();
+            return;
+        };
+        self.push_canvas_snapshot();
+        let rotated = rotate_frame_cw(&output);
+        self.replace_canvas(rotated, cx);
+        self.status = Some(t(language, "editor.rotated").to_owned());
+        cx.notify();
+    }
+
+    fn flip_canvas(&mut self, horizontal: bool, cx: &mut Context<Self>) {
+        self.commit_text(cx);
+        let language = settings_state::get().language;
+        let Ok(output) = rasterize(&self.document, &self.frame) else {
+            self.status = Some(t(language, "editor.export_failed").to_owned());
+            cx.notify();
+            return;
+        };
+        self.push_canvas_snapshot();
+        let flipped = flip_frame(&output, horizontal);
+        self.replace_canvas(flipped, cx);
+        self.status = Some(
+            t(
+                language,
+                if horizontal {
+                    "editor.flipped_horizontal"
+                } else {
+                    "editor.flipped_vertical"
+                },
+            )
+            .to_owned(),
+        );
+        cx.notify();
+    }
+
+    fn toggle_crop(&mut self, cx: &mut Context<Self>) {
+        self.commit_text(cx);
+        self.crop_mode = !self.crop_mode;
+        self.crop_draft = None;
+        self.text_edit = None;
+        self.draft = None;
+        self.move_draft = None;
+        self.resize_draft = None;
+        self.status = self
+            .crop_mode
+            .then(|| t(settings_state::get().language, "editor.crop_hint").to_owned());
+        cx.notify();
+    }
+
+    fn apply_crop(&mut self, cx: &mut Context<Self>) {
+        let Some(draft) = self.crop_draft.take() else {
+            return;
+        };
+        let rect = normalized_rect(draft.start, draft.current);
+        if rect.size.width < 2 || rect.size.height < 2 {
+            return;
+        }
+        let left = rect.origin.x.clamp(0, self.image_size.width as i32);
+        let top = rect.origin.y.clamp(0, self.image_size.height as i32);
+        let right =
+            (rect.origin.x + rect.size.width as i32).clamp(left, self.image_size.width as i32);
+        let bottom =
+            (rect.origin.y + rect.size.height as i32).clamp(top, self.image_size.height as i32);
+        let rect = PhysicalRect::new(left, top, (right - left) as u32, (bottom - top) as u32);
+        if rect.size.width < 2 || rect.size.height < 2 {
+            return;
+        }
+        let Some(cropped) = crop_frame(&self.frame, rect) else {
+            return;
+        };
+        self.push_canvas_snapshot();
+        let new_size = PhysicalSize::new(cropped.width(), cropped.height());
+        let mut document = AnnotationDocument::new(new_size);
+        for annotation in self.document.objects() {
+            let translated = annotation
+                .clone()
+                .translated(-rect.origin.x, -rect.origin.y);
+            document.add(translated.shape, translated.style);
+        }
+        document.clear_history();
+        self.frame = cropped;
+        self.image_size = new_size;
+        self.image = image_util::render_image(&self.frame);
+        self.blur_images = BLUR_RADII.map(|radius| image_util::blurred_image(&self.frame, radius));
+        self.document = document;
+        self.crop_mode = false;
+        self.crop_draft = None;
+        self.text_edit = None;
+        self.reset_view(cx);
+        self.status = Some(t(settings_state::get().language, "editor.cropped").to_owned());
+        cx.notify();
+    }
+
+    fn cancel_crop(&mut self, cx: &mut Context<Self>) {
+        self.crop_mode = false;
+        self.crop_draft = None;
+        self.status = None;
+        cx.notify();
     }
 
     fn to_image_point(&self, position: Point<Pixels>, window: &Window) -> Option<PhysicalPoint> {
@@ -499,6 +848,23 @@ impl EditorView {
         }
         style.filled = (self.tool == Tool::Rect && self.rect_filled)
             || (self.tool == Tool::Ellipse && self.ellipse_filled);
+        if self.tool == Tool::Rect && style.filled {
+            // Rectangles are opaque by design; there is no opacity control.
+            style.color |= 0x000000FF;
+        }
+        if self.tool == Tool::Text {
+            style.font_size = self.font_size;
+            style.text_background = self.text_background;
+            style.text_outline = self.text_outline;
+            style.text_alignment = self.text_alignment;
+        }
+        if self.tool == Tool::Number {
+            style.number_style = self.number_style;
+        }
+        if matches!(self.tool, Tool::Arrow | Tool::Polyline | Tool::Curve) {
+            style.arrow_start = self.arrow_start;
+            style.arrow_end = self.arrow_end;
+        }
         match self.tool {
             Tool::Rect => style.corner_radius = self.corner_radius,
             Tool::Blur => style.blur_radius = self.blur_radius,
@@ -546,6 +912,61 @@ impl EditorView {
     fn apply_stroke_width(&mut self, width: f32) {
         self.update_style(|style| style.stroke_width = width);
         settings_state::update(|settings| settings.annotation_stroke_width = width);
+    }
+
+    fn apply_font_size(&mut self, size: f32) {
+        self.font_size = size;
+        self.update_style(|style| style.font_size = size);
+        if let Some(edit) = &mut self.text_edit {
+            edit.style.font_size = size;
+        }
+        settings_state::update(|settings| settings.annotation_font_size = size);
+    }
+
+    fn apply_text_background(&mut self, enabled: bool) {
+        self.text_background = enabled;
+        self.update_style(|style| style.text_background = enabled);
+        if let Some(edit) = &mut self.text_edit {
+            edit.style.text_background = enabled;
+        }
+        settings_state::update(|settings| settings.annotation_text_background = enabled);
+    }
+
+    fn apply_text_outline(&mut self, enabled: bool) {
+        self.text_outline = enabled;
+        self.update_style(|style| style.text_outline = enabled);
+        if let Some(edit) = &mut self.text_edit {
+            edit.style.text_outline = enabled;
+        }
+        settings_state::update(|settings| settings.annotation_text_outline = enabled);
+    }
+
+    fn apply_text_alignment(&mut self, alignment: TextAlignment) {
+        self.text_alignment = alignment;
+        self.update_style(|style| style.text_alignment = alignment);
+        if let Some(edit) = &mut self.text_edit {
+            edit.style.text_alignment = alignment;
+        }
+        settings_state::update(|settings| settings.annotation_text_alignment = alignment);
+    }
+
+    fn apply_number_style(&mut self, number_style: NumberStyle) {
+        self.number_style = number_style;
+        self.update_style(|style| style.number_style = number_style);
+        settings_state::update(|settings| settings.annotation_number_style = number_style);
+    }
+
+    fn apply_arrow_heads(&mut self, start: bool, end: bool) {
+        self.arrow_start = start;
+        self.arrow_end = end;
+        self.update_style(|style| {
+            style.arrow_start = start;
+            style.arrow_end = end;
+        });
+        settings_state::update(|settings| {
+            settings.annotation_arrow_start = start;
+            settings.annotation_arrow_end = end;
+        });
     }
 
     fn apply_corner_radius(&mut self, radius: f32) {
@@ -619,6 +1040,49 @@ impl EditorView {
         update(&mut self.style);
     }
 
+    fn finish_polyline(&mut self, cx: &mut Context<Self>) {
+        let Some(draft) = self.polyline_draft.take() else {
+            return;
+        };
+        let mut points = draft.points;
+        if distance(*points.last().unwrap_or(&draft.current), draft.current) > 2.0 {
+            points.push(draft.current);
+        }
+        if points.len() >= 2 {
+            self.document
+                .add(Shape::Polyline { points }, self.effective_style());
+        }
+        self.status = None;
+        cx.notify();
+    }
+
+    fn cancel_polyline(&mut self, cx: &mut Context<Self>) {
+        self.polyline_draft = None;
+        self.status = None;
+        cx.notify();
+    }
+
+    fn finish_resize(&mut self, point: PhysicalPoint, cx: &mut Context<Self>) {
+        let Some(draft) = self.resize_draft.take() else {
+            return;
+        };
+        if point == draft.start {
+            cx.notify();
+            return;
+        }
+        let Some(style) = self
+            .document
+            .object(draft.id)
+            .map(|annotation| annotation.style)
+        else {
+            return;
+        };
+        let shape = resize_shape(&draft.original, draft.handle, draft.start, point, 4);
+        self.document.update_shape(draft.id, shape, style);
+        self.status = None;
+        cx.notify();
+    }
+
     fn select_annotation(&mut self, id: Option<core_annotate::AnnotationId>) {
         self.document.select(id);
         if let Some(annotation) = id.and_then(|id| self.document.object(id)) {
@@ -633,6 +1097,17 @@ impl EditorView {
                         self.rect_filled = annotation.style.filled;
                     }
                     Tool::Ellipse => self.ellipse_filled = annotation.style.filled,
+                    Tool::Text => {
+                        self.font_size = annotation.style.font_size;
+                        self.text_background = annotation.style.text_background;
+                        self.text_outline = annotation.style.text_outline;
+                        self.text_alignment = annotation.style.text_alignment;
+                    }
+                    Tool::Number => self.number_style = annotation.style.number_style,
+                    Tool::Arrow => {
+                        self.arrow_start = annotation.style.arrow_start;
+                        self.arrow_end = annotation.style.arrow_end;
+                    }
                     Tool::Blur => self.blur_radius = annotation.style.blur_radius,
                     Tool::Spotlight => {
                         self.spotlight_intensity = annotation.style.spotlight_intensity
@@ -707,6 +1182,16 @@ impl EditorView {
     }
 
     fn preview_shape(&self) -> Option<(Shape, AnnotationStyle)> {
+        if let Some(draft) = &self.polyline_draft {
+            let mut points = draft.points.clone();
+            if distance(*points.last().unwrap_or(&draft.current), draft.current) > 2.0 {
+                points.push(draft.current);
+            }
+            if points.len() >= 2 {
+                return Some((Shape::Polyline { points }, self.effective_style()));
+            }
+            return None;
+        }
         let draft = self.draft.as_ref()?;
         finalize_shape(draft, draft.current).map(|shape| (shape, self.effective_style()))
     }
@@ -839,6 +1324,9 @@ impl EditorView {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.commit_text(cx);
                     this.document.select(None);
+                    this.crop_mode = false;
+                    this.crop_draft = None;
+                    this.polyline_draft = None;
                     this.tool = tool;
                     if let Some(color_tool) = tool.color_tool() {
                         this.active_color_tool = color_tool;
@@ -888,6 +1376,10 @@ impl EditorView {
             Some(Tool::Rect | Tool::Ellipse) => !config_filled,
             _ => false,
         };
+        let show_font = config_tool == Some(Tool::Text);
+        let show_text_style = config_tool == Some(Tool::Text);
+        let show_number_style = config_tool == Some(Tool::Number);
+        let show_arrow_heads = config_tool == Some(Tool::Arrow);
         let show_corner = config_tool == Some(Tool::Rect);
         let show_blur = config_tool == Some(Tool::Blur);
         let show_spotlight = config_tool == Some(Tool::Spotlight);
@@ -1022,6 +1514,272 @@ impl EditorView {
                     .items_center()
                     .gap(px(2.0))
                     .children(widths)
+                    .into_any_element(),
+            );
+        }
+
+        if show_font {
+            let mut sizes = Vec::new();
+            for size in FONT_SIZES {
+                let selected = (config_style.font_size - size).abs() < 0.1;
+                let label = format!("{size:.0}");
+                let tooltip = format!("{} {label}", t(language, "editor.font_size"));
+                let button = div()
+                    .id(format!("editor-font-{label}"))
+                    .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
+                    .w(px(24.0))
+                    .h(px(22.0))
+                    .rounded(px(5.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(selected, |button| button.bg(accent_selected))
+                    .hover(move |style| style.bg(hover))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.commit_text(cx);
+                        this.apply_font_size(size);
+                        this.status = None;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(if selected { accent } else { muted })
+                            .child(label),
+                    );
+                sizes.push(button.into_any_element());
+            }
+            groups.push(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(2.0))
+                    .child(icons::icon(icons::TEXT, 14.0, muted))
+                    .children(sizes)
+                    .into_any_element(),
+            );
+        }
+
+        if show_text_style {
+            let background_enabled = config_style.text_background;
+            let outline_enabled = config_style.text_outline;
+            let alignment = config_style.text_alignment;
+            let alignment_label = match alignment {
+                TextAlignment::Left => t(language, "editor.align_left"),
+                TextAlignment::Center => t(language, "editor.align_center"),
+                TextAlignment::Right => t(language, "editor.align_right"),
+            };
+            let background_tooltip = t(language, "editor.text_background").to_owned();
+            let outline_tooltip = t(language, "editor.text_outline").to_owned();
+            let alignment_tooltip = t(language, "editor.text_alignment").to_owned();
+            let background = div()
+                .id("editor-text-background")
+                .tooltip(move |_, cx| tooltip_view(background_tooltip.clone(), cx))
+                .w(px(24.0))
+                .h(px(22.0))
+                .rounded(px(5.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(background_enabled, |button| button.bg(accent_selected))
+                .hover(move |style| style.bg(hover))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.commit_text(cx);
+                    this.apply_text_background(!this.text_background);
+                    this.status = None;
+                    cx.notify();
+                }))
+                .child(icons::icon(
+                    icons::FILL,
+                    15.0,
+                    if background_enabled { accent } else { muted },
+                ))
+                .into_any_element();
+            let outline = div()
+                .id("editor-text-outline")
+                .tooltip(move |_, cx| tooltip_view(outline_tooltip.clone(), cx))
+                .w(px(24.0))
+                .h(px(22.0))
+                .rounded(px(5.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(outline_enabled, |button| button.bg(accent_selected))
+                .hover(move |style| style.bg(hover))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.commit_text(cx);
+                    this.apply_text_outline(!this.text_outline);
+                    this.status = None;
+                    cx.notify();
+                }))
+                .child(icons::icon(
+                    icons::OUTLINE,
+                    15.0,
+                    if outline_enabled { accent } else { muted },
+                ))
+                .into_any_element();
+            let next_alignment = match alignment {
+                TextAlignment::Left => TextAlignment::Center,
+                TextAlignment::Center => TextAlignment::Right,
+                TextAlignment::Right => TextAlignment::Left,
+            };
+            let alignment_button = div()
+                .id("editor-text-alignment")
+                .tooltip(move |_, cx| tooltip_view(alignment_tooltip.clone(), cx))
+                .w(px(28.0))
+                .h(px(22.0))
+                .rounded(px(5.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .hover(move |style| style.bg(hover))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.commit_text(cx);
+                    this.apply_text_alignment(next_alignment);
+                    this.status = None;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(accent)
+                        .child(alignment_label),
+                )
+                .into_any_element();
+            groups.push(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(2.0))
+                    .child(background)
+                    .child(outline)
+                    .child(alignment_button)
+                    .into_any_element(),
+            );
+        }
+
+        if show_number_style {
+            let mut buttons = Vec::new();
+            for (style, label, tooltip_key, id) in [
+                (
+                    NumberStyle::Circle,
+                    "○",
+                    "editor.number_circle",
+                    "editor-number-circle",
+                ),
+                (
+                    NumberStyle::Square,
+                    "□",
+                    "editor.number_square",
+                    "editor-number-square",
+                ),
+                (
+                    NumberStyle::Plain,
+                    "A",
+                    "editor.number_plain",
+                    "editor-number-plain",
+                ),
+            ] {
+                let selected = config_style.number_style == style;
+                let tooltip = t(language, tooltip_key).to_owned();
+                let button = div()
+                    .id(id)
+                    .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
+                    .w(px(24.0))
+                    .h(px(22.0))
+                    .rounded(px(5.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(selected, |button| button.bg(accent_selected))
+                    .hover(move |style| style.bg(hover))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.commit_text(cx);
+                        this.apply_number_style(style);
+                        this.status = None;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(if selected { accent } else { muted })
+                            .child(label),
+                    );
+                buttons.push(button.into_any_element());
+            }
+            groups.push(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(2.0))
+                    .children(buttons)
+                    .into_any_element(),
+            );
+        }
+
+        if show_arrow_heads {
+            let mut buttons = Vec::new();
+            for (is_start, enabled, label, tooltip_key, id) in [
+                (
+                    true,
+                    config_style.arrow_start,
+                    "←",
+                    "editor.arrow_start",
+                    "editor-arrow-start",
+                ),
+                (
+                    false,
+                    config_style.arrow_end,
+                    "→",
+                    "editor.arrow_end",
+                    "editor-arrow-end",
+                ),
+            ] {
+                let tooltip = t(language, tooltip_key).to_owned();
+                let button = div()
+                    .id(id)
+                    .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
+                    .w(px(24.0))
+                    .h(px(22.0))
+                    .rounded(px(5.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(enabled, |button| button.bg(accent_selected))
+                    .hover(move |style| style.bg(hover))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let start = if is_start {
+                            !enabled
+                        } else {
+                            config_style.arrow_start
+                        };
+                        let end = if is_start {
+                            config_style.arrow_end
+                        } else {
+                            !enabled
+                        };
+                        this.apply_arrow_heads(start, end);
+                        this.status = None;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .text_color(if enabled { accent } else { muted })
+                            .child(label),
+                    );
+                buttons.push(button.into_any_element());
+            }
+            groups.push(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(2.0))
+                    .children(buttons)
                     .into_any_element(),
             );
         }
@@ -1163,8 +1921,73 @@ impl EditorView {
             config_children.push(group);
         }
 
+        let crop_label = t(language, "editor.crop").to_owned();
+        let crop = div()
+            .id("editor-crop")
+            .tooltip(move |_, cx| tooltip_view(crop_label.clone(), cx))
+            .w(px(26.0))
+            .h(px(26.0))
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(self.crop_mode, |button| button.bg(accent_selected))
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_crop(cx)))
+            .child(icons::icon(
+                icons::CROP,
+                16.0,
+                if self.crop_mode { accent } else { muted },
+            ))
+            .into_any_element();
+
+        let rotate_label = t(language, "editor.rotate").to_owned();
+        let rotate = div()
+            .id("editor-rotate")
+            .tooltip(move |_, cx| tooltip_view(rotate_label.clone(), cx))
+            .w(px(26.0))
+            .h(px(26.0))
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(|this, _, _, cx| this.rotate_canvas(cx)))
+            .child(icons::icon(icons::ROTATE, 16.0, muted))
+            .into_any_element();
+
+        let flip_h_label = t(language, "editor.flip_horizontal").to_owned();
+        let flip_h = div()
+            .id("editor-flip-horizontal")
+            .tooltip(move |_, cx| tooltip_view(flip_h_label.clone(), cx))
+            .w(px(26.0))
+            .h(px(26.0))
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(|this, _, _, cx| this.flip_canvas(true, cx)))
+            .child(icons::icon(icons::FLIP_H, 16.0, muted))
+            .into_any_element();
+
+        let flip_v_label = t(language, "editor.flip_vertical").to_owned();
+        let flip_v = div()
+            .id("editor-flip-vertical")
+            .tooltip(move |_, cx| tooltip_view(flip_v_label.clone(), cx))
+            .w(px(26.0))
+            .h(px(26.0))
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(|this, _, _, cx| this.flip_canvas(false, cx)))
+            .child(icons::icon(icons::FLIP_V, 16.0, muted))
+            .into_any_element();
+
         let undo_label = t(language, "editor.undo").to_owned();
-        let undo = if self.document.can_undo() {
+        let undo = if self.document.can_undo() || !self.canvas_undo.is_empty() {
             div()
                 .id("editor-undo")
                 .tooltip(move |_, cx| tooltip_view(undo_label.clone(), cx))
@@ -1176,7 +1999,9 @@ impl EditorView {
                 .justify_center()
                 .hover(move |style| style.bg(hover))
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.document.undo();
+                    if !this.document.undo() {
+                        this.undo_canvas(cx);
+                    }
                     this.status = None;
                     cx.notify();
                 }))
@@ -1195,7 +2020,7 @@ impl EditorView {
         };
 
         let redo_label = t(language, "editor.redo").to_owned();
-        let redo = if self.document.can_redo() {
+        let redo = if self.document.can_redo() || !self.canvas_redo.is_empty() {
             div()
                 .id("editor-redo")
                 .tooltip(move |_, cx| tooltip_view(redo_label.clone(), cx))
@@ -1207,7 +2032,9 @@ impl EditorView {
                 .justify_center()
                 .hover(move |style| style.bg(hover))
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.document.redo();
+                    if !this.document.redo() {
+                        this.redo_canvas(cx);
+                    }
                     this.status = None;
                     cx.notify();
                 }))
@@ -1351,6 +2178,11 @@ impl EditorView {
                     .flex_row()
                     .items_center()
                     .gap(px(2.0))
+                    .child(crop)
+                    .child(rotate)
+                    .child(flip_h)
+                    .child(flip_v)
+                    .child(div().w(px(6.0)))
                     .child(undo)
                     .child(redo)
                     .child(delete)
@@ -1365,7 +2197,12 @@ impl EditorView {
     fn pin(&mut self, cx: &mut Context<Self>) {
         self.commit_text(cx);
         match rasterize(&self.document, &self.frame) {
-            Ok(output) => crate::pin::open_frame(output, cx),
+            Ok(output) => {
+                if self.pin_target.is_none() {
+                    crate::capture_history::record(&output);
+                }
+                crate::pin::open_frame(output, cx);
+            }
             Err(error) => {
                 let language = settings_state::get().language;
                 self.status = Some(format!("{}{}", t(language, "editor.export_failed"), error));
@@ -1381,9 +2218,13 @@ impl EditorView {
         match rasterize(&self.document, &self.frame) {
             Ok(output) => {
                 crate::pin::remember(&output);
+                let mut exported = false;
                 if copy_only || settings_state::get().copy_to_clipboard {
                     match image_util::copy_png(&output, cx) {
-                        Ok(()) => messages.push(t(language, "editor.copied").to_owned()),
+                        Ok(()) => {
+                            exported = true;
+                            messages.push(t(language, "editor.copied").to_owned());
+                        }
                         Err(error) => {
                             messages.push(format!("{}{}", t(language, "editor.copy_failed"), error))
                         }
@@ -1398,11 +2239,14 @@ impl EditorView {
                         }
                     } else {
                         match image_util::save_png(&output) {
-                            Ok(path) => messages.push(format!(
-                                "{} {}",
-                                t(language, "editor.saved"),
-                                path.display()
-                            )),
+                            Ok(path) => {
+                                exported = true;
+                                messages.push(format!(
+                                    "{} {}",
+                                    t(language, "editor.saved"),
+                                    path.display()
+                                ));
+                            }
                             Err(error) => messages.push(format!(
                                 "{} {}",
                                 t(language, "editor.save_failed"),
@@ -1410,6 +2254,9 @@ impl EditorView {
                             )),
                         }
                     }
+                }
+                if exported && self.pin_target.is_none() {
+                    crate::capture_history::record(&output);
                 }
             }
             Err(error) => {
@@ -1566,11 +2413,29 @@ impl Render for EditorView {
                 *annotation = annotation.clone().translated(dx, dy);
             }
         }
-        let selected_bounds = self
+        if let Some(resize_draft) = &self.resize_draft {
+            if let Some(annotation) = objects
+                .iter_mut()
+                .find(|annotation| annotation.id == resize_draft.id)
+            {
+                annotation.shape = resize_shape(
+                    &resize_draft.original,
+                    resize_draft.handle,
+                    resize_draft.start,
+                    resize_draft.current,
+                    4,
+                );
+            }
+        }
+        let selected_shape = self
             .document
             .selected()
             .and_then(|id| objects.iter().find(|annotation| annotation.id == id))
-            .map(|annotation| annotation.bounds());
+            .map(|annotation| annotation.shape.clone());
+        let crop_selection = self
+            .crop_draft
+            .as_ref()
+            .map(|draft| normalized_rect(draft.start, draft.current));
         let preview = self.preview_shape();
         let status = self.status.clone();
         let accent_hex = self.accent_hex;
@@ -1612,27 +2477,91 @@ impl Render for EditorView {
                     );
                 }
                 Shape::Text { bounds, text } => {
+                    let color = (annotation.style.color >> 8) & 0x00FF_FFFF;
+                    let text_color = rgb(color);
+                    let text_align = match annotation.style.text_alignment {
+                        TextAlignment::Left => TextAlign::Left,
+                        TextAlignment::Center => TextAlign::Center,
+                        TextAlignment::Right => TextAlign::Right,
+                    };
+                    let font_size = (annotation.style.font_size * scale).max(8.0);
+                    let mut layer = div()
+                        .absolute()
+                        .left(px(bounds.origin.x as f32 * scale))
+                        .top(px(bounds.origin.y as f32 * scale))
+                        .w(px(bounds.size.width as f32 * scale))
+                        .text_size(px(font_size))
+                        .text_align(text_align);
+                    if annotation.style.text_background {
+                        let background = if prefers_dark_foreground(color) {
+                            rgba(0x000000A0)
+                        } else {
+                            rgba(0xFFFFFFBE)
+                        };
+                        layer = layer.rounded(px(font_size * 0.2)).bg(background);
+                    }
+                    if annotation.style.text_outline {
+                        let outline = if prefers_dark_foreground(color) {
+                            rgb(0x000000)
+                        } else {
+                            rgb(0xFFFFFF)
+                        };
+                        let offset =
+                            ((annotation.style.stroke_width * 0.6 * scale).max(1.0) as i32).min(3);
+                        for (dx, dy) in [
+                            (-offset, 0),
+                            (offset, 0),
+                            (0, -offset),
+                            (0, offset),
+                            (-offset, -offset),
+                            (offset, -offset),
+                            (-offset, offset),
+                            (offset, offset),
+                        ] {
+                            layer = layer.child(
+                                div()
+                                    .absolute()
+                                    .left(px(dx as f32))
+                                    .top(px(dy as f32))
+                                    .w_full()
+                                    .text_size(px(font_size))
+                                    .text_align(text_align)
+                                    .text_color(outline)
+                                    .child(text.clone()),
+                            );
+                        }
+                    }
                     object_layers.push(
-                        div()
-                            .absolute()
-                            .left(px(bounds.origin.x as f32 * scale))
-                            .top(px(bounds.origin.y as f32 * scale))
-                            .w(px(bounds.size.width as f32 * scale))
-                            .text_size(px(annotation.style.font_size * scale))
-                            .text_color(rgb((annotation.style.color >> 8) & 0x00FF_FFFF))
-                            .child(text.clone())
+                        layer
+                            .child(div().w_full().text_color(text_color).child(text.clone()))
                             .into_any_element(),
                     );
                 }
                 Shape::Number { bounds, value } => {
                     let color = (annotation.style.color >> 8) & 0x00FF_FFFF;
-                    let foreground = if prefers_dark_foreground(color) {
-                        rgb(0x111111)
-                    } else {
-                        rgb(0xFFFFFF)
-                    };
                     let width = bounds.size.width as f32 * scale;
                     let height = bounds.size.height as f32 * scale;
+                    let (foreground, background, radius) = match annotation.style.number_style {
+                        NumberStyle::Circle => (
+                            if prefers_dark_foreground(color) {
+                                rgb(0x111111)
+                            } else {
+                                rgb(0xFFFFFF)
+                            },
+                            rgb(color),
+                            height.min(width) / 2.0,
+                        ),
+                        NumberStyle::Square => (
+                            if prefers_dark_foreground(color) {
+                                rgb(0x111111)
+                            } else {
+                                rgb(0xFFFFFF)
+                            },
+                            rgb(color),
+                            height.min(width) * 0.18,
+                        ),
+                        NumberStyle::Plain => (rgb(color), rgba(0x00000000), 0.0),
+                    };
                     object_layers.push(
                         div()
                             .absolute()
@@ -1640,8 +2569,8 @@ impl Render for EditorView {
                             .top(px(bounds.origin.y as f32 * scale))
                             .w(px(width))
                             .h(px(height))
-                            .rounded(px(height.min(width) / 2.0))
-                            .bg(rgb(color))
+                            .rounded(px(radius))
+                            .bg(background)
                             .flex()
                             .items_center()
                             .justify_center()
@@ -1677,8 +2606,11 @@ impl Render for EditorView {
                 if let Some((shape, style)) = &preview {
                     paint_shape(window, bounds, scale, shape, *style);
                 }
-                if let Some(rect) = selected_bounds {
-                    paint_selection(window, bounds, scale, rect, accent_hex);
+                if let Some(shape) = &selected_shape {
+                    paint_selection(window, bounds, scale, shape, accent_hex);
+                }
+                if let Some(rect) = crop_selection {
+                    paint_crop_overlay(window, bounds, scale, rect, accent_hex);
                 }
             },
         )
@@ -1754,6 +2686,7 @@ impl Render for EditorView {
             .top(image_rect.origin.y)
             .w(image_rect.size.width)
             .h(image_rect.size.height)
+            .overflow_hidden()
             .child(
                 img(self.image.clone())
                     .absolute()
@@ -1764,22 +2697,103 @@ impl Render for EditorView {
             .children(object_layers)
             .child(overlay_canvas)
             .children(text_overlay)
+            .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
+                let (x, y) = match event.delta {
+                    ScrollDelta::Pixels(delta) => (f32::from(delta.x), f32::from(delta.y)),
+                    ScrollDelta::Lines(delta) => (delta.x * 50.0, delta.y * 50.0),
+                };
+                if event.modifiers.control || event.modifiers.platform {
+                    let steps = (y / 50.0).clamp(-4.0, 4.0);
+                    this.zoom_at(1.15f32.powf(steps), event.position, window, cx);
+                } else {
+                    this.view_pan.x += px(x);
+                    this.view_pan.y += px(y);
+                    cx.notify();
+                }
+                cx.stop_propagation();
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if this.space_down && this.text_edit.is_none() {
+                        this.pan_draft = Some(PanDraft {
+                            start: event.position,
+                            start_pan: this.view_pan,
+                        });
+                        this.status = None;
+                        cx.notify();
+                        return;
+                    }
                     let Some(point) = this.to_image_point(event.position, window) else {
                         return;
                     };
+                    if this.crop_mode {
+                        this.crop_draft = Some(CropDraft {
+                            start: point,
+                            current: point,
+                        });
+                        cx.notify();
+                        return;
+                    }
+                    if this.tool == Tool::Polyline {
+                        this.resize_draft = None;
+                        this.move_draft = None;
+                        if event.click_count >= 2 {
+                            if let Some(draft) = &mut this.polyline_draft {
+                                draft.current = point;
+                            }
+                            this.finish_polyline(cx);
+                            return;
+                        }
+                        if let Some(draft) = &mut this.polyline_draft {
+                            if distance(*draft.points.last().unwrap_or(&point), point) > 2.0 {
+                                draft.points.push(point);
+                            }
+                            draft.current = point;
+                        } else {
+                            this.polyline_draft = Some(PolylineDraft {
+                                points: vec![point],
+                                current: point,
+                            });
+                        }
+                        this.status = Some(
+                            t(settings_state::get().language, "editor.polyline_hint").to_owned(),
+                        );
+                        cx.notify();
+                        return;
+                    }
                     if this.text_edit.is_some() {
                         this.commit_text(cx);
                     }
                     if this.tool == Tool::Select {
+                        let scale = this.image_scale(window);
+                        if let Some(annotation) = this
+                            .document
+                            .selected()
+                            .and_then(|id| this.document.object(id))
+                            .cloned()
+                            && let Some(handle) =
+                                hit_resize_handle(&annotation.shape, point, 9.0 / scale)
+                        {
+                            this.resize_draft = Some(ResizeDraft {
+                                id: annotation.id,
+                                handle,
+                                start: point,
+                                current: point,
+                                original: annotation.shape,
+                            });
+                            this.move_draft = None;
+                            this.status = None;
+                            cx.notify();
+                            return;
+                        }
                         if event.click_count >= 2 && this.edit_text_at(point, cx) {
                             let focus = this.focus_handle.clone();
                             window.focus(&focus, cx);
                             return;
                         }
                         let selected = this.document.hit_test(point);
+                        this.resize_draft = None;
                         this.select_annotation(selected);
                         this.move_draft = selected.map(|id| MoveDraft {
                             id,
@@ -1790,12 +2804,14 @@ impl Render for EditorView {
                         cx.notify();
                         return;
                     }
+                    this.resize_draft = None;
+                    this.move_draft = None;
                     if this.tool == Tool::Number {
                         let max_left = (this.image_size.width.saturating_sub(BADGE_SIZE)) as i32;
                         let max_top = (this.image_size.height.saturating_sub(BADGE_SIZE)) as i32;
                         let left = (point.x - BADGE_SIZE as i32 / 2).clamp(0, max_left);
                         let top = (point.y - BADGE_SIZE as i32 / 2).clamp(0, max_top);
-                        let value = this.document.next_number();
+                        let value = next_sequence(&this.document);
                         this.document.add(
                             Shape::Number {
                                 bounds: PhysicalRect::new(left, top, BADGE_SIZE, BADGE_SIZE),
@@ -1828,9 +2844,34 @@ impl Render for EditorView {
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                if let Some(pan_draft) = &this.pan_draft {
+                    this.view_pan.x =
+                        pan_draft.start_pan.x + (event.position.x - pan_draft.start.x);
+                    this.view_pan.y =
+                        pan_draft.start_pan.y + (event.position.y - pan_draft.start.y);
+                    cx.notify();
+                    return;
+                }
                 let Some(point) = this.to_image_point(event.position, window) else {
                     return;
                 };
+                if this.crop_mode {
+                    if let Some(crop_draft) = &mut this.crop_draft {
+                        crop_draft.current = point;
+                        cx.notify();
+                    }
+                    return;
+                }
+                if let Some(polyline) = &mut this.polyline_draft {
+                    polyline.current = point;
+                    cx.notify();
+                    return;
+                }
+                if let Some(resize_draft) = &mut this.resize_draft {
+                    resize_draft.current = point;
+                    cx.notify();
+                    return;
+                }
                 if let Some(move_draft) = &mut this.move_draft {
                     move_draft.current = point;
                     cx.notify();
@@ -1845,6 +2886,35 @@ impl Render for EditorView {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    if this.crop_mode {
+                        if let Some(point) = this.to_image_point(event.position, window)
+                            && let Some(crop_draft) = &mut this.crop_draft
+                        {
+                            crop_draft.current = point;
+                        }
+                        cx.notify();
+                        return;
+                    }
+                    if this.polyline_draft.is_some() {
+                        cx.notify();
+                        return;
+                    }
+                    if this.pan_draft.take().is_some() {
+                        cx.notify();
+                        return;
+                    }
+                    if this.resize_draft.is_some() {
+                        let point = this
+                            .to_image_point(event.position, window)
+                            .or_else(|| this.resize_draft.as_ref().map(|draft| draft.current));
+                        if let Some(point) = point {
+                            this.finish_resize(point, cx);
+                        } else {
+                            this.resize_draft = None;
+                            cx.notify();
+                        }
+                        return;
+                    }
                     if let Some(move_draft) = this.move_draft.take() {
                         let point = this
                             .to_image_point(event.position, window)
@@ -1873,7 +2943,11 @@ impl Render for EditorView {
                 }),
             )
             .on_mouse_exit(cx.listener(|this, _, _, cx| {
-                if this.draft.take().is_some() || this.move_draft.take().is_some() {
+                if this.draft.take().is_some()
+                    || this.move_draft.take().is_some()
+                    || this.resize_draft.take().is_some()
+                    || this.pan_draft.take().is_some()
+                {
                     cx.notify();
                 }
             }));
@@ -1967,6 +3041,49 @@ impl Render for EditorView {
                     // in-flight text edit.
                     return;
                 }
+                if this.polyline_draft.is_some() {
+                    if key == "enter" {
+                        this.finish_polyline(cx);
+                        return;
+                    }
+                    if key == "escape" {
+                        this.cancel_polyline(cx);
+                        return;
+                    }
+                }
+                if this.crop_mode {
+                    if key == "enter" {
+                        this.apply_crop(cx);
+                        return;
+                    }
+                    if key == "escape" {
+                        this.cancel_crop(cx);
+                        return;
+                    }
+                }
+                if key == "space" {
+                    this.space_down = true;
+                    cx.notify();
+                    return;
+                }
+                if command && key == "0" {
+                    this.reset_view(cx);
+                    return;
+                }
+                if command && key == "1" {
+                    this.actual_size(window, cx);
+                    return;
+                }
+                if command && (key == "=" || key == "+" || key == "-") {
+                    let view = this.image_view_rect(window);
+                    let center = point(
+                        px(f32::from(view.origin.x) + f32::from(view.size.width) / 2.0),
+                        px(f32::from(view.origin.y) + f32::from(view.size.height) / 2.0),
+                    );
+                    let factor = if key == "-" { 1.0 / 1.2 } else { 1.2 };
+                    this.zoom_at(factor, center, window, cx);
+                    return;
+                }
                 if key == "escape" {
                     window.remove_window();
                     return;
@@ -2005,11 +3122,19 @@ impl Render for EditorView {
                 }
                 if command && key == "z" {
                     if event.keystroke.modifiers.shift {
-                        this.document.redo();
-                    } else {
-                        this.document.undo();
+                        if !this.document.redo() {
+                            this.redo_canvas(cx);
+                        }
+                    } else if !this.document.undo() {
+                        this.undo_canvas(cx);
                     }
                     this.status = None;
+                    cx.notify();
+                }
+            }))
+            .on_key_up(cx.listener(|this, event: &KeyUpEvent, _, cx| {
+                if event.keystroke.key == "space" {
+                    this.space_down = false;
                     cx.notify();
                 }
             }))
@@ -2024,8 +3149,10 @@ impl Render for EditorView {
                     .text_size(px(10.5))
                     .text_color(rgba(0xFFFFFF66))
                     .child(format!(
-                        "{} x {}",
-                        self.image_size.width, self.image_size.height
+                        "{} x {} · {:.0}%",
+                        self.image_size.width,
+                        self.image_size.height,
+                        self.image_scale(window) * 100.0
                     )),
             )
     }
@@ -2090,6 +3217,70 @@ fn open_editor_with_pin(frame: RgbaFrame, pin_target: Option<u64>, cx: &mut App)
     }
 }
 
+fn rotate_frame_cw(frame: &RgbaFrame) -> RgbaFrame {
+    let width = frame.width();
+    let height = frame.height();
+    let mut pixels = vec![0u8; frame.pixels().len()];
+    let source = frame.pixels();
+    for y in 0..height {
+        for x in 0..width {
+            let source_index = ((y * width + x) * 4) as usize;
+            let destination_index = ((x * height + (height - 1 - y)) * 4) as usize;
+            pixels[destination_index..destination_index + 4]
+                .copy_from_slice(&source[source_index..source_index + 4]);
+        }
+    }
+    RgbaFrame::from_pixels(height, width, pixels).expect("rotated frame keeps valid dimensions")
+}
+
+fn flip_frame(frame: &RgbaFrame, horizontal: bool) -> RgbaFrame {
+    let width = frame.width();
+    let height = frame.height();
+    let mut pixels = vec![0u8; frame.pixels().len()];
+    let source = frame.pixels();
+    for y in 0..height {
+        for x in 0..width {
+            let source_index = ((y * width + x) * 4) as usize;
+            let destination_x = if horizontal { width - 1 - x } else { x };
+            let destination_y = if horizontal { y } else { height - 1 - y };
+            let destination_index = ((destination_y * width + destination_x) * 4) as usize;
+            pixels[destination_index..destination_index + 4]
+                .copy_from_slice(&source[source_index..source_index + 4]);
+        }
+    }
+    RgbaFrame::from_pixels(width, height, pixels).expect("flipped frame keeps valid dimensions")
+}
+
+fn crop_frame(frame: &RgbaFrame, rect: PhysicalRect) -> Option<RgbaFrame> {
+    let source_width = frame.width();
+    let source_height = frame.height();
+    let left = rect.origin.x.clamp(0, source_width as i32) as u32;
+    let top = rect.origin.y.clamp(0, source_height as i32) as u32;
+    let right =
+        (rect.origin.x + rect.size.width as i32).clamp(left as i32, source_width as i32) as u32;
+    let bottom =
+        (rect.origin.y + rect.size.height as i32).clamp(top as i32, source_height as i32) as u32;
+    let width = right.checked_sub(left)?;
+    let height = bottom.checked_sub(top)?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+    let source = frame.pixels();
+    for row in top..bottom {
+        let start = ((row * source_width + left) * 4) as usize;
+        let end = start + (width * 4) as usize;
+        pixels.extend_from_slice(&source[start..end]);
+    }
+    RgbaFrame::from_pixels(width, height, pixels).ok()
+}
+
+fn next_sequence(document: &AnnotationDocument) -> u32 {
+    let next = document.next_number().max(NEXT_SEQUENCE.with(Cell::get));
+    NEXT_SEQUENCE.with(|slot| slot.set(next.saturating_add(1)));
+    next
+}
+
 fn finalize_shape(draft: &Draft, end: PhysicalPoint) -> Option<Shape> {
     match draft.tool {
         Tool::Rect => {
@@ -2112,12 +3303,31 @@ fn finalize_shape(draft: &Draft, end: PhysicalPoint) -> Option<Shape> {
             start: draft.start,
             end,
         }),
+        Tool::Curve => (distance(draft.start, end) >= 2.0).then_some(Shape::Curve {
+            start: draft.start,
+            control: default_curve_control(draft.start, end),
+            end,
+        }),
         Tool::Highlighter => {
             let rect = normalized_rect(draft.start, end);
             (rect.size.width >= 2 && rect.size.height >= 2).then_some(Shape::HighlighterBox(rect))
         }
-        Tool::Text | Tool::Select | Tool::Number => None,
+        Tool::Text | Tool::Select | Tool::Number | Tool::Polyline => None,
     }
+}
+
+fn default_curve_control(start: PhysicalPoint, end: PhysicalPoint) -> PhysicalPoint {
+    let dx = (end.x - start.x) as f32;
+    let dy = (end.y - start.y) as f32;
+    let length = (dx * dx + dy * dy).sqrt();
+    if length < f32::EPSILON {
+        return start;
+    }
+    let offset = length * 0.18;
+    PhysicalPoint::new(
+        (start.x as f32 + dx * 0.5 - dy / length * offset).round() as i32,
+        (start.y as f32 + dy * 0.5 + dx / length * offset).round() as i32,
+    )
 }
 
 fn normalized_rect(start: PhysicalPoint, end: PhysicalPoint) -> PhysicalRect {
@@ -2134,13 +3344,309 @@ fn distance(a: PhysicalPoint, b: PhysicalPoint) -> f32 {
     (dx * dx + dy * dy).sqrt()
 }
 
-fn paint_selection(
+fn shape_bounds(shape: &Shape) -> PhysicalRect {
+    match shape {
+        Shape::Rect(rect)
+        | Shape::Ellipse(rect)
+        | Shape::HighlighterBox(rect)
+        | Shape::Blur(rect)
+        | Shape::Spotlight(rect)
+        | Shape::Text { bounds: rect, .. }
+        | Shape::Number { bounds: rect, .. } => *rect,
+        Shape::Arrow { start, end } => {
+            let left = start.x.min(end.x);
+            let top = start.y.min(end.y);
+            let right = start.x.max(end.x);
+            let bottom = start.y.max(end.y);
+            PhysicalRect::new(left, top, (right - left) as u32, (bottom - top) as u32)
+        }
+        Shape::Polyline { points } => {
+            let Some(first) = points.first() else {
+                return PhysicalRect::new(0, 0, 0, 0);
+            };
+            let mut left = first.x;
+            let mut top = first.y;
+            let mut right = first.x;
+            let mut bottom = first.y;
+            for point in points {
+                left = left.min(point.x);
+                top = top.min(point.y);
+                right = right.max(point.x);
+                bottom = bottom.max(point.y);
+            }
+            PhysicalRect::new(left, top, (right - left) as u32, (bottom - top) as u32)
+        }
+        Shape::Curve {
+            start,
+            control,
+            end,
+        } => {
+            let points = [*start, *control, *end];
+            let left = points.iter().map(|point| point.x).min().unwrap_or(0);
+            let top = points.iter().map(|point| point.y).min().unwrap_or(0);
+            let right = points.iter().map(|point| point.x).max().unwrap_or(0);
+            let bottom = points.iter().map(|point| point.y).max().unwrap_or(0);
+            PhysicalRect::new(left, top, (right - left) as u32, (bottom - top) as u32)
+        }
+    }
+}
+
+fn handle_points(shape: &Shape) -> Vec<(ResizeHandle, PhysicalPoint)> {
+    if let Shape::Polyline { .. } = shape {
+        return Vec::new();
+    }
+    if let Shape::Curve {
+        start,
+        control,
+        end,
+    } = shape
+    {
+        return vec![
+            (ResizeHandle::CurveStart, *start),
+            (ResizeHandle::CurveControl, *control),
+            (ResizeHandle::CurveEnd, *end),
+        ];
+    }
+    if let Shape::Arrow { start, end } = shape {
+        return vec![
+            (ResizeHandle::ArrowStart, *start),
+            (ResizeHandle::ArrowEnd, *end),
+        ];
+    }
+    let rect = shape_bounds(shape);
+    let left = rect.origin.x;
+    let top = rect.origin.y;
+    let right = left + rect.size.width as i32;
+    let bottom = top + rect.size.height as i32;
+    let mid_x = left + (right - left) / 2;
+    let mid_y = top + (bottom - top) / 2;
+    vec![
+        (ResizeHandle::Nw, PhysicalPoint::new(left, top)),
+        (ResizeHandle::N, PhysicalPoint::new(mid_x, top)),
+        (ResizeHandle::Ne, PhysicalPoint::new(right, top)),
+        (ResizeHandle::E, PhysicalPoint::new(right, mid_y)),
+        (ResizeHandle::Se, PhysicalPoint::new(right, bottom)),
+        (ResizeHandle::S, PhysicalPoint::new(mid_x, bottom)),
+        (ResizeHandle::Sw, PhysicalPoint::new(left, bottom)),
+        (ResizeHandle::W, PhysicalPoint::new(left, mid_y)),
+    ]
+}
+
+fn hit_resize_handle(shape: &Shape, point: PhysicalPoint, tolerance: f32) -> Option<ResizeHandle> {
+    let tolerance_sq = tolerance * tolerance;
+    handle_points(shape)
+        .into_iter()
+        .filter_map(|(handle, handle_point)| {
+            let dx = (handle_point.x - point.x) as f32;
+            let dy = (handle_point.y - point.y) as f32;
+            let distance_sq = dx * dx + dy * dy;
+            (distance_sq <= tolerance_sq).then_some((handle, distance_sq))
+        })
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+        .map(|(handle, _)| handle)
+}
+
+fn resize_shape(
+    original: &Shape,
+    handle: ResizeHandle,
+    start: PhysicalPoint,
+    current: PhysicalPoint,
+    min_size: i32,
+) -> Shape {
+    if let Shape::Curve {
+        start: original_start,
+        control: original_control,
+        end: original_end,
+    } = original
+    {
+        return Shape::Curve {
+            start: if handle == ResizeHandle::CurveStart {
+                current
+            } else {
+                *original_start
+            },
+            control: if handle == ResizeHandle::CurveControl {
+                current
+            } else {
+                *original_control
+            },
+            end: if handle == ResizeHandle::CurveEnd {
+                current
+            } else {
+                *original_end
+            },
+        };
+    }
+    if let Shape::Arrow {
+        start: original_start,
+        end: original_end,
+    } = original
+    {
+        return Shape::Arrow {
+            start: if handle == ResizeHandle::ArrowStart {
+                current
+            } else {
+                *original_start
+            },
+            end: if handle == ResizeHandle::ArrowEnd {
+                current
+            } else {
+                *original_end
+            },
+        };
+    }
+
+    let rect = shape_bounds(original);
+    let mut left = rect.origin.x;
+    let mut top = rect.origin.y;
+    let mut right = left + rect.size.width as i32;
+    let mut bottom = top + rect.size.height as i32;
+    let dx = current.x - start.x;
+    let dy = current.y - start.y;
+    match handle {
+        ResizeHandle::Nw => {
+            left += dx;
+            top += dy;
+        }
+        ResizeHandle::N => top += dy,
+        ResizeHandle::Ne => {
+            right += dx;
+            top += dy;
+        }
+        ResizeHandle::E => right += dx,
+        ResizeHandle::Se => {
+            right += dx;
+            bottom += dy;
+        }
+        ResizeHandle::S => bottom += dy,
+        ResizeHandle::Sw => {
+            left += dx;
+            bottom += dy;
+        }
+        ResizeHandle::W => left += dx,
+        ResizeHandle::ArrowStart
+        | ResizeHandle::ArrowEnd
+        | ResizeHandle::CurveStart
+        | ResizeHandle::CurveControl
+        | ResizeHandle::CurveEnd => {}
+    }
+    if right - left < min_size {
+        if matches!(
+            handle,
+            ResizeHandle::Nw | ResizeHandle::W | ResizeHandle::Sw
+        ) {
+            left = right - min_size;
+        } else {
+            right = left + min_size;
+        }
+    }
+    if bottom - top < min_size {
+        if matches!(
+            handle,
+            ResizeHandle::Nw | ResizeHandle::N | ResizeHandle::Ne
+        ) {
+            top = bottom - min_size;
+        } else {
+            bottom = top + min_size;
+        }
+    }
+    let rect = PhysicalRect::new(
+        left,
+        top,
+        (right - left).max(0) as u32,
+        (bottom - top).max(0) as u32,
+    );
+    match original {
+        Shape::Rect(_) => Shape::Rect(rect),
+        Shape::Ellipse(_) => Shape::Ellipse(rect),
+        Shape::HighlighterBox(_) => Shape::HighlighterBox(rect),
+        Shape::Blur(_) => Shape::Blur(rect),
+        Shape::Spotlight(_) => Shape::Spotlight(rect),
+        Shape::Text { text, .. } => Shape::Text {
+            bounds: rect,
+            text: text.clone(),
+        },
+        Shape::Number { value, .. } => Shape::Number {
+            bounds: rect,
+            value: *value,
+        },
+        Shape::Arrow { .. } => unreachable!("arrow handled above"),
+        Shape::Polyline { .. } => original.clone(),
+        Shape::Curve { .. } => unreachable!("curve handled above"),
+    }
+}
+
+fn paint_crop_overlay(
     window: &mut Window,
     bounds: Bounds<Pixels>,
     scale: f32,
     rect: PhysicalRect,
     accent_hex: u32,
 ) {
+    let image_width = f32::from(bounds.size.width);
+    let image_height = f32::from(bounds.size.height);
+    let left = rect.origin.x as f32 * scale;
+    let top = rect.origin.y as f32 * scale;
+    let right = left + rect.size.width as f32 * scale;
+    let bottom = top + rect.size.height as f32 * scale;
+    let fill = rgba(0x00000099);
+    let mut fill_rect = |x: f32, y: f32, width: f32, height: f32| {
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+        let mut builder = PathBuilder::fill();
+        builder.move_to(point(bounds.origin.x + px(x), bounds.origin.y + px(y)));
+        builder.line_to(point(
+            bounds.origin.x + px(x + width),
+            bounds.origin.y + px(y),
+        ));
+        builder.line_to(point(
+            bounds.origin.x + px(x + width),
+            bounds.origin.y + px(y + height),
+        ));
+        builder.line_to(point(
+            bounds.origin.x + px(x),
+            bounds.origin.y + px(y + height),
+        ));
+        builder.close();
+        if let Ok(path) = builder.build() {
+            window.paint_path(path, fill);
+        }
+    };
+    fill_rect(0.0, 0.0, image_width, top);
+    fill_rect(0.0, bottom, image_width, image_height - bottom);
+    fill_rect(0.0, top, left, bottom - top);
+    fill_rect(right, top, image_width - right, bottom - top);
+
+    let stroke = px((1.5 * scale).max(1.0));
+    let mut builder = PathBuilder::stroke(stroke);
+    builder.move_to(point(bounds.origin.x + px(left), bounds.origin.y + px(top)));
+    builder.line_to(point(
+        bounds.origin.x + px(right),
+        bounds.origin.y + px(top),
+    ));
+    builder.line_to(point(
+        bounds.origin.x + px(right),
+        bounds.origin.y + px(bottom),
+    ));
+    builder.line_to(point(
+        bounds.origin.x + px(left),
+        bounds.origin.y + px(bottom),
+    ));
+    builder.close();
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, rgba((accent_hex << 8) | 0xFF));
+    }
+}
+
+fn paint_selection(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    scale: f32,
+    shape: &Shape,
+    accent_hex: u32,
+) {
+    let rect = shape_bounds(shape);
     let left = rect.origin.x as f32;
     let top = rect.origin.y as f32;
     let right = left + rect.size.width as f32;
@@ -2160,6 +3666,35 @@ fn paint_selection(
     builder.close();
     if let Ok(path) = builder.build() {
         window.paint_path(path, rgba((accent_hex << 8) | 0xFF));
+    }
+
+    let draw_handle = |window: &mut Window, handle_pos: PhysicalPoint| {
+        let center = to_point(handle_pos.x as f32, handle_pos.y as f32);
+        for (half, color) in [
+            (px(4.5), rgba((accent_hex << 8) | 0xFF)),
+            (px(2.5), rgb(0xFFFFFF)),
+        ] {
+            let mut builder = PathBuilder::fill();
+            builder.move_to(point(center.x - half, center.y - half));
+            builder.line_to(point(center.x + half, center.y - half));
+            builder.line_to(point(center.x + half, center.y + half));
+            builder.line_to(point(center.x - half, center.y + half));
+            builder.close();
+            if let Ok(path) = builder.build() {
+                window.paint_path(path, color);
+            }
+        }
+    };
+    match shape {
+        Shape::Arrow { start, end } => {
+            draw_handle(window, *start);
+            draw_handle(window, *end);
+        }
+        _ => {
+            for (_, handle) in handle_points(shape) {
+                draw_handle(window, handle);
+            }
+        }
     }
 }
 
@@ -2253,17 +3788,120 @@ fn paint_shape(
             let angle = dy.atan2(dx);
             let head = (style.stroke_width * 3.5).max(10.0);
             let spread = 0.55;
-            let left = (
-                end.x as f32 - head * (angle - spread).cos(),
-                end.y as f32 - head * (angle - spread).sin(),
+            let push_head = |builder: &mut PathBuilder, tip_x: f32, tip_y: f32, angle: f32| {
+                let left = (
+                    tip_x - head * (angle - spread).cos(),
+                    tip_y - head * (angle - spread).sin(),
+                );
+                let right = (
+                    tip_x - head * (angle + spread).cos(),
+                    tip_y - head * (angle + spread).sin(),
+                );
+                builder.move_to(to_point(left.0, left.1));
+                builder.line_to(to_point(tip_x, tip_y));
+                builder.line_to(to_point(right.0, right.1));
+            };
+            if style.arrow_end {
+                push_head(&mut builder, end.x as f32, end.y as f32, angle);
+            }
+            if style.arrow_start {
+                push_head(
+                    &mut builder,
+                    start.x as f32,
+                    start.y as f32,
+                    (-dy).atan2(-dx),
+                );
+            }
+            if let Ok(path) = builder.build() {
+                window.paint_path(path, color);
+            }
+        }
+        Shape::Curve {
+            start,
+            control,
+            end,
+        } => {
+            let mut builder = PathBuilder::stroke(stroke);
+            builder.move_to(to_point(start.x as f32, start.y as f32));
+            builder.curve_to(
+                to_point(control.x as f32, control.y as f32),
+                to_point(end.x as f32, end.y as f32),
             );
-            let right = (
-                end.x as f32 - head * (angle + spread).cos(),
-                end.y as f32 - head * (angle + spread).sin(),
-            );
-            builder.move_to(to_point(left.0, left.1));
-            builder.line_to(to_point(end.x as f32, end.y as f32));
-            builder.line_to(to_point(right.0, right.1));
+            let head = (style.stroke_width * 3.5).max(10.0);
+            let spread = 0.55;
+            let push_head = |builder: &mut PathBuilder, tip: PhysicalPoint, angle: f32| {
+                let left = (
+                    tip.x as f32 - head * (angle - spread).cos(),
+                    tip.y as f32 - head * (angle - spread).sin(),
+                );
+                let right = (
+                    tip.x as f32 - head * (angle + spread).cos(),
+                    tip.y as f32 - head * (angle + spread).sin(),
+                );
+                builder.move_to(to_point(left.0, left.1));
+                builder.line_to(to_point(tip.x as f32, tip.y as f32));
+                builder.line_to(to_point(right.0, right.1));
+            };
+            if style.arrow_end {
+                push_head(
+                    &mut builder,
+                    *end,
+                    ((end.y - control.y) as f32).atan2((end.x - control.x) as f32),
+                );
+            }
+            if style.arrow_start {
+                push_head(
+                    &mut builder,
+                    *start,
+                    ((start.y - control.y) as f32).atan2((start.x - control.x) as f32),
+                );
+            }
+            if let Ok(path) = builder.build() {
+                window.paint_path(path, color);
+            }
+        }
+        Shape::Polyline { points } => {
+            if points.len() < 2 {
+                return;
+            }
+            let mut builder = PathBuilder::stroke(stroke);
+            builder.move_to(to_point(points[0].x as f32, points[0].y as f32));
+            for point in &points[1..] {
+                builder.line_to(to_point(point.x as f32, point.y as f32));
+            }
+            let head = (style.stroke_width * 3.5).max(10.0);
+            let spread = 0.55;
+            let push_head = |builder: &mut PathBuilder, tip: PhysicalPoint, angle: f32| {
+                let left = (
+                    tip.x as f32 - head * (angle - spread).cos(),
+                    tip.y as f32 - head * (angle - spread).sin(),
+                );
+                let right = (
+                    tip.x as f32 - head * (angle + spread).cos(),
+                    tip.y as f32 - head * (angle + spread).sin(),
+                );
+                builder.move_to(to_point(left.0, left.1));
+                builder.line_to(to_point(tip.x as f32, tip.y as f32));
+                builder.line_to(to_point(right.0, right.1));
+            };
+            if style.arrow_end {
+                let last = points[points.len() - 1];
+                let previous = points[points.len() - 2];
+                push_head(
+                    &mut builder,
+                    last,
+                    ((last.y - previous.y) as f32).atan2((last.x - previous.x) as f32),
+                );
+            }
+            if style.arrow_start {
+                let first = points[0];
+                let next = points[1];
+                push_head(
+                    &mut builder,
+                    first,
+                    ((first.y - next.y) as f32).atan2((first.x - next.x) as f32),
+                );
+            }
             if let Ok(path) = builder.build() {
                 window.paint_path(path, color);
             }

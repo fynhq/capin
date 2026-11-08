@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -330,6 +331,128 @@ fn card_color(dark: bool) -> Rgba {
     }
 }
 
+#[derive(Clone, Debug)]
+struct TemplateEdit {
+    content: String,
+    cursor: usize,
+    anchor: usize,
+    marked: Option<Range<usize>>,
+}
+
+impl TemplateEdit {
+    fn new(content: String) -> Self {
+        let end = content.len();
+        Self {
+            content,
+            cursor: end,
+            anchor: end,
+            marked: None,
+        }
+    }
+
+    fn cursor_utf8(&self) -> usize {
+        self.cursor.min(self.content.len())
+    }
+
+    fn selection(&self) -> Range<usize> {
+        let cursor = self.cursor_utf8();
+        let anchor = self.anchor.min(self.content.len());
+        if anchor <= cursor {
+            anchor..cursor
+        } else {
+            cursor..anchor
+        }
+    }
+
+    fn move_cursor(&mut self, cursor: usize, extend_selection: bool) {
+        let cursor = cursor.min(self.content.len());
+        let cursor = if self.content.is_char_boundary(cursor) {
+            cursor
+        } else {
+            previous_char_boundary(&self.content, cursor)
+        };
+        self.cursor = cursor;
+        if !extend_selection {
+            self.anchor = cursor;
+        }
+    }
+
+    fn previous_boundary(&self) -> usize {
+        previous_char_boundary(&self.content, self.cursor_utf8())
+    }
+
+    fn next_boundary(&self) -> usize {
+        next_char_boundary(&self.content, self.cursor_utf8())
+    }
+
+    fn offset_from_utf16(&self, offset: usize) -> usize {
+        let mut utf8_offset = 0;
+        let mut utf16_count = 0;
+        for ch in self.content.chars() {
+            if utf16_count >= offset {
+                break;
+            }
+            utf16_count += ch.len_utf16();
+            utf8_offset += ch.len_utf8();
+        }
+        utf8_offset
+    }
+
+    fn offset_to_utf16(&self, offset: usize) -> usize {
+        let offset = offset.min(self.content.len());
+        self.content[..offset]
+            .chars()
+            .map(|ch| ch.len_utf16())
+            .sum()
+    }
+
+    fn range_from_utf16(&self, range: &Range<usize>) -> Range<usize> {
+        let start = self.offset_from_utf16(range.start);
+        let end = self.offset_from_utf16(range.end).max(start);
+        start..end
+    }
+
+    fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
+        let start = self.offset_to_utf16(range.start);
+        let end = self.offset_to_utf16(range.end).max(start);
+        start..end
+    }
+
+    fn replace(&mut self, range: Option<Range<usize>>, text: &str) {
+        let selection = self.selection();
+        let range = range
+            .or_else(|| self.marked.take())
+            .or_else(|| (!selection.is_empty()).then_some(selection))
+            .unwrap_or(self.cursor_utf8()..self.cursor_utf8());
+        let text: String = text
+            .chars()
+            .filter(|ch| *ch != '\n' && *ch != '\r')
+            .collect();
+        self.content.replace_range(range.clone(), &text);
+        self.cursor = range.start + text.len();
+        self.anchor = self.cursor;
+        self.marked = (!text.is_empty()).then_some(range.start..range.start + text.len());
+    }
+}
+
+fn previous_char_boundary(content: &str, cursor: usize) -> usize {
+    let cursor = cursor.min(content.len());
+    content[..cursor]
+        .char_indices()
+        .next_back()
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn next_char_boundary(content: &str, cursor: usize) -> usize {
+    let cursor = cursor.min(content.len());
+    content[cursor..]
+        .chars()
+        .next()
+        .map(|ch| cursor + ch.len_utf8())
+        .unwrap_or(cursor)
+}
+
 struct SettingsView {
     section: SettingsSection,
     settings: AppSettings,
@@ -337,6 +460,8 @@ struct SettingsView {
     last_accent: Option<u32>,
     status: Option<String>,
     recording_shortcut: Option<ShortcutSlot>,
+    filename_edit: Option<TemplateEdit>,
+    filename_focus: FocusHandle,
     focus_handle: FocusHandle,
 }
 
@@ -349,6 +474,8 @@ impl SettingsView {
             last_accent: None,
             status: None,
             recording_shortcut: None,
+            filename_edit: None,
+            filename_focus: cx.focus_handle(),
             focus_handle: cx.focus_handle(),
         };
         view.start_accent_watch(cx);
@@ -545,7 +672,7 @@ impl SettingsView {
 
     fn general(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
-        card(
+        let content = card(
             theme,
             vec![
                 div().child(self.language_row(theme, cx)),
@@ -558,7 +685,88 @@ impl SettingsView {
                     None,
                 ),
             ],
+        );
+        #[cfg(target_os = "macos")]
+        {
+            content
+                .child(group_header(
+                    theme,
+                    t(language, "settings.group.permissions"),
+                    t(language, "settings.group.permissions_desc"),
+                ))
+                .child(self.permissions_card(theme, cx))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            content
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn permissions_card(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let language = self.settings.language;
+        card(
+            theme,
+            vec![
+                div().child(self.permission_row(
+                    theme,
+                    t(language, "settings.permission_screen"),
+                    t(language, "settings.permission_screen_desc"),
+                    platform_window::screen_capture_trusted(),
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+                    cx,
+                )),
+                div().child(self.permission_row(
+                    theme,
+                    t(language, "settings.permission_accessibility"),
+                    t(language, "settings.permission_accessibility_desc"),
+                    platform_window::accessibility_trusted(),
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+                    cx,
+                )),
+            ],
         )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn permission_row(
+        &self,
+        theme: &Theme,
+        title: &str,
+        description: &str,
+        granted: bool,
+        url: &'static str,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let language = self.settings.language;
+        let status = t(
+            language,
+            if granted {
+                "settings.permission_granted"
+            } else {
+                "settings.permission_missing"
+            },
+        );
+        row_shell(theme)
+            .child(label_block(theme, title, description))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(if granted { theme.muted } else { theme.accent })
+                            .child(status),
+                    )
+                    .child(
+                        action_button(theme, t(language, "settings.open_settings").to_owned())
+                            .id("settings-open-permission")
+                            .on_click(cx.listener(move |_, _, _, cx| cx.open_url(url))),
+                    ),
+            )
     }
 
     fn language_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -680,6 +888,7 @@ impl SettingsView {
                         Some(icons::CAPTURE),
                     ),
                     div().child(self.save_location_row(SaveTarget::Screenshots, theme, cx)),
+                    div().child(self.filename_template_row(theme, cx)),
                 ],
             ))
             .child(group_header(
@@ -1077,6 +1286,333 @@ impl SettingsView {
             )
     }
 
+    fn filename_template_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let language = self.settings.language;
+        let editing = self.filename_edit.is_some();
+        let shown = self
+            .filename_edit
+            .as_ref()
+            .map(|edit| {
+                let cursor = edit.cursor_utf8();
+                format!("{}|{}", &edit.content[..cursor], &edit.content[cursor..])
+            })
+            .unwrap_or_else(|| self.settings.filename_template.clone());
+        let template = self
+            .filename_edit
+            .as_ref()
+            .map(|edit| edit.content.as_str())
+            .unwrap_or(self.settings.filename_template.as_str());
+        let preview = crate::storage::render_filename(template, 1920, 1080);
+        let action_label = t(
+            language,
+            if editing {
+                "settings.done"
+            } else {
+                "settings.edit"
+            },
+        );
+        let action = action_button(theme, action_label.to_owned())
+            .id("settings-filename-template-action")
+            .on_click(cx.listener(|this, _, window, cx| {
+                if this.filename_edit.is_some() {
+                    this.finish_filename_edit(window, cx);
+                } else {
+                    this.begin_filename_edit(window, cx);
+                }
+            }));
+
+        let focus = self.filename_focus.clone();
+        let entity = cx.entity();
+        let input = editing.then(|| {
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, cx| {
+                    window.handle_input(
+                        &focus,
+                        ElementInputHandler::new(bounds, entity.clone()),
+                        cx,
+                    );
+                },
+            )
+            .absolute()
+            .inset_0()
+            .into_any_element()
+        });
+
+        let field = div()
+            .id("settings-filename-template-field")
+            .track_focus(&self.filename_focus)
+            .relative()
+            .w(px(220.0))
+            .h(px(30.0))
+            .px(px(8.0))
+            .rounded(px(6.0))
+            .bg(theme.control)
+            .border_1()
+            .border_color(if editing { theme.accent } else { theme.border })
+            .flex()
+            .items_center()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_size(px(12.0))
+            .text_color(theme.text)
+            .child(shown)
+            .children(input)
+            .on_click(cx.listener(|this, _, window, cx| {
+                if this.filename_edit.is_some() {
+                    window.focus(&this.filename_focus, cx);
+                } else {
+                    this.begin_filename_edit(window, cx);
+                }
+            }));
+
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .px(px(16.0))
+            .py(px(14.0))
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(24.0))
+                    .child(label_block(
+                        theme,
+                        t(language, "settings.filename_template"),
+                        t(language, "settings.filename_template_desc"),
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(field)
+                            .child(action),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(theme.muted)
+                    .child(format!(
+                        "{} {}",
+                        t(language, "settings.filename_template_preview"),
+                        preview
+                    )),
+            )
+    }
+
+    fn begin_filename_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.filename_edit.is_none() {
+            self.filename_edit = Some(TemplateEdit::new(self.settings.filename_template.clone()));
+        }
+        window.focus(&self.filename_focus, cx);
+        self.status = None;
+        cx.notify();
+    }
+
+    fn finish_filename_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = self.filename_edit.as_ref() else {
+            return;
+        };
+        let template = edit.content.trim().to_owned();
+        if template.is_empty() {
+            self.status =
+                Some(t(self.settings.language, "settings.filename_template_invalid").to_owned());
+            window.focus(&self.filename_focus, cx);
+            cx.notify();
+            return;
+        }
+        self.settings.filename_template = template.clone();
+        settings_state::update(|settings| settings.filename_template = template);
+        self.filename_edit = None;
+        self.status =
+            Some(t(self.settings.language, "settings.filename_template_saved").to_owned());
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+    }
+
+    fn cancel_filename_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.filename_edit = None;
+        window.focus(&self.focus_handle, cx);
+        self.status = None;
+        cx.notify();
+    }
+
+    fn persist_filename_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = self.filename_edit.as_ref() else {
+            return;
+        };
+        let template = edit.content.trim();
+        if template.is_empty() || template == self.settings.filename_template {
+            return;
+        }
+        self.settings.filename_template = template.to_owned();
+        settings_state::update(|settings| settings.filename_template = template.to_owned());
+        cx.notify();
+    }
+
+    fn handle_filename_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.filename_edit.is_none() {
+            return false;
+        }
+        let key = event.keystroke.key.as_str();
+        let command = event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
+        let extend = event.keystroke.modifiers.shift;
+        match key {
+            "escape" => {
+                self.cancel_filename_edit(window, cx);
+                return true;
+            }
+            "enter" => {
+                self.finish_filename_edit(window, cx);
+                return true;
+            }
+            "backspace" => {
+                self.backspace_filename(cx);
+                return true;
+            }
+            "delete" => {
+                self.delete_filename(cx);
+                return true;
+            }
+            "left" => {
+                let position = self
+                    .filename_edit
+                    .as_ref()
+                    .map(TemplateEdit::previous_boundary);
+                if let Some(position) = position {
+                    self.move_filename_cursor(position, extend, cx);
+                }
+                return true;
+            }
+            "right" => {
+                let position = self.filename_edit.as_ref().map(TemplateEdit::next_boundary);
+                if let Some(position) = position {
+                    self.move_filename_cursor(position, extend, cx);
+                }
+                return true;
+            }
+            "home" => {
+                self.move_filename_cursor(0, extend, cx);
+                return true;
+            }
+            "end" => {
+                let end = self.filename_edit.as_ref().map(|edit| edit.content.len());
+                if let Some(end) = end {
+                    self.move_filename_cursor(end, extend, cx);
+                }
+                return true;
+            }
+            _ => {}
+        }
+        if command && key == "a" {
+            if let Some(edit) = &mut self.filename_edit {
+                edit.anchor = 0;
+                edit.cursor = edit.content.len();
+                cx.notify();
+            }
+            return true;
+        }
+        if command && key == "c" {
+            self.copy_filename_selection(cx);
+            return true;
+        }
+        if command && key == "v" {
+            self.paste_filename(cx);
+            return true;
+        }
+        true
+    }
+
+    fn backspace_filename(&mut self, cx: &mut Context<Self>) {
+        if let Some(edit) = &mut self.filename_edit {
+            let selection = edit.selection();
+            let range = edit.marked.take().or_else(|| {
+                if !selection.is_empty() {
+                    Some(selection)
+                } else {
+                    let cursor = edit.cursor_utf8();
+                    (cursor > 0).then(|| edit.previous_boundary()..cursor)
+                }
+            });
+            if let Some(range) = range {
+                edit.content.replace_range(range.clone(), "");
+                edit.cursor = range.start;
+                edit.anchor = range.start;
+            }
+        }
+        self.persist_filename_edit(cx);
+    }
+
+    fn delete_filename(&mut self, cx: &mut Context<Self>) {
+        if let Some(edit) = &mut self.filename_edit {
+            let selection = edit.selection();
+            let range = if !selection.is_empty() {
+                Some(selection)
+            } else {
+                let cursor = edit.cursor_utf8();
+                (cursor < edit.content.len()).then(|| cursor..edit.next_boundary())
+            };
+            if let Some(range) = range {
+                edit.content.replace_range(range.clone(), "");
+                edit.cursor = range.start;
+                edit.anchor = range.start;
+            }
+        }
+        self.persist_filename_edit(cx);
+    }
+
+    fn move_filename_cursor(&mut self, cursor: usize, extend: bool, cx: &mut Context<Self>) {
+        if let Some(edit) = &mut self.filename_edit {
+            edit.move_cursor(cursor, extend);
+            cx.notify();
+        }
+    }
+
+    fn copy_filename_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = self.filename_edit.as_ref() else {
+            return;
+        };
+        let selection = edit.selection();
+        if selection.is_empty() {
+            return;
+        }
+        let text = edit.content[selection].to_owned();
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
+    fn paste_filename(&mut self, cx: &mut Context<Self>) {
+        let mut text = None;
+        if let Some(item) = cx.read_from_clipboard() {
+            for entry in item.entries() {
+                if let ClipboardEntry::String(value) = entry {
+                    text = Some(value.text.clone());
+                    break;
+                }
+            }
+        }
+        if let Some(text) = text {
+            if let Some(edit) = &mut self.filename_edit {
+                edit.replace(None, &text);
+            }
+            self.persist_filename_edit(cx);
+        }
+    }
+
     fn choose_directory(&mut self, target: SaveTarget, cx: &mut Context<Self>) {
         let language = self.settings.language;
         let prompt = t(language, "settings.choose_folder").to_owned();
@@ -1194,6 +1730,8 @@ impl SettingsView {
                 vec![
                     self.recording_format_row(theme, cx),
                     self.recording_frame_rate_row(theme, cx),
+                    self.recording_quality_row(theme, cx),
+                    div().child(self.recording_segments_row(theme, cx)),
                     div().child(self.recording_cursor_row(theme, cx)),
                     div().child(self.save_location_row(SaveTarget::Recordings, theme, cx)),
                 ],
@@ -1271,6 +1809,60 @@ impl SettingsView {
                 t(language, "settings.frame_rate_desc"),
             ))
             .child(control)
+    }
+
+    fn recording_quality_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let language = self.settings.language;
+        let mut control = segmented(theme);
+        for quality in core_record::RecordQuality::ALL {
+            let selected = self.settings.record_quality == quality;
+            let label = t(
+                language,
+                match quality {
+                    core_record::RecordQuality::Low => "quality.low",
+                    core_record::RecordQuality::Standard => "quality.standard",
+                    core_record::RecordQuality::High => "quality.high",
+                },
+            );
+            control = control.child(
+                segment(theme, label, selected)
+                    .id(format!("record-quality-{}", quality.code()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.settings.record_quality = quality;
+                        settings_state::update(|settings| settings.record_quality = quality);
+                        cx.notify();
+                    })),
+            );
+        }
+
+        row_shell(theme)
+            .child(label_block(
+                theme,
+                t(language, "settings.quality"),
+                t(language, "settings.quality_desc"),
+            ))
+            .child(control)
+    }
+
+    fn recording_segments_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = self.settings.language;
+        let value = self.settings.record_segments;
+
+        row_shell(theme)
+            .id("settings-record-segments")
+            .on_click(cx.listener(|this, _, _, cx| {
+                let value = !this.settings.record_segments;
+                this.settings.record_segments = value;
+                settings_state::update(|settings| settings.record_segments = value);
+                this.status = None;
+                cx.notify();
+            }))
+            .child(label_block(
+                theme,
+                t(language, "settings.record_segments"),
+                t(language, "settings.record_segments_desc"),
+            ))
+            .child(toggle(theme, value))
     }
 
     fn recording_cursor_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1597,6 +2189,118 @@ impl SettingsView {
     }
 }
 
+impl EntityInputHandler for SettingsView {
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        actual_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let edit = self.filename_edit.as_ref()?;
+        let range = edit.range_from_utf16(&range_utf16);
+        actual_range.replace(edit.range_to_utf16(&range));
+        Some(edit.content[range].to_string())
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        let edit = self.filename_edit.as_ref()?;
+        let selection = edit.selection();
+        Some(UTF16Selection {
+            range: edit.range_to_utf16(&selection),
+            reversed: edit.anchor > edit.cursor,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        let edit = self.filename_edit.as_ref()?;
+        edit.marked.as_ref().map(|range| edit.range_to_utf16(range))
+    }
+
+    fn unmark_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(edit) = &mut self.filename_edit {
+            edit.marked = None;
+            window.notify_text_input_changed(&self.filename_focus);
+            cx.notify();
+        }
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(edit) = &mut self.filename_edit {
+            let range = range_utf16
+                .as_ref()
+                .map(|range| edit.range_from_utf16(range));
+            edit.marked = None;
+            edit.replace(range, new_text);
+            window.notify_text_input_changed(&self.filename_focus);
+        }
+        self.persist_filename_edit(cx);
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        _new_selected_range: Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(edit) = &mut self.filename_edit {
+            let range = range_utf16
+                .as_ref()
+                .map(|range| edit.range_from_utf16(range));
+            edit.replace(range, new_text);
+            window.notify_text_input_changed(&self.filename_focus);
+        }
+        self.persist_filename_edit(cx);
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        self.filename_edit.as_ref()?;
+        Some(element_bounds)
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        let edit = self.filename_edit.as_ref()?;
+        Some(edit.offset_to_utf16(edit.content.len()))
+    }
+
+    fn text_length_utf16(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        let edit = self.filename_edit.as_ref()?;
+        Some(edit.offset_to_utf16(edit.content.len()))
+    }
+}
+
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::for_window(window, self.accent);
@@ -1609,6 +2313,9 @@ impl Render for SettingsView {
             .text_color(theme.text)
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.handle_filename_key(event, window, cx) {
+                    return;
+                }
                 this.handle_shortcut_key(event, window, cx);
             }))
             .child(self.sidebar(&theme, cx))

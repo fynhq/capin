@@ -24,8 +24,9 @@ thread_local! {
     static LAST_HASH: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
-/// Records a pinned image for the recent-pin history. Consecutive identical
-/// images are deduplicated so holding the pin hotkey does not fill the list.
+/// Records a completed screenshot for the recent-screenshot history.
+/// Consecutive identical images are deduplicated so repeated exports do not
+/// fill the list.
 pub fn record(frame: &RgbaFrame) {
     let hash = hash_frame(frame);
     let Some(directory) = history_dir() else {
@@ -60,7 +61,7 @@ pub fn record(frame: &RgbaFrame) {
     reset_cursor(hash);
 }
 
-/// Returns the next older pinned image after the one matching `hash`.
+/// Returns the next older screenshot after the one matching `hash`.
 pub fn cycle(hash: u64) -> Option<RgbaFrame> {
     let entries = entries();
     if entries.is_empty() {
@@ -93,7 +94,12 @@ pub fn cycle(hash: u64) -> Option<RgbaFrame> {
     None
 }
 
-/// Stable in-process hash for matching the clipboard image against history.
+/// Whether `hash` belongs to a screenshot in the current history.
+pub fn contains(hash: u64) -> bool {
+    entries().iter().any(|entry| entry.hash == hash)
+}
+
+/// Stable in-process hash for matching an image against history.
 pub fn hash_frame(frame: &RgbaFrame) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     for byte in frame.pixels() {
@@ -197,7 +203,7 @@ fn save_image(directory: &Path, frame: &RgbaFrame, now: u64) -> Option<String> {
 }
 
 fn history_dir() -> Option<PathBuf> {
-    let directory = storage::pins_dir()?.join("history");
+    let directory = storage::app_data_dir()?.join("history");
     std::fs::create_dir_all(&directory).ok()?;
     Some(directory)
 }

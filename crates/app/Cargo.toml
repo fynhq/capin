@@ -13,6 +13,7 @@ name = "capin"
 path = "src/main.rs"
 
 [dependencies]
+chrono.workspace = true
 core-annotate.workspace = true
 core-capture.workspace = true
 core-compose.workspace = true

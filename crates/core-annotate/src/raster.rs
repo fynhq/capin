@@ -1,15 +1,20 @@
 use std::cell::RefCell;
 
-use core_types::{FrameError, PhysicalRect, PhysicalSize, RgbaFrame, prefers_dark_foreground};
+use core_types::{
+    FrameError, PhysicalPoint, PhysicalRect, PhysicalSize, RgbaFrame, prefers_dark_foreground,
+};
 use cosmic_text::{
-    Attrs, Buffer, Color as TextColor, Family, FontSystem, Metrics, Shaping, SwashCache,
+    Align, Attrs, Buffer, Color as TextColor, Family, FontSystem, Metrics, Shaping, SwashCache,
 };
 use thiserror::Error;
 use tiny_skia::{
     IntSize, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, Transform,
 };
 
-use crate::{Annotation, AnnotationDocument, AnnotationId, AnnotationStyle, Shape};
+use crate::{
+    Annotation, AnnotationDocument, AnnotationId, AnnotationStyle, NumberStyle, Shape,
+    TextAlignment,
+};
 
 pub fn rasterize(
     document: &AnnotationDocument,
@@ -88,6 +93,26 @@ pub fn rasterize(
     )?)
 }
 
+fn push_arrow_head(
+    builder: &mut PathBuilder,
+    tip: PhysicalPoint,
+    angle: f32,
+    head_length: f32,
+    spread: f32,
+) {
+    let left = (
+        tip.x as f32 - head_length * (angle - spread).cos(),
+        tip.y as f32 - head_length * (angle - spread).sin(),
+    );
+    let right = (
+        tip.x as f32 - head_length * (angle + spread).cos(),
+        tip.y as f32 - head_length * (angle + spread).sin(),
+    );
+    builder.move_to(left.0, left.1);
+    builder.line_to(tip.x as f32, tip.y as f32);
+    builder.line_to(right.0, right.1);
+}
+
 fn fills_shape(annotation: &Annotation) -> bool {
     match &annotation.shape {
         Shape::HighlighterBox(_) => true,
@@ -112,20 +137,64 @@ fn build_path(annotation: &Annotation) -> Result<Path, RasterError> {
 
             let dx = (end.x - start.x) as f32;
             let dy = (end.y - start.y) as f32;
-            let angle = dy.atan2(dx);
             let head_length = (annotation.style.stroke_width * 3.5).max(10.0);
             let spread = 0.55;
-            let left = (
-                end.x as f32 - head_length * (angle - spread).cos(),
-                end.y as f32 - head_length * (angle - spread).sin(),
+            if annotation.style.arrow_end {
+                push_arrow_head(&mut builder, *end, dy.atan2(dx), head_length, spread);
+            }
+            if annotation.style.arrow_start {
+                push_arrow_head(&mut builder, *start, (-dy).atan2(-dx), head_length, spread);
+            }
+            builder.finish().ok_or(RasterError::InvalidGeometry)
+        }
+        Shape::Polyline { points } => {
+            if points.len() < 2 {
+                return Err(RasterError::InvalidGeometry);
+            }
+            let mut builder = PathBuilder::new();
+            builder.move_to(points[0].x as f32, points[0].y as f32);
+            for point in &points[1..] {
+                builder.line_to(point.x as f32, point.y as f32);
+            }
+            let head_length = (annotation.style.stroke_width * 3.5).max(10.0);
+            let spread = 0.55;
+            if annotation.style.arrow_end {
+                let last = points[points.len() - 1];
+                let previous = points[points.len() - 2];
+                let angle = ((last.y - previous.y) as f32).atan2((last.x - previous.x) as f32);
+                push_arrow_head(&mut builder, last, angle, head_length, spread);
+            }
+            if annotation.style.arrow_start {
+                let first = points[0];
+                let next = points[1];
+                let angle = ((first.y - next.y) as f32).atan2((first.x - next.x) as f32);
+                push_arrow_head(&mut builder, first, angle, head_length, spread);
+            }
+            builder.finish().ok_or(RasterError::InvalidGeometry)
+        }
+        Shape::Curve {
+            start,
+            control,
+            end,
+        } => {
+            let mut builder = PathBuilder::new();
+            builder.move_to(start.x as f32, start.y as f32);
+            builder.quad_to(
+                control.x as f32,
+                control.y as f32,
+                end.x as f32,
+                end.y as f32,
             );
-            let right = (
-                end.x as f32 - head_length * (angle + spread).cos(),
-                end.y as f32 - head_length * (angle + spread).sin(),
-            );
-            builder.move_to(left.0, left.1);
-            builder.line_to(end.x as f32, end.y as f32);
-            builder.line_to(right.0, right.1);
+            let head_length = (annotation.style.stroke_width * 3.5).max(10.0);
+            let spread = 0.55;
+            if annotation.style.arrow_end {
+                let angle = ((end.y - control.y) as f32).atan2((end.x - control.x) as f32);
+                push_arrow_head(&mut builder, *end, angle, head_length, spread);
+            }
+            if annotation.style.arrow_start {
+                let angle = ((start.y - control.y) as f32).atan2((start.x - control.x) as f32);
+                push_arrow_head(&mut builder, *start, angle, head_length, spread);
+            }
             builder.finish().ok_or(RasterError::InvalidGeometry)
         }
         Shape::Blur(_) => Err(RasterError::Unsupported(annotation.id)),
@@ -179,6 +248,10 @@ fn draw_text(pixmap: &mut Pixmap, annotation: &Annotation) {
         return;
     }
 
+    if annotation.style.text_background {
+        draw_text_background(pixmap, *bounds, annotation.style);
+    }
+
     TEXT_ENGINE.with(|engine| {
         let mut engine = engine.borrow_mut();
         let engine = engine.get_or_insert_with(|| TextEngine {
@@ -194,54 +267,125 @@ fn draw_text(pixmap: &mut Pixmap, annotation: &Annotation) {
             Metrics::new(font_size, font_size * 1.3),
         );
         buffer.set_size(Some(bounds.size.width as f32), None);
+        let alignment = match annotation.style.text_alignment {
+            TextAlignment::Left => Align::Left,
+            TextAlignment::Center => Align::Center,
+            TextAlignment::Right => Align::Right,
+        };
         buffer.set_text(
             text,
             &Attrs::new().family(Family::SansSerif),
             Shaping::Advanced,
-            None,
+            Some(alignment),
         );
 
         let (red, green, blue, alpha) = unpack(annotation.style.color);
-        let width = pixmap.width() as i32;
-        let height = pixmap.height() as i32;
-        let origin = bounds.origin;
-        let data = pixmap.data_mut();
-        buffer.draw(
-            &mut engine.font_system,
-            &mut engine.swash_cache,
-            TextColor::rgba(red, green, blue, alpha),
-            |x, y, rect_width, rect_height, color| {
-                let mask = f32::from((color.0 >> 24) as u8) / 255.0;
-                let coverage = mask * (f32::from(alpha) / 255.0);
-                if coverage <= 0.0 {
-                    return;
-                }
-                let source_red = f32::from(((color.0 >> 16) & 0xFF) as u8);
-                let source_green = f32::from(((color.0 >> 8) & 0xFF) as u8);
-                let source_blue = f32::from((color.0 & 0xFF) as u8);
-                let inverse = 1.0 - coverage;
-                for row in 0..rect_height as i32 {
-                    let pixel_y = origin.y + y + row;
-                    if !(0..height).contains(&pixel_y) {
+        let rgb = (u32::from(red) << 16) | (u32::from(green) << 8) | u32::from(blue);
+        if annotation.style.text_outline {
+            let outline = if prefers_dark_foreground(rgb) {
+                (0, 0, 0, 255)
+            } else {
+                (255, 255, 255, 255)
+            };
+            let radius = (annotation.style.stroke_width * 0.6).max(1.0).round() as i32;
+            for dx in [-radius, 0, radius] {
+                for dy in [-radius, 0, radius] {
+                    if dx == 0 && dy == 0 {
                         continue;
                     }
-                    for column in 0..rect_width as i32 {
-                        let pixel_x = origin.x + x + column;
-                        if !(0..width).contains(&pixel_x) {
-                            continue;
-                        }
-                        let index = ((pixel_y * width + pixel_x) * 4) as usize;
-                        data[index] = blend_channel(source_red, coverage, data[index], inverse);
-                        data[index + 1] =
-                            blend_channel(source_green, coverage, data[index + 1], inverse);
-                        data[index + 2] =
-                            blend_channel(source_blue, coverage, data[index + 2], inverse);
-                        data[index + 3] = blend_channel(255.0, coverage, data[index + 3], inverse);
-                    }
+                    draw_text_buffer(
+                        pixmap,
+                        &mut engine.font_system,
+                        &mut engine.swash_cache,
+                        &mut buffer,
+                        bounds.origin,
+                        outline,
+                        (dx, dy),
+                    );
                 }
-            },
+            }
+        }
+        draw_text_buffer(
+            pixmap,
+            &mut engine.font_system,
+            &mut engine.swash_cache,
+            &mut buffer,
+            bounds.origin,
+            (red, green, blue, alpha),
+            (0, 0),
         );
     });
+}
+
+fn draw_text_buffer(
+    pixmap: &mut Pixmap,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    buffer: &mut Buffer,
+    origin: PhysicalPoint,
+    color: (u8, u8, u8, u8),
+    offset: (i32, i32),
+) {
+    let width = pixmap.width() as i32;
+    let height = pixmap.height() as i32;
+    let data = pixmap.data_mut();
+    buffer.draw(
+        font_system,
+        swash_cache,
+        TextColor::rgba(color.0, color.1, color.2, color.3),
+        |x, y, rect_width, rect_height, glyph| {
+            let mask = f32::from((glyph.0 >> 24) as u8) / 255.0;
+            let coverage = mask * (f32::from(color.3) / 255.0);
+            if coverage <= 0.0 {
+                return;
+            }
+            let source_red = f32::from(((glyph.0 >> 16) & 0xFF) as u8);
+            let source_green = f32::from(((glyph.0 >> 8) & 0xFF) as u8);
+            let source_blue = f32::from((glyph.0 & 0xFF) as u8);
+            let inverse = 1.0 - coverage;
+            for row in 0..rect_height as i32 {
+                let pixel_y = origin.y + y + row + offset.1;
+                if !(0..height).contains(&pixel_y) {
+                    continue;
+                }
+                for column in 0..rect_width as i32 {
+                    let pixel_x = origin.x + x + column + offset.0;
+                    if !(0..width).contains(&pixel_x) {
+                        continue;
+                    }
+                    let index = ((pixel_y * width + pixel_x) * 4) as usize;
+                    data[index] = blend_channel(source_red, coverage, data[index], inverse);
+                    data[index + 1] =
+                        blend_channel(source_green, coverage, data[index + 1], inverse);
+                    data[index + 2] =
+                        blend_channel(source_blue, coverage, data[index + 2], inverse);
+                    data[index + 3] = blend_channel(255.0, coverage, data[index + 3], inverse);
+                }
+            }
+        },
+    );
+}
+
+fn draw_text_background(pixmap: &mut Pixmap, rect: PhysicalRect, style: AnnotationStyle) {
+    let (red, green, blue, _) = unpack(style.color);
+    let rgb = (u32::from(red) << 16) | (u32::from(green) << 8) | u32::from(blue);
+    let color = if prefers_dark_foreground(rgb) {
+        (0, 0, 0, 160)
+    } else {
+        (255, 255, 255, 190)
+    };
+    let Ok(path) = rounded_rect_path(rect, style.font_size * 0.2) else {
+        return;
+    };
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(color.0, color.1, color.2, color.3);
+    pixmap.as_mut().fill_path(
+        &path,
+        &paint,
+        tiny_skia::FillRule::Winding,
+        Transform::identity(),
+        None,
+    );
 }
 
 fn blend_channel(source: f32, coverage: f32, destination: u8, inverse: f32) -> u8 {
@@ -284,26 +428,42 @@ fn draw_number(pixmap: &mut Pixmap, annotation: &Annotation) {
     }
     let (red, green, blue, alpha) = unpack(annotation.style.color);
     let rgb = (u32::from(red) << 16) | (u32::from(green) << 8) | u32::from(blue);
-    let foreground = if prefers_dark_foreground(rgb) {
-        0x111111FF
-    } else {
-        0xFFFFFFFF
+    let foreground = match annotation.style.number_style {
+        NumberStyle::Plain => annotation.style.color,
+        NumberStyle::Circle | NumberStyle::Square => {
+            if prefers_dark_foreground(rgb) {
+                0x111111FF
+            } else {
+                0xFFFFFFFF
+            }
+        }
     };
 
-    if let Ok(rect) = to_skia_rect(*bounds) {
-        let mut builder = PathBuilder::new();
-        builder.push_oval(rect);
-        if let Some(path) = builder.finish() {
-            let mut paint = Paint::default();
-            paint.set_color_rgba8(red, green, blue, alpha);
-            pixmap.as_mut().fill_path(
-                &path,
-                &paint,
-                tiny_skia::FillRule::Winding,
-                Transform::identity(),
-                None,
-            );
+    let background = match annotation.style.number_style {
+        NumberStyle::Circle => {
+            let rect = to_skia_rect(*bounds).ok();
+            rect.and_then(|rect| {
+                let mut builder = PathBuilder::new();
+                builder.push_oval(rect);
+                builder.finish()
+            })
         }
+        NumberStyle::Square => {
+            let radius = bounds.size.width.min(bounds.size.height) as f32 * 0.18;
+            rounded_rect_path(*bounds, radius).ok()
+        }
+        NumberStyle::Plain => None,
+    };
+    if let Some(path) = background {
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(red, green, blue, alpha);
+        pixmap.as_mut().fill_path(
+            &path,
+            &paint,
+            tiny_skia::FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
     }
 
     let font_size = (bounds.size.height as f32 * 0.54).max(10.0);
@@ -732,6 +892,65 @@ mod tests {
     }
 
     #[test]
+    fn polyline_arrow_renders_without_error() {
+        let frame = black_frame(100, 100);
+        let mut document = document(100, 100);
+        document.add(
+            Shape::Polyline {
+                points: vec![
+                    PhysicalPoint::new(10, 80),
+                    PhysicalPoint::new(40, 30),
+                    PhysicalPoint::new(70, 70),
+                    PhysicalPoint::new(90, 20),
+                ],
+            },
+            AnnotationStyle {
+                arrow_start: true,
+                arrow_end: true,
+                ..Default::default()
+            },
+        );
+        assert!(rasterize(&document, &frame).is_ok());
+    }
+
+    #[test]
+    fn curve_arrow_renders_without_error() {
+        let frame = black_frame(100, 100);
+        let mut document = document(100, 100);
+        document.add(
+            Shape::Curve {
+                start: PhysicalPoint::new(10, 80),
+                control: PhysicalPoint::new(50, 10),
+                end: PhysicalPoint::new(90, 70),
+            },
+            AnnotationStyle {
+                arrow_start: true,
+                arrow_end: true,
+                ..Default::default()
+            },
+        );
+        assert!(rasterize(&document, &frame).is_ok());
+    }
+
+    #[test]
+    fn arrow_heads_can_be_rendered_at_both_ends() {
+        let frame = black_frame(80, 80);
+        let mut document = document(80, 80);
+        document.add(
+            Shape::Arrow {
+                start: PhysicalPoint::new(10, 40),
+                end: PhysicalPoint::new(70, 40),
+            },
+            AnnotationStyle {
+                arrow_start: true,
+                arrow_end: true,
+                ..Default::default()
+            },
+        );
+        assert!(rasterize(&document, &frame).is_ok());
+    }
+
+    #[test]
     fn ellipse_and_arrow_render_without_error() {
         let frame = black_frame(80, 80);
         let mut document = document(80, 80);
@@ -831,6 +1050,46 @@ mod tests {
         );
         let output = rasterize(&document, &frame).unwrap();
         assert_eq!(output.width(), 120);
+    }
+
+    #[test]
+    fn text_styles_render_without_error() {
+        let frame = black_frame(120, 60);
+        let mut document = document(120, 60);
+        document.add(
+            Shape::Text {
+                bounds: PhysicalRect::new(4, 4, 110, 40),
+                text: "Capin text".to_owned(),
+            },
+            AnnotationStyle {
+                text_background: true,
+                text_outline: true,
+                text_alignment: TextAlignment::Center,
+                ..Default::default()
+            },
+        );
+        let output = rasterize(&document, &frame).unwrap();
+        assert_eq!(output.width(), 120);
+    }
+
+    #[test]
+    fn number_badge_supports_square_and_plain_styles() {
+        let frame = black_frame(80, 80);
+        for style in [NumberStyle::Square, NumberStyle::Plain] {
+            let mut document = document(80, 80);
+            document.add(
+                Shape::Number {
+                    bounds: PhysicalRect::new(20, 20, 36, 36),
+                    value: 1,
+                },
+                AnnotationStyle {
+                    color: 0xFF0000FF,
+                    number_style: style,
+                    ..Default::default()
+                },
+            );
+            assert!(rasterize(&document, &frame).is_ok());
+        }
     }
 
     #[test]

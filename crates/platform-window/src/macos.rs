@@ -45,6 +45,14 @@ pub(super) fn set_click_through(
     Ok(())
 }
 
+pub(super) fn accessibility_trusted() -> bool {
+    unsafe { AXIsProcessTrusted() }
+}
+
+pub(super) fn screen_capture_trusted() -> bool {
+    core_graphics::access::ScreenCaptureAccess::default().preflight()
+}
+
 pub(super) fn set_accessory_activation_policy() {
     let Some(marker) = MainThreadMarker::new() else {
         return;

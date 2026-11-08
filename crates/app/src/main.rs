@@ -1,3 +1,4 @@
+mod capture_history;
 mod editor;
 mod hotkey;
 mod i18n;
@@ -6,8 +7,8 @@ mod image_util;
 mod ocr;
 mod overlay;
 mod pin;
-mod pin_history;
 mod record;
+mod record_session;
 mod scroll;
 mod settings;
 mod settings_state;

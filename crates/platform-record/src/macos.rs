@@ -7,7 +7,8 @@ use std::time::Duration;
 use block2::RcBlock;
 use core_capture::CaptureTarget;
 use core_record::{
-    FrameDecision, FrameRate, FrameTimeline, RecordConfig, WebpEncoder, webp_output_size,
+    FrameDecision, FrameRate, FrameTimeline, RecordConfig, RecordQuality, WebpEncoder,
+    webp_output_size,
 };
 use core_types::{PhysicalRect, PhysicalSize, RecordFormat};
 use dispatch2::DispatchQueue;
@@ -56,6 +57,7 @@ pub(crate) fn start(
     let (width, height) = (plan.width, plan.height);
     let fps = config.frame_rate.as_u32();
     let format = config.format;
+    let quality = config.quality;
     let encoder_flags = Arc::clone(&flags);
     let encoder_temp = temp.clone();
     let encoder_output = output.clone();
@@ -70,6 +72,7 @@ pub(crate) fn start(
                 width,
                 height,
                 fps,
+                quality,
                 encoder_flags,
             )
         })
@@ -525,6 +528,7 @@ fn encode_loop(
     width: usize,
     height: usize,
     fps: u32,
+    quality: RecordQuality,
     flags: Arc<Flags>,
 ) -> Result<(), String> {
     let result = (|| {
@@ -536,7 +540,8 @@ fn encode_loop(
                     let input = PhysicalSize::new(frame.width as u32, frame.height as u32);
                     let output = webp_output_size(input);
                     webp = Some(
-                        WebpEncoder::new(input, output, fps).map_err(|error| error.to_string())?,
+                        WebpEncoder::new(input, output, fps, quality.webp_quality())
+                            .map_err(|error| error.to_string())?,
                     );
                 }
                 if let Some(encoder) = webp.as_mut() {
@@ -547,7 +552,7 @@ fn encode_loop(
                 continue;
             }
             if writer.is_none() {
-                writer = Some(Writer::new(temp, width, height, fps)?);
+                writer = Some(Writer::new(temp, width, height, fps, quality)?);
             }
             if let Some(writer) = writer.as_mut() {
                 writer.append(&frame)?;
@@ -588,7 +593,13 @@ struct Writer {
 }
 
 impl Writer {
-    fn new(path: &Path, width: usize, height: usize, fps: u32) -> Result<Self, String> {
+    fn new(
+        path: &Path,
+        width: usize,
+        height: usize,
+        fps: u32,
+        quality: RecordQuality,
+    ) -> Result<Self, String> {
         if path.exists() {
             let _ = std::fs::remove_file(path);
         }
@@ -601,7 +612,7 @@ impl Writer {
         }
         .map_err(|error| format!("failed to create the movie writer: {}", ns_error(&error)))?;
 
-        let settings = video_settings(width, height, fps)?;
+        let settings = video_settings(width, height, fps, quality)?;
         let media_type = unsafe { AVMediaTypeVideo }
             .ok_or_else(|| "video media type is unavailable".to_owned())?;
         let input = unsafe {
@@ -761,10 +772,12 @@ fn video_settings(
     width: usize,
     height: usize,
     fps: u32,
+    quality: RecordQuality,
 ) -> Result<Retained<NSDictionary<NSString, AnyObject>>, String> {
     let codec = unsafe { AVVideoCodecTypeH264 }.ok_or_else(|| "H.264 is unavailable".to_owned())?;
-    let bitrate = ((width as u64 * height as u64 * u64::from(fps.max(1))) / 4)
-        .clamp(4_000_000, 60_000_000) as u32;
+    let base_bitrate = ((width as u64 * height as u64 * u64::from(fps.max(1))) / 4) as f32;
+    let bitrate =
+        (base_bitrate * quality.bitrate_multiplier()).clamp(4_000_000.0, 60_000_000.0) as u32;
     let bitrate = NSNumber::new_u32(bitrate);
     let interval = NSNumber::new_u32(fps.max(1));
     let compression = NSDictionary::from_slices(
