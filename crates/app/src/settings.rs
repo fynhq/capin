@@ -2512,7 +2512,9 @@ impl Render for SettingsView {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let command =
                     event.keystroke.modifiers.platform || event.keystroke.modifiers.control;
-                if command && event.keystroke.key.eq_ignore_ascii_case("w") {
+                // Cmd/Ctrl+W and Cmd/Ctrl+Q close only the settings window;
+                // quitting the menu-bar app stays on the tray menu.
+                if command && matches!(event.keystroke.key.as_str(), "w" | "q") {
                     platform_window::set_macos_accessory_activation_policy();
                     window.remove_window();
                     return;
