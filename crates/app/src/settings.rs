@@ -1205,27 +1205,25 @@ impl SettingsView {
         let mut control = segmented(theme);
         for (format, label) in [
             (RecordFormat::Mp4, t(language, "format.mp4")),
-            (RecordFormat::WebM, t(language, "format.webm")),
+            (RecordFormat::WebP, t(language, "format.webp")),
         ] {
             let selected = self.settings.record_format == format;
-            let disabled = format == RecordFormat::WebM;
-            let button = if disabled {
-                segment(theme, label, selected)
-                    .opacity(0.4)
-                    .into_any_element()
-            } else {
-                segment(theme, label, selected)
-                    .id(label)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.settings.record_format = format;
-                        settings_state::update(|settings| {
-                            settings.record_format = format;
-                        });
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            };
-            control = control.child(button);
+            control = control.child(segment(theme, label, selected).id(label).on_click(
+                cx.listener(move |this, _, _, cx| {
+                    this.settings.record_format = format;
+                    let frame_rate = if format == RecordFormat::WebP {
+                        FrameRate::Fps30
+                    } else {
+                        this.settings.record_frame_rate
+                    };
+                    this.settings.record_frame_rate = frame_rate;
+                    settings_state::update(|settings| {
+                        settings.record_format = format;
+                        settings.record_frame_rate = frame_rate;
+                    });
+                    cx.notify();
+                }),
+            ));
         }
 
         row_shell(theme)
@@ -1245,15 +1243,25 @@ impl SettingsView {
             (FrameRate::Fps60, t(language, "fps.60")),
         ] {
             let selected = self.settings.record_frame_rate == frame_rate;
-            control = control.child(segment(theme, label, selected).id(label).on_click(
-                cx.listener(move |this, _, _, cx| {
-                    this.settings.record_frame_rate = frame_rate;
-                    settings_state::update(|settings| {
-                        settings.record_frame_rate = frame_rate;
-                    });
-                    cx.notify();
-                }),
-            ));
+            let disabled =
+                self.settings.record_format == RecordFormat::WebP && frame_rate == FrameRate::Fps60;
+            let button = if disabled {
+                segment(theme, label, selected)
+                    .opacity(0.4)
+                    .into_any_element()
+            } else {
+                segment(theme, label, selected)
+                    .id(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.settings.record_frame_rate = frame_rate;
+                        settings_state::update(|settings| {
+                            settings.record_frame_rate = frame_rate;
+                        });
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            };
+            control = control.child(button);
         }
 
         row_shell(theme)

@@ -1,8 +1,9 @@
-//! Platform screen recorders for MP4 output.
+//! Platform screen recorders for MP4 and animated WebP output.
 //!
 //! The recorder captures a monitor, a region, or a single window without audio
-//! and reports progress through [`Recorder`]. Encoding stays on the platform:
-//! Media Foundation on Windows and AVFoundation on macOS.
+//! and reports progress through [`Recorder`]. MP4 uses the platform encoder
+//! (Media Foundation on Windows, AVFoundation on macOS); WebP is encoded in
+//! software with libwebp on both platforms.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use core_capture::{CaptureTarget, platform_backend};
 use core_record::RecordConfig;
-use core_types::{PhysicalSize, RecordFormat};
+use core_types::PhysicalSize;
 use thiserror::Error;
 
 #[cfg(target_os = "macos")]
@@ -26,8 +27,6 @@ pub enum RecorderError {
     Config(#[from] core_record::RecordError),
     #[error("the recording target no longer exists")]
     TargetMissing,
-    #[error("the {} recording format is not available yet", .0.display_name())]
-    UnsupportedFormat(RecordFormat),
     #[error("platform recording failed: {0}")]
     Platform(String),
     #[error("screen recording is not supported on this platform")]
@@ -180,9 +179,6 @@ impl Recorder {
         output: PathBuf,
         excluded_windows: &[u64],
     ) -> Result<Self, RecorderError> {
-        if config.format != RecordFormat::Mp4 {
-            return Err(RecorderError::UnsupportedFormat(config.format));
-        }
         let dimensions = resolve_dimensions(&config)?;
         config.validate(dimensions)?;
 
@@ -292,18 +288,13 @@ fn platform_start(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_types::{CaptureRegion, MonitorId, PhysicalRect};
+    use core_types::{CaptureRegion, MonitorId, PhysicalRect, RecordFormat};
 
     #[test]
-    fn webm_is_rejected_until_the_encoder_lands() {
-        let config = RecordConfig::new(
-            CaptureTarget::Monitor(MonitorId::from_raw(1)),
-            RecordFormat::WebM,
-        );
-        let output = std::env::temp_dir().join("capin-webm-test.mp4");
+    fn part_files_keep_the_output_extension() {
         assert_eq!(
-            Recorder::start(config, output).err(),
-            Some(RecorderError::UnsupportedFormat(RecordFormat::WebM))
+            part_path(Path::new("capin-recording.webp")),
+            Path::new(".capin-recording.part.webp")
         );
     }
 

@@ -4,8 +4,10 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use core_capture::CaptureTarget;
-use core_record::{FrameDecision, FrameRate, FrameTimeline, RecordConfig};
-use core_types::PhysicalRect;
+use core_record::{
+    FrameDecision, FrameRate, FrameTimeline, RecordConfig, WebpEncoder, webp_output_size,
+};
+use core_types::{PhysicalRect, PhysicalSize, RecordFormat};
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
 use windows_capture::encoder::{
     AudioSettingsBuilder, ContainerSettingsBuilder, VideoEncoder, VideoSettingsBuilder,
@@ -35,6 +37,7 @@ struct CaptureInfo {
     source: Source,
     output: PathBuf,
     final_output: PathBuf,
+    format: RecordFormat,
     fps: u32,
     include_cursor: bool,
     shared: Arc<Flags>,
@@ -60,6 +63,7 @@ pub(crate) fn start(
                 source: Source::Region(region.rect),
                 output: temp,
                 final_output: output,
+                format: config.format,
                 fps,
                 include_cursor: config.include_cursor,
                 shared,
@@ -72,6 +76,7 @@ pub(crate) fn start(
                 source: Source::Monitor,
                 output: temp,
                 final_output: output,
+                format: config.format,
                 fps,
                 include_cursor: config.include_cursor,
                 shared,
@@ -85,6 +90,7 @@ pub(crate) fn start(
                 source: Source::Window,
                 output: temp,
                 final_output: output,
+                format: config.format,
                 fps,
                 include_cursor: config.include_cursor,
                 shared,
@@ -176,6 +182,7 @@ fn cursor_settings(include_cursor: bool) -> CursorCaptureSettings {
 
 struct Recorder {
     encoder: Option<VideoEncoder>,
+    webp: Option<WebpEncoder>,
     output_size: Option<(u32, u32)>,
     last_buffer: Option<Vec<u8>>,
     last_pts: i64,
@@ -194,6 +201,7 @@ impl GraphicsCaptureApiHandler for Recorder {
         let frame_rate = FrameRate::from_u32(fps).unwrap_or(FrameRate::Fps30);
         Ok(Self {
             encoder: None,
+            webp: None,
             output_size: None,
             last_buffer: None,
             last_pts: 0,
@@ -273,6 +281,30 @@ impl GraphicsCaptureApiHandler for Recorder {
             frame_bytes[y * row..y * row + row].copy_from_slice(&data[source..source + row]);
         }
 
+        if self.flags.format == RecordFormat::WebP {
+            if self.webp.is_none() {
+                let input = PhysicalSize::new(width, height);
+                let output = webp_output_size(input);
+                match WebpEncoder::new(input, output, self.flags.fps) {
+                    Ok(encoder) => self.webp = Some(encoder),
+                    Err(error) => {
+                        self.flags.shared.fail(error.to_string());
+                        capture_control.stop();
+                        return Ok(());
+                    }
+                }
+            }
+            if let Some(encoder) = self.webp.as_mut() {
+                let pts_millis =
+                    (index.saturating_mul(1000) / u64::from(self.flags.fps.max(1))) as i64;
+                if let Err(error) = encoder.push_bgra(&frame_bytes, pts_millis) {
+                    self.flags.shared.fail(error.to_string());
+                    capture_control.stop();
+                }
+            }
+            return Ok(());
+        }
+
         if self.encoder.is_none() {
             let bitrate = ((u64::from(width) * u64::from(height) * u64::from(self.flags.fps)) / 4)
                 .clamp(4_000_000, 60_000_000) as u32;
@@ -307,6 +339,43 @@ impl GraphicsCaptureApiHandler for Recorder {
 
 impl Drop for Recorder {
     fn drop(&mut self) {
+        if self
+            .flags
+            .shared
+            .error
+            .lock()
+            .map(|slot| slot.is_some())
+            .unwrap_or(false)
+        {
+            let _ = std::fs::remove_file(&self.flags.output);
+            return;
+        }
+
+        if self.flags.format == RecordFormat::WebP {
+            let Some(encoder) = self.webp.take() else {
+                self.flags
+                    .shared
+                    .fail("no frames were captured before the recording stopped");
+                let _ = std::fs::remove_file(&self.flags.output);
+                return;
+            };
+            let end_ms = self.flags.shared.elapsed_active().as_millis() as i64;
+            if let Err(error) = encoder.finish(end_ms, &self.flags.output) {
+                self.flags.shared.fail(error.to_string());
+                let _ = std::fs::remove_file(&self.flags.output);
+                return;
+            }
+            if let Err(error) = std::fs::rename(&self.flags.output, &self.flags.final_output) {
+                self.flags
+                    .shared
+                    .fail(format!("failed to publish the recording: {error}"));
+                let _ = std::fs::remove_file(&self.flags.output);
+                return;
+            }
+            self.flags.shared.finish();
+            return;
+        }
+
         let Some(mut encoder) = self.encoder.take() else {
             self.flags
                 .shared

@@ -1,7 +1,15 @@
+use std::collections::VecDeque;
+use std::ptr::NonNull;
 use std::sync::OnceLock;
 
 #[path = "macos_sck.rs"]
 mod sck;
+
+use objc2_application_services::{AXError, AXIsProcessTrusted, AXUIElement, AXValue, AXValueType};
+use objc2_core_foundation::{
+    CFArray as AxArray, CFRetained, CFString as AxString, CFType as AxType, CGPoint as AxPoint,
+    CGRect as AxRect, CGSize as AxSize,
+};
 
 use core_foundation::array::CFArray;
 use core_foundation::base::{CFType, TCFType};
@@ -385,10 +393,229 @@ pub fn window_corner_radius(_id: WindowId, scale: f32) -> u32 {
     (10.0 * scale.max(0.0)).round() as u32
 }
 
-/// Accessibility element enumeration is not wired up yet; callers fall back
-/// to whole-window selection.
-pub fn ui_elements(_id: WindowId) -> Vec<PhysicalRect> {
-    Vec::new()
+const MAX_AX_ELEMENTS: usize = 512;
+const MAX_AX_VISITS: usize = 1024;
+const MAX_AX_DEPTH: usize = 32;
+
+struct AxWindowInfo {
+    pid: i32,
+    bounds: AxRect,
+    title: String,
+    scale: f64,
+}
+
+/// Returns the accessibility element bounds inside a window, in the same
+/// physical desktop coordinates as [`WindowInfo`].
+///
+/// The caller must grant Accessibility permission; without it macOS hides the
+/// element tree and the overlay falls back to whole-window targeting.
+pub fn ui_elements(id: WindowId) -> Vec<PhysicalRect> {
+    if !unsafe { AXIsProcessTrusted() } {
+        return Vec::new();
+    }
+    let Some(info) = ax_window_info(id) else {
+        return Vec::new();
+    };
+    let application = unsafe { AXUIElement::new_application(info.pid) };
+    unsafe { application.set_messaging_timeout(0.25) };
+    let Some(window) = ax_window(&application, &info) else {
+        return Vec::new();
+    };
+    unsafe { window.set_messaging_timeout(0.25) };
+
+    let window_rect = ax_physical_rect(info.bounds, info.scale);
+    let mut result = Vec::new();
+    let mut queue: VecDeque<(CFRetained<AXUIElement>, usize)> = VecDeque::new();
+    for child in ax_children(&window) {
+        queue.push_back((child, 1));
+    }
+
+    let started = std::time::Instant::now();
+    let mut visits = 0usize;
+    while let Some((element, depth)) = queue.pop_front() {
+        visits += 1;
+        if visits > MAX_AX_VISITS
+            || result.len() >= MAX_AX_ELEMENTS
+            || started.elapsed() > std::time::Duration::from_millis(300)
+        {
+            break;
+        }
+        if let Some(frame) = ax_frame(&element) {
+            let rect = ax_physical_rect(frame, info.scale);
+            if rect.size.width > 1
+                && rect.size.height > 1
+                && rect.intersection(window_rect).is_some()
+            {
+                result.push(rect);
+            }
+        }
+        if depth >= MAX_AX_DEPTH {
+            continue;
+        }
+        for child in ax_children(&element) {
+            if queue.len() + result.len() < MAX_AX_VISITS {
+                queue.push_back((child, depth + 1));
+            }
+        }
+    }
+    result
+}
+
+fn ax_window_info(id: WindowId) -> Option<AxWindowInfo> {
+    let raw = unsafe {
+        core_graphics::window::CGWindowListCopyWindowInfo(
+            kCGWindowListOptionIncludingWindow,
+            u32::try_from(id.raw()).ok()? as CGWindowID,
+        )
+    };
+    if raw.is_null() {
+        return None;
+    }
+    let windows: CFArray<CFDictionary<CFString, CFType>> =
+        unsafe { CFArray::wrap_under_create_rule(raw) };
+    let info = windows.iter().next()?;
+    let pid = integer_field(&info, "kCGWindowOwnerPID")?.try_into().ok()?;
+    let (x, y, width, height) = bounds_field(&info)?;
+    let title = string_field(&info, "kCGWindowName").unwrap_or_default();
+    let (center_x, center_y) = (x + width / 2.0, y + height / 2.0);
+    let scale = displays()
+        .ok()?
+        .into_iter()
+        .find(|display| contains(display.point_bounds, center_x, center_y))
+        .map_or(1.0, |display| f64::from(display.scale.get()));
+    Some(AxWindowInfo {
+        pid,
+        bounds: AxRect::new(
+            AxPoint::new(x, y),
+            AxSize::new(width.max(1.0), height.max(1.0)),
+        ),
+        title,
+        scale,
+    })
+}
+
+fn ax_window(application: &AXUIElement, info: &AxWindowInfo) -> Option<CFRetained<AXUIElement>> {
+    let windows = ax_elements(application, "AXWindows");
+    let single = windows.len() == 1;
+    let mut fallback = None;
+    for window in windows {
+        let matches_frame =
+            ax_frame(&window).is_some_and(|frame| ax_frames_overlap(frame, info.bounds));
+        let matches_title = !info.title.is_empty()
+            && ax_string(&window, "AXTitle").is_some_and(|title| title == info.title.as_str());
+        if matches_frame || matches_title {
+            return Some(window);
+        }
+        if single {
+            fallback = Some(window);
+        }
+    }
+    if let Some(focused) = ax_attribute(application, "AXFocusedWindow")
+        .and_then(|value| value.downcast::<AXUIElement>().ok())
+        && ax_frame(&focused).is_some_and(|frame| ax_frames_overlap(frame, info.bounds))
+    {
+        return Some(focused);
+    }
+    fallback
+}
+
+fn ax_children(element: &AXUIElement) -> Vec<CFRetained<AXUIElement>> {
+    let children = ax_elements(element, "AXChildren");
+    if children.is_empty() {
+        ax_elements(element, "AXContents")
+    } else {
+        children
+    }
+}
+
+fn ax_elements(element: &AXUIElement, name: &str) -> Vec<CFRetained<AXUIElement>> {
+    let Some(value) = ax_attribute(element, name) else {
+        return Vec::new();
+    };
+    let Some(array) = value.downcast_ref::<AxArray>() else {
+        return Vec::new();
+    };
+    // SAFETY: accessibility attribute arrays always contain CFType values.
+    let array = unsafe { array.cast_unchecked::<AxType>() };
+    array
+        .iter()
+        .filter_map(|item| item.downcast::<AXUIElement>().ok())
+        .collect()
+}
+
+fn ax_attribute(element: &AXUIElement, name: &str) -> Option<CFRetained<AxType>> {
+    let name = AxString::from_str(name);
+    let mut value: *const AxType = std::ptr::null();
+    let error = unsafe { element.copy_attribute_value(&name, NonNull::from(&mut value)) };
+    if error != AXError::Success || value.is_null() {
+        return None;
+    }
+    NonNull::new(value as *mut AxType).map(|pointer| unsafe { CFRetained::from_raw(pointer) })
+}
+
+fn ax_string(element: &AXUIElement, name: &str) -> Option<String> {
+    ax_attribute(element, name)?
+        .downcast_ref::<AxString>()
+        .map(ToString::to_string)
+}
+
+fn ax_frame(element: &AXUIElement) -> Option<AxRect> {
+    if let Some(frame) = ax_attribute(element, "AXFrame")
+        && let Some(value) = frame.downcast_ref::<AXValue>()
+    {
+        let mut rect = std::mem::MaybeUninit::<AxRect>::uninit();
+        let pointer = NonNull::new(rect.as_mut_ptr().cast::<std::ffi::c_void>())?;
+        if unsafe { value.value(AXValueType::CGRect, pointer) } {
+            return Some(unsafe { rect.assume_init() });
+        }
+    }
+
+    let position = ax_attribute(element, "AXPosition")
+        .and_then(|value| value.downcast_ref::<AXValue>().and_then(ax_value_point))?;
+    let size = ax_attribute(element, "AXSize")
+        .and_then(|value| value.downcast_ref::<AXValue>().and_then(ax_value_size))?;
+    Some(AxRect::new(position, size))
+}
+
+fn ax_value_point(value: &AXValue) -> Option<AxPoint> {
+    let mut point = std::mem::MaybeUninit::<AxPoint>::uninit();
+    let pointer = NonNull::new(point.as_mut_ptr().cast::<std::ffi::c_void>())?;
+    if unsafe { value.value(AXValueType::CGPoint, pointer) } {
+        Some(unsafe { point.assume_init() })
+    } else {
+        None
+    }
+}
+
+fn ax_value_size(value: &AXValue) -> Option<AxSize> {
+    let mut size = std::mem::MaybeUninit::<AxSize>::uninit();
+    let pointer = NonNull::new(size.as_mut_ptr().cast::<std::ffi::c_void>())?;
+    if unsafe { value.value(AXValueType::CGSize, pointer) } {
+        Some(unsafe { size.assume_init() })
+    } else {
+        None
+    }
+}
+
+fn ax_physical_rect(rect: AxRect, scale: f64) -> PhysicalRect {
+    let width = (rect.size.width * scale).round().max(1.0) as u32;
+    let height = (rect.size.height * scale).round().max(1.0) as u32;
+    PhysicalRect::new(
+        (rect.origin.x * scale).round() as i32,
+        (rect.origin.y * scale).round() as i32,
+        width,
+        height,
+    )
+}
+
+fn ax_frames_overlap(a: AxRect, b: AxRect) -> bool {
+    let left = a.origin.x.max(b.origin.x);
+    let top = a.origin.y.max(b.origin.y);
+    let right = (a.origin.x + a.size.width).min(b.origin.x + b.size.width);
+    let bottom = (a.origin.y + a.size.height).min(b.origin.y + b.size.height);
+    let intersection = (right - left).max(0.0) * (bottom - top).max(0.0);
+    let smaller = (a.size.width * a.size.height).min(b.size.width * b.size.height);
+    smaller > 0.0 && intersection / smaller >= 0.85
 }
 
 fn capture_window(id: WindowId) -> Result<RgbaFrame> {

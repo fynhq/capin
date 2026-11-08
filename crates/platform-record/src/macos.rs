@@ -6,8 +6,10 @@ use std::time::Duration;
 
 use block2::RcBlock;
 use core_capture::CaptureTarget;
-use core_record::{FrameDecision, FrameRate, FrameTimeline, RecordConfig};
-use core_types::PhysicalRect;
+use core_record::{
+    FrameDecision, FrameRate, FrameTimeline, RecordConfig, WebpEncoder, webp_output_size,
+};
+use core_types::{PhysicalRect, PhysicalSize, RecordFormat};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
@@ -53,6 +55,7 @@ pub(crate) fn start(
     let (tx, rx) = sync_channel::<EncodedFrame>(FRAME_QUEUE);
     let (width, height) = (plan.width, plan.height);
     let fps = config.frame_rate.as_u32();
+    let format = config.format;
     let encoder_flags = Arc::clone(&flags);
     let encoder_temp = temp.clone();
     let encoder_output = output.clone();
@@ -63,6 +66,7 @@ pub(crate) fn start(
                 &encoder_temp,
                 &encoder_output,
                 rx,
+                format,
                 width,
                 height,
                 fps,
@@ -517,6 +521,7 @@ fn encode_loop(
     temp: &Path,
     final_output: &Path,
     rx: std::sync::mpsc::Receiver<EncodedFrame>,
+    format: RecordFormat,
     width: usize,
     height: usize,
     fps: u32,
@@ -524,7 +529,23 @@ fn encode_loop(
 ) -> Result<(), String> {
     let result = (|| {
         let mut writer: Option<Writer> = None;
+        let mut webp: Option<WebpEncoder> = None;
         while let Ok(frame) = rx.recv() {
+            if format == RecordFormat::WebP {
+                if webp.is_none() {
+                    let input = PhysicalSize::new(frame.width as u32, frame.height as u32);
+                    let output = webp_output_size(input);
+                    webp = Some(
+                        WebpEncoder::new(input, output, fps).map_err(|error| error.to_string())?,
+                    );
+                }
+                if let Some(encoder) = webp.as_mut() {
+                    encoder
+                        .push_bgra(&frame.data, frame.pts_millis)
+                        .map_err(|error| error.to_string())?;
+                }
+                continue;
+            }
             if writer.is_none() {
                 writer = Some(Writer::new(temp, width, height, fps)?);
             }
@@ -533,6 +554,16 @@ fn encode_loop(
             }
         }
         let final_pts = flags.elapsed_active().as_millis() as i64;
+        if format == RecordFormat::WebP {
+            let Some(encoder) = webp else {
+                return Err("no frames were captured before the recording stopped".to_owned());
+            };
+            encoder
+                .finish(final_pts, temp)
+                .map_err(|error| error.to_string())?;
+            return std::fs::rename(temp, final_output)
+                .map_err(|error| format!("failed to publish the recording: {error}"));
+        }
         let Some(writer) = writer else {
             return Err("no frames were captured before the recording stopped".to_owned());
         };

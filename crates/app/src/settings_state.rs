@@ -265,7 +265,8 @@ fn parse(text: &str) -> AppSettings {
             "auto_start_explicit" => settings.auto_start_explicit = value == "true",
             "copy_to_clipboard" => settings.copy_to_clipboard = value != "false",
             "record_format" => match value {
-                "webm" => settings.record_format = RecordFormat::WebM,
+                // Earlier builds reserved "webm"; treat it as the WebP choice.
+                "webm" | "webp" => settings.record_format = RecordFormat::WebP,
                 "mp4" => settings.record_format = RecordFormat::Mp4,
                 _ => {}
             },
@@ -342,6 +343,9 @@ fn parse(text: &str) -> AppSettings {
             _ => {}
         }
     }
+    if settings.record_format == RecordFormat::WebP {
+        settings.record_frame_rate = FrameRate::Fps30;
+    }
     settings
 }
 
@@ -384,7 +388,7 @@ fn serialize(settings: &AppSettings) -> String {
     };
     let format = match settings.record_format {
         RecordFormat::Mp4 => "mp4",
-        RecordFormat::WebM => "webm",
+        RecordFormat::WebP => "webp",
     };
     let screenshot_dir = settings
         .screenshot_dir
@@ -561,6 +565,14 @@ mod tests {
         settings.apply_annotation_color(AnnotationColorTool::Text, 0x0A84FFFF);
 
         assert_eq!(parse(&serialize(&settings)), settings);
+    }
+
+    #[test]
+    fn migrates_the_legacy_webm_choice_to_webp() {
+        let settings = parse("record_format=webm\nrecord_frame_rate=60\n");
+        assert_eq!(settings.record_format, RecordFormat::WebP);
+        assert_eq!(settings.record_frame_rate, FrameRate::Fps30);
+        assert!(serialize(&settings).contains("record_format=webp"));
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use core_capture::{CaptureTarget, MonitorInfo, platform_backend};
-use core_record::RecordConfig;
+use core_record::{FrameRate, RecordConfig};
 use core_types::{PhysicalPoint, PhysicalRect, RecordFormat};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -29,7 +29,11 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
     let config = RecordConfig {
         target,
         format,
-        frame_rate: settings.record_frame_rate,
+        frame_rate: if format == RecordFormat::WebP {
+            FrameRate::Fps30
+        } else {
+            settings.record_frame_rate
+        },
         include_cursor: settings.record_cursor,
     };
 
