@@ -30,6 +30,114 @@ const FALLBACK_ACCENT_LIGHT: u32 = 0x0067C0;
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 const FALLBACK_ACCENT_DARK: u32 = 0x4CC2FF;
 
+/// Native window metrics. Windows follows WinUI 3 / Settings, macOS follows
+/// System Settings, so paddings, corner radii and type sizes match the host.
+#[cfg(target_os = "windows")]
+mod layout {
+    pub const WINDOW_WIDTH: f32 = 1000.0;
+    pub const WINDOW_HEIGHT: f32 = 700.0;
+    pub const MIN_WIDTH: f32 = 820.0;
+    pub const MIN_HEIGHT: f32 = 560.0;
+    pub const TITLEBAR_HEIGHT: f32 = 48.0;
+    pub const CAPTION_BUTTON_WIDTH: f32 = 46.0;
+    pub const CAPTION_BUTTON_HEIGHT: f32 = 32.0;
+    pub const SIDEBAR_WIDTH: f32 = 280.0;
+    pub const SIDEBAR_PAD: f32 = 12.0;
+    pub const SIDEBAR_DIVIDER: bool = false;
+    pub const NAV_ITEM_HEIGHT: f32 = 36.0;
+    pub const NAV_ITEM_RADIUS: f32 = 4.0;
+    pub const NAV_ITEM_PAD_X: f32 = 12.0;
+    pub const NAV_GAP: f32 = 10.0;
+    pub const NAV_ICON: f32 = 16.0;
+    pub const NAV_FONT: f32 = 14.0;
+    pub const CONTENT_PAD_X: f32 = 32.0;
+    pub const CONTENT_PAD_TOP: f32 = 20.0;
+    pub const CONTENT_PAD_BOTTOM: f32 = 32.0;
+    pub const CONTENT_GAP: f32 = 24.0;
+    pub const PAGE_TITLE: f32 = 28.0;
+    pub const SECTION_TITLE: f32 = 14.0;
+    pub const BODY: f32 = 14.0;
+    pub const CAPTION: f32 = 12.0;
+    pub const CARD_RADIUS: f32 = 4.0;
+    pub const ROW_PAD_X: f32 = 16.0;
+    pub const ROW_PAD_Y: f32 = 14.0;
+    pub const BUTTON_HEIGHT: f32 = 32.0;
+    pub const BUTTON_RADIUS: f32 = 4.0;
+    pub const CONTROL_TEXT: f32 = 13.0;
+}
+
+#[cfg(target_os = "macos")]
+mod layout {
+    pub const WINDOW_WIDTH: f32 = 920.0;
+    pub const WINDOW_HEIGHT: f32 = 640.0;
+    pub const MIN_WIDTH: f32 = 760.0;
+    pub const MIN_HEIGHT: f32 = 520.0;
+    pub const TITLEBAR_HEIGHT: f32 = 52.0;
+    pub const CAPTION_BUTTON_WIDTH: f32 = 0.0;
+    pub const CAPTION_BUTTON_HEIGHT: f32 = 0.0;
+    pub const SIDEBAR_WIDTH: f32 = 216.0;
+    pub const SIDEBAR_PAD: f32 = 10.0;
+    pub const SIDEBAR_DIVIDER: bool = true;
+    pub const NAV_ITEM_HEIGHT: f32 = 28.0;
+    pub const NAV_ITEM_RADIUS: f32 = 6.0;
+    pub const NAV_ITEM_PAD_X: f32 = 8.0;
+    pub const NAV_GAP: f32 = 8.0;
+    pub const NAV_ICON: f32 = 15.0;
+    pub const NAV_FONT: f32 = 13.0;
+    pub const CONTENT_PAD_X: f32 = 28.0;
+    pub const CONTENT_PAD_TOP: f32 = 16.0;
+    pub const CONTENT_PAD_BOTTOM: f32 = 24.0;
+    pub const CONTENT_GAP: f32 = 20.0;
+    pub const PAGE_TITLE: f32 = 22.0;
+    pub const SECTION_TITLE: f32 = 13.0;
+    pub const BODY: f32 = 13.0;
+    pub const CAPTION: f32 = 11.0;
+    pub const CARD_RADIUS: f32 = 10.0;
+    pub const ROW_PAD_X: f32 = 14.0;
+    pub const ROW_PAD_Y: f32 = 12.0;
+    pub const BUTTON_HEIGHT: f32 = 28.0;
+    pub const BUTTON_RADIUS: f32 = 6.0;
+    pub const CONTROL_TEXT: f32 = 12.0;
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+mod layout {
+    pub const WINDOW_WIDTH: f32 = 920.0;
+    pub const WINDOW_HEIGHT: f32 = 640.0;
+    pub const MIN_WIDTH: f32 = 760.0;
+    pub const MIN_HEIGHT: f32 = 520.0;
+    pub const TITLEBAR_HEIGHT: f32 = 0.0;
+    pub const CAPTION_BUTTON_WIDTH: f32 = 0.0;
+    pub const CAPTION_BUTTON_HEIGHT: f32 = 0.0;
+    pub const SIDEBAR_WIDTH: f32 = 216.0;
+    pub const SIDEBAR_PAD: f32 = 10.0;
+    pub const SIDEBAR_DIVIDER: bool = true;
+    pub const NAV_ITEM_HEIGHT: f32 = 28.0;
+    pub const NAV_ITEM_RADIUS: f32 = 6.0;
+    pub const NAV_ITEM_PAD_X: f32 = 8.0;
+    pub const NAV_GAP: f32 = 8.0;
+    pub const NAV_ICON: f32 = 15.0;
+    pub const NAV_FONT: f32 = 13.0;
+    pub const CONTENT_PAD_X: f32 = 28.0;
+    pub const CONTENT_PAD_TOP: f32 = 16.0;
+    pub const CONTENT_PAD_BOTTOM: f32 = 24.0;
+    pub const CONTENT_GAP: f32 = 20.0;
+    pub const PAGE_TITLE: f32 = 22.0;
+    pub const SECTION_TITLE: f32 = 13.0;
+    pub const BODY: f32 = 13.0;
+    pub const CAPTION: f32 = 11.0;
+    pub const CARD_RADIUS: f32 = 10.0;
+    pub const ROW_PAD_X: f32 = 14.0;
+    pub const ROW_PAD_Y: f32 = 12.0;
+    pub const BUTTON_HEIGHT: f32 = 28.0;
+    pub const BUTTON_RADIUS: f32 = 6.0;
+    pub const CONTROL_TEXT: f32 = 12.0;
+}
+
+fn custom_titlebar() -> bool {
+    cfg!(any(target_os = "windows", target_os = "macos"))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsSection {
     General,
@@ -205,8 +313,8 @@ impl SaveTarget {
 struct Theme {
     text: Rgba,
     muted: Rgba,
-    sidebar: Rgba,
     card: Rgba,
+    page: Option<Rgba>,
     border: Rgba,
     accent: Rgba,
     hover: Rgba,
@@ -215,6 +323,18 @@ struct Theme {
     toggle_off: Rgba,
     knob: Rgba,
     accent_text: Rgba,
+    close_hover: Rgba,
+}
+
+struct Palette {
+    text: Rgba,
+    muted: Rgba,
+    border: Rgba,
+    control: Rgba,
+    hover: Rgba,
+    selected: Rgba,
+    toggle_off: Rgba,
+    page: Option<Rgba>,
 }
 
 impl Theme {
@@ -228,44 +348,25 @@ impl Theme {
         } else {
             FALLBACK_ACCENT_LIGHT
         });
-        if dark {
-            Self::dark(accent_hex)
-        } else {
-            Self::light(accent_hex)
-        }
+        Self::build(dark, accent_hex)
     }
 
-    fn light(accent_hex: u32) -> Self {
+    fn build(dark: bool, accent_hex: u32) -> Self {
+        let palette = native_palette(dark);
         Self {
-            text: rgb(0x1A1A1A),
-            muted: rgb(0x666666),
-            sidebar: sidebar_color(false),
-            card: card_color(false),
-            border: rgba(0x0000001A),
+            text: palette.text,
+            muted: palette.muted,
+            card: card_color(dark),
+            page: palette.page,
+            border: palette.border,
             accent: rgb(accent_hex),
-            hover: rgba(0x0000000D),
-            selected: rgba((accent_hex << 8) | 0x33),
-            control: rgba(0x0000000F),
-            toggle_off: rgba(0x00000026),
+            hover: palette.hover,
+            selected: palette.selected,
+            control: palette.control,
+            toggle_off: palette.toggle_off,
             knob: rgb(0xFFFFFF),
             accent_text: accent_text_color(accent_hex),
-        }
-    }
-
-    fn dark(accent_hex: u32) -> Self {
-        Self {
-            text: rgb(0xF2F2F2),
-            muted: rgb(0xA0A0A0),
-            sidebar: sidebar_color(true),
-            card: card_color(true),
-            border: rgba(0xFFFFFF1A),
-            accent: rgb(accent_hex),
-            hover: rgba(0xFFFFFF12),
-            selected: rgba((accent_hex << 8) | 0x33),
-            control: rgba(0xFFFFFF14),
-            toggle_off: rgba(0xFFFFFF2E),
-            knob: rgb(0xFFFFFF),
-            accent_text: accent_text_color(accent_hex),
+            close_hover: rgb(0xC42B1C),
         }
     }
 }
@@ -279,12 +380,83 @@ fn accent_text_color(accent_hex: u32) -> Rgba {
 }
 
 #[cfg(target_os = "windows")]
-fn sidebar_color(dark: bool) -> Rgba {
-    // WinUI layer fill over Mica.
+fn native_palette(dark: bool) -> Palette {
     if dark {
-        rgba(0x3A3A3A4C)
+        Palette {
+            text: rgb(0xF2F2F2),
+            muted: rgb(0xA8A8A8),
+            border: rgba(0xFFFFFF18),
+            control: rgb(0x383838),
+            hover: rgba(0xFFFFFF10),
+            selected: rgba(0xFFFFFF14),
+            toggle_off: rgba(0xFFFFFF8C),
+            page: None,
+        }
     } else {
-        rgba(0xFFFFFF80)
+        Palette {
+            text: rgb(0x1B1B1B),
+            muted: rgb(0x5D5D5D),
+            border: rgba(0x0000000F),
+            control: rgb(0xFCFCFC),
+            hover: rgba(0x00000008),
+            selected: rgba(0x0000000A),
+            toggle_off: rgba(0x00000073),
+            page: None,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn native_palette(dark: bool) -> Palette {
+    if dark {
+        Palette {
+            text: rgb(0xF5F5F7),
+            muted: rgb(0x98989D),
+            border: rgba(0xFFFFFF1F),
+            control: rgb(0x3A3A3C),
+            hover: rgba(0xFFFFFF14),
+            selected: rgba(0xFFFFFF1F),
+            toggle_off: rgba(0xFFFFFF4D),
+            page: Some(rgb(0x1E1E1E)),
+        }
+    } else {
+        Palette {
+            text: rgb(0x1D1D1F),
+            muted: rgb(0x6E6E73),
+            border: rgba(0x00000014),
+            control: rgb(0xFFFFFF),
+            hover: rgba(0x0000000A),
+            selected: rgba(0x0000000F),
+            toggle_off: rgba(0x00000026),
+            page: Some(rgb(0xF2F2F2)),
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn native_palette(dark: bool) -> Palette {
+    if dark {
+        Palette {
+            text: rgb(0xF5F5F7),
+            muted: rgb(0x98989D),
+            border: rgba(0xFFFFFF1F),
+            control: rgb(0x3A3A3C),
+            hover: rgba(0xFFFFFF14),
+            selected: rgba(0xFFFFFF1F),
+            toggle_off: rgba(0xFFFFFF4D),
+            page: Some(rgb(0x1E1E1E)),
+        }
+    } else {
+        Palette {
+            text: rgb(0x1D1D1F),
+            muted: rgb(0x6E6E73),
+            border: rgba(0x00000014),
+            control: rgb(0xFFFFFF),
+            hover: rgba(0x0000000A),
+            selected: rgba(0x0000000F),
+            toggle_off: rgba(0x00000026),
+            page: Some(rgb(0xF2F2F2)),
+        }
     }
 }
 
@@ -296,39 +468,13 @@ fn card_color(dark: bool) -> Rgba {
 }
 
 #[cfg(target_os = "macos")]
-fn sidebar_color(dark: bool) -> Rgba {
-    if dark {
-        rgba(0x1C1C1C80)
-    } else {
-        rgba(0xF5F5F5B3)
-    }
-}
-
-#[cfg(target_os = "macos")]
 fn card_color(dark: bool) -> Rgba {
-    if dark {
-        rgba(0xFFFFFF0F)
-    } else {
-        rgba(0xFFFFFFCC)
-    }
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn sidebar_color(dark: bool) -> Rgba {
-    if dark {
-        rgba(0x1C1C1C80)
-    } else {
-        rgba(0xF5F5F5B3)
-    }
+    if dark { rgb(0x2C2C2E) } else { rgb(0xFFFFFF) }
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn card_color(dark: bool) -> Rgba {
-    if dark {
-        rgba(0xFFFFFF0F)
-    } else {
-        rgba(0xFFFFFFCC)
-    }
+    if dark { rgb(0x2C2C2E) } else { rgb(0xFFFFFF) }
 }
 
 #[derive(Clone, Debug)]
@@ -463,6 +609,7 @@ struct SettingsView {
     filename_edit: Option<TemplateEdit>,
     filename_focus: FocusHandle,
     focus_handle: FocusHandle,
+    titlebar_drag: bool,
 }
 
 impl SettingsView {
@@ -477,6 +624,7 @@ impl SettingsView {
             filename_edit: None,
             filename_focus: cx.focus_handle(),
             focus_handle: cx.focus_handle(),
+            titlebar_drag: false,
         };
         view.start_accent_watch(cx);
         view
@@ -524,15 +672,15 @@ impl SettingsView {
             let selected_bg = theme.selected;
             let item = div()
                 .w_full()
-                .h(px(38.0))
-                .px(px(10.0))
-                .rounded(px(8.0))
+                .h(px(layout::NAV_ITEM_HEIGHT))
+                .px(px(layout::NAV_ITEM_PAD_X))
+                .rounded(px(layout::NAV_ITEM_RADIUS))
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(10.0))
+                .gap(px(layout::NAV_GAP))
                 .when(selected, |item| item.bg(selected_bg))
-                .hover(move |style| style.bg(hover))
+                .when(!selected, |item| item.hover(move |style| style.bg(hover)))
                 .id(section.id())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.section = section;
@@ -540,78 +688,139 @@ impl SettingsView {
                 }))
                 .child(icons::icon(
                     section.icon(),
-                    17.0,
+                    layout::NAV_ICON,
                     if selected { accent } else { muted },
                 ))
                 .child(
                     div()
-                        .text_size(px(13.5))
+                        .text_size(px(layout::NAV_FONT))
                         .text_color(text)
+                        .when(selected, |label| label.font_weight(FontWeight::SEMIBOLD))
                         .child(section.title(self.settings.language)),
                 );
             nav.push(item.into_any_element());
         }
 
-        div()
-            .w(px(220.0))
+        let sidebar = div()
+            .w(px(layout::SIDEBAR_WIDTH))
             .h_full()
             .flex()
             .flex_col()
-            .p(px(14.0))
-            .gap(px(3.0))
-            .bg(theme.sidebar)
-            .border_r_1()
-            .border_color(theme.border)
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(10.0))
-                    .px(px(8.0))
-                    .py(px(10.0))
-                    .child(icons::icon(icons::APP, 26.0, theme.accent))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(1.0))
-                            .child(
-                                div()
-                                    .text_size(px(14.5))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.text)
-                                    .child("Capin"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(theme.muted)
-                                    .child(t(self.settings.language, "settings.subtitle")),
-                            ),
-                    ),
-            )
-            .child(div().h(px(14.0)))
-            .child(div().flex().flex_col().gap(px(3.0)).children(nav))
+            .flex_shrink_0()
+            .px(px(layout::SIDEBAR_PAD))
+            .pt(px(layout::TITLEBAR_HEIGHT + 8.0))
+            .pb(px(layout::SIDEBAR_PAD))
+            .child(div().flex().flex_col().gap(px(2.0)).children(nav))
             .child(div().flex_1())
-            .child(self.capture_button(theme, cx))
-            .child(
+            .child(self.capture_button(theme, cx));
+
+        if layout::SIDEBAR_DIVIDER {
+            sidebar.border_r_1().border_color(theme.border)
+        } else {
+            sidebar
+        }
+    }
+
+    /// A title bar drawn inside the client area so it shares the window
+    /// backdrop with the navigation pane and page instead of sitting on a
+    /// separate native strip. Windows keeps the system caption hit-testing
+    /// (drag, snap, double-click); macOS moves the window explicitly.
+    fn titlebar(&self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let windows = cfg!(target_os = "windows");
+        let macos = cfg!(target_os = "macos");
+        let mut leading = div()
+            .id("settings-titlebar-drag")
+            .flex_1()
+            .h_full()
+            .flex()
+            .flex_row()
+            .items_center();
+        if windows {
+            leading = leading.pl(px(16.0)).child(
                 div()
-                    .px(px(8.0))
-                    .pt(px(10.0))
-                    .text_size(px(11.0))
-                    .text_color(theme.muted)
-                    .child(format!("Capin v{}", env!("CARGO_PKG_VERSION"))),
-            )
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .child(t(self.settings.language, "settings.subtitle")),
+            );
+        }
+        if windows {
+            leading = leading.window_control_area(WindowControlArea::Drag);
+        }
+        if macos {
+            leading = leading
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, window, _| {
+                        if event.click_count == 2 {
+                            this.titlebar_drag = false;
+                            window.titlebar_double_click();
+                        } else {
+                            this.titlebar_drag = true;
+                        }
+                    }),
+                )
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, _| this.titlebar_drag = false),
+                )
+                .on_mouse_down_out(cx.listener(|this, _, _, _| this.titlebar_drag = false))
+                .on_mouse_move(cx.listener(|this, _, window, _| {
+                    if this.titlebar_drag {
+                        this.titlebar_drag = false;
+                        window.start_window_move();
+                    }
+                }));
+        }
+
+        let mut bar = div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .h(px(layout::TITLEBAR_HEIGHT))
+            .flex()
+            .flex_row()
+            .items_start()
+            .child(leading);
+        if windows {
+            bar = bar
+                .child(window_control_button(
+                    theme,
+                    "settings-window-minimize",
+                    icons::MINIMIZE,
+                    WindowControlArea::Min,
+                    false,
+                ))
+                .child(window_control_button(
+                    theme,
+                    "settings-window-maximize",
+                    if window.is_maximized() {
+                        icons::RESTORE
+                    } else {
+                        icons::MAXIMIZE
+                    },
+                    WindowControlArea::Max,
+                    false,
+                ))
+                .child(window_control_button(
+                    theme,
+                    "settings-window-close",
+                    icons::WINDOW_CLOSE,
+                    WindowControlArea::Close,
+                    true,
+                ));
+        }
+        bar
     }
 
     fn capture_button(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let accent = theme.accent;
         let accent_text = theme.accent_text;
         div()
-            .h(px(38.0))
+            .h(px(layout::BUTTON_HEIGHT))
             .w_full()
-            .rounded(px(8.0))
+            .rounded(px(layout::BUTTON_RADIUS))
             .bg(accent)
             .flex()
             .flex_row()
@@ -620,10 +829,10 @@ impl SettingsView {
             .gap(px(8.0))
             .id("settings-capture")
             .on_click(cx.listener(|this, _, _, cx| this.start_capture(cx)))
-            .child(icons::icon(icons::CAPTURE, 16.0, accent_text))
+            .child(icons::icon(icons::CAPTURE, 15.0, accent_text))
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(px(layout::CONTROL_TEXT))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(accent_text)
                     .child(t(self.settings.language, "button.capture")),
@@ -631,40 +840,54 @@ impl SettingsView {
     }
 
     fn content(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        // The page background reaches the window edge so it fuses with the
+        // custom title bar; the scroll viewport itself starts below the bar so
+        // scrolled rows never slide underneath the caption buttons.
         div()
             .flex_1()
             .h_full()
             .flex()
             .flex_col()
-            .p(px(32.0))
-            .gap(px(24.0))
-            .id("settings-content")
-            .overflow_y_scroll()
-            .child(self.section_header(theme))
-            .child(match self.section {
-                SettingsSection::General => self.general(theme, cx),
-                SettingsSection::Capture => self.capture_settings(theme, cx),
-                SettingsSection::Recording => self.recording(theme, cx),
-                SettingsSection::Shortcuts => self.shortcuts(theme, cx),
-                SettingsSection::About => self.about(theme, cx),
-            })
+            .pt(px(layout::TITLEBAR_HEIGHT))
+            .when_some(theme.page, |content, page| content.bg(page))
+            .child(
+                div()
+                    .flex_1()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .px(px(layout::CONTENT_PAD_X))
+                    .pt(px(layout::CONTENT_PAD_TOP))
+                    .pb(px(layout::CONTENT_PAD_BOTTOM))
+                    .gap(px(layout::CONTENT_GAP))
+                    .id("settings-content")
+                    .overflow_y_scroll()
+                    .child(self.section_header(theme))
+                    .child(match self.section {
+                        SettingsSection::General => self.general(theme, cx),
+                        SettingsSection::Capture => self.capture_settings(theme, cx),
+                        SettingsSection::Recording => self.recording(theme, cx),
+                        SettingsSection::Shortcuts => self.shortcuts(theme, cx),
+                        SettingsSection::About => self.about(theme, cx),
+                    }),
+            )
     }
 
     fn section_header(&self, theme: &Theme) -> Div {
         div()
             .flex()
             .flex_col()
-            .gap(px(5.0))
+            .gap(px(4.0))
             .child(
                 div()
-                    .text_size(px(26.0))
+                    .text_size(px(layout::PAGE_TITLE))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text)
                     .child(self.section.title(self.settings.language)),
             )
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(px(layout::BODY))
                     .text_color(theme.muted)
                     .child(self.section.description(self.settings.language)),
             )
@@ -757,7 +980,7 @@ impl SettingsView {
                     .gap(px(10.0))
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(layout::CAPTION))
                             .text_color(if granted { theme.muted } else { theme.accent })
                             .child(status),
                     )
@@ -1057,8 +1280,8 @@ impl SettingsView {
             .flex()
             .flex_col()
             .gap(px(10.0))
-            .px(px(16.0))
-            .py(px(14.0))
+            .px(px(layout::ROW_PAD_X))
+            .py(px(layout::ROW_PAD_Y))
             .border_b_1()
             .border_color(theme.border)
             .child(label_block(
@@ -1148,8 +1371,8 @@ impl SettingsView {
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .px(px(16.0))
-            .py(px(14.0))
+            .px(px(layout::ROW_PAD_X))
+            .py(px(layout::ROW_PAD_Y))
             .border_b_1()
             .border_color(theme.border)
             .child(label_block(
@@ -1246,8 +1469,8 @@ impl SettingsView {
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .px(px(16.0))
-            .py(px(14.0))
+            .px(px(layout::ROW_PAD_X))
+            .py(px(layout::ROW_PAD_Y))
             .border_b_1()
             .border_color(theme.border)
             .child(
@@ -1344,9 +1567,9 @@ impl SettingsView {
             .track_focus(&self.filename_focus)
             .relative()
             .w(px(220.0))
-            .h(px(30.0))
-            .px(px(8.0))
-            .rounded(px(6.0))
+            .h(px(layout::BUTTON_HEIGHT))
+            .px(px(10.0))
+            .rounded(px(layout::BUTTON_RADIUS))
             .bg(theme.control)
             .border_1()
             .border_color(if editing { theme.accent } else { theme.border })
@@ -1354,7 +1577,7 @@ impl SettingsView {
             .items_center()
             .overflow_hidden()
             .whitespace_nowrap()
-            .text_size(px(12.0))
+            .text_size(px(layout::CONTROL_TEXT))
             .text_color(theme.text)
             .child(shown)
             .children(input)
@@ -1371,8 +1594,8 @@ impl SettingsView {
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .px(px(16.0))
-            .py(px(14.0))
+            .px(px(layout::ROW_PAD_X))
+            .py(px(layout::ROW_PAD_Y))
             .border_b_1()
             .border_color(theme.border)
             .child(
@@ -1400,7 +1623,7 @@ impl SettingsView {
             )
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(px(layout::CAPTION))
                     .text_color(theme.muted)
                     .child(format!(
                         "{} {}",
@@ -1721,7 +1944,7 @@ impl SettingsView {
             .gap(px(12.0))
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(px(layout::CAPTION))
                     .text_color(theme.muted)
                     .child(t(language, "settings.recording_note")),
             )
@@ -1901,7 +2124,7 @@ impl SettingsView {
             ))
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(px(layout::CAPTION))
                     .text_color(theme.muted)
                     .child(t(language, "shortcuts.editor_note")),
             )
@@ -2000,13 +2223,15 @@ impl SettingsView {
             ))
             .child(
                 div()
-                    .px(px(10.0))
-                    .py(px(5.0))
-                    .rounded(px(6.0))
+                    .h(px(layout::BUTTON_HEIGHT))
+                    .px(px(12.0))
+                    .rounded(px(layout::BUTTON_RADIUS))
+                    .flex()
+                    .items_center()
                     .bg(if recording { selected } else { control })
                     .border_1()
                     .border_color(if recording { accent } else { border })
-                    .text_size(px(12.0))
+                    .text_size(px(layout::CONTROL_TEXT))
                     .text_color(if recording { accent } else { text })
                     .child(display),
             )
@@ -2099,7 +2324,7 @@ impl SettingsView {
             .items_center()
             .gap(px(16.0))
             .p(px(20.0))
-            .rounded(px(12.0))
+            .rounded(px(layout::CARD_RADIUS))
             .bg(theme.card)
             .border_1()
             .border_color(theme.border)
@@ -2111,14 +2336,14 @@ impl SettingsView {
                     .gap(px(3.0))
                     .child(
                         div()
-                            .text_size(px(21.0))
+                            .text_size(px(layout::PAGE_TITLE - 7.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.text)
                             .child("Capin"),
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(layout::CAPTION))
                             .text_color(theme.muted)
                             .child(format!(
                                 "{} {}",
@@ -2164,7 +2389,7 @@ impl SettingsView {
                         ))
                         .child(
                             div()
-                                .text_size(px(12.5))
+                                .text_size(px(layout::CAPTION))
                                 .text_color(theme.accent)
                                 .child("github.com/fynhq/capin"),
                         ),
@@ -2305,6 +2530,7 @@ impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::for_window(window, self.accent);
         let status = self.status.clone();
+        let titlebar = custom_titlebar().then(|| self.titlebar(&theme, window, cx));
         div()
             .relative()
             .size_full()
@@ -2320,16 +2546,17 @@ impl Render for SettingsView {
             }))
             .child(self.sidebar(&theme, cx))
             .child(self.content(&theme, cx))
+            .children(titlebar)
             .children(status.map(|message| {
                 div()
                     .absolute()
                     .bottom(px(16.0))
                     .right(px(16.0))
-                    .px(px(10.0))
-                    .py(px(6.0))
-                    .rounded(px(6.0))
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .rounded(px(layout::BUTTON_RADIUS))
                     .bg(rgba(0x000000CC))
-                    .text_size(px(12.0))
+                    .text_size(px(layout::CONTROL_TEXT))
                     .text_color(rgb(0xFFFFFF))
                     .child(message)
             }))
@@ -2340,12 +2567,15 @@ pub fn open_settings(cx: &mut App) {
     let bounds = settings_bounds(cx);
     let display_id = cx.primary_display().map(|display| display.id());
     let language = settings_state::get().language;
+    let titlebar = custom_titlebar().then(|| TitlebarOptions {
+        title: Some(t(language, "settings.title").into()),
+        appears_transparent: true,
+        traffic_light_position: Some(point(px(18.0), px(20.0))),
+    });
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: Some(TitlebarOptions {
-            title: Some(t(language, "settings.title").into()),
-            ..Default::default()
-        }),
+        titlebar,
+        app_owns_titlebar_drag: cfg!(target_os = "macos"),
         focus: true,
         show: true,
         kind: WindowKind::Normal,
@@ -2354,7 +2584,7 @@ pub fn open_settings(cx: &mut App) {
         is_minimizable: true,
         display_id,
         window_background: settings_background(),
-        window_min_size: Some(size(px(760.0), px(520.0))),
+        window_min_size: Some(size(px(layout::MIN_WIDTH), px(layout::MIN_HEIGHT))),
         app_id: Some("capin-settings".to_owned()),
         ..Default::default()
     };
@@ -2374,7 +2604,7 @@ pub fn open_settings(cx: &mut App) {
 }
 
 fn settings_bounds(cx: &App) -> Bounds<Pixels> {
-    crate::ui::centered_bounds(cx, 900.0, 620.0)
+    crate::ui::centered_bounds(cx, layout::WINDOW_WIDTH, layout::WINDOW_HEIGHT)
 }
 
 fn settings_background() -> WindowBackgroundAppearance {
@@ -2392,12 +2622,50 @@ fn settings_background() -> WindowBackgroundAppearance {
     }
 }
 
+fn window_control_button(
+    theme: &Theme,
+    id: &'static str,
+    icon: &'static [u8],
+    area: WindowControlArea,
+    close: bool,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .w(px(layout::CAPTION_BUTTON_WIDTH))
+        .h(px(layout::CAPTION_BUTTON_HEIGHT))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .window_control_area(area)
+        .when(close, |button| {
+            button
+                .group("settings-window-close")
+                .hover(move |style| style.bg(theme.close_hover))
+        })
+        .when(!close, |button| {
+            button.hover(move |style| style.bg(theme.hover))
+        })
+        .child(
+            svg()
+                .data(icon)
+                .w(px(10.0))
+                .h(px(10.0))
+                .text_color(theme.text)
+                .when(close, |glyph| {
+                    glyph.group_hover("settings-window-close", |style| {
+                        style.text_color(rgb(0xFFFFFF))
+                    })
+                }),
+        )
+}
+
 fn card(theme: &Theme, rows: Vec<Div>) -> Div {
     div()
         .w_full()
         .flex()
         .flex_col()
-        .rounded(px(12.0))
+        .rounded(px(layout::CARD_RADIUS))
         .bg(theme.card)
         .border_1()
         .border_color(theme.border)
@@ -2412,14 +2680,14 @@ fn group_header(theme: &Theme, title: &str, description: &str) -> Div {
         .gap(px(2.0))
         .child(
             div()
-                .text_size(px(12.5))
+                .text_size(px(layout::SECTION_TITLE))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.text)
                 .child(title.to_owned()),
         )
         .child(
             div()
-                .text_size(px(11.5))
+                .text_size(px(layout::CAPTION))
                 .text_color(theme.muted)
                 .child(description.to_owned()),
         )
@@ -2433,8 +2701,8 @@ fn row_shell(theme: &Theme) -> Div {
         .items_center()
         .justify_between()
         .gap(px(24.0))
-        .px(px(16.0))
-        .py(px(14.0))
+        .px(px(layout::ROW_PAD_X))
+        .py(px(layout::ROW_PAD_Y))
         .border_b_1()
         .border_color(theme.border)
 }
@@ -2446,13 +2714,13 @@ fn label_block(theme: &Theme, title: &str, subtitle: &str) -> Div {
         .gap(px(2.0))
         .child(
             div()
-                .text_size(px(13.5))
+                .text_size(px(layout::BODY))
                 .text_color(theme.text)
                 .child(title.to_owned()),
         )
         .child(
             div()
-                .text_size(px(12.0))
+                .text_size(px(layout::CAPTION))
                 .text_color(theme.muted)
                 .child(subtitle.to_owned()),
         )
@@ -2471,7 +2739,7 @@ fn info_row(
     }
     value_side = value_side.child(
         div()
-            .text_size(px(12.5))
+            .text_size(px(layout::CAPTION))
             .text_color(theme.muted)
             .child(value.to_owned()),
     );
@@ -2481,6 +2749,26 @@ fn info_row(
         .child(value_side)
 }
 
+#[cfg(target_os = "windows")]
+fn toggle(theme: &Theme, value: bool) -> Div {
+    // WinUI ToggleSwitch: outlined off track with a secondary knob.
+    let stroke = theme.toggle_off;
+    let knob = if value { theme.knob } else { theme.muted };
+    div()
+        .w(px(40.0))
+        .h(px(20.0))
+        .rounded(px(10.0))
+        .when(value, |toggle| toggle.bg(theme.accent))
+        .when(!value, |toggle| toggle.border_1().border_color(stroke))
+        .flex()
+        .items_center()
+        .px(px(4.0))
+        .when(value, |toggle| toggle.justify_end())
+        .when(!value, |toggle| toggle.justify_start())
+        .child(div().w(px(12.0)).h(px(12.0)).rounded(px(6.0)).bg(knob))
+}
+
+#[cfg(not(target_os = "windows"))]
 fn toggle(theme: &Theme, value: bool) -> Div {
     let accent = theme.accent;
     let off = theme.toggle_off;
@@ -2530,11 +2818,15 @@ fn padding_id(padding: u32) -> &'static str {
 fn action_button(theme: &Theme, label: String) -> Div {
     let hover = theme.hover;
     div()
-        .px(px(10.0))
-        .py(px(5.0))
-        .rounded(px(6.0))
+        .h(px(layout::BUTTON_HEIGHT))
+        .px(px(12.0))
+        .rounded(px(layout::BUTTON_RADIUS))
         .bg(theme.control)
-        .text_size(px(12.0))
+        .border_1()
+        .border_color(theme.border)
+        .flex()
+        .items_center()
+        .text_size(px(layout::CONTROL_TEXT))
         .text_color(theme.text)
         .hover(move |style| style.bg(hover))
         .child(label)
@@ -2545,18 +2837,22 @@ fn segmented(theme: &Theme) -> Div {
         .flex()
         .flex_row()
         .gap(px(2.0))
-        .p(px(3.0))
-        .rounded(px(9.0))
+        .p(px(2.0))
+        .rounded(px(layout::BUTTON_RADIUS))
         .bg(theme.control)
+        .border_1()
+        .border_color(theme.border)
 }
 
 fn segment(theme: &Theme, label: &str, selected: bool) -> Div {
     div()
-        .px(px(12.0))
-        .py(px(5.0))
-        .rounded(px(7.0))
-        .text_size(px(12.0))
+        .h(px(layout::BUTTON_HEIGHT - 6.0))
+        .px(px(10.0))
+        .rounded(px(layout::BUTTON_RADIUS - 1.0))
+        .flex()
+        .items_center()
+        .text_size(px(layout::CONTROL_TEXT))
         .text_color(if selected { theme.text } else { theme.muted })
-        .when(selected, |button| button.bg(theme.selected))
+        .when(selected, |button| button.bg(theme.card))
         .child(label.to_owned())
 }
