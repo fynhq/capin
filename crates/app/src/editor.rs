@@ -7,13 +7,14 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use platform_window::system_accent_hex;
 
+use crate::settings_state::AnnotationColorTool;
 use crate::{i18n::t, icons, image_util, settings_state};
 
 const TOOLBAR_HEIGHT: f32 = 48.0;
 const PADDING: f32 = 16.0;
 const MAX_IMAGE_WIDTH: f32 = 1200.0;
 const MAX_IMAGE_HEIGHT: f32 = 800.0;
-const MIN_WINDOW_WIDTH: f32 = 860.0;
+const MIN_WINDOW_WIDTH: f32 = 960.0;
 const BACKGROUND: u32 = 0x141414FF;
 const TOOLBAR_BG: u32 = 0x202020FF;
 const TEXT: u32 = 0xF2F2F2FF;
@@ -24,6 +25,9 @@ const TOOLBAR_SIZE: u32 = 32;
 const BADGE_SIZE: u32 = 32;
 
 const STROKE_WIDTHS: [f32; 3] = [2.0, 4.0, 8.0];
+const CORNER_RADII: [f32; 4] = [0.0, 8.0, 16.0, 24.0];
+const BLUR_RADII: [u32; 4] = [8, 16, 24, 32];
+const DEFAULT_BLUR_RADIUS: u32 = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tool {
@@ -92,6 +96,31 @@ impl Tool {
             Self::Spotlight => "editor.tool.spotlight",
         }
     }
+
+    fn color_tool(self) -> Option<AnnotationColorTool> {
+        match self {
+            Self::Rect => Some(AnnotationColorTool::Rect),
+            Self::Ellipse => Some(AnnotationColorTool::Ellipse),
+            Self::Arrow => Some(AnnotationColorTool::Arrow),
+            Self::Highlighter => Some(AnnotationColorTool::Highlighter),
+            Self::Text => Some(AnnotationColorTool::Text),
+            Self::Number => Some(AnnotationColorTool::Number),
+            Self::Select | Self::Blur | Self::Spotlight => None,
+        }
+    }
+
+    fn from_shape(shape: &Shape) -> Option<Self> {
+        match shape {
+            Shape::Rect(_) => Some(Self::Rect),
+            Shape::Ellipse(_) => Some(Self::Ellipse),
+            Shape::Arrow { .. } => Some(Self::Arrow),
+            Shape::Highlighter { .. } => Some(Self::Highlighter),
+            Shape::Blur(_) => Some(Self::Blur),
+            Shape::Text { .. } => Some(Self::Text),
+            Shape::Number { .. } => Some(Self::Number),
+            Shape::Spotlight(_) => Some(Self::Spotlight),
+        }
+    }
 }
 
 fn stroke_id(width: f32) -> &'static str {
@@ -100,6 +129,15 @@ fn stroke_id(width: f32) -> &'static str {
         4 => "editor-width-4",
         _ => "editor-width-8",
     }
+}
+
+fn blur_image_index(radius: u32) -> usize {
+    BLUR_RADII
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, candidate)| candidate.abs_diff(radius))
+        .map(|(index, _)| index)
+        .unwrap_or(0)
 }
 
 struct TooltipLabel {
@@ -343,13 +381,16 @@ fn estimated_char_width(ch: char, font_size: f32) -> f32 {
 
 struct EditorView {
     image: Arc<RenderImage>,
-    blur_image: Arc<RenderImage>,
+    blur_images: [Arc<RenderImage>; BLUR_RADII.len()],
     frame: RgbaFrame,
     pin_target: Option<u64>,
     document: AnnotationDocument,
     image_size: PhysicalSize,
     tool: Tool,
     style: AnnotationStyle,
+    corner_radius: f32,
+    blur_radius: u32,
+    active_color_tool: AnnotationColorTool,
     draft: Option<Draft>,
     move_draft: Option<MoveDraft>,
     annotation_clipboard: Option<Annotation>,
@@ -366,21 +407,31 @@ impl EditorView {
     fn new(frame: RgbaFrame, pin_target: Option<u64>, cx: &mut Context<Self>) -> Self {
         let image_size = PhysicalSize::new(frame.width(), frame.height());
         let image = image_util::render_image(&frame);
-        let blur_image = image_util::blurred_image(&frame);
+        let blur_images = BLUR_RADII.map(|radius| image_util::blurred_image(&frame, radius));
         let accent_hex = system_accent_hex().unwrap_or(0x4C9AFF);
+        let settings = settings_state::get();
+        let active_color_tool = AnnotationColorTool::Rect;
+        let style_color = settings.annotation_color_for(active_color_tool);
+        let corner_radius = CORNER_RADII[0];
+        let blur_radius = DEFAULT_BLUR_RADIUS;
         Self {
             image,
-            blur_image,
+            blur_images,
             frame,
             pin_target,
             document: AnnotationDocument::new(image_size),
             image_size,
             tool: Tool::Select,
             style: AnnotationStyle {
-                color: settings_state::get().annotation_color,
+                color: style_color,
                 stroke_width: 4.0,
                 font_size: 20.0,
+                corner_radius,
+                blur_radius,
             },
+            corner_radius,
+            blur_radius,
+            active_color_tool,
             draft: None,
             move_draft: None,
             annotation_clipboard: None,
@@ -429,11 +480,83 @@ impl EditorView {
 
     fn effective_style(&self) -> AnnotationStyle {
         let mut style = self.style;
+        if let Some(tool) = self.tool.color_tool() {
+            style.color = (self.tool_color(tool) & 0xFFFFFF00) | (style.color & 0xFF);
+        }
         if self.tool == Tool::Highlighter {
             style.color = (style.color & 0xFFFFFF00) | 0x80;
             style.stroke_width = 12.0;
         }
+        match self.tool {
+            Tool::Rect => style.corner_radius = self.corner_radius,
+            Tool::Blur => style.blur_radius = self.blur_radius,
+            _ => {}
+        }
         style
+    }
+
+    /// Current color for a tool. Reading the mode from the shared settings
+    /// keeps an already-open editor in step when the setting is toggled.
+    fn tool_color(&self, tool: AnnotationColorTool) -> u32 {
+        settings_state::get().annotation_color_for(tool)
+    }
+
+    /// The tool whose color the toolbar palette edits: the selected object's
+    /// tool when there is a selection, otherwise the active drawing tool.
+    fn palette_color_tool(&self) -> AnnotationColorTool {
+        if let Some(tool) = self
+            .document
+            .selected()
+            .and_then(|id| self.document.object(id))
+            .and_then(|annotation| Tool::from_shape(&annotation.shape))
+            .and_then(Tool::color_tool)
+        {
+            return tool;
+        }
+        self.tool.color_tool().unwrap_or(self.active_color_tool)
+    }
+
+    /// The tool whose properties the toolbar should expose. The selected
+    /// object wins over the drawing tool; `Select` alone has no properties.
+    fn config_tool(&self) -> Option<Tool> {
+        if let Some(tool) = self
+            .document
+            .selected()
+            .and_then(|id| self.document.object(id))
+            .and_then(|annotation| Tool::from_shape(&annotation.shape))
+        {
+            return Some(tool);
+        }
+        (self.tool != Tool::Select).then_some(self.tool)
+    }
+
+    fn apply_corner_radius(&mut self, radius: f32) {
+        self.corner_radius = radius;
+        self.update_style(|style| style.corner_radius = radius);
+    }
+
+    fn apply_blur_radius(&mut self, radius: u32) {
+        self.blur_radius = radius;
+        self.update_style(|style| style.blur_radius = radius);
+    }
+
+    fn apply_color(&mut self, color: u32) {
+        let tool = self.palette_color_tool();
+        let applied = (color & 0xFFFFFF00) | (self.style.color & 0xFF);
+        self.style.color = applied;
+
+        if let Some(mut style) = self
+            .document
+            .selected()
+            .and_then(|id| self.document.object(id))
+            .map(|annotation| annotation.style)
+        {
+            style.color = applied;
+            self.document.update_selected_style(style);
+            self.style = style;
+        }
+
+        settings_state::update(|settings| settings.apply_annotation_color(tool, color));
     }
 
     fn update_style(&mut self, update: impl FnOnce(&mut AnnotationStyle)) {
@@ -455,6 +578,16 @@ impl EditorView {
         self.document.select(id);
         if let Some(annotation) = id.and_then(|id| self.document.object(id)) {
             self.style = annotation.style;
+            if let Some(tool) = Tool::from_shape(&annotation.shape) {
+                if let Some(color_tool) = tool.color_tool() {
+                    self.active_color_tool = color_tool;
+                }
+                match tool {
+                    Tool::Rect => self.corner_radius = annotation.style.corner_radius,
+                    Tool::Blur => self.blur_radius = annotation.style.blur_radius,
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -480,9 +613,7 @@ impl EditorView {
         };
         let id = self.document.paste(&annotation, 16, 16);
         self.tool = Tool::Select;
-        if let Some(annotation) = self.document.object(id) {
-            self.style = annotation.style;
-        }
+        self.select_annotation(Some(id));
         self.status =
             Some(t(settings_state::get().language, "editor.annotation_pasted").to_owned());
         cx.notify();
@@ -655,7 +786,17 @@ impl EditorView {
                 .hover(move |style| style.bg(hover))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.commit_text(cx);
+                    this.document.select(None);
                     this.tool = tool;
+                    if let Some(color_tool) = tool.color_tool() {
+                        this.active_color_tool = color_tool;
+                        this.style.color = this.tool_color(color_tool);
+                    }
+                    match tool {
+                        Tool::Rect => this.style.corner_radius = this.corner_radius,
+                        Tool::Blur => this.style.blur_radius = this.blur_radius,
+                        _ => {}
+                    }
                     this.status = None;
                     cx.notify();
                 }))
@@ -667,63 +808,196 @@ impl EditorView {
             tools.push(button.into_any_element());
         }
 
-        let mut swatches = Vec::new();
-        for (color, name, label_key) in settings_state::ANNOTATION_COLORS {
-            let selected = (self.style.color & 0xFFFFFF00) == (color & 0xFFFFFF00);
-            let label = t(language, label_key).to_owned();
-            let swatch = div()
-                .id(name)
-                .tooltip(move |_, cx| tooltip_view(label.clone(), cx))
-                .w(px(18.0))
-                .h(px(18.0))
-                .rounded(px(9.0))
-                .bg(rgb((color >> 8) & 0x00FF_FFFF))
-                .border_2()
-                .border_color(if selected {
-                    rgb(0xFFFFFF)
-                } else {
-                    rgba(0x00000000)
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.commit_text(cx);
-                    this.update_style(|style| {
-                        style.color = (color & 0xFFFFFF00) | (style.color & 0xFF);
-                    });
-                    this.status = None;
-                    cx.notify();
-                }));
-            swatches.push(swatch.into_any_element());
+        let config_tool = self.config_tool();
+        let config_style = self
+            .document
+            .selected()
+            .and_then(|id| self.document.object(id))
+            .map(|annotation| annotation.style)
+            .unwrap_or(self.style);
+        let show_color = config_tool.and_then(Tool::color_tool).is_some();
+        let show_width = matches!(config_tool, Some(Tool::Rect | Tool::Ellipse | Tool::Arrow));
+        let show_corner = config_tool == Some(Tool::Rect);
+        let show_blur = config_tool == Some(Tool::Blur);
+
+        let mut groups: Vec<AnyElement> = Vec::new();
+        if show_color {
+            let palette_color = self
+                .document
+                .selected()
+                .and_then(|id| self.document.object(id))
+                .map(|annotation| annotation.style.color)
+                .unwrap_or_else(|| self.tool_color(self.palette_color_tool()));
+            let mut swatches = Vec::new();
+            for (color, name, label_key) in settings_state::ANNOTATION_COLORS {
+                let selected = (palette_color & 0xFFFFFF00) == (color & 0xFFFFFF00);
+                let label = t(language, label_key).to_owned();
+                let swatch = div()
+                    .id(name)
+                    .tooltip(move |_, cx| tooltip_view(label.clone(), cx))
+                    .w(px(18.0))
+                    .h(px(18.0))
+                    .rounded(px(9.0))
+                    .bg(rgb((color >> 8) & 0x00FF_FFFF))
+                    .border_2()
+                    .border_color(if selected {
+                        rgb(0xFFFFFF)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.commit_text(cx);
+                        this.apply_color(color);
+                        this.status = None;
+                        cx.notify();
+                    }));
+                swatches.push(swatch.into_any_element());
+            }
+            groups.push(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .children(swatches)
+                    .into_any_element(),
+            );
         }
 
-        let mut widths = Vec::new();
-        for width in STROKE_WIDTHS {
-            let selected = (self.style.stroke_width - width).abs() < 0.1;
-            let label = format!("{width:.0}");
-            let button = div()
-                .id(stroke_id(width))
-                .tooltip(move |_, cx| tooltip_view(label.clone(), cx))
-                .w(px(22.0))
-                .h(px(22.0))
-                .rounded(px(5.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .when(selected, |button| button.bg(accent_selected))
-                .hover(move |style| style.bg(hover))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.commit_text(cx);
-                    this.update_style(|style| style.stroke_width = width);
-                    this.status = None;
-                    cx.notify();
-                }))
-                .child(
-                    div()
-                        .w(px(14.0))
-                        .h(px(width))
-                        .rounded(px(width / 2.0))
-                        .bg(if selected { accent } else { muted }),
-                );
-            widths.push(button.into_any_element());
+        if show_width {
+            let mut widths = Vec::new();
+            for width in STROKE_WIDTHS {
+                let selected = (config_style.stroke_width - width).abs() < 0.1;
+                let label = format!("{width:.0}");
+                let button = div()
+                    .id(stroke_id(width))
+                    .tooltip(move |_, cx| tooltip_view(label.clone(), cx))
+                    .w(px(22.0))
+                    .h(px(22.0))
+                    .rounded(px(5.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(selected, |button| button.bg(accent_selected))
+                    .hover(move |style| style.bg(hover))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.commit_text(cx);
+                        this.update_style(|style| style.stroke_width = width);
+                        this.status = None;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .w(px(14.0))
+                            .h(px(width))
+                            .rounded(px(width / 2.0))
+                            .bg(if selected { accent } else { muted }),
+                    );
+                widths.push(button.into_any_element());
+            }
+            groups.push(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(2.0))
+                    .children(widths)
+                    .into_any_element(),
+            );
+        }
+
+        if show_corner {
+            let mut radii = Vec::new();
+            for radius in CORNER_RADII {
+                let selected = (config_style.corner_radius - radius).abs() < 0.1;
+                let label = format!("{radius:.0}");
+                let tooltip = format!("{} {label}", t(language, "editor.corner_radius"));
+                let button = div()
+                    .id(format!("editor-corner-{label}"))
+                    .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
+                    .w(px(22.0))
+                    .h(px(22.0))
+                    .rounded(px(5.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(selected, |button| button.bg(accent_selected))
+                    .hover(move |style| style.bg(hover))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.commit_text(cx);
+                        this.apply_corner_radius(radius);
+                        this.status = None;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(if selected { accent } else { muted })
+                            .child(label),
+                    );
+                radii.push(button.into_any_element());
+            }
+            groups.push(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(2.0))
+                    .child(icons::icon(icons::RECT, 14.0, muted))
+                    .children(radii)
+                    .into_any_element(),
+            );
+        }
+
+        if show_blur {
+            let mut radii = Vec::new();
+            for radius in BLUR_RADII {
+                let selected = config_style.blur_radius == radius;
+                let label = format!("{radius}");
+                let tooltip = format!("{} {label}", t(language, "editor.blur_radius"));
+                let button = div()
+                    .id(format!("editor-blur-{label}"))
+                    .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
+                    .w(px(24.0))
+                    .h(px(22.0))
+                    .rounded(px(5.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(selected, |button| button.bg(accent_selected))
+                    .hover(move |style| style.bg(hover))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.commit_text(cx);
+                        this.apply_blur_radius(radius);
+                        this.status = None;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(if selected { accent } else { muted })
+                            .child(label),
+                    );
+                radii.push(button.into_any_element());
+            }
+            groups.push(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(2.0))
+                    .child(icons::icon(icons::BLUR, 14.0, muted))
+                    .children(radii)
+                    .into_any_element(),
+            );
+        }
+
+        let mut config_children: Vec<AnyElement> = Vec::new();
+        for (index, group) in groups.into_iter().enumerate() {
+            if index > 0 {
+                config_children.push(div().w(px(1.0)).h(px(18.0)).bg(border).into_any_element());
+            }
+            config_children.push(group);
         }
 
         let undo_label = t(language, "editor.undo").to_owned();
@@ -906,16 +1180,7 @@ impl EditorView {
                     .flex_row()
                     .items_center()
                     .gap(px(6.0))
-                    .children(swatches)
-                    .child(div().w(px(1.0)).h(px(18.0)).bg(border))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(2.0))
-                            .children(widths),
-                    ),
+                    .children(config_children),
             )
             .child(
                 div()
@@ -1161,6 +1426,8 @@ impl Render for EditorView {
                     let top = rect.origin.y as f32 * scale;
                     let width = px(rect.size.width as f32 * scale);
                     let height = px(rect.size.height as f32 * scale);
+                    let blur_image =
+                        self.blur_images[blur_image_index(annotation.style.blur_radius)].clone();
                     object_layers.push(
                         div()
                             .absolute()
@@ -1170,7 +1437,7 @@ impl Render for EditorView {
                             .h(height)
                             .overflow_hidden()
                             .child(
-                                img(self.blur_image.clone())
+                                img(blur_image)
                                     .absolute()
                                     .left(px(-left))
                                     .top(px(-top))
@@ -1566,9 +1833,7 @@ impl Render for EditorView {
                     if let Some(id) = this.document.selected()
                         && let Some(pasted) = this.document.duplicate(id, 16, 16)
                     {
-                        if let Some(annotation) = this.document.object(pasted) {
-                            this.style = annotation.style;
-                        }
+                        this.select_annotation(Some(pasted));
                         this.tool = Tool::Select;
                         this.status = Some(
                             t(settings_state::get().language, "editor.annotation_pasted")
@@ -1767,11 +2032,25 @@ fn paint_shape(
             let top = rect.origin.y as f32;
             let right = left + rect.size.width as f32;
             let bottom = top + rect.size.height as f32;
+            let radius =
+                (style.corner_radius * scale).clamp(0.0, (right - left).min(bottom - top) / 2.0);
             let mut builder = PathBuilder::stroke(stroke);
-            builder.move_to(to_point(left, top));
-            builder.line_to(to_point(right, top));
-            builder.line_to(to_point(right, bottom));
-            builder.line_to(to_point(left, bottom));
+            if radius < 0.5 {
+                builder.move_to(to_point(left, top));
+                builder.line_to(to_point(right, top));
+                builder.line_to(to_point(right, bottom));
+                builder.line_to(to_point(left, bottom));
+            } else {
+                builder.move_to(to_point(left + radius, top));
+                builder.line_to(to_point(right - radius, top));
+                builder.curve_to(to_point(right, top + radius), to_point(right, top));
+                builder.line_to(to_point(right, bottom - radius));
+                builder.curve_to(to_point(right - radius, bottom), to_point(right, bottom));
+                builder.line_to(to_point(left + radius, bottom));
+                builder.curve_to(to_point(left, bottom - radius), to_point(left, bottom));
+                builder.line_to(to_point(left, top + radius));
+                builder.curve_to(to_point(left + radius, top), to_point(left, top));
+            }
             builder.close();
             if let Ok(path) = builder.build() {
                 window.paint_path(path, color);

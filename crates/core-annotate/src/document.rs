@@ -11,6 +11,10 @@ pub struct AnnotationStyle {
     pub color: u32,
     pub stroke_width: f32,
     pub font_size: f32,
+    /// Corner radius in image pixels for `Shape::Rect`.
+    pub corner_radius: f32,
+    /// Box-blur radius in image pixels for `Shape::Blur`.
+    pub blur_radius: u32,
 }
 
 impl Default for AnnotationStyle {
@@ -19,6 +23,8 @@ impl Default for AnnotationStyle {
             color: 0xFF3B30FF,
             stroke_width: 3.0,
             font_size: 20.0,
+            corner_radius: 0.0,
+            blur_radius: 16,
         }
     }
 }
@@ -517,6 +523,7 @@ mod tests {
             color: 0x00FF00FF,
             stroke_width: 5.0,
             font_size: 20.0,
+            ..Default::default()
         };
         assert!(doc.update_selected_style(style));
         assert_eq!(doc.object(id).unwrap().style.color, 0x00FF00FF);

@@ -689,7 +689,7 @@ impl SettingsView {
             ))
             .child(card(
                 theme,
-                vec![div().child(self.annotation_color_row(theme, cx))],
+                vec![div().child(self.annotation_uniform_color_row(theme, cx))],
             ))
             .child(group_header(
                 theme,
@@ -755,37 +755,29 @@ impl SettingsView {
             .child(toggle(theme, value))
     }
 
-    fn annotation_color_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn annotation_uniform_color_row(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let language = self.settings.language;
-        let accent = theme.accent;
-        let mut swatches = div().flex().flex_row().items_center().gap(px(8.0));
-        for (color, name, _) in settings_state::ANNOTATION_COLORS {
-            let selected = (self.settings.annotation_color & 0xFFFFFF00) == (color & 0xFFFFFF00);
-            let swatch = div()
-                .id(format!("settings-annotation-color-{name}"))
-                .w(px(24.0))
-                .h(px(24.0))
-                .rounded(px(12.0))
-                .bg(rgb((color >> 8) & 0x00FF_FFFF))
-                .border_2()
-                .border_color(if selected { accent } else { rgba(0x00000000) })
-                .hover(move |style| style.border_color(accent))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.settings.annotation_color = color;
-                    settings_state::update(|settings| settings.annotation_color = color);
-                    this.status = None;
-                    cx.notify();
-                }));
-            swatches = swatches.child(swatch);
-        }
+        let value = self.settings.annotation_uniform_color;
 
         row_shell(theme)
+            .id("settings-annotation-uniform-color")
+            .on_click(cx.listener(|this, _, _, cx| {
+                let value = !this.settings.annotation_uniform_color;
+                this.settings.annotation_uniform_color = value;
+                settings_state::update(|settings| settings.annotation_uniform_color = value);
+                this.status = None;
+                cx.notify();
+            }))
             .child(label_block(
                 theme,
-                t(language, "settings.annotation_color"),
-                t(language, "settings.annotation_color_desc"),
+                t(language, "settings.annotation_uniform_color"),
+                t(language, "settings.annotation_uniform_color_desc"),
             ))
-            .child(swatches)
+            .child(toggle(theme, value))
     }
 
     fn capture_cursor_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {

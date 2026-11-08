@@ -12,7 +12,7 @@ Capin 是面向 Windows 10+ 与 macOS 13+ 的截图、标注、贴图、OCR、�
 
 - **窗口截图**：悬停自动识别窗口/元素，滚轮在元素、父级与整窗之间调整；拖拽自由选区，桌面空白处单击截取整屏；支持固定比例与光标捕捉。Windows 使用 UI Automation，macOS 目前识别到窗口级。
 - **窗口质感**：窗口截图合成圆角、阴影、内边距与背景画布，支持透明、浅色、深色、渐变、壁纸背景与透明 PNG；可在设置中调整或关闭。
-- **标注**：矩形、椭圆、箭头、荧光笔、文字、高斯模糊、序号、聚光灯、撤销重做；默认颜色可在设置中配置，编辑器内可临时修改；选中对象可移动、复制粘贴、删除或改线宽，双击文字可再编辑；删除序号后自动续排。
+- **标注**：矩形（可调圆角）、椭圆、箭头、荧光笔、文字、高斯模糊（可调强度）、序号、聚光灯、撤销重做；颜色在编辑器工具栏选择，设置中可切换所有工具统一颜色或各工具独立；选中对象可移动、复制粘贴、删除或改颜色/线宽，双击文字可再编辑；删除序号后自动续排。
 - **贴图**：图片/文本/文件/颜色贴图，置顶、透明度、缩放、旋转、多贴、鼠标穿透、重启恢复、贴图标注与 OCR；图片贴图可按设置自动识别文字与二维码，文字可直接划选并自动复制。最近 7 天保留最多 50 张贴图历史，重复按贴图快捷键可循环贴出历史图片。
 - **OCR**：框选识别、复制文本、二维码。
 - **长截图**：自动滚动（macOS 需辅助功能权限）+ 重叠匹配与固定顶栏裁除；手动滚动兜底。
@@ -48,8 +48,8 @@ xattr -d -r com.apple.quarantine /Applications/Capin.app
 - 全局热键：`Win/Cmd+Shift+S` 截图，`Win/Cmd+Shift+D` 钉图；可在设置中修改。
 - 编辑器内复制/保存使用系统快捷键 `Ctrl/Cmd+C`、`Ctrl/Cmd+S`；选中标注后 `Ctrl/Cmd+C` 复制对象、`Ctrl/Cmd+V` 粘贴、`Delete` 删除，拖动对象可移动。
 - 托盘右键菜单提供截图、录屏、长截图、OCR、截图文件夹、设置、恢复贴图交互、重启与退出；关闭窗口后应用留在托盘。
-- 截图后进入标注编辑器：绘制、文字、序号、聚光灯、模糊，复制、保存或贴图；选中已有对象可移动、复制粘贴、删除、改颜色与线宽，双击文字可再次编辑。
-- 窗口截图的圆角、阴影、留白与背景在「设置 → 截图 → 窗口截图」中调整，这些样式只作用于窗口截图；默认透明背景并输出带 Alpha 的 PNG。标注默认颜色在「设置 → 截图 → 标注」中配置，编辑器内仍可临时改动。
+- 截图后进入标注编辑器：绘制、文字、序号、聚光灯、模糊，矩形可调圆角、模糊可调强度，复制、保存或贴图；选中已有对象可移动、复制粘贴、删除、改颜色与线宽，双击文字可再次编辑。
+- 窗口截图的圆角、阴影、留白与背景在「设置 → 截图 → 窗口截图」中调整，这些样式只作用于窗口截图；默认透明背景并输出带 Alpha 的 PNG。标注颜色在编辑器工具栏选择；「设置 → 截图 → 标注」只控制各工具是否统一颜色。
 - 贴图窗口可置顶、调整透明度与缩放，图片贴图可顺时针旋转 90°；默认不显示操作栏，左键移动或划选文字，右键菜单可旋转、编辑、复制、保存、关闭；也可开启鼠标穿透。开启穿透后从托盘选择「恢复贴图交互」恢复操作；贴图会在重启后恢复。再次按贴图快捷键可循环贴出最近 7 天的历史图片（最多 50 张）。
 - 图片贴图可按「设置 → 截图 → 贴图」中的开关自动识别文字与二维码：在文字上拖动即可划选，松开后自动复制；双击选择单词；在非文字区域按住左键拖动可移动贴图。
 - 录屏以系统 H.264 编码保存为 MP4；默认包含光标，可在「设置 → 录屏」中关闭；拖拽选区或悬停窗口后单击开始录制，录制过程可暂停，停止后自动保存。
@@ -82,7 +82,7 @@ Capin is a screenshot, annotation, pin, OCR, scrolling-capture, and screen-recor
 
 - **Window capture** — hover to detect windows and elements automatically; scroll to switch between an element, its parent, and the whole window. Drag for a free region or click empty desktop for the full display; fixed ratios and cursor capture are available. Windows uses UI Automation; macOS currently detects whole windows.
 - **Window finish** — composited rounded corners, shadow, padding and background canvas, with transparent, light, dark, gradient and wallpaper backgrounds plus transparent PNG; adjustable or disabled in settings.
-- **Annotation** — rectangle, ellipse, arrow, highlighter, text, Gaussian blur, numbered badges, spotlight, undo/redo; configure the default color in settings or override it in the editor; select an object to move, copy, paste, delete, or resize its stroke; double-click text to edit it. Deleting a numbered badge renumbers the rest.
+- **Annotation** — rectangle (adjustable corner radius), ellipse, arrow, highlighter, text, Gaussian blur (adjustable intensity), numbered badges, spotlight, undo/redo; choose colors in the editor toolbar, and use settings to make all tools share one color or keep them independent; select an object to move, copy, paste, delete, recolor, or resize its stroke; double-click text to edit it. Deleting a numbered badge renumbers the rest.
 - **Pin** — image, text, file and color pins; always on top, opacity, zoom, rotation, multiple pins, click-through, restore after restart, annotation and OCR; image pins can recognize text and QR codes based on settings, with selectable and copyable text. The last 7 days of pinned images (up to 50) are kept; pressing the pin hotkey again cycles through them.
 - **OCR** — region recognition, copy text, QR codes.
 - **Scrolling capture** — automatic scrolling (Accessibility permission is required on macOS) with overlap matching; manual scrolling fallback.
@@ -118,8 +118,8 @@ xattr -d -r com.apple.quarantine /Applications/Capin.app
 - Global hotkeys: `Win/Cmd+Shift+S` captures, `Win/Cmd+Shift+D` pins; both can be changed in settings.
 - In the editor, copy and save use the system shortcuts `Ctrl/Cmd+C` and `Ctrl/Cmd+S`; with an annotation selected, `Ctrl/Cmd+C` copies the object, `Ctrl/Cmd+V` pastes it, `Delete` removes it, and dragging moves it.
 - The tray menu offers capture, recording, scrolling capture, OCR, the screenshots folder, settings, release pinned windows, restart, and quit; closing a window keeps Capin in the tray.
-- The editor supports drawing, text, numbered badges, spotlight, blur, copy, save, and pin; select an existing object to move, copy, paste, delete, recolor or resize its stroke, and double-click text to edit it again.
-- Configure window corners, shadow, padding and background under Settings → Capture → Window capture; these styles apply to window captures only. The default is a transparent PNG with alpha. Configure the default annotation color under Settings → Capture → Annotations; the editor can override it per capture.
+- The editor supports drawing, text, numbered badges, spotlight and blur with adjustable intensity, rectangle corner radius, copy, save, and pin; select an existing object to move, copy, paste, delete, recolor or resize its stroke, and double-click text to edit it again.
+- Configure window corners, shadow, padding and background under Settings → Capture → Window capture; these styles apply to window captures only. The default is a transparent PNG with alpha. Choose annotation colors in the editor toolbar; Settings → Capture → Annotations only controls whether all tools share one color.
 - Pin windows can stay on top, change opacity and zoom, and rotate image pins clockwise by 90 degrees; no action bar is shown by default. Left-click to move or select text, and right-click for rotate, edit, copy, save and close (plus click-through). After click-through, use Release pinned windows in the tray menu; pins restore after a restart. Press the pin hotkey again to cycle through the last 7 days of pinned images (up to 50).
 - Image pins can recognize text and QR codes according to Settings → Capture → Pins: drag over text to select it and release to copy; double-click to select a word; drag any non-text area with the left button to move the pin.
 - Recording encodes MP4 with the system H.264 encoder and includes the cursor by default (disable it in Settings → Recording). Drag a region or hover a window and click to start; pause while recording, and the file is saved on stop.

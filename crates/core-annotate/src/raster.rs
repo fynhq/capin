@@ -28,7 +28,13 @@ pub fn rasterize(
 
     for annotation in document.objects() {
         if let Shape::Blur(rect) = &annotation.shape {
-            blur_region(pixmap.data_mut(), expected.width, expected.height, *rect);
+            blur_region(
+                pixmap.data_mut(),
+                expected.width,
+                expected.height,
+                *rect,
+                annotation.style.blur_radius,
+            );
             continue;
         }
         if matches!(annotation.shape, Shape::Text { .. }) {
@@ -69,11 +75,7 @@ pub fn rasterize(
 
 fn build_path(annotation: &Annotation) -> Result<Path, RasterError> {
     match &annotation.shape {
-        Shape::Rect(rect) => {
-            let mut builder = PathBuilder::new();
-            builder.push_rect(to_skia_rect(*rect)?);
-            builder.finish().ok_or(RasterError::InvalidGeometry)
-        }
+        Shape::Rect(rect) => rounded_rect_path(*rect, annotation.style.corner_radius),
         Shape::Ellipse(rect) => {
             let mut builder = PathBuilder::new();
             builder.push_oval(to_skia_rect(*rect)?);
@@ -235,6 +237,31 @@ fn blend_channel(source: f32, coverage: f32, destination: u8, inverse: f32) -> u
         .clamp(0.0, 255.0) as u8
 }
 
+fn rounded_rect_path(rect: PhysicalRect, radius: f32) -> Result<Path, RasterError> {
+    let rect = to_skia_rect(rect)?;
+    let radius = radius.max(0.0).min(rect.width().min(rect.height()) / 2.0);
+    let mut builder = PathBuilder::new();
+    if radius < 0.5 {
+        builder.push_rect(rect);
+    } else {
+        let left = rect.left();
+        let top = rect.top();
+        let right = rect.right();
+        let bottom = rect.bottom();
+        builder.move_to(left + radius, top);
+        builder.line_to(right - radius, top);
+        builder.quad_to(right, top, right, top + radius);
+        builder.line_to(right, bottom - radius);
+        builder.quad_to(right, bottom, right - radius, bottom);
+        builder.line_to(left + radius, bottom);
+        builder.quad_to(left, bottom, left, bottom - radius);
+        builder.line_to(left, top + radius);
+        builder.quad_to(left, top, left + radius, top);
+        builder.close();
+    }
+    builder.finish().ok_or(RasterError::InvalidGeometry)
+}
+
 fn draw_number(pixmap: &mut Pixmap, annotation: &Annotation) {
     let Shape::Number { bounds, value } = &annotation.shape else {
         return;
@@ -285,6 +312,7 @@ fn draw_number(pixmap: &mut Pixmap, annotation: &Annotation) {
             color: foreground,
             stroke_width: 0.0,
             font_size,
+            ..Default::default()
         },
     };
     draw_text(pixmap, &text_annotation);
@@ -347,7 +375,7 @@ struct TextEngine {
     swash_cache: SwashCache,
 }
 
-fn blur_region(data: &mut [u8], width: u32, height: u32, rect: PhysicalRect) {
+fn blur_region(data: &mut [u8], width: u32, height: u32, rect: PhysicalRect, radius: u32) {
     if rect.is_empty() {
         return;
     }
@@ -361,9 +389,10 @@ fn blur_region(data: &mut [u8], width: u32, height: u32, rect: PhysicalRect) {
 
     let region_width = x1 - x0;
     let region_height = y1 - y0;
-    // Keep the export radius aligned with the editor preview, which blurs a
-    // downscaled copy once instead of deriving strength from the selection.
-    let radius = 16usize.min(region_width.min(region_height) / 2).max(1);
+    let radius = (radius as usize)
+        .max(1)
+        .min(region_width.min(region_height) / 2)
+        .max(1);
     let mut scratch = vec![0u8; region_width * region_height * 4];
 
     // Three box passes are a close, separable approximation of a Gaussian blur.
@@ -594,6 +623,56 @@ mod tests {
         let border = pixel(&output, 10, 50);
         assert!(border[0] > 120, "border should be red: {border:?}");
         assert_eq!(pixel(&output, 50, 50), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn rectangle_corner_radius_keeps_the_corner_clear() {
+        let frame = black_frame(100, 100);
+        let mut document = document(100, 100);
+        document.add(
+            Shape::Rect(PhysicalRect::new(10, 10, 80, 80)),
+            AnnotationStyle {
+                color: 0xFF0000FF,
+                stroke_width: 4.0,
+                corner_radius: 30.0,
+                ..Default::default()
+            },
+        );
+        let output = rasterize(&document, &frame).unwrap();
+        assert_eq!(pixel(&output, 10, 10), [0, 0, 0, 255]);
+        assert!(pixel(&output, 50, 10)[0] > 120);
+    }
+
+    #[test]
+    fn blur_radius_controls_the_spread() {
+        let width = 100;
+        let height = 80;
+        let mut pixels = [0, 0, 0, 255].repeat((width * height) as usize);
+        for y in 30..50 {
+            for x in 40..60 {
+                let index = (y * width + x) as usize * 4;
+                pixels[index..index + 4].copy_from_slice(&[255, 0, 0, 255]);
+            }
+        }
+        let frame = RgbaFrame::from_pixels(width, height, pixels).unwrap();
+
+        let blurred_sample = |radius: u32| {
+            let mut document = document(width, height);
+            document.add(
+                Shape::Blur(PhysicalRect::new(10, 10, 80, 60)),
+                AnnotationStyle {
+                    blur_radius: radius,
+                    ..Default::default()
+                },
+            );
+            let output = rasterize(&document, &frame).unwrap();
+            pixel(&output, 80, 40)[0]
+        };
+
+        assert!(
+            blurred_sample(4) < blurred_sample(32),
+            "stronger blur should spread the source block further"
+        );
     }
 
     #[test]
