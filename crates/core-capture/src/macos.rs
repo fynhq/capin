@@ -17,7 +17,7 @@ use core_foundation::dictionary::CFDictionary;
 use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
 use core_graphics::access::ScreenCaptureAccess;
-use core_graphics::base::{CGFloat, kCGBitmapByteOrder32Host, kCGImageAlphaPremultipliedLast};
+use core_graphics::base::{CGFloat, kCGBitmapByteOrder32Big, kCGImageAlphaPremultipliedLast};
 use core_graphics::context::CGContext;
 use core_graphics::display::CGDisplay;
 use core_graphics::event::CGEvent;
@@ -647,7 +647,7 @@ fn image_to_frame(image: &CGImage) -> Result<RgbaFrame> {
         8,
         width * 4,
         &color_space,
-        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Host,
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big,
     );
     context.draw_image(
         CGRect::new(

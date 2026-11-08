@@ -1,17 +1,19 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use core_capture::{
     CaptureTarget, MonitorInfo, SelectionAction, SelectionOutcome, SelectionSession, WindowInfo,
     platform_backend,
 };
-use core_types::{MonitorId, PhysicalPoint, PhysicalRect, RgbaFrame, WindowId};
+use core_types::{CaptureRegion, MonitorId, PhysicalPoint, PhysicalRect, RgbaFrame, WindowId};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use platform_window::{WindowStyle, apply as apply_window_style, system_accent_hex};
 
 use crate::{
+    editor::{EditorView, InlineCapture},
     i18n::{Language, t},
     icons, image_util, settings_state,
 };
@@ -23,6 +25,21 @@ const MAGNIFIER_SIZE: u32 = 144;
 const MAGNIFIER_SOURCE: u32 = 24;
 const MAGNIFIER_PANEL: f32 = 160.0;
 const MAGNIFIER_PANEL_HEIGHT: f32 = 228.0;
+
+/// Number of live overlay views. The global capture shortcut uses this to
+/// close an overlay even when keyboard focus was lost, which is the safety
+/// valve against a full-screen window with no visible way out.
+static OPEN_OVERLAYS: AtomicUsize = AtomicUsize::new(0);
+
+pub fn has_open_overlays() -> bool {
+    OPEN_OVERLAYS.load(Ordering::Relaxed) > 0
+}
+
+pub fn close_open_overlays(cx: &mut App) {
+    let handles = cx.window_stack().unwrap_or_default();
+    crate::windows::close_auxiliary(cx, handles);
+    OPEN_OVERLAYS.store(0, Ordering::Relaxed);
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AspectPreset {
@@ -98,19 +115,11 @@ pub fn open_overlays(cx: &mut App) {
     open_overlays_mode(cx, OverlayMode::Capture);
 }
 
-pub fn open_scroll_overlays(cx: &mut App) {
-    open_overlays_mode(cx, OverlayMode::Scroll);
-}
-
-pub fn open_ocr_overlays(cx: &mut App) {
-    open_overlays_mode(cx, OverlayMode::Ocr);
-}
-
-pub fn open_record_overlays(cx: &mut App) {
-    open_overlays_mode(cx, OverlayMode::Record);
-}
-
 fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
+    // Capture is a menu-bar utility mode: return to the accessory policy even
+    // if the settings window was force-closed by the tray, which bypasses its
+    // close callback. The overlay itself still gets key status below.
+    platform_window::set_macos_accessory_activation_policy();
     #[cfg(target_os = "windows")]
     core_capture::init_process_dpi_awareness();
 
@@ -152,6 +161,10 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
             SelectionSession::with_scale(monitor.id, monitor.bounds, windows.clone(), scale);
         let options = overlay_options(monitor.id, window_bounds);
 
+        // Accessories are not brought forward by ordering a window front:
+        // AppKit only gives key status to an active app. Without this the
+        // overlay looks right but ignores Esc and every letter shortcut.
+        cx.activate(true);
         match gpui_kit::open_window(options, cx, move |window, cx| {
             if let Err(error) = apply_window_style(&*window, WindowStyle::OVERLAY) {
                 eprintln!("capin: failed to style overlay: {error}");
@@ -163,10 +176,14 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
             window.defer(cx, move |window, cx| {
                 window.focus(&focus, cx);
                 window.activate_window();
+                cx.activate(true);
             });
             view
         }) {
-            Ok(_) => opened += 1,
+            Ok(_) => {
+                OPEN_OVERLAYS.fetch_add(1, Ordering::Relaxed);
+                opened += 1;
+            }
             Err(error) => eprintln!("capin: failed to open overlay: {error}"),
         }
     }
@@ -182,14 +199,28 @@ fn overlay_options(monitor: MonitorId, bounds: Bounds<Pixels>) -> WindowOptions 
         titlebar: None,
         focus: true,
         show: true,
-        kind: WindowKind::PopUp,
+        kind: overlay_window_kind(),
         is_movable: false,
         is_resizable: false,
         is_minimizable: false,
         display_id: Some(DisplayId::new(monitor.raw())),
-        window_background: WindowBackgroundAppearance::Transparent,
+        window_background: WindowBackgroundAppearance::Opaque,
         app_id: Some("capin-overlay".to_owned()),
         ..Default::default()
+    }
+}
+
+/// macOS needs a normal window so AppKit can give it key status (a
+/// nonactivating panel silently drops Esc and letter shortcuts). Windows keeps
+/// the popup tool window that already worked and stays out of Alt+Tab.
+fn overlay_window_kind() -> WindowKind {
+    #[cfg(target_os = "macos")]
+    {
+        WindowKind::Normal
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        WindowKind::PopUp
     }
 }
 
@@ -233,6 +264,8 @@ struct OverlayView {
     element_candidates: Vec<PhysicalRect>,
     element_level: usize,
     focus_handle: FocusHandle,
+    editor: Option<Entity<EditorView>>,
+    editing_rect: Option<Bounds<Pixels>>,
 }
 
 impl OverlayView {
@@ -271,6 +304,8 @@ impl OverlayView {
             element_candidates: Vec::new(),
             element_level: 0,
             focus_handle: cx.focus_handle(),
+            editor: None,
+            editing_rect: None,
         }
     }
 
@@ -280,6 +315,25 @@ impl OverlayView {
             origin.x + (f32::from(position.x) * self.scale).round() as i32,
             origin.y + (f32::from(position.y) * self.scale).round() as i32,
         )
+    }
+
+    /// Converts a monitor-local physical rectangle (as produced by
+    /// `SelectionSession::selection_rect`) into window coordinates. Unlike
+    /// `local_bounds`, there is no virtual-desktop origin to remove.
+    fn local_rect(&self, rect: PhysicalRect) -> Option<Bounds<Pixels>> {
+        let monitor = self.session.monitor_bounds();
+        let local = PhysicalRect::new(0, 0, monitor.size.width, monitor.size.height);
+        let clipped = rect.intersection(local)?;
+        Some(Bounds {
+            origin: point(
+                px(clipped.origin.x as f32 / self.scale),
+                px(clipped.origin.y as f32 / self.scale),
+            ),
+            size: size(
+                px(clipped.size.width as f32 / self.scale),
+                px(clipped.size.height as f32 / self.scale),
+            ),
+        })
     }
 
     fn local_bounds(&self, bounds: PhysicalRect) -> Option<Bounds<Pixels>> {
@@ -724,12 +778,12 @@ impl OverlayView {
         )
     }
 
-    fn finish(&self, outcome: SelectionOutcome, cx: &mut Context<Self>) {
+    fn finish(&mut self, outcome: SelectionOutcome, window: &mut Window, cx: &mut Context<Self>) {
         let monitor_bounds = self.session.monitor_bounds();
-        let window_region = |id| -> Option<core_types::CaptureRegion> {
+        let window_region = |id| -> Option<CaptureRegion> {
             let window = self.session.window(id)?;
             let clipped = window.bounds.intersection(monitor_bounds)?;
-            Some(core_types::CaptureRegion::new(
+            Some(CaptureRegion::new(
                 self.session.monitor(),
                 PhysicalRect::new(
                     clipped.origin.x - monitor_bounds.origin.x,
@@ -742,12 +796,22 @@ impl OverlayView {
         let region = match &outcome {
             SelectionOutcome::Region(region) => Some(*region),
             SelectionOutcome::Window(id) => window_region(*id),
-            SelectionOutcome::Monitor(_) => None,
+            SelectionOutcome::Monitor(_) => Some(CaptureRegion::new(
+                self.session.monitor(),
+                PhysicalRect::new(0, 0, monitor_bounds.size.width, monitor_bounds.size.height),
+            )),
         };
+        if matches!(self.mode, OverlayMode::Scroll | OverlayMode::Ocr)
+            && matches!(outcome, SelectionOutcome::Monitor(_))
+        {
+            return;
+        }
         if matches!(self.mode, OverlayMode::Scroll | OverlayMode::Ocr) && region.is_none() {
             return;
         }
         let handles = cx.window_stack().unwrap_or_default();
+        let current = window.window_handle();
+        let view = cx.entity();
         let scale = match &outcome {
             SelectionOutcome::Window(id) => self
                 .session
@@ -762,19 +826,25 @@ impl OverlayView {
             SelectionOutcome::Region(region) => CaptureTarget::Region(region),
         };
         let mode = self.mode;
+        let window_size = self.window_size;
+        if mode == OverlayMode::Capture {
+            // Keep the hole visible while the capture and editor entity are
+            // being prepared; `pointer_released` has already consumed the drag.
+            self.editing_rect = region.and_then(|region| self.local_rect(region.rect));
+        }
 
         cx.defer(move |cx| {
-            crate::windows::close_auxiliary(cx, handles);
-
-            let mut backend = platform_backend();
             if mode == OverlayMode::Record {
+                crate::windows::close_auxiliary(cx, handles);
                 crate::record::start(target, cx);
                 return;
             }
             if mode == OverlayMode::Scroll || mode == OverlayMode::Ocr {
+                crate::windows::close_auxiliary(cx, handles);
                 let Some(region) = region else {
                     return;
                 };
+                let mut backend = platform_backend();
                 match backend.capture(CaptureTarget::Region(region)) {
                     Ok(frame) if mode == OverlayMode::Scroll => {
                         crate::scroll::open_session(region, frame, cx);
@@ -784,23 +854,76 @@ impl OverlayView {
                 }
                 return;
             }
+
+            // The capture overlay turned into the inline editor. Only the
+            // overlay on the selection's monitor survives; the other
+            // monitors' overlays disappear before the frozen frame is
+            // replaced by the editable one.
+            crate::windows::close_auxiliary_except(cx, handles, current);
+
+            let Some(region) = region else {
+                return;
+            };
+            let mut backend = platform_backend();
             let captured = if settings_state::get().capture_cursor {
                 backend.capture_with_cursor(target)
             } else {
                 backend.capture(target)
             };
-            match captured {
-                Ok(frame) => {
-                    let frame = match target {
-                        CaptureTarget::Window(id) => {
-                            crate::window_style::compose_window_capture(id, frame, scale)
-                        }
-                        _ => frame,
-                    };
-                    crate::editor::open_editor(frame, cx);
+            let frame = match captured {
+                Ok(frame) => match target {
+                    CaptureTarget::Window(id) => {
+                        crate::window_style::compose_window_capture(id, frame, scale)
+                    }
+                    _ => frame,
+                },
+                Err(error) => {
+                    eprintln!("capin: capture failed: {error}");
+                    let _ = view.update(cx, |this, cx| {
+                        this.editing_rect = None;
+                        cx.notify();
+                    });
+                    return;
                 }
-                Err(error) => eprintln!("capin: capture failed: {error}"),
-            }
+            };
+            let center_x =
+                (region.rect.origin.x as f32 + region.rect.size.width as f32 / 2.0) / scale;
+            let center_y =
+                (region.rect.origin.y as f32 + region.rect.size.height as f32 / 2.0) / scale;
+            let image_width = frame.width() as f32 / scale;
+            let image_height = frame.height() as f32 / scale;
+            let editor_rect = Bounds {
+                origin: point(
+                    px(center_x - image_width / 2.0),
+                    px(center_y - image_height / 2.0),
+                ),
+                size: size(px(image_width), px(image_height)),
+            };
+            let window_height = f32::from(window_size.height);
+            let top = f32::from(editor_rect.origin.y);
+            let bottom = top + image_height;
+            let toolbar_top = if bottom + 8.0 + 48.0 <= window_height {
+                bottom + 8.0
+            } else if top >= 56.0 {
+                top - 56.0
+            } else {
+                (window_height - 48.0).max(0.0)
+            };
+            let inline_capture = InlineCapture { region, target };
+            let _ = current.update(cx, |_, window, cx| {
+                let editor = view.update(cx, |this, cx| {
+                    let editor = cx.new(|cx| {
+                        EditorView::new_inline(frame, editor_rect, toolbar_top, inline_capture, cx)
+                    });
+                    this.editor = Some(editor.clone());
+                    this.editing_rect = Some(editor_rect);
+                    this.session.cancel();
+                    cx.notify();
+                    editor
+                });
+                let focus = editor.read(cx).focus_handle.clone();
+                window.focus(&focus, cx);
+            });
         });
     }
 
@@ -820,14 +943,44 @@ impl OverlayView {
     }
 }
 
-impl Render for OverlayView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl Drop for OverlayView {
+    fn drop(&mut self) {
+        // Saturating: `close_open_overlays` also resets the counter, and the
+        // view can then be dropped afterwards.
+        let _ = OPEN_OVERLAYS.try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            Some(count.saturating_sub(1))
+        });
+    }
+}
+
+impl OverlayView {
+    fn render_inner(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(editor) = self.editor.clone() {
+            let rect = self.editing_rect;
+            let mut layers = self.dim_layers(rect);
+            if let Some(rect) = rect {
+                layers.push(border(rect, rgb(REGION_BORDER)));
+            }
+            return div()
+                .relative()
+                .size_full()
+                .child(
+                    img(self.image.clone())
+                        .absolute()
+                        .inset_0()
+                        .size_full()
+                        .object_fit(ObjectFit::Fill),
+                )
+                .children(layers)
+                .child(editor)
+                .into_any_element();
+        }
         self.update_magnifier();
         let language = settings_state::get().language;
         let selection = self
             .session
             .selection_rect()
-            .and_then(|rect| self.local_bounds(rect));
+            .and_then(|rect| self.local_rect(rect));
         let hovered_window = self
             .session
             .hovered_window()
@@ -837,7 +990,7 @@ impl Render for OverlayView {
             .hovered_element()
             .and_then(|element| self.local_bounds(element));
         let hovered = hovered_element.or(hovered_window);
-        let hole = selection.or(hovered);
+        let hole = selection.or(hovered).or(self.editing_rect);
 
         let hint_key = match self.mode {
             OverlayMode::Capture => None,
@@ -906,7 +1059,7 @@ impl Render for OverlayView {
         });
 
         let mut layers = self.dim_layers(hole);
-        if let Some(rect) = selection {
+        if let Some(rect) = selection.or(self.editing_rect) {
             layers.push(border(rect, rgb(REGION_BORDER)));
         } else if let Some(rect) = hovered {
             layers.push(border(rect, self.accent));
@@ -937,7 +1090,10 @@ impl Render for OverlayView {
                 },
             ))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                if event.keystroke.key == "escape" {
+                let key = event.keystroke.key.as_str();
+                let command =
+                    event.keystroke.modifiers.platform || event.keystroke.modifiers.control;
+                if key == "escape" || (command && matches!(key, "w" | "q")) {
                     this.session.cancel();
                     this.close_overlays(cx);
                     return;
@@ -978,6 +1134,13 @@ impl Render for OverlayView {
                 cx.notify();
             }))
             .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                    this.session.cancel();
+                    this.close_overlays(cx);
+                }),
+            )
+            .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                     let point = this.to_physical(event.position);
@@ -990,7 +1153,7 @@ impl Render for OverlayView {
             )
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, event: &MouseUpEvent, _window, cx| {
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
                     if this.suppress_capture {
                         this.suppress_capture = false;
                         this.session.cancel();
@@ -1001,7 +1164,7 @@ impl Render for OverlayView {
                     this.cursor = Some(point);
                     let action = this.session.pointer_released(point);
                     if let SelectionAction::Capture(outcome) = action {
-                        this.finish(outcome, cx);
+                        this.finish(outcome, window, cx);
                     }
                     cx.notify();
                 }),
@@ -1051,6 +1214,13 @@ impl Render for OverlayView {
                     .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx)))
                     .child(icons::icon(icons::SETTINGS, 18.0, rgb(0xffffff))),
             )
+            .into_any_element()
+    }
+}
+
+impl Render for OverlayView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_inner(window, cx)
     }
 }
 

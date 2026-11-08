@@ -49,6 +49,77 @@ pub fn set_macos_accessory_activation_policy() {
     macos::set_accessory_activation_policy();
 }
 
+/// Shows a Dock icon while a full app window (the settings page) is open.
+/// No-op on other platforms.
+pub fn set_macos_regular_activation_policy() {
+    #[cfg(target_os = "macos")]
+    macos::set_regular_activation_policy();
+}
+
+/// Brings the process to the foreground. The capture overlay needs this on
+/// macOS because accessories are not activated merely by ordering a window
+/// front; without it the overlay never becomes the key window, so Esc and
+/// letter shortcuts do nothing.
+pub fn activate_application() {
+    #[cfg(target_os = "macos")]
+    macos::activate_application();
+}
+
+/// A macOS Privacy & Security pane that the settings page can open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrivacyPane {
+    ScreenCapture,
+    Accessibility,
+}
+
+/// Opens the matching pane of System Settings. On macOS, requesting the
+/// accessibility pane also triggers the system permission prompt so Capin is
+/// added to the list instead of leaving the user with an empty toggle.
+pub fn open_privacy_settings(pane: PrivacyPane) {
+    #[cfg(target_os = "macos")]
+    {
+        if pane == PrivacyPane::Accessibility {
+            let _ = macos::request_accessibility_permission();
+        }
+        macos::open_privacy_settings(pane);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pane;
+    }
+}
+
+/// The current desktop wallpaper path, when the platform exposes one.
+pub fn desktop_wallpaper_path() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        windows::desktop_wallpaper_path()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::desktop_wallpaper_path()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+/// Decodes the current desktop wallpaper through the platform image stack.
+///
+/// macOS wallpapers are commonly HEIC, which the `image` crate cannot decode;
+/// AppKit owns the decode there. Windows falls back to the path loader.
+pub fn desktop_wallpaper_frame() -> Option<core_types::RgbaFrame> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::desktop_wallpaper_frame()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 /// Returns the current user's Pictures folder.
 ///
 /// On Windows this is the known folder, so redirected libraries (for example

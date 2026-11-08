@@ -5,7 +5,10 @@ use std::sync::Arc;
 use core_annotate::{
     Annotation, AnnotationDocument, AnnotationStyle, NumberStyle, Shape, TextAlignment, rasterize,
 };
-use core_types::{PhysicalPoint, PhysicalRect, PhysicalSize, RgbaFrame, prefers_dark_foreground};
+use core_capture::CaptureTarget;
+use core_types::{
+    CaptureRegion, PhysicalPoint, PhysicalRect, PhysicalSize, RgbaFrame, prefers_dark_foreground,
+};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use platform_window::system_accent_hex;
@@ -241,6 +244,23 @@ struct EditorSnapshot {
     document: AnnotationDocument,
 }
 
+/// Where an inline editor sits inside the full-screen capture overlay.
+/// `image_rect` is already in the overlay window's logical coordinates, so the
+/// editor can draw the annotated image exactly where the selection was instead
+/// of opening a separate window.
+#[derive(Clone, Copy)]
+struct InlineHost {
+    image_rect: Bounds<Pixels>,
+    toolbar_top: f32,
+    capture: Option<InlineCapture>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct InlineCapture {
+    pub(crate) region: CaptureRegion,
+    pub(crate) target: CaptureTarget,
+}
+
 struct TextEdit {
     target: Option<core_annotate::AnnotationId>,
     origin: PhysicalPoint,
@@ -446,7 +466,7 @@ fn estimated_char_width(ch: char, font_size: f32) -> f32 {
     }
 }
 
-struct EditorView {
+pub(crate) struct EditorView {
     image: Arc<RenderImage>,
     blur_images: [Arc<RenderImage>; BLUR_RADII.len()],
     frame: RgbaFrame,
@@ -487,7 +507,8 @@ struct EditorView {
     accent_hex: u32,
     accent_selected: Rgba,
     status: Option<String>,
-    focus_handle: FocusHandle,
+    pub(crate) focus_handle: FocusHandle,
+    inline: Option<InlineHost>,
 }
 
 impl EditorView {
@@ -567,10 +588,33 @@ impl EditorView {
             accent_selected: rgba((accent_hex << 8) | 0x33),
             status: None,
             focus_handle: cx.focus_handle(),
+            inline: None,
         }
     }
 
+    /// Builds an editor that paints directly inside the full-screen capture
+    /// overlay. The image stays at its screen position and the frozen desktop
+    /// remains visible around it, so the user never sees a second window.
+    pub(crate) fn new_inline(
+        frame: RgbaFrame,
+        image_rect: Bounds<Pixels>,
+        toolbar_top: f32,
+        capture: InlineCapture,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut view = Self::new(frame, None, cx);
+        view.inline = Some(InlineHost {
+            image_rect,
+            toolbar_top,
+            capture: Some(capture),
+        });
+        view
+    }
+
     fn image_view_rect(&self, window: &Window) -> Bounds<Pixels> {
+        if let Some(inline) = &self.inline {
+            return inline.image_rect;
+        }
         let viewport = window.viewport_size();
         let available_width = (f32::from(viewport.width) - PADDING * 2.0).max(1.0);
         let available_height =
@@ -2142,9 +2186,54 @@ impl EditorView {
             .child(icons::icon(icons::CLOSE, 18.0, muted))
             .into_any_element();
 
-        div()
+        let inline_actions = self.inline.and_then(|inline| inline.capture).is_some();
+        let scroll_label = t(language, "menu.scroll_capture").to_owned();
+        let scroll = div()
+            .id("editor-scroll-capture")
+            .tooltip(move |_, cx| tooltip_view(scroll_label.clone(), cx))
+            .w(px(TOOLBAR_SIZE as f32))
+            .h(px(TOOLBAR_SIZE as f32))
+            .rounded(px(7.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(|this, _, _, cx| this.start_scroll_capture(cx)))
+            .child(icons::icon(icons::SCROLL, 18.0, text))
+            .into_any_element();
+        let ocr_label = t(language, "editor.ocr").to_owned();
+        let ocr = div()
+            .id("editor-ocr")
+            .tooltip(move |_, cx| tooltip_view(ocr_label.clone(), cx))
+            .w(px(TOOLBAR_SIZE as f32))
+            .h(px(TOOLBAR_SIZE as f32))
+            .rounded(px(7.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(|this, _, _, cx| this.start_ocr(cx)))
+            .child(icons::icon(icons::OCR, 18.0, text))
+            .into_any_element();
+        let record_label = t(language, "menu.record").to_owned();
+        let record = div()
+            .id("editor-record")
+            .tooltip(move |_, cx| tooltip_view(record_label.clone(), cx))
+            .w(px(TOOLBAR_SIZE as f32))
+            .h(px(TOOLBAR_SIZE as f32))
+            .rounded(px(7.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(|this, _, _, cx| this.start_recording(cx)))
+            .child(icons::icon(icons::RECORDING, 18.0, text))
+            .into_any_element();
+
+        let inline = self.inline.is_some();
+        let inline_toolbar_top = self.inline.map(|host| host.toolbar_top);
+        let mut bar = div()
             .absolute()
-            .top(px(0.0))
             .left(px(0.0))
             .w_full()
             .h(px(TOOLBAR_HEIGHT))
@@ -2154,44 +2243,97 @@ impl EditorView {
             .items_center()
             .justify_between()
             .bg(rgb(TOOLBAR_BG))
-            .border_b_1()
-            .border_color(border)
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.0))
-                    .children(tools),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.0))
-                    .children(config_children),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(2.0))
-                    .child(crop)
-                    .child(rotate)
-                    .child(flip_h)
-                    .child(flip_v)
-                    .child(div().w(px(6.0)))
-                    .child(undo)
-                    .child(redo)
-                    .child(delete)
-                    .child(div().w(px(6.0)))
-                    .child(pin)
-                    .child(copy)
-                    .child(save)
-                    .child(close),
-            )
+            .border_color(border);
+        if let Some(top) = inline_toolbar_top {
+            bar = bar.top(px(top)).border_1().occlude();
+        } else {
+            bar = bar.top(px(0.0)).border_b_1();
+        }
+        bar.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .children(tools),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .children(config_children),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(2.0))
+                .when(inline_actions, |group| {
+                    group
+                        .child(scroll)
+                        .child(record)
+                        .child(ocr)
+                        .child(div().w(px(6.0)))
+                })
+                .when(!inline, |group| {
+                    group
+                        .child(crop)
+                        .child(rotate)
+                        .child(flip_h)
+                        .child(flip_v)
+                        .child(div().w(px(6.0)))
+                })
+                .child(undo)
+                .child(redo)
+                .child(delete)
+                .child(div().w(px(6.0)))
+                .child(pin)
+                .child(copy)
+                .child(save)
+                .child(close),
+        )
+    }
+
+    fn start_scroll_capture(&mut self, cx: &mut Context<Self>) {
+        let Some(capture) = self.inline.and_then(|inline| inline.capture) else {
+            return;
+        };
+        self.commit_text(cx);
+        let first_frame =
+            rasterize(&self.document, &self.frame).unwrap_or_else(|_| self.frame.clone());
+        let handles = cx.window_stack().unwrap_or_default();
+        cx.defer(move |cx| {
+            crate::windows::close_auxiliary(cx, handles);
+            crate::scroll::open_session(capture.region, first_frame, cx);
+        });
+    }
+
+    fn start_ocr(&mut self, cx: &mut Context<Self>) {
+        if self.inline.is_none() {
+            return;
+        }
+        self.commit_text(cx);
+        let frame = rasterize(&self.document, &self.frame).unwrap_or_else(|_| self.frame.clone());
+        let handles = cx.window_stack().unwrap_or_default();
+        cx.defer(move |cx| {
+            crate::windows::close_auxiliary(cx, handles);
+            crate::ocr::start(frame, cx);
+        });
+    }
+
+    fn start_recording(&mut self, cx: &mut Context<Self>) {
+        let Some(capture) = self.inline.and_then(|inline| inline.capture) else {
+            return;
+        };
+        self.commit_text(cx);
+        let handles = cx.window_stack().unwrap_or_default();
+        cx.defer(move |cx| {
+            crate::windows::close_auxiliary(cx, handles);
+            crate::record::start(capture.target, cx);
+        });
     }
 
     fn pin(&mut self, cx: &mut Context<Self>) {
@@ -2207,6 +2349,10 @@ impl EditorView {
                 let language = settings_state::get().language;
                 self.status = Some(format!("{}{}", t(language, "editor.export_failed"), error));
             }
+        }
+        if self.inline.is_some() {
+            let handles = cx.window_stack().unwrap_or_default();
+            cx.defer(move |cx| crate::windows::close_auxiliary(cx, handles));
         }
         cx.notify();
     }
@@ -2698,6 +2844,10 @@ impl Render for EditorView {
             .child(overlay_canvas)
             .children(text_overlay)
             .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
+                if this.inline.is_some() {
+                    cx.stop_propagation();
+                    return;
+                }
                 let (x, y) = match event.delta {
                     ScrollDelta::Pixels(delta) => (f32::from(delta.x), f32::from(delta.y)),
                     ScrollDelta::Lines(delta) => (delta.x * 50.0, delta.y * 50.0),
@@ -2952,10 +3102,11 @@ impl Render for EditorView {
                 }
             }));
 
+        let inline = self.inline.is_some();
+        let inline_toolbar_top = self.inline.map(|host| host.toolbar_top);
         let status_toast = status.map(|message| {
-            div()
+            let mut toast = div()
                 .absolute()
-                .bottom(px(16.0))
                 .right(px(16.0))
                 .px(px(10.0))
                 .py(px(6.0))
@@ -2963,15 +3114,30 @@ impl Render for EditorView {
                 .bg(rgba(0x000000CC))
                 .text_size(px(12.0))
                 .text_color(rgb(0xFFFFFF))
-                .child(message)
+                .child(message);
+            if let Some(top) = inline_toolbar_top {
+                toast = toast.top(px((top - 38.0).max(0.0)));
+            } else {
+                toast = toast.bottom(px(16.0));
+            }
+            toast
         });
 
         div()
             .relative()
             .size_full()
-            .bg(rgb(BACKGROUND))
+            .when(!inline, |root| root.bg(rgb(BACKGROUND)))
             .text_color(rgb(TEXT))
             .track_focus(&self.focus_handle)
+            .when(inline, |root| {
+                root.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                        let handles = cx.window_stack().unwrap_or_default();
+                        crate::windows::close_auxiliary(cx, handles);
+                    }),
+                )
+            })
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
                 let command =
@@ -3084,8 +3250,13 @@ impl Render for EditorView {
                     this.zoom_at(factor, center, window, cx);
                     return;
                 }
-                if key == "escape" {
-                    window.remove_window();
+                if key == "escape" || (command && matches!(key, "w" | "q")) {
+                    if this.inline.is_some() {
+                        let handles = cx.window_stack().unwrap_or_default();
+                        crate::windows::close_auxiliary(cx, handles);
+                    } else {
+                        window.remove_window();
+                    }
                     return;
                 }
                 if key == "delete" || key == "backspace" {
@@ -3138,10 +3309,10 @@ impl Render for EditorView {
                     cx.notify();
                 }
             }))
-            .child(self.toolbar(cx))
             .child(image_layer)
+            .child(self.toolbar(cx))
             .children(status_toast)
-            .child(
+            .children((!inline).then(|| {
                 div()
                     .absolute()
                     .left(px(12.0))
@@ -3153,8 +3324,8 @@ impl Render for EditorView {
                         self.image_size.width,
                         self.image_size.height,
                         self.image_scale(window) * 100.0
-                    )),
-            )
+                    ))
+            }))
     }
 }
 

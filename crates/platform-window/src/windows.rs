@@ -13,10 +13,11 @@ use windows::Win32::UI::Shell::{
     FOLDERID_Pictures, FOLDERID_Videos, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetWindowLongPtrW, HWND_TOPMOST, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_SHOWWINDOW, SetForegroundWindow, SetLayeredWindowAttributes,
-    SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, WDA_EXCLUDEFROMCAPTURE,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WindowFromPoint,
+    GWL_EXSTYLE, GetWindowLongPtrW, HWND_TOPMOST, LWA_ALPHA, SPI_GETDESKWALLPAPER, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetForegroundWindow, SetLayeredWindowAttributes,
+    SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, SystemParametersInfoW,
+    WDA_EXCLUDEFROMCAPTURE, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    WindowFromPoint,
 };
 use windows::core::GUID;
 
@@ -74,6 +75,28 @@ pub(super) fn apply(
 
 pub(super) fn pictures_dir() -> Option<PathBuf> {
     known_folder(&FOLDERID_Pictures).or_else(|| profile_dir("Pictures"))
+}
+
+pub(super) fn desktop_wallpaper_path() -> Option<PathBuf> {
+    const MAX_PATH: usize = 32_768;
+    let mut buffer = vec![0u16; MAX_PATH];
+    // SAFETY: the buffer is writable for `buffer.len()` UTF-16 units and the
+    // API only fills it with a null-terminated path.
+    let size = buffer.len() as u32;
+    unsafe {
+        SystemParametersInfoW(
+            SPI_GETDESKWALLPAPER,
+            size,
+            Some(buffer.as_mut_ptr().cast::<c_void>()),
+            Default::default(),
+        )
+    }
+    .ok()?;
+    let end = buffer.iter().position(|unit| *unit == 0)?;
+    if end == 0 {
+        return None;
+    }
+    Some(PathBuf::from(String::from_utf16_lossy(&buffer[..end])))
 }
 
 pub(super) fn videos_dir() -> Option<PathBuf> {

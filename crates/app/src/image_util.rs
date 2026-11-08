@@ -20,6 +20,20 @@ pub fn render_image(frame: &RgbaFrame) -> Arc<RenderImage> {
     Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))
 }
 
+/// Decodes an embedded PNG (the app icon) into a GPUI render image. The SVG
+/// artwork uses masks, filters and gradients that GPUI's SVG renderer does not
+/// implement, so settings must use the raster asset.
+pub fn render_png(bytes: &[u8]) -> Option<Arc<RenderImage>> {
+    let image = image::load_from_memory(bytes).ok()?.into_rgba8();
+    let (width, height) = image.dimensions();
+    let mut pixels = image.into_raw();
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+    let buffer = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(width, height, pixels)?;
+    Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
+}
+
 /// Builds a nearest-neighbour magnified crop around `center` for the overlay
 /// magnifier. `center` is in frame-local physical pixels.
 pub fn magnifier_image(

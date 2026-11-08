@@ -49,16 +49,29 @@ fn background(settings: &AppSettings) -> Background {
         WindowBackground::Light => Background::Solid(LIGHT_CANVAS),
         WindowBackground::Dark => Background::Solid(DARK_CANVAS),
         WindowBackground::Gradient => gradient(),
-        WindowBackground::Wallpaper => settings
-            .window_wallpaper
-            .as_deref()
-            .and_then(load_wallpaper)
-            .map(Background::Image)
-            .unwrap_or_else(|| {
-                eprintln!("capin: window wallpaper is unavailable; using a transparent canvas");
-                Background::Transparent
-            }),
+        WindowBackground::Wallpaper => {
+            wallpaper(settings)
+                .map(Background::Image)
+                .unwrap_or_else(|| {
+                    eprintln!("capin: window wallpaper is unavailable; using a transparent canvas");
+                    Background::Transparent
+                })
+        }
     }
+}
+
+/// A custom image wins; otherwise the current system wallpaper is used, so
+/// choosing "Wallpaper" works without asking the user to pick a file first.
+fn wallpaper(settings: &AppSettings) -> Option<RgbaFrame> {
+    if let Some(path) = settings.window_wallpaper.as_deref()
+        && let Some(frame) = load_wallpaper(path)
+    {
+        return Some(frame);
+    }
+    platform_window::desktop_wallpaper_path()
+        .as_deref()
+        .and_then(load_wallpaper)
+        .or_else(platform_window::desktop_wallpaper_frame)
 }
 
 fn gradient() -> Background {

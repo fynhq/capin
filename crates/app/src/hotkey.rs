@@ -71,7 +71,11 @@ mod imp {
                     let pin_id = PIN_ID.with(|id| id.get());
                     for id in actions {
                         if id == capture_id {
-                            crate::tray::replace_windows(cx, crate::overlay::open_overlays);
+                            if crate::overlay::has_open_overlays() {
+                                crate::overlay::close_open_overlays(cx);
+                            } else {
+                                crate::tray::replace_windows(cx, crate::overlay::open_overlays);
+                            }
                         } else if id == pin_id {
                             crate::pin::pin_last(cx);
                         }

@@ -43,16 +43,16 @@ xattr -d -r com.apple.quarantine /Applications/Capin.app
 
 ## 使用
 
-- 通过托盘菜单或全局热键开始截图；悬停自动识别窗口/元素，滚轮调整识别范围，拖拽自由选区，Esc 取消。macOS 的元素识别与长截图自动滚动需要在「系统设置 → 隐私与安全性 → 辅助功能」中授权 Capin；授权后如未生效，请重启 Capin。「设置 → 通用 → 权限」会显示屏幕录制与辅助功能状态并提供系统设置入口。
+- 通过托盘菜单的「开始」或全局热键开始截图；悬停自动识别窗口/元素，滚轮调整识别范围，拖拽自由选区，Esc、Cmd/Ctrl+W、Cmd/Ctrl+Q 或右键取消。macOS 的元素识别与长截图自动滚动需要在「系统设置 → 隐私与安全性 → 辅助功能」中授权 Capin；授权后如未生效，请重启 Capin。「设置 → 通用 → 权限」会显示屏幕录制与辅助功能状态并提供系统设置入口。
 - 截图时按 `R` 切换自由/1:1/4:3/16:9 比例；放大镜显示光标下的颜色和选区尺寸，按 `Shift` 切换十六进制/RGB，按 `C` 复制当前格式的颜色值。
 - 全局热键：`Win/Cmd+Shift+S` 截图，`Win/Cmd+Shift+D` 贴图；可在设置中修改。
 - 编辑器内复制/保存使用系统快捷键 `Ctrl/Cmd+C`、`Ctrl/Cmd+S`；选中标注后 `Ctrl/Cmd+C` 复制对象、`Ctrl/Cmd+V` 粘贴、`Delete` 删除，拖动对象可移动。
-- 托盘右键菜单提供截图、录屏、长截图、OCR、截图文件夹、设置、恢复贴图交互、重启与退出；关闭窗口后应用留在托盘。
-- 截图后进入标注编辑器：绘制、文字、序号、聚光灯、模糊，矩形/椭圆可切换实心与线框，矩形可调圆角，文字可调字号/背景/描边/对齐，箭头可配首尾，折线箭头依次点击端点并以双击/Enter 完成，曲线箭头拖拽生成后可拖控制点调整，序号可选圆形/方形/纯数字，模糊与聚光灯可调强度，荧光笔框选色块，复制、保存或贴图；选中已有对象可拖手柄缩放、移动、复制粘贴、删除、改颜色与线宽，双击文字可再次编辑。Ctrl/Cmd+滚轮缩放，Space+左键拖动平移，Ctrl/Cmd+0 适应窗口，Ctrl/Cmd+1 显示 100%；裁剪按钮拖选区域后按 Enter 应用、Esc 取消；旋转/翻转会合并标注，可用撤销恢复。
+- 托盘右键菜单提供开始（截图）、设置、重启与退出；有可恢复录制或穿透贴图时额外显示对应恢复项。关闭窗口后应用留在托盘。
+- 框选后在截图 overlay 内直接标注，不另开编辑窗口；工具栏的长截图、录屏与 OCR 按钮可直接进入对应模式。标注支持绘制、文字、序号、聚光灯、模糊，矩形/椭圆可切换实心与线框，矩形可调圆角，文字可调字号/背景/描边/对齐，箭头可配首尾，折线箭头依次点击端点并以双击/Enter 完成，曲线箭头拖拽生成后可拖控制点调整，序号可选圆形/方形/纯数字，模糊与聚光灯可调强度，荧光笔框选色块，复制、保存或贴图；选中已有对象可拖手柄缩放、移动、复制粘贴、删除、改颜色与线宽，双击文字可再次编辑。独立编辑窗口（贴图标注、长截图结果）支持 Ctrl/Cmd+滚轮缩放、Space+左键拖动平移、Ctrl/Cmd+0 适应窗口与 Ctrl/Cmd+1 显示 100%；裁剪按钮拖选区域后按 Enter 应用、Esc 取消；旋转/翻转会合并标注，可用撤销恢复。截图内联标注不提供画布缩放与裁剪。
 - 窗口截图的圆角、阴影、留白与背景在「设置 → 截图 → 窗口截图」中调整，这些样式只作用于窗口截图；默认透明背景并输出带 Alpha 的 PNG。标注颜色在编辑器工具栏选择；「设置 → 截图 → 标注」只控制各工具是否统一颜色。截图文件名模板在「设置 → 截图 → 截图保存位置」下修改，默认 `Capin_{date}_{time}`，冲突自动加序号。
 - 贴图窗口可置顶、调整透明度与缩放，图片贴图可顺时针旋转 90°；默认不显示操作栏，左键移动或划选文字，右键菜单可旋转、编辑、复制、保存、关闭；也可开启鼠标穿透。开启穿透后从托盘选择「恢复贴图交互」恢复操作；贴图会在重启后恢复。再次按贴图快捷键可循环贴出最近 7 天的截图历史（最多 50 张，仅最终导出图）。
 - 图片贴图可按「设置 → 截图 → 贴图」中的开关自动识别文字与二维码：在文字上拖动即可划选，松开后自动复制；双击选择单词；在非文字区域按住左键拖动可移动贴图。
-- 录屏可选 MP4（系统 H.264）或 WebP（软件编码，固定 30 fps、最高 1080p）；默认包含光标，可在「设置 → 录屏」中关闭；开始前有 3 秒倒计时；「设置 → 录屏」可选择低/标准/高画质；开启“分段恢复”后每 10 秒保存一个可播放片段，正常停止输出会话文件夹，崩溃后可从托盘“恢复未完成录制”打开；拖拽选区或悬停窗口后单击开始录制，录制过程可暂停，停止后自动保存。
+- 录屏可选 MP4（系统 H.264）或 WebP（软件编码，固定 30 fps、最高 1080p）；默认包含光标，可在「设置 → 录屏」中关闭；开始前有 3 秒倒计时；「设置 → 录屏」可选择低/标准/高画质；开启“分段恢复”后每 10 秒保存一个可播放片段，正常停止输出会话文件夹，崩溃后可从托盘“恢复未完成录制”打开；框选后点击工具栏的录屏按钮开始，录制过程可暂停，停止后自动保存。
 - 所有截图与录屏只在本机处理；不上传，无遥测。
 
 ## 从源码构建
@@ -113,16 +113,16 @@ xattr -d -r com.apple.quarantine /Applications/Capin.app
 
 ## Usage
 
-- Start a capture from the tray menu or the global hotkey; hover to detect a window or element, scroll to adjust the target, drag for a free region, and press Esc to cancel. On macOS, element detection and automatic scrolling capture require granting Capin under System Settings → Privacy & Security → Accessibility; restart Capin if detection does not take effect. Settings → General → Permissions shows screen-recording and accessibility status with shortcuts to System Settings.
+- Start a capture from Start in the tray menu or the global hotkey; hover to detect a window or element, scroll to adjust the target, drag for a free region, and press Esc, Cmd/Ctrl+W, Cmd/Ctrl+Q or right-click to cancel. On macOS, element detection and automatic scrolling capture require granting Capin under System Settings → Privacy & Security → Accessibility; restart Capin if detection does not take effect. Settings → General → Permissions shows screen-recording and accessibility status with shortcuts to System Settings.
 - During selection, press `R` to cycle Free/1:1/4:3/16:9; the magnifier shows the color under the cursor and the selection size; press `Shift` to switch between hex and RGB, and `C` to copy the current value.
 - Global hotkeys: `Win/Cmd+Shift+S` captures, `Win/Cmd+Shift+D` pins; both can be changed in settings.
 - In the editor, copy and save use the system shortcuts `Ctrl/Cmd+C` and `Ctrl/Cmd+S`; with an annotation selected, `Ctrl/Cmd+C` copies the object, `Ctrl/Cmd+V` pastes it, `Delete` removes it, and dragging moves it.
-- The tray menu offers capture, recording, scrolling capture, OCR, the screenshots folder, settings, release pinned windows, restart, and quit; closing a window keeps Capin in the tray.
-- The editor supports drawing, text, numbered badges, spotlight and blur with adjustable intensity, rectangle corner radius, text size/background/outline/alignment, start/end arrow heads, polyline and curve arrows, numbered badge styles, crop, rotate 90°, horizontal/vertical flip, copy, save, and pin; select an existing object to resize with handles, move, copy, paste, delete, recolor or resize its stroke, and double-click text to edit it again. Use Ctrl/Cmd+wheel to zoom, Space+left-drag to pan, Ctrl/Cmd+0 to fit, and Ctrl/Cmd+1 for 100%. In crop mode, drag a region and press Enter to apply or Esc to cancel; rotate/flip flattens annotations and can be undone.
+- The tray menu offers Start (capture), Settings, Restart and Quit; recovery entries appear only when an unfinished recording or a click-through pin needs them. Closing a window keeps Capin in the tray.
+- After selecting a region, annotations happen in the capture overlay itself; no separate editor window opens, and the toolbar can start scrolling capture, recording or OCR. The editor supports drawing, text, numbered badges, spotlight and blur with adjustable intensity, rectangle corner radius, text size/background/outline/alignment, start/end arrow heads, polyline and curve arrows, numbered badge styles, crop, rotate 90°, horizontal/vertical flip, copy, save, and pin; select an existing object to resize with handles, move, copy, paste, delete, recolor or resize its stroke, and double-click text to edit it again. Standalone editor windows (pin annotation, scroll results) support Ctrl/Cmd+wheel zoom, Space+left-drag pan, Ctrl/Cmd+0 to fit, and Ctrl/Cmd+1 for 100%. In crop mode, drag a region and press Enter to apply or Esc to cancel; rotate/flip flattens annotations and can be undone. The inline capture editor does not zoom or crop.
 - Configure window corners, shadow, padding and background under Settings → Capture → Window capture; these styles apply to window captures only. The default is a transparent PNG with alpha. Choose annotation colors in the editor toolbar; Settings → Capture → Annotations only controls whether all tools share one color. The screenshot filename template lives under Settings → Capture → Screenshot folder and defaults to `Capin_{date}_{time}` with automatic numeric suffixes on conflict.
 - Pin windows can stay on top, change opacity and zoom, and rotate image pins clockwise by 90 degrees; no action bar is shown by default. Left-click to move or select text, and right-click for rotate, edit, copy, save and close (plus click-through). After click-through, use Release pinned windows in the tray menu; pins restore after a restart. Press the pin hotkey again to cycle through the last 7 days of final screenshot exports (up to 50).
 - Image pins can recognize text and QR codes according to Settings → Capture → Pins: drag over text to select it and release to copy; double-click to select a word; drag any non-text area with the left button to move the pin.
-- Recording saves MP4 with the system H.264 encoder or WebP with the software encoder (fixed 30 fps, up to 1080p), and includes the cursor by default (disable it in Settings → Recording). A 3-second countdown starts the capture; low/standard/high quality is available in Settings → Recording. Enable segmented recovery to save a playable segment every 10 seconds; normal stop produces a session folder, and a crash can be recovered from the tray. Drag a region or hover a window and click to start; pause while recording, and the file is saved on stop.
+- Recording saves MP4 with the system H.264 encoder or WebP with the software encoder (fixed 30 fps, up to 1080p), and includes the cursor by default (disable it in Settings → Recording). A 3-second countdown starts the capture; low/standard/high quality is available in Settings → Recording. Enable segmented recovery to save a playable segment every 10 seconds; normal stop produces a session folder, and a crash can be recovered from the tray. Select a region and click the record button in the toolbar; pause while recording, and the file is saved on stop.
 - Captures and recordings stay local; no upload, no telemetry.
 
 ## Build from source

@@ -1,9 +1,10 @@
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use core_record::FrameRate;
-use core_types::{RecordFormat, prefers_dark_foreground};
+use core_types::RecordFormat;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use platform_window::{AutostartState, set_autostart, system_accent_hex};
@@ -144,16 +145,14 @@ enum SettingsSection {
     Capture,
     Recording,
     Shortcuts,
-    About,
 }
 
 impl SettingsSection {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 4] = [
         Self::General,
         Self::Capture,
         Self::Recording,
         Self::Shortcuts,
-        Self::About,
     ];
 
     fn id(self) -> &'static str {
@@ -162,7 +161,6 @@ impl SettingsSection {
             Self::Capture => "settings-nav-capture",
             Self::Recording => "settings-nav-recording",
             Self::Shortcuts => "settings-nav-shortcuts",
-            Self::About => "settings-nav-about",
         }
     }
 
@@ -174,7 +172,6 @@ impl SettingsSection {
                 Self::Capture => "nav.capture",
                 Self::Recording => "nav.recording",
                 Self::Shortcuts => "nav.shortcuts",
-                Self::About => "nav.about",
             },
         )
     }
@@ -187,7 +184,6 @@ impl SettingsSection {
                 Self::Capture => "section.capture.desc",
                 Self::Recording => "section.recording.desc",
                 Self::Shortcuts => "section.shortcuts.desc",
-                Self::About => "section.about.desc",
             },
         )
     }
@@ -198,7 +194,6 @@ impl SettingsSection {
             Self::Capture => icons::CAPTURE,
             Self::Recording => icons::RECORDING,
             Self::Shortcuts => icons::SHORTCUTS,
-            Self::About => icons::ABOUT,
         }
     }
 }
@@ -314,6 +309,7 @@ struct Theme {
     text: Rgba,
     muted: Rgba,
     card: Rgba,
+    card_border: Rgba,
     page: Option<Rgba>,
     border: Rgba,
     accent: Rgba,
@@ -322,7 +318,6 @@ struct Theme {
     control: Rgba,
     toggle_off: Rgba,
     knob: Rgba,
-    accent_text: Rgba,
     close_hover: Rgba,
 }
 
@@ -357,6 +352,7 @@ impl Theme {
             text: palette.text,
             muted: palette.muted,
             card: card_color(dark),
+            card_border: card_border(dark),
             page: palette.page,
             border: palette.border,
             accent: rgb(accent_hex),
@@ -365,17 +361,8 @@ impl Theme {
             control: palette.control,
             toggle_off: palette.toggle_off,
             knob: rgb(0xFFFFFF),
-            accent_text: accent_text_color(accent_hex),
             close_hover: rgb(0xC42B1C),
         }
-    }
-}
-
-fn accent_text_color(accent_hex: u32) -> Rgba {
-    if prefers_dark_foreground(accent_hex) {
-        rgb(0x111111)
-    } else {
-        rgb(0xFFFFFF)
     }
 }
 
@@ -389,7 +376,7 @@ fn native_palette(dark: bool) -> Palette {
             control: rgb(0x383838),
             hover: rgba(0xFFFFFF10),
             selected: rgba(0xFFFFFF14),
-            toggle_off: rgba(0xFFFFFF8C),
+            toggle_off: rgba(0xFFFFFF1F),
             page: None,
         }
     } else {
@@ -400,7 +387,7 @@ fn native_palette(dark: bool) -> Palette {
             control: rgb(0xFCFCFC),
             hover: rgba(0x00000008),
             selected: rgba(0x0000000A),
-            toggle_off: rgba(0x00000073),
+            toggle_off: rgba(0x0000001A),
             page: None,
         }
     }
@@ -416,8 +403,10 @@ fn native_palette(dark: bool) -> Palette {
             control: rgb(0x3A3A3C),
             hover: rgba(0xFFFFFF14),
             selected: rgba(0xFFFFFF1F),
-            toggle_off: rgba(0xFFFFFF4D),
-            page: Some(rgb(0x1E1E1E)),
+            toggle_off: rgba(0xFFFFFF1F),
+            // SysVitals settings tint: 0.72 dark / 0.82 light over the live
+            // window blur. Higher than Mica so text keeps native contrast.
+            page: Some(rgba(0x1E1E1EB8)),
         }
     } else {
         Palette {
@@ -427,8 +416,8 @@ fn native_palette(dark: bool) -> Palette {
             control: rgb(0xFFFFFF),
             hover: rgba(0x0000000A),
             selected: rgba(0x0000000F),
-            toggle_off: rgba(0x00000026),
-            page: Some(rgb(0xF2F2F2)),
+            toggle_off: rgba(0x0000001A),
+            page: Some(rgba(0xF2F2F2D1)),
         }
     }
 }
@@ -469,12 +458,31 @@ fn card_color(dark: bool) -> Rgba {
 
 #[cfg(target_os = "macos")]
 fn card_color(dark: bool) -> Rgba {
-    if dark { rgb(0x2C2C2E) } else { rgb(0xFFFFFF) }
+    // SysVitals macOS grouped cards: a translucent lift over the page tint.
+    if dark {
+        rgba(0xFFFFFF1A)
+    } else {
+        rgba(0xFFFFFFD1)
+    }
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn card_color(dark: bool) -> Rgba {
     if dark { rgb(0x2C2C2E) } else { rgb(0xFFFFFF) }
+}
+
+#[cfg(target_os = "windows")]
+fn card_border(dark: bool) -> Rgba {
+    if dark {
+        rgba(0x0000001A)
+    } else {
+        rgba(0x0000000F)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn card_border(_dark: bool) -> Rgba {
+    rgba(0x00000000)
 }
 
 #[derive(Clone, Debug)]
@@ -610,6 +618,11 @@ struct SettingsView {
     filename_focus: FocusHandle,
     focus_handle: FocusHandle,
     titlebar_drag: bool,
+    logo: Option<Arc<RenderImage>>,
+    #[cfg(target_os = "macos")]
+    permission_screen: bool,
+    #[cfg(target_os = "macos")]
+    permission_accessibility: bool,
 }
 
 impl SettingsView {
@@ -625,8 +638,17 @@ impl SettingsView {
             filename_focus: cx.focus_handle(),
             focus_handle: cx.focus_handle(),
             titlebar_drag: false,
+            logo: crate::image_util::render_png(include_bytes!(
+                "../../../assets/icon/capin_icon_1024.png"
+            )),
+            #[cfg(target_os = "macos")]
+            permission_screen: platform_window::screen_capture_trusted(),
+            #[cfg(target_os = "macos")]
+            permission_accessibility: platform_window::accessibility_trusted(),
         };
         view.start_accent_watch(cx);
+        #[cfg(target_os = "macos")]
+        view.start_permission_watch(cx);
         view
     }
 
@@ -649,6 +671,36 @@ impl SettingsView {
                         }
                         view.last_accent = current;
                         view.accent = current;
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn start_permission_watch(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(1000))
+                    .await;
+                let alive = this
+                    .update(cx, |view: &mut SettingsView, cx| {
+                        let screen = platform_window::screen_capture_trusted();
+                        let accessibility = platform_window::accessibility_trusted();
+                        if screen == view.permission_screen
+                            && accessibility == view.permission_accessibility
+                        {
+                            return true;
+                        }
+                        view.permission_screen = screen;
+                        view.permission_accessibility = accessibility;
                         cx.notify();
                         true
                     })
@@ -710,9 +762,7 @@ impl SettingsView {
             .px(px(layout::SIDEBAR_PAD))
             .pt(px(layout::TITLEBAR_HEIGHT + 8.0))
             .pb(px(layout::SIDEBAR_PAD))
-            .child(div().flex().flex_col().gap(px(2.0)).children(nav))
-            .child(div().flex_1())
-            .child(self.capture_button(theme, cx));
+            .child(div().flex().flex_col().gap(px(2.0)).children(nav));
 
         if layout::SIDEBAR_DIVIDER {
             sidebar.border_r_1().border_color(theme.border)
@@ -735,19 +785,25 @@ impl SettingsView {
             .flex()
             .flex_row()
             .items_center();
-        if windows {
-            leading = leading.pl(px(16.0)).child(
+        let make_brand = || {
+            let mut brand = div().flex().flex_row().items_center().gap(px(8.0));
+            if let Some(logo) = self.logo.clone() {
+                brand = brand.child(img(logo).w(px(18.0)).h(px(18.0)));
+            }
+            brand.child(
                 div()
                     .text_size(px(13.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text)
-                    .child(t(self.settings.language, "settings.subtitle")),
-            );
-        }
+                    .child(t(self.settings.language, "settings.title")),
+            )
+        };
         if windows {
+            leading = leading.pl(px(16.0)).child(make_brand());
             leading = leading.window_control_area(WindowControlArea::Drag);
         }
         if macos {
+            leading = leading.pl(px(84.0)).child(make_brand());
             leading = leading
                 .on_mouse_down(
                     MouseButton::Left,
@@ -814,31 +870,6 @@ impl SettingsView {
         bar
     }
 
-    fn capture_button(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let accent = theme.accent;
-        let accent_text = theme.accent_text;
-        div()
-            .h(px(layout::BUTTON_HEIGHT))
-            .w_full()
-            .rounded(px(layout::BUTTON_RADIUS))
-            .bg(accent)
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_center()
-            .gap(px(8.0))
-            .id("settings-capture")
-            .on_click(cx.listener(|this, _, _, cx| this.start_capture(cx)))
-            .child(icons::icon(icons::CAPTURE, 15.0, accent_text))
-            .child(
-                div()
-                    .text_size(px(layout::CONTROL_TEXT))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(accent_text)
-                    .child(t(self.settings.language, "button.capture")),
-            )
-    }
-
     fn content(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         // The page background reaches the window edge so it fuses with the
         // custom title bar; the scroll viewport itself starts below the bar so
@@ -849,7 +880,6 @@ impl SettingsView {
             .flex()
             .flex_col()
             .pt(px(layout::TITLEBAR_HEIGHT))
-            .when_some(theme.page, |content, page| content.bg(page))
             .child(
                 div()
                     .flex_1()
@@ -868,7 +898,6 @@ impl SettingsView {
                         SettingsSection::Capture => self.capture_settings(theme, cx),
                         SettingsSection::Recording => self.recording(theme, cx),
                         SettingsSection::Shortcuts => self.shortcuts(theme, cx),
-                        SettingsSection::About => self.about(theme, cx),
                     }),
             )
     }
@@ -895,18 +924,40 @@ impl SettingsView {
 
     fn general(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
+        let version = row_shell(theme)
+            .id("settings-version-link")
+            .hover(move |style| style.bg(theme.hover))
+            .on_click(cx.listener(|this, _, _, cx| this.open_project(cx)))
+            .child(label_block(
+                theme,
+                t(language, "settings.version"),
+                t(language, "settings.version_desc"),
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_size(px(layout::CAPTION))
+                            .text_color(theme.muted)
+                            .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(layout::CAPTION))
+                            .text_color(theme.accent)
+                            .child("github.com/fynhq/capin"),
+                    ),
+            );
         let content = card(
             theme,
             vec![
                 div().child(self.language_row(theme, cx)),
                 div().child(self.auto_start_row(theme, cx)),
-                info_row(
-                    theme,
-                    t(language, "settings.version"),
-                    t(language, "settings.version_desc"),
-                    env!("CARGO_PKG_VERSION"),
-                    None,
-                ),
+                div().child(version),
             ],
         );
         #[cfg(target_os = "macos")]
@@ -935,16 +986,16 @@ impl SettingsView {
                     theme,
                     t(language, "settings.permission_screen"),
                     t(language, "settings.permission_screen_desc"),
-                    platform_window::screen_capture_trusted(),
-                    "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+                    self.permission_screen,
+                    platform_window::PrivacyPane::ScreenCapture,
                     cx,
                 )),
                 div().child(self.permission_row(
                     theme,
                     t(language, "settings.permission_accessibility"),
                     t(language, "settings.permission_accessibility_desc"),
-                    platform_window::accessibility_trusted(),
-                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+                    self.permission_accessibility,
+                    platform_window::PrivacyPane::Accessibility,
                     cx,
                 )),
             ],
@@ -958,7 +1009,7 @@ impl SettingsView {
         title: &str,
         description: &str,
         granted: bool,
-        url: &'static str,
+        pane: platform_window::PrivacyPane,
         cx: &mut Context<Self>,
     ) -> Div {
         let language = self.settings.language;
@@ -986,8 +1037,21 @@ impl SettingsView {
                     )
                     .child(
                         action_button(theme, t(language, "settings.open_settings").to_owned())
-                            .id("settings-open-permission")
-                            .on_click(cx.listener(move |_, _, _, cx| cx.open_url(url))),
+                            .id(match pane {
+                                platform_window::PrivacyPane::ScreenCapture => {
+                                    "settings-open-screen-permission"
+                                }
+                                platform_window::PrivacyPane::Accessibility => {
+                                    "settings-open-accessibility-permission"
+                                }
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                platform_window::open_privacy_settings(pane);
+                                this.permission_screen = platform_window::screen_capture_trusted();
+                                this.permission_accessibility =
+                                    platform_window::accessibility_trusted();
+                                cx.notify();
+                            })),
                     ),
             )
     }
@@ -1351,7 +1415,7 @@ impl SettingsView {
             .window_wallpaper
             .as_ref()
             .map(|path| path.display().to_string())
-            .unwrap_or_else(|| t(language, "settings.no_wallpaper").to_owned());
+            .unwrap_or_else(|| t(language, "settings.system_wallpaper").to_owned());
         let choose = action_button(theme, t(language, "settings.choose_image").to_owned())
             .id("settings-wallpaper-choose")
             .on_click(cx.listener(|this, _, _, cx| this.choose_wallpaper(cx)));
@@ -2315,102 +2379,8 @@ impl SettingsView {
         true
     }
 
-    fn about(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
-        let language = self.settings.language;
-        let hero = div()
-            .w_full()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(16.0))
-            .p(px(20.0))
-            .rounded(px(layout::CARD_RADIUS))
-            .bg(theme.card)
-            .border_1()
-            .border_color(theme.border)
-            .child(icons::icon(icons::APP, 52.0, theme.accent))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(3.0))
-                    .child(
-                        div()
-                            .text_size(px(layout::PAGE_TITLE - 7.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
-                            .child("Capin"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(layout::CAPTION))
-                            .text_color(theme.muted)
-                            .child(format!(
-                                "{} {}",
-                                t(language, "settings.version"),
-                                env!("CARGO_PKG_VERSION")
-                            )),
-                    ),
-            );
-
-        let details = card(
-            theme,
-            vec![
-                info_row(
-                    theme,
-                    t(language, "about.license"),
-                    t(language, "about.license_desc"),
-                    t(language, "about.license_value"),
-                    None,
-                ),
-                info_row(
-                    theme,
-                    t(language, "about.platforms"),
-                    t(language, "about.platforms_desc"),
-                    t(language, "about.platforms_value"),
-                    None,
-                ),
-                info_row(
-                    theme,
-                    t(language, "about.privacy"),
-                    t(language, "about.privacy_desc"),
-                    t(language, "about.privacy_value"),
-                    None,
-                ),
-                div().w_full().child(
-                    row_shell(theme)
-                        .id("settings-project-link")
-                        .hover(move |style| style.bg(theme.hover))
-                        .on_click(cx.listener(|_, _, _, cx| cx.open_url(PROJECT_URL)))
-                        .child(label_block(
-                            theme,
-                            t(language, "about.project"),
-                            t(language, "about.project_desc"),
-                        ))
-                        .child(
-                            div()
-                                .text_size(px(layout::CAPTION))
-                                .text_color(theme.accent)
-                                .child("github.com/fynhq/capin"),
-                        ),
-                ),
-            ],
-        );
-
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(16.0))
-            .child(hero)
-            .child(details)
-    }
-
-    fn start_capture(&self, cx: &mut Context<Self>) {
-        let handles = cx.window_stack().unwrap_or_default();
-        cx.defer(move |cx| {
-            crate::windows::close_auxiliary(cx, handles);
-            crate::overlay::open_overlays(cx);
-        });
+    fn open_project(&self, cx: &mut Context<Self>) {
+        cx.open_url(PROJECT_URL);
     }
 }
 
@@ -2536,9 +2506,17 @@ impl Render for SettingsView {
             .size_full()
             .flex()
             .flex_row()
+            .when_some(theme.page, |root, page| root.bg(page))
             .text_color(theme.text)
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let command =
+                    event.keystroke.modifiers.platform || event.keystroke.modifiers.control;
+                if command && event.keystroke.key.eq_ignore_ascii_case("w") {
+                    platform_window::set_macos_accessory_activation_policy();
+                    window.remove_window();
+                    return;
+                }
                 if this.handle_filename_key(event, window, cx) {
                     return;
                 }
@@ -2567,6 +2545,9 @@ pub fn open_settings(cx: &mut App) {
     let bounds = settings_bounds(cx);
     let display_id = cx.primary_display().map(|display| display.id());
     let language = settings_state::get().language;
+    // The settings page is a real app window: show the Dock tile while it is
+    // open so the user can find Capin in Mission Control and the app switcher.
+    platform_window::set_macos_regular_activation_policy();
     let titlebar = custom_titlebar().then(|| TitlebarOptions {
         title: Some(t(language, "settings.title").into()),
         appears_transparent: true,
@@ -2590,6 +2571,12 @@ pub fn open_settings(cx: &mut App) {
     };
 
     match gpui_kit::open_window(options, cx, |window, cx| {
+        window.on_window_should_close(cx, |_, _| {
+            // Closing the last real window returns Capin to its menu-bar
+            // utility role (no Dock icon, no app-switcher entry).
+            platform_window::set_macos_accessory_activation_policy();
+            true
+        });
         let view = cx.new(SettingsView::new);
         let focus = view.read(cx).focus_handle.clone();
         window.defer(cx, move |window, cx| window.focus(&focus, cx));
@@ -2668,7 +2655,7 @@ fn card(theme: &Theme, rows: Vec<Div>) -> Div {
         .rounded(px(layout::CARD_RADIUS))
         .bg(theme.card)
         .border_1()
-        .border_color(theme.border)
+        .border_color(theme.card_border)
         .overflow_hidden()
         .children(rows)
 }
@@ -2749,38 +2736,23 @@ fn info_row(
         .child(value_side)
 }
 
-#[cfg(target_os = "windows")]
 fn toggle(theme: &Theme, value: bool) -> Div {
-    // WinUI ToggleSwitch: outlined off track with a secondary knob.
-    let stroke = theme.toggle_off;
-    let knob = if value { theme.knob } else { theme.muted };
-    div()
-        .w(px(40.0))
-        .h(px(20.0))
-        .rounded(px(10.0))
-        .when(value, |toggle| toggle.bg(theme.accent))
-        .when(!value, |toggle| toggle.border_1().border_color(stroke))
-        .flex()
-        .items_center()
-        .px(px(4.0))
-        .when(value, |toggle| toggle.justify_end())
-        .when(!value, |toggle| toggle.justify_start())
-        .child(div().w(px(12.0)).h(px(12.0)).rounded(px(6.0)).bg(knob))
-}
-
-#[cfg(not(target_os = "windows"))]
-fn toggle(theme: &Theme, value: bool) -> Div {
+    // gpui-component's Switch, which SysVitals uses on both platforms: a
+    // 36x20 track with a 16px white thumb, 1px transparent border and 2px
+    // travel. The unchecked track is a neutral translucent fill.
     let accent = theme.accent;
     let off = theme.toggle_off;
     let knob = theme.knob;
     div()
-        .w(px(38.0))
-        .h(px(22.0))
-        .rounded(px(11.0))
+        .w(px(36.0))
+        .h(px(20.0))
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(rgba(0x00000000))
+        .p(px(1.0))
         .bg(if value { accent } else { off })
         .flex()
         .items_center()
-        .px(px(3.0))
         .when(value, |toggle| toggle.justify_end())
         .when(!value, |toggle| toggle.justify_start())
         .child(div().w(px(16.0)).h(px(16.0)).rounded(px(8.0)).bg(knob))

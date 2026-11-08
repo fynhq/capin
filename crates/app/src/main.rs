@@ -37,6 +37,7 @@ fn main() {
             }
             hotkey::install(cx);
             pin::restore(cx);
+            tray::refresh_menu();
 
             let args: Vec<String> = std::env::args().skip(1).collect();
             if args.iter().any(|argument| argument == "--settings") {

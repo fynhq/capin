@@ -16,6 +16,7 @@ thiserror.workspace = true
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
     "Win32_System_Com",
     "Win32_System_Registry",
     "Win32_UI_Input_KeyboardAndMouse",
@@ -31,17 +32,25 @@ objc2 = "0.6.5"
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "std",
     "NSProcessInfo",
+    "NSString",
+    "NSURL",
 ] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std",
     "NSApplication",
     "NSColor",
     "NSColorSpace",
+    "NSGraphicsContext",
+    "NSImage",
+    "NSImageRep",
     "NSResponder",
     "NSRunningApplication",
+    "NSScreen",
     "NSView",
     "NSWindow",
+    "NSWorkspace",
     "objc2-core-foundation",
+    "objc2-core-graphics",
 ] }
 
 [lints]

@@ -598,6 +598,15 @@ pub fn refresh_recognition(cx: &mut App) {
     }
 }
 
+pub fn click_through_count() -> usize {
+    PINS.with(|pins| {
+        pins.borrow()
+            .values()
+            .filter(|state| state.click_through)
+            .count()
+    })
+}
+
 pub fn release_click_through(cx: &mut App) -> usize {
     let states: Vec<(u64, Entity<PinView>, AnyWindowHandle)> = PINS.with(|pins| {
         pins.borrow()
@@ -622,6 +631,7 @@ pub fn release_click_through(cx: &mut App) -> usize {
         });
     }
     save_manifest();
+    crate::tray::refresh_menu();
     count
 }
 
@@ -1635,6 +1645,8 @@ fn open_pin_menu(
                 skip_taskbar: true,
                 no_activate: false,
                 exclude_from_capture: true,
+                borderless: false,
+                opaque: false,
             },
         );
         let view = cx.new(|cx| PinMenuView {
@@ -1756,6 +1768,7 @@ fn enable_click_through(
         set_state_click_through(id, true);
         cx.notify();
     });
+    crate::tray::refresh_menu();
 }
 
 fn display_for_bounds(cx: &App, bounds: Bounds<Pixels>) -> Option<DisplayId> {

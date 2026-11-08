@@ -4,19 +4,15 @@ mod imp {
     use std::time::Duration;
 
     use gpui_kit::*;
-    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+    use tray_icon::menu::{IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
     use crate::i18n::t;
     use crate::settings_state;
 
-    const MENU_CAPTURE: &str = "capture";
-    const MENU_SCROLL: &str = "scroll";
-    const MENU_OCR: &str = "ocr";
-    const MENU_FOLDER: &str = "folder";
-    const MENU_RECORD: &str = "record";
-    const MENU_RECOVER: &str = "recover-recording";
+    const MENU_START: &str = "start";
     const MENU_SETTINGS: &str = "settings";
+    const MENU_RECOVER: &str = "recover-recording";
     const MENU_RELEASE_PINS: &str = "release-pins";
     const MENU_RESTART: &str = "restart";
     const MENU_QUIT: &str = "quit";
@@ -64,47 +60,42 @@ mod imp {
     fn build_menu() -> Option<Menu> {
         let language = settings_state::get().language;
         let menu = Menu::new();
-        let capture = MenuItem::with_id(MENU_CAPTURE, t(language, "menu.capture"), true, None);
-        let record = MenuItem::with_id(MENU_RECORD, t(language, "menu.record"), true, None);
-        let scroll = MenuItem::with_id(MENU_SCROLL, t(language, "menu.scroll_capture"), true, None);
-        let ocr = MenuItem::with_id(MENU_OCR, t(language, "menu.ocr"), true, None);
-        let folder = MenuItem::with_id(
-            MENU_FOLDER,
-            t(language, "menu.screenshot_folder"),
-            true,
-            None,
-        );
+        let start = MenuItem::with_id(MENU_START, t(language, "menu.start"), true, None);
         let settings = MenuItem::with_id(MENU_SETTINGS, t(language, "menu.settings"), true, None);
-        let recover_enabled = !crate::record_session::pending_sessions().is_empty();
-        let recover = MenuItem::with_id(
-            MENU_RECOVER,
-            t(language, "menu.recover_recording"),
-            recover_enabled,
-            None,
-        );
-        let release_pins = MenuItem::with_id(
-            MENU_RELEASE_PINS,
-            t(language, "menu.release_pins"),
-            true,
-            None,
-        );
         let separator = PredefinedMenuItem::separator();
         let restart = MenuItem::with_id(MENU_RESTART, t(language, "menu.restart"), true, None);
         let quit = MenuItem::with_id(MENU_QUIT, t(language, "menu.quit"), true, None);
-        menu.append_items(&[
-            &capture,
-            &record,
-            &scroll,
-            &ocr,
-            &folder,
-            &settings,
-            &recover,
-            &release_pins,
-            &separator,
-            &restart,
-            &quit,
-        ])
-        .ok()?;
+        let mut items: Vec<&dyn IsMenuItem> = vec![&start, &settings];
+
+        // Recovery entries only appear when they can do something, so the
+        // normal menu stays at Start / Settings / Restart / Quit while a
+        // click-through pin or an interrupted recording is still reachable.
+        let recover = (!crate::record_session::pending_sessions().is_empty()).then(|| {
+            MenuItem::with_id(
+                MENU_RECOVER,
+                t(language, "menu.recover_recording"),
+                true,
+                None,
+            )
+        });
+        if let Some(item) = recover.as_ref() {
+            items.push(item);
+        }
+        let release_pins = (crate::pin::click_through_count() > 0).then(|| {
+            MenuItem::with_id(
+                MENU_RELEASE_PINS,
+                t(language, "menu.release_pins"),
+                true,
+                None,
+            )
+        });
+        if let Some(item) = release_pins.as_ref() {
+            items.push(item);
+        }
+        items.push(&separator);
+        items.push(&restart);
+        items.push(&quit);
+        menu.append_items(&items).ok()?;
         Some(menu)
     }
 
@@ -163,25 +154,15 @@ mod imp {
 
     fn handle_action(action: &str, cx: &mut App) {
         match action {
-            MENU_CAPTURE => replace_windows(cx, crate::overlay::open_overlays),
-            MENU_RECORD => replace_windows(cx, crate::overlay::open_record_overlays),
-            MENU_SCROLL => replace_windows(cx, crate::overlay::open_scroll_overlays),
-            MENU_OCR => replace_windows(cx, crate::overlay::open_ocr_overlays),
-            MENU_FOLDER => {
-                let directory = crate::storage::screenshot_dir();
-                if let Err(error) = crate::storage::ensure_directory(&directory) {
-                    eprintln!("capin: failed to create the screenshot folder: {error}");
-                } else {
-                    cx.open_with_system(&directory);
-                }
-            }
+            MENU_START => replace_windows(cx, crate::overlay::open_overlays),
+            MENU_SETTINGS => replace_windows(cx, crate::settings::open_settings),
             MENU_RECOVER => {
                 if let Some(directory) = crate::record_session::pending_sessions().last() {
                     cx.open_with_system(directory);
                     crate::record_session::mark_recovered(directory);
+                    refresh_menu();
                 }
             }
-            MENU_SETTINGS => replace_windows(cx, crate::settings::open_settings),
             MENU_RELEASE_PINS => {
                 crate::pin::release_click_through(cx);
             }

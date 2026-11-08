@@ -9,6 +9,13 @@ pub struct WindowStyle {
     pub no_activate: bool,
     /// Exclude the window from screen capture where the OS supports it.
     pub exclude_from_capture: bool,
+    /// Remove the native title bar and its traffic lights. Used by the
+    /// full-screen capture overlay, which draws its own chrome.
+    pub borderless: bool,
+    /// Paint an opaque native surface. The capture overlay covers the whole
+    /// screen with a frozen frame, so a transparent AppKit layer only invites
+    /// compositor artifacts.
+    pub opaque: bool,
 }
 
 impl WindowStyle {
@@ -17,6 +24,8 @@ impl WindowStyle {
         skip_taskbar: false,
         no_activate: false,
         exclude_from_capture: false,
+        borderless: false,
+        opaque: false,
     };
 
     pub const OVERLAY: Self = Self {
@@ -24,6 +33,8 @@ impl WindowStyle {
         skip_taskbar: true,
         no_activate: false,
         exclude_from_capture: true,
+        borderless: true,
+        opaque: true,
     };
 
     pub const PIN: Self = Self {
@@ -31,6 +42,8 @@ impl WindowStyle {
         skip_taskbar: true,
         no_activate: true,
         exclude_from_capture: true,
+        borderless: false,
+        opaque: false,
     };
 
     pub const CAPTURE_BAR: Self = Self {
@@ -38,5 +51,7 @@ impl WindowStyle {
         skip_taskbar: true,
         no_activate: true,
         exclude_from_capture: true,
+        borderless: false,
+        opaque: false,
     };
 }
