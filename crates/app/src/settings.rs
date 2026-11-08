@@ -42,7 +42,7 @@ mod layout {
     pub const TITLEBAR_HEIGHT: f32 = 48.0;
     pub const CAPTION_BUTTON_WIDTH: f32 = 46.0;
     pub const CAPTION_BUTTON_HEIGHT: f32 = 32.0;
-    pub const SIDEBAR_WIDTH: f32 = 280.0;
+    pub const SIDEBAR_WIDTH: f32 = 240.0;
     pub const SIDEBAR_PAD: f32 = 12.0;
     pub const SIDEBAR_DIVIDER: bool = false;
     pub const NAV_ITEM_HEIGHT: f32 = 36.0;
@@ -51,10 +51,13 @@ mod layout {
     pub const NAV_GAP: f32 = 10.0;
     pub const NAV_ICON: f32 = 16.0;
     pub const NAV_FONT: f32 = 14.0;
+    pub const CONTENT_MAX_WIDTH: f32 = 720.0;
     pub const CONTENT_PAD_X: f32 = 32.0;
     pub const CONTENT_PAD_TOP: f32 = 20.0;
     pub const CONTENT_PAD_BOTTOM: f32 = 32.0;
     pub const CONTENT_GAP: f32 = 24.0;
+    pub const GROUP_GAP: f32 = 28.0;
+    pub const GROUP_HEADER_GAP: f32 = 8.0;
     pub const PAGE_TITLE: f32 = 28.0;
     pub const SECTION_TITLE: f32 = 14.0;
     pub const BODY: f32 = 14.0;
@@ -64,7 +67,7 @@ mod layout {
     pub const ROW_PAD_Y: f32 = 14.0;
     pub const BUTTON_HEIGHT: f32 = 32.0;
     pub const BUTTON_RADIUS: f32 = 4.0;
-    pub const CONTROL_TEXT: f32 = 13.0;
+    pub const CONTROL_TEXT: f32 = 14.0;
 }
 
 #[cfg(target_os = "macos")]
@@ -76,7 +79,7 @@ mod layout {
     pub const TITLEBAR_HEIGHT: f32 = 52.0;
     pub const CAPTION_BUTTON_WIDTH: f32 = 0.0;
     pub const CAPTION_BUTTON_HEIGHT: f32 = 0.0;
-    pub const SIDEBAR_WIDTH: f32 = 216.0;
+    pub const SIDEBAR_WIDTH: f32 = 200.0;
     pub const SIDEBAR_PAD: f32 = 10.0;
     pub const SIDEBAR_DIVIDER: bool = true;
     pub const NAV_ITEM_HEIGHT: f32 = 28.0;
@@ -85,10 +88,13 @@ mod layout {
     pub const NAV_GAP: f32 = 8.0;
     pub const NAV_ICON: f32 = 15.0;
     pub const NAV_FONT: f32 = 13.0;
+    pub const CONTENT_MAX_WIDTH: f32 = 680.0;
     pub const CONTENT_PAD_X: f32 = 28.0;
     pub const CONTENT_PAD_TOP: f32 = 16.0;
     pub const CONTENT_PAD_BOTTOM: f32 = 24.0;
     pub const CONTENT_GAP: f32 = 20.0;
+    pub const GROUP_GAP: f32 = 22.0;
+    pub const GROUP_HEADER_GAP: f32 = 6.0;
     pub const PAGE_TITLE: f32 = 22.0;
     pub const SECTION_TITLE: f32 = 13.0;
     pub const BODY: f32 = 13.0;
@@ -98,7 +104,7 @@ mod layout {
     pub const ROW_PAD_Y: f32 = 12.0;
     pub const BUTTON_HEIGHT: f32 = 28.0;
     pub const BUTTON_RADIUS: f32 = 6.0;
-    pub const CONTROL_TEXT: f32 = 12.0;
+    pub const CONTROL_TEXT: f32 = 13.0;
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -110,7 +116,7 @@ mod layout {
     pub const TITLEBAR_HEIGHT: f32 = 0.0;
     pub const CAPTION_BUTTON_WIDTH: f32 = 0.0;
     pub const CAPTION_BUTTON_HEIGHT: f32 = 0.0;
-    pub const SIDEBAR_WIDTH: f32 = 216.0;
+    pub const SIDEBAR_WIDTH: f32 = 200.0;
     pub const SIDEBAR_PAD: f32 = 10.0;
     pub const SIDEBAR_DIVIDER: bool = true;
     pub const NAV_ITEM_HEIGHT: f32 = 28.0;
@@ -119,10 +125,13 @@ mod layout {
     pub const NAV_GAP: f32 = 8.0;
     pub const NAV_ICON: f32 = 15.0;
     pub const NAV_FONT: f32 = 13.0;
+    pub const CONTENT_MAX_WIDTH: f32 = 680.0;
     pub const CONTENT_PAD_X: f32 = 28.0;
     pub const CONTENT_PAD_TOP: f32 = 16.0;
     pub const CONTENT_PAD_BOTTOM: f32 = 24.0;
     pub const CONTENT_GAP: f32 = 20.0;
+    pub const GROUP_GAP: f32 = 22.0;
+    pub const GROUP_HEADER_GAP: f32 = 6.0;
     pub const PAGE_TITLE: f32 = 22.0;
     pub const SECTION_TITLE: f32 = 13.0;
     pub const BODY: f32 = 13.0;
@@ -132,7 +141,7 @@ mod layout {
     pub const ROW_PAD_Y: f32 = 12.0;
     pub const BUTTON_HEIGHT: f32 = 28.0;
     pub const BUTTON_RADIUS: f32 = 6.0;
-    pub const CONTROL_TEXT: f32 = 12.0;
+    pub const CONTROL_TEXT: f32 = 13.0;
 }
 
 fn custom_titlebar() -> bool {
@@ -305,6 +314,16 @@ impl SaveTarget {
 }
 
 #[derive(Clone, Copy)]
+struct ToggleRow {
+    id: &'static str,
+    title_key: &'static str,
+    description_key: &'static str,
+    value: bool,
+    set: fn(&mut AppSettings, bool),
+    refresh_pin: bool,
+}
+
+#[derive(Clone, Copy)]
 struct Theme {
     text: Rgba,
     muted: Rgba,
@@ -316,9 +335,12 @@ struct Theme {
     hover: Rgba,
     selected: Rgba,
     control: Rgba,
+    segment_track: Rgba,
+    segment_selected: Rgba,
     toggle_off: Rgba,
     knob: Rgba,
     close_hover: Rgba,
+    hairline: f32,
 }
 
 struct Palette {
@@ -328,6 +350,8 @@ struct Palette {
     control: Rgba,
     hover: Rgba,
     selected: Rgba,
+    segment_track: Rgba,
+    segment_selected: Rgba,
     toggle_off: Rgba,
     page: Option<Rgba>,
 }
@@ -343,10 +367,10 @@ impl Theme {
         } else {
             FALLBACK_ACCENT_LIGHT
         });
-        Self::build(dark, accent_hex)
+        Self::build(dark, accent_hex, window.scale_factor())
     }
 
-    fn build(dark: bool, accent_hex: u32) -> Self {
+    fn build(dark: bool, accent_hex: u32, scale_factor: f32) -> Self {
         let palette = native_palette(dark);
         Self {
             text: palette.text,
@@ -359,9 +383,12 @@ impl Theme {
             hover: palette.hover,
             selected: palette.selected,
             control: palette.control,
+            segment_track: palette.segment_track,
+            segment_selected: palette.segment_selected,
             toggle_off: palette.toggle_off,
             knob: rgb(0xFFFFFF),
             close_hover: rgb(0xC42B1C),
+            hairline: 1.0 / scale_factor.max(1.0),
         }
     }
 }
@@ -376,6 +403,8 @@ fn native_palette(dark: bool) -> Palette {
             control: rgb(0x383838),
             hover: rgba(0xFFFFFF10),
             selected: rgba(0xFFFFFF14),
+            segment_track: rgb(0x383838),
+            segment_selected: rgb(0x4D4D4D),
             toggle_off: rgba(0xFFFFFF1F),
             page: None,
         }
@@ -387,6 +416,8 @@ fn native_palette(dark: bool) -> Palette {
             control: rgb(0xFCFCFC),
             hover: rgba(0x00000008),
             selected: rgba(0x0000000A),
+            segment_track: rgb(0xF0F0F0),
+            segment_selected: rgb(0xFFFFFF),
             toggle_off: rgba(0x0000001A),
             page: None,
         }
@@ -403,6 +434,8 @@ fn native_palette(dark: bool) -> Palette {
             control: rgb(0x3A3A3C),
             hover: rgba(0xFFFFFF14),
             selected: rgba(0xFFFFFF1F),
+            segment_track: rgba(0xFFFFFF0F),
+            segment_selected: rgba(0xFFFFFF29),
             toggle_off: rgba(0xFFFFFF1F),
             // SysVitals settings tint: 0.72 dark / 0.82 light over the live
             // window blur. Higher than Mica so text keeps native contrast.
@@ -416,6 +449,8 @@ fn native_palette(dark: bool) -> Palette {
             control: rgb(0xFFFFFF),
             hover: rgba(0x0000000A),
             selected: rgba(0x0000000F),
+            segment_track: rgba(0x00000012),
+            segment_selected: rgb(0xFFFFFF),
             toggle_off: rgba(0x0000001A),
             page: Some(rgba(0xF2F2F2D1)),
         }
@@ -432,6 +467,8 @@ fn native_palette(dark: bool) -> Palette {
             control: rgb(0x3A3A3C),
             hover: rgba(0xFFFFFF14),
             selected: rgba(0xFFFFFF1F),
+            segment_track: rgba(0xFFFFFF0F),
+            segment_selected: rgba(0xFFFFFF29),
             toggle_off: rgba(0xFFFFFF4D),
             page: Some(rgb(0x1E1E1E)),
         }
@@ -443,6 +480,8 @@ fn native_palette(dark: bool) -> Palette {
             control: rgb(0xFFFFFF),
             hover: rgba(0x0000000A),
             selected: rgba(0x0000000F),
+            segment_track: rgba(0x00000012),
+            segment_selected: rgb(0xFFFFFF),
             toggle_off: rgba(0x00000026),
             page: Some(rgb(0xF2F2F2)),
         }
@@ -886,19 +925,27 @@ impl SettingsView {
                     .w_full()
                     .flex()
                     .flex_col()
+                    .items_center()
                     .px(px(layout::CONTENT_PAD_X))
                     .pt(px(layout::CONTENT_PAD_TOP))
                     .pb(px(layout::CONTENT_PAD_BOTTOM))
-                    .gap(px(layout::CONTENT_GAP))
                     .id("settings-content")
                     .overflow_y_scroll()
-                    .child(self.section_header(theme))
-                    .child(match self.section {
-                        SettingsSection::General => self.general(theme, cx),
-                        SettingsSection::Capture => self.capture_settings(theme, cx),
-                        SettingsSection::Recording => self.recording(theme, cx),
-                        SettingsSection::Shortcuts => self.shortcuts(theme, cx),
-                    }),
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(layout::CONTENT_MAX_WIDTH))
+                            .flex()
+                            .flex_col()
+                            .gap(px(layout::CONTENT_GAP))
+                            .child(self.section_header(theme))
+                            .child(match self.section {
+                                SettingsSection::General => self.general(theme, cx),
+                                SettingsSection::Capture => self.capture_settings(theme, cx),
+                                SettingsSection::Recording => self.recording(theme, cx),
+                                SettingsSection::Shortcuts => self.shortcuts(theme, cx),
+                            }),
+                    ),
             )
     }
 
@@ -924,11 +971,11 @@ impl SettingsView {
 
     fn general(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
-        let version = row_shell(theme)
+        let version = row_shell()
             .id("settings-version-link")
             .hover(move |style| style.bg(theme.hover))
             .on_click(cx.listener(|this, _, _, cx| this.open_project(cx)))
-            .child(label_block(
+            .child(row_label(
                 theme,
                 t(language, "settings.version"),
                 t(language, "settings.version_desc"),
@@ -936,6 +983,7 @@ impl SettingsView {
             .child(
                 div()
                     .flex()
+                    .flex_shrink_0()
                     .flex_col()
                     .items_end()
                     .gap(px(2.0))
@@ -960,20 +1008,19 @@ impl SettingsView {
                 div().child(version),
             ],
         );
+        let page = div()
+            .flex()
+            .flex_col()
+            .gap(px(layout::GROUP_GAP))
+            .child(content);
         #[cfg(target_os = "macos")]
-        {
-            content
-                .child(group_header(
-                    theme,
-                    t(language, "settings.group.permissions"),
-                    t(language, "settings.group.permissions_desc"),
-                ))
-                .child(self.permissions_card(theme, cx))
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            content
-        }
+        let page = page.child(group(
+            theme,
+            t(language, "settings.group.permissions"),
+            t(language, "settings.group.permissions_desc"),
+            self.permissions_card(theme, cx),
+        ));
+        page
     }
 
     #[cfg(target_os = "macos")]
@@ -1021,11 +1068,12 @@ impl SettingsView {
                 "settings.permission_missing"
             },
         );
-        row_shell(theme)
-            .child(label_block(theme, title, description))
+        row_shell()
+            .child(row_label(theme, title, description))
             .child(
                 div()
                     .flex()
+                    .flex_shrink_0()
                     .flex_row()
                     .items_center()
                     .gap(px(10.0))
@@ -1075,8 +1123,8 @@ impl SettingsView {
             ));
         }
 
-        row_shell(theme)
-            .child(label_block(
+        row_shell()
+            .child(row_label(
                 theme,
                 t(language, "settings.language"),
                 t(language, "settings.language_desc"),
@@ -1087,9 +1135,11 @@ impl SettingsView {
     fn auto_start_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let language = self.settings.language;
         let value = self.settings.auto_start;
+        let hover = theme.hover;
 
-        row_shell(theme)
+        row_shell()
             .id("settings-auto-start")
+            .hover(move |style| style.bg(hover))
             .on_click(cx.listener(|this, _, _, cx| {
                 let language = this.settings.language;
                 let desired = !this.settings.auto_start;
@@ -1133,7 +1183,7 @@ impl SettingsView {
                 }
                 cx.notify();
             }))
-            .child(label_block(
+            .child(row_label(
                 theme,
                 t(language, "settings.auto_start"),
                 t(language, "settings.auto_start_desc"),
@@ -1143,182 +1193,177 @@ impl SettingsView {
 
     fn capture_settings(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
-        let mut window_rows = vec![div().child(self.window_composition_row(theme, cx))];
+        let mut window_rows = vec![self.toggle_row(
+            theme,
+            cx,
+            ToggleRow {
+                id: "settings-window-composition",
+                title_key: "settings.window_composition",
+                description_key: "settings.window_composition_desc",
+                value: self.settings.window_composition,
+                set: |settings, value| settings.window_composition = value,
+                refresh_pin: false,
+            },
+        )];
         if self.settings.window_composition {
-            window_rows.push(div().child(self.window_background_row(theme, cx)));
-            window_rows.push(div().child(self.window_padding_row(theme, cx)));
-            window_rows.push(div().child(self.window_shadow_row(theme, cx)));
+            window_rows.push(self.window_background_row(theme, cx));
+            window_rows.push(self.window_padding_row(theme, cx));
+            window_rows.push(self.toggle_row(
+                theme,
+                cx,
+                ToggleRow {
+                    id: "settings-window-shadow",
+                    title_key: "settings.window_shadow",
+                    description_key: "settings.window_shadow_desc",
+                    value: self.settings.window_shadow,
+                    set: |settings, value| settings.window_shadow = value,
+                    refresh_pin: false,
+                },
+            ));
             if self.settings.window_background == WindowBackground::Wallpaper {
-                window_rows.push(div().child(self.window_wallpaper_row(theme, cx)));
+                window_rows.push(self.window_wallpaper_row(theme, cx));
             }
         }
 
         div()
             .flex()
             .flex_col()
-            .gap(px(14.0))
-            .child(group_header(
+            .gap(px(layout::GROUP_GAP))
+            .child(group(
                 theme,
                 t(language, "settings.group.selection"),
                 t(language, "settings.group.selection_desc"),
+                card(
+                    theme,
+                    vec![
+                        self.toggle_row(
+                            theme,
+                            cx,
+                            ToggleRow {
+                                id: "settings-copy-to-clipboard",
+                                title_key: "settings.copy_clipboard",
+                                description_key: "settings.copy_clipboard_desc",
+                                value: self.settings.copy_to_clipboard,
+                                set: |settings, value| settings.copy_to_clipboard = value,
+                                refresh_pin: false,
+                            },
+                        ),
+                        self.toggle_row(
+                            theme,
+                            cx,
+                            ToggleRow {
+                                id: "settings-capture-cursor",
+                                title_key: "settings.capture_cursor",
+                                description_key: "settings.capture_cursor_desc",
+                                value: self.settings.capture_cursor,
+                                set: |settings, value| settings.capture_cursor = value,
+                                refresh_pin: false,
+                            },
+                        ),
+                        info_row(
+                            theme,
+                            t(language, "settings.capture_mode"),
+                            t(language, "settings.capture_mode_desc"),
+                            t(language, "settings.capture_mode_value"),
+                            Some(icons::CAPTURE),
+                        ),
+                        self.save_location_row(SaveTarget::Screenshots, theme, cx),
+                        self.filename_template_row(theme, cx),
+                    ],
+                ),
             ))
-            .child(card(
-                theme,
-                vec![
-                    div().child(self.copy_to_clipboard_row(theme, cx)),
-                    div().child(self.capture_cursor_row(theme, cx)),
-                    info_row(
-                        theme,
-                        t(language, "settings.capture_mode"),
-                        t(language, "settings.capture_mode_desc"),
-                        t(language, "settings.capture_mode_value"),
-                        Some(icons::CAPTURE),
-                    ),
-                    div().child(self.save_location_row(SaveTarget::Screenshots, theme, cx)),
-                    div().child(self.filename_template_row(theme, cx)),
-                ],
-            ))
-            .child(group_header(
+            .child(group(
                 theme,
                 t(language, "settings.group.annotation"),
                 t(language, "settings.group.annotation_desc"),
+                card(
+                    theme,
+                    vec![self.toggle_row(
+                        theme,
+                        cx,
+                        ToggleRow {
+                            id: "settings-annotation-uniform-color",
+                            title_key: "settings.annotation_uniform_color",
+                            description_key: "settings.annotation_uniform_color_desc",
+                            value: self.settings.annotation_uniform_color,
+                            set: |settings, value| settings.annotation_uniform_color = value,
+                            refresh_pin: false,
+                        },
+                    )],
+                ),
             ))
-            .child(card(
-                theme,
-                vec![div().child(self.annotation_uniform_color_row(theme, cx))],
-            ))
-            .child(group_header(
+            .child(group(
                 theme,
                 t(language, "settings.group.window"),
                 t(language, "settings.group.window_desc"),
+                card(theme, window_rows),
             ))
-            .child(card(theme, window_rows))
-            .child(group_header(
+            .child(group(
                 theme,
                 t(language, "settings.group.pin"),
                 t(language, "settings.group.pin_desc"),
-            ))
-            .child(card(
-                theme,
-                vec![
-                    div().child(self.pin_text_ocr_row(theme, cx)),
-                    div().child(self.pin_qr_row(theme, cx)),
-                ],
+                card(
+                    theme,
+                    vec![
+                        self.toggle_row(
+                            theme,
+                            cx,
+                            ToggleRow {
+                                id: "settings-pin-text-ocr",
+                                title_key: "settings.pin_text_ocr",
+                                description_key: "settings.pin_text_ocr_desc",
+                                value: self.settings.pin_text_ocr,
+                                set: |settings, value| settings.pin_text_ocr = value,
+                                refresh_pin: true,
+                            },
+                        ),
+                        self.toggle_row(
+                            theme,
+                            cx,
+                            ToggleRow {
+                                id: "settings-pin-qr",
+                                title_key: "settings.pin_qr",
+                                description_key: "settings.pin_qr_desc",
+                                value: self.settings.pin_qr,
+                                set: |settings, value| settings.pin_qr = value,
+                                refresh_pin: true,
+                            },
+                        ),
+                    ],
+                ),
             ))
     }
 
-    fn pin_text_ocr_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    /// One clickable on/off row. Hover covers the whole row because the whole
+    /// row is the hit target; `refresh_pin` reapplies pin recognition when a
+    /// recognition toggle changes.
+    fn toggle_row(&self, theme: &Theme, cx: &mut Context<Self>, row: ToggleRow) -> Div {
         let language = self.settings.language;
-        let value = self.settings.pin_text_ocr;
-
-        row_shell(theme)
-            .id("settings-pin-text-ocr")
-            .on_click(cx.listener(|this, _, _, cx| {
-                let value = !this.settings.pin_text_ocr;
-                this.settings.pin_text_ocr = value;
-                settings_state::update(|settings| settings.pin_text_ocr = value);
-                cx.defer(crate::pin::refresh_recognition);
-                this.status = None;
-                cx.notify();
-            }))
-            .child(label_block(
-                theme,
-                t(language, "settings.pin_text_ocr"),
-                t(language, "settings.pin_text_ocr_desc"),
-            ))
-            .child(toggle(theme, value))
+        let hover = theme.hover;
+        div().child(
+            row_shell()
+                .id(row.id)
+                .hover(move |style| style.bg(hover))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let value = !row.value;
+                    (row.set)(&mut this.settings, value);
+                    settings_state::update(|settings| (row.set)(settings, value));
+                    if row.refresh_pin {
+                        cx.defer(crate::pin::refresh_recognition);
+                    }
+                    this.status = None;
+                    cx.notify();
+                }))
+                .child(row_label(
+                    theme,
+                    t(language, row.title_key),
+                    t(language, row.description_key),
+                ))
+                .child(toggle(theme, row.value)),
+        )
     }
 
-    fn pin_qr_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let language = self.settings.language;
-        let value = self.settings.pin_qr;
-
-        row_shell(theme)
-            .id("settings-pin-qr")
-            .on_click(cx.listener(|this, _, _, cx| {
-                let value = !this.settings.pin_qr;
-                this.settings.pin_qr = value;
-                settings_state::update(|settings| settings.pin_qr = value);
-                cx.defer(crate::pin::refresh_recognition);
-                this.status = None;
-                cx.notify();
-            }))
-            .child(label_block(
-                theme,
-                t(language, "settings.pin_qr"),
-                t(language, "settings.pin_qr_desc"),
-            ))
-            .child(toggle(theme, value))
-    }
-
-    fn annotation_uniform_color_row(
-        &self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let language = self.settings.language;
-        let value = self.settings.annotation_uniform_color;
-
-        row_shell(theme)
-            .id("settings-annotation-uniform-color")
-            .on_click(cx.listener(|this, _, _, cx| {
-                let value = !this.settings.annotation_uniform_color;
-                this.settings.annotation_uniform_color = value;
-                settings_state::update(|settings| settings.annotation_uniform_color = value);
-                this.status = None;
-                cx.notify();
-            }))
-            .child(label_block(
-                theme,
-                t(language, "settings.annotation_uniform_color"),
-                t(language, "settings.annotation_uniform_color_desc"),
-            ))
-            .child(toggle(theme, value))
-    }
-
-    fn capture_cursor_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let language = self.settings.language;
-        let value = self.settings.capture_cursor;
-
-        row_shell(theme)
-            .id("settings-capture-cursor")
-            .on_click(cx.listener(|this, _, _, cx| {
-                let value = !this.settings.capture_cursor;
-                this.settings.capture_cursor = value;
-                settings_state::update(|settings| settings.capture_cursor = value);
-                this.status = None;
-                cx.notify();
-            }))
-            .child(label_block(
-                theme,
-                t(language, "settings.capture_cursor"),
-                t(language, "settings.capture_cursor_desc"),
-            ))
-            .child(toggle(theme, value))
-    }
-
-    fn window_composition_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let language = self.settings.language;
-        let value = self.settings.window_composition;
-
-        row_shell(theme)
-            .id("settings-window-composition")
-            .on_click(cx.listener(|this, _, _, cx| {
-                let value = !this.settings.window_composition;
-                this.settings.window_composition = value;
-                settings_state::update(|settings| settings.window_composition = value);
-                this.status = None;
-                cx.notify();
-            }))
-            .child(label_block(
-                theme,
-                t(language, "settings.window_composition"),
-                t(language, "settings.window_composition_desc"),
-            ))
-            .child(toggle(theme, value))
-    }
-
-    fn window_background_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn window_background_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
         let mut control = segmented(theme);
         for background in WindowBackground::ALL {
@@ -1346,8 +1391,6 @@ impl SettingsView {
             .gap(px(10.0))
             .px(px(layout::ROW_PAD_X))
             .py(px(layout::ROW_PAD_Y))
-            .border_b_1()
-            .border_color(theme.border)
             .child(label_block(
                 theme,
                 t(language, "settings.window_background"),
@@ -1356,7 +1399,7 @@ impl SettingsView {
             .child(control)
     }
 
-    fn window_padding_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn window_padding_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
         let mut control = segmented(theme);
         for (padding, label) in [
@@ -1378,34 +1421,13 @@ impl SettingsView {
             );
         }
 
-        row_shell(theme)
-            .child(label_block(
+        row_shell()
+            .child(row_label(
                 theme,
                 t(language, "settings.window_padding"),
                 t(language, "settings.window_padding_desc"),
             ))
             .child(control)
-    }
-
-    fn window_shadow_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let language = self.settings.language;
-        let value = self.settings.window_shadow;
-
-        row_shell(theme)
-            .id("settings-window-shadow")
-            .on_click(cx.listener(|this, _, _, cx| {
-                let value = !this.settings.window_shadow;
-                this.settings.window_shadow = value;
-                settings_state::update(|settings| settings.window_shadow = value);
-                this.status = None;
-                cx.notify();
-            }))
-            .child(label_block(
-                theme,
-                t(language, "settings.window_shadow"),
-                t(language, "settings.window_shadow_desc"),
-            ))
-            .child(toggle(theme, value))
     }
 
     fn window_wallpaper_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
@@ -1437,8 +1459,6 @@ impl SettingsView {
             .gap(px(8.0))
             .px(px(layout::ROW_PAD_X))
             .py(px(layout::ROW_PAD_Y))
-            .border_b_1()
-            .border_color(theme.border)
             .child(label_block(
                 theme,
                 t(language, "settings.window_wallpaper"),
@@ -1447,6 +1467,7 @@ impl SettingsView {
             .child(
                 div()
                     .flex()
+                    .flex_shrink_0()
                     .flex_row()
                     .items_center()
                     .gap(px(6.0))
@@ -1459,7 +1480,7 @@ impl SettingsView {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis_start()
-                    .text_size(px(12.0))
+                    .text_size(px(layout::CAPTION))
                     .text_color(theme.muted)
                     .child(path),
             )
@@ -1535,8 +1556,6 @@ impl SettingsView {
             .gap(px(8.0))
             .px(px(layout::ROW_PAD_X))
             .py(px(layout::ROW_PAD_Y))
-            .border_b_1()
-            .border_color(theme.border)
             .child(
                 div()
                     .w_full()
@@ -1545,7 +1564,7 @@ impl SettingsView {
                     .items_center()
                     .justify_between()
                     .gap(px(24.0))
-                    .child(label_block(
+                    .child(row_label(
                         theme,
                         t(language, target.title_key()),
                         t(language, target.description_key()),
@@ -1553,6 +1572,7 @@ impl SettingsView {
                     .child(
                         div()
                             .flex()
+                            .flex_shrink_0()
                             .flex_row()
                             .items_center()
                             .gap(px(6.0))
@@ -1567,7 +1587,7 @@ impl SettingsView {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis_start()
-                    .text_size(px(12.0))
+                    .text_size(px(layout::CAPTION))
                     .text_color(theme.muted)
                     .child(directory),
             )
@@ -1632,6 +1652,7 @@ impl SettingsView {
             .relative()
             .w(px(220.0))
             .h(px(layout::BUTTON_HEIGHT))
+            .flex_shrink_0()
             .px(px(10.0))
             .rounded(px(layout::BUTTON_RADIUS))
             .bg(theme.control)
@@ -1660,8 +1681,6 @@ impl SettingsView {
             .gap(px(8.0))
             .px(px(layout::ROW_PAD_X))
             .py(px(layout::ROW_PAD_Y))
-            .border_b_1()
-            .border_color(theme.border)
             .child(
                 div()
                     .w_full()
@@ -1670,7 +1689,7 @@ impl SettingsView {
                     .items_center()
                     .justify_between()
                     .gap(px(24.0))
-                    .child(label_block(
+                    .child(row_label(
                         theme,
                         t(language, "settings.filename_template"),
                         t(language, "settings.filename_template_desc"),
@@ -1678,6 +1697,7 @@ impl SettingsView {
                     .child(
                         div()
                             .flex()
+                            .flex_shrink_0()
                             .flex_row()
                             .items_center()
                             .gap(px(6.0))
@@ -1980,47 +2000,44 @@ impl SettingsView {
         cx.notify();
     }
 
-    fn copy_to_clipboard_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let language = self.settings.language;
-        let value = self.settings.copy_to_clipboard;
-
-        row_shell(theme)
-            .id("settings-copy-to-clipboard")
-            .on_click(cx.listener(|this, _, _, cx| {
-                let value = !this.settings.copy_to_clipboard;
-                this.settings.copy_to_clipboard = value;
-                settings_state::update(|settings| settings.copy_to_clipboard = value);
-                cx.notify();
-            }))
-            .child(label_block(
-                theme,
-                t(language, "settings.copy_clipboard"),
-                t(language, "settings.copy_clipboard_desc"),
-            ))
-            .child(toggle(theme, value))
-    }
-
     fn recording(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
         div()
             .flex()
             .flex_col()
-            .gap(px(12.0))
-            .child(
-                div()
-                    .text_size(px(layout::CAPTION))
-                    .text_color(theme.muted)
-                    .child(t(language, "settings.recording_note")),
-            )
+            .gap(px(layout::GROUP_HEADER_GAP))
+            .child(note(theme, t(language, "settings.recording_note")))
             .child(card(
                 theme,
                 vec![
                     self.recording_format_row(theme, cx),
                     self.recording_frame_rate_row(theme, cx),
                     self.recording_quality_row(theme, cx),
-                    div().child(self.recording_segments_row(theme, cx)),
-                    div().child(self.recording_cursor_row(theme, cx)),
-                    div().child(self.save_location_row(SaveTarget::Recordings, theme, cx)),
+                    self.toggle_row(
+                        theme,
+                        cx,
+                        ToggleRow {
+                            id: "settings-record-segments",
+                            title_key: "settings.record_segments",
+                            description_key: "settings.record_segments_desc",
+                            value: self.settings.record_segments,
+                            set: |settings, value| settings.record_segments = value,
+                            refresh_pin: false,
+                        },
+                    ),
+                    self.toggle_row(
+                        theme,
+                        cx,
+                        ToggleRow {
+                            id: "settings-record-cursor",
+                            title_key: "settings.record_cursor",
+                            description_key: "settings.record_cursor_desc",
+                            value: self.settings.record_cursor,
+                            set: |settings, value| settings.record_cursor = value,
+                            refresh_pin: false,
+                        },
+                    ),
+                    self.save_location_row(SaveTarget::Recordings, theme, cx),
                 ],
             ))
     }
@@ -2051,8 +2068,8 @@ impl SettingsView {
             ));
         }
 
-        row_shell(theme)
-            .child(label_block(
+        row_shell()
+            .child(row_label(
                 theme,
                 t(language, "settings.format"),
                 t(language, "settings.format_desc"),
@@ -2089,8 +2106,8 @@ impl SettingsView {
             control = control.child(button);
         }
 
-        row_shell(theme)
-            .child(label_block(
+        row_shell()
+            .child(row_label(
                 theme,
                 t(language, "settings.frame_rate"),
                 t(language, "settings.frame_rate_desc"),
@@ -2122,8 +2139,8 @@ impl SettingsView {
             );
         }
 
-        row_shell(theme)
-            .child(label_block(
+        row_shell()
+            .child(row_label(
                 theme,
                 t(language, "settings.quality"),
                 t(language, "settings.quality_desc"),
@@ -2131,134 +2148,88 @@ impl SettingsView {
             .child(control)
     }
 
-    fn recording_segments_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let language = self.settings.language;
-        let value = self.settings.record_segments;
-
-        row_shell(theme)
-            .id("settings-record-segments")
-            .on_click(cx.listener(|this, _, _, cx| {
-                let value = !this.settings.record_segments;
-                this.settings.record_segments = value;
-                settings_state::update(|settings| settings.record_segments = value);
-                this.status = None;
-                cx.notify();
-            }))
-            .child(label_block(
-                theme,
-                t(language, "settings.record_segments"),
-                t(language, "settings.record_segments_desc"),
-            ))
-            .child(toggle(theme, value))
-    }
-
-    fn recording_cursor_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let language = self.settings.language;
-        let value = self.settings.record_cursor;
-
-        row_shell(theme)
-            .id("settings-record-cursor")
-            .on_click(cx.listener(|this, _, _, cx| {
-                let value = !this.settings.record_cursor;
-                this.settings.record_cursor = value;
-                settings_state::update(|settings| settings.record_cursor = value);
-                this.status = None;
-                cx.notify();
-            }))
-            .child(label_block(
-                theme,
-                t(language, "settings.record_cursor"),
-                t(language, "settings.record_cursor_desc"),
-            ))
-            .child(toggle(theme, value))
-    }
-
     fn shortcuts(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
         div()
             .flex()
             .flex_col()
-            .gap(px(12.0))
-            .child(card(
-                theme,
-                vec![
-                    div().child(self.shortcut_row(ShortcutSlot::Capture, theme, cx)),
-                    div().child(self.shortcut_row(ShortcutSlot::Pin, theme, cx)),
-                ],
-            ))
+            .gap(px(layout::GROUP_GAP))
             .child(
                 div()
-                    .text_size(px(layout::CAPTION))
-                    .text_color(theme.muted)
-                    .child(t(language, "shortcuts.editor_note")),
+                    .flex()
+                    .flex_col()
+                    .gap(px(layout::GROUP_HEADER_GAP))
+                    .child(card(
+                        theme,
+                        vec![
+                            self.shortcut_row(ShortcutSlot::Capture, theme, cx),
+                            self.shortcut_row(ShortcutSlot::Pin, theme, cx),
+                        ],
+                    ))
+                    .child(note(theme, t(language, "shortcuts.editor_note"))),
             )
-            .child(group_header(
+            .child(group(
                 theme,
                 t(language, "settings.group.capture_keys"),
                 t(language, "settings.group.capture_keys_desc"),
-            ))
-            .child(card(
-                theme,
-                vec![
-                    info_row(
-                        theme,
-                        t(language, "shortcuts.capture_region"),
-                        t(language, "shortcuts.capture_region_desc"),
-                        t(language, "shortcuts.value.drag"),
-                        None,
-                    ),
-                    info_row(
-                        theme,
-                        t(language, "shortcuts.window_capture"),
-                        t(language, "shortcuts.window_capture_desc"),
-                        t(language, "shortcuts.value.auto"),
-                        None,
-                    ),
-                    info_row(
-                        theme,
-                        t(language, "shortcuts.adjust_target"),
-                        t(language, "shortcuts.adjust_target_desc"),
-                        t(language, "shortcuts.value.wheel"),
-                        None,
-                    ),
-                    info_row(
-                        theme,
-                        t(language, "shortcuts.toggle_ratio"),
-                        t(language, "shortcuts.toggle_ratio_desc"),
-                        "R",
-                        None,
-                    ),
-                    info_row(
-                        theme,
-                        t(language, "shortcuts.toggle_color_format"),
-                        t(language, "shortcuts.toggle_color_format_desc"),
-                        "Shift",
-                        None,
-                    ),
-                    info_row(
-                        theme,
-                        t(language, "shortcuts.copy_color"),
-                        t(language, "shortcuts.copy_color_desc"),
-                        "C",
-                        None,
-                    ),
-                    info_row(
-                        theme,
-                        t(language, "shortcuts.cancel"),
-                        t(language, "shortcuts.cancel_desc"),
-                        "Esc",
-                        None,
-                    ),
-                ],
+                card(
+                    theme,
+                    vec![
+                        info_row(
+                            theme,
+                            t(language, "shortcuts.capture_region"),
+                            t(language, "shortcuts.capture_region_desc"),
+                            t(language, "shortcuts.value.drag"),
+                            None,
+                        ),
+                        info_row(
+                            theme,
+                            t(language, "shortcuts.window_capture"),
+                            t(language, "shortcuts.window_capture_desc"),
+                            t(language, "shortcuts.value.auto"),
+                            None,
+                        ),
+                        info_row(
+                            theme,
+                            t(language, "shortcuts.adjust_target"),
+                            t(language, "shortcuts.adjust_target_desc"),
+                            t(language, "shortcuts.value.wheel"),
+                            None,
+                        ),
+                        info_row(
+                            theme,
+                            t(language, "shortcuts.toggle_ratio"),
+                            t(language, "shortcuts.toggle_ratio_desc"),
+                            "R",
+                            None,
+                        ),
+                        info_row(
+                            theme,
+                            t(language, "shortcuts.toggle_color_format"),
+                            t(language, "shortcuts.toggle_color_format_desc"),
+                            "Shift",
+                            None,
+                        ),
+                        info_row(
+                            theme,
+                            t(language, "shortcuts.copy_color"),
+                            t(language, "shortcuts.copy_color_desc"),
+                            "C",
+                            None,
+                        ),
+                        info_row(
+                            theme,
+                            t(language, "shortcuts.cancel"),
+                            t(language, "shortcuts.cancel_desc"),
+                            "Esc",
+                            None,
+                        ),
+                    ],
+                ),
             ))
     }
 
-    fn shortcut_row(
-        &self,
-        slot: ShortcutSlot,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn shortcut_row(&self, slot: ShortcutSlot, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
         let recording = self.recording_shortcut == Some(slot);
         let display = if recording {
@@ -2271,34 +2242,39 @@ impl SettingsView {
         let control = theme.control;
         let border = theme.border;
         let text = theme.text;
+        let hover = theme.hover;
 
-        row_shell(theme)
-            .id(slot.id())
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.recording_shortcut = Some(slot);
-                this.status = None;
-                window.focus(&this.focus_handle, cx);
-                cx.notify();
-            }))
-            .child(label_block(
-                theme,
-                t(language, slot.title_key()),
-                t(language, slot.description_key()),
-            ))
-            .child(
-                div()
-                    .h(px(layout::BUTTON_HEIGHT))
-                    .px(px(12.0))
-                    .rounded(px(layout::BUTTON_RADIUS))
-                    .flex()
-                    .items_center()
-                    .bg(if recording { selected } else { control })
-                    .border_1()
-                    .border_color(if recording { accent } else { border })
-                    .text_size(px(layout::CONTROL_TEXT))
-                    .text_color(if recording { accent } else { text })
-                    .child(display),
-            )
+        div().child(
+            row_shell()
+                .id(slot.id())
+                .hover(move |style| style.bg(hover))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.recording_shortcut = Some(slot);
+                    this.status = None;
+                    window.focus(&this.focus_handle, cx);
+                    cx.notify();
+                }))
+                .child(row_label(
+                    theme,
+                    t(language, slot.title_key()),
+                    t(language, slot.description_key()),
+                ))
+                .child(
+                    div()
+                        .h(px(layout::BUTTON_HEIGHT))
+                        .px(px(12.0))
+                        .rounded(px(layout::BUTTON_RADIUS))
+                        .flex()
+                        .flex_shrink_0()
+                        .items_center()
+                        .bg(if recording { selected } else { control })
+                        .border_1()
+                        .border_color(if recording { accent } else { border })
+                        .text_size(px(layout::CONTROL_TEXT))
+                        .text_color(if recording { accent } else { text })
+                        .child(display),
+                ),
+        )
     }
 
     fn handle_shortcut_key(
@@ -2532,6 +2508,7 @@ impl Render for SettingsView {
                     .absolute()
                     .bottom(px(16.0))
                     .right(px(16.0))
+                    .max_w(px(480.0))
                     .px(px(12.0))
                     .py(px(8.0))
                     .rounded(px(layout::BUTTON_RADIUS))
@@ -2650,6 +2627,13 @@ fn window_control_button(
 }
 
 fn card(theme: &Theme, rows: Vec<Div>) -> Div {
+    let mut children: Vec<AnyElement> = Vec::with_capacity(rows.len() * 2);
+    for (index, row) in rows.into_iter().enumerate() {
+        if index > 0 {
+            children.push(card_divider(theme).into_any_element());
+        }
+        children.push(row.into_any_element());
+    }
     div()
         .w_full()
         .flex()
@@ -2659,7 +2643,17 @@ fn card(theme: &Theme, rows: Vec<Div>) -> Div {
         .border_1()
         .border_color(theme.card_border)
         .overflow_hidden()
-        .children(rows)
+        .children(children)
+}
+
+/// Grouped-list separator between rows. The hairline is one physical pixel;
+/// it starts at the row text inset like native settings lists, and the last
+/// row in a card has no trailing divider.
+fn card_divider(theme: &Theme) -> Div {
+    div()
+        .w_full()
+        .pl(px(layout::ROW_PAD_X))
+        .child(div().w_full().h(px(theme.hairline)).bg(theme.border))
 }
 
 fn group_header(theme: &Theme, title: &str, description: &str) -> Div {
@@ -2682,7 +2676,24 @@ fn group_header(theme: &Theme, title: &str, description: &str) -> Div {
         )
 }
 
-fn row_shell(theme: &Theme) -> Div {
+/// A group header and its card at the tight native label gap.
+fn group(theme: &Theme, title: &str, description: &str, body: Div) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(layout::GROUP_HEADER_GAP))
+        .child(group_header(theme, title, description))
+        .child(body)
+}
+
+fn note(theme: &Theme, text: &str) -> Div {
+    div()
+        .text_size(px(layout::CAPTION))
+        .text_color(theme.muted)
+        .child(text.to_owned())
+}
+
+fn row_shell() -> Div {
     div()
         .w_full()
         .flex()
@@ -2692,10 +2703,15 @@ fn row_shell(theme: &Theme) -> Div {
         .gap(px(24.0))
         .px(px(layout::ROW_PAD_X))
         .py(px(layout::ROW_PAD_Y))
-        .border_b_1()
-        .border_color(theme.border)
 }
 
+/// Label block for a horizontal settings row. It takes the remaining width so
+/// long descriptions wrap instead of squeezing the control.
+fn row_label(theme: &Theme, title: &str, subtitle: &str) -> Div {
+    label_block(theme, title, subtitle).flex_1().min_w(px(0.0))
+}
+
+/// Label block for stacked layouts that manage their own width.
 fn label_block(theme: &Theme, title: &str, subtitle: &str) -> Div {
     div()
         .flex()
@@ -2722,19 +2738,24 @@ fn info_row(
     value: &str,
     icon: Option<&'static [u8]>,
 ) -> Div {
-    let mut value_side = div().flex().flex_row().items_center().gap(px(6.0));
+    let mut value_side = div()
+        .flex()
+        .flex_shrink_0()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0));
     if let Some(icon_data) = icon {
         value_side = value_side.child(icons::icon(icon_data, 15.0, theme.muted));
     }
     value_side = value_side.child(
         div()
-            .text_size(px(layout::CAPTION))
+            .text_size(px(layout::CONTROL_TEXT))
             .text_color(theme.muted)
             .child(value.to_owned()),
     );
 
-    row_shell(theme)
-        .child(label_block(theme, title, subtitle))
+    row_shell()
+        .child(row_label(theme, title, subtitle))
         .child(value_side)
 }
 
@@ -2748,6 +2769,7 @@ fn toggle(theme: &Theme, value: bool) -> Div {
     div()
         .w(px(36.0))
         .h(px(20.0))
+        .flex_shrink_0()
         .rounded(px(10.0))
         .border_1()
         .border_color(rgba(0x00000000))
@@ -2795,6 +2817,7 @@ fn action_button(theme: &Theme, label: String) -> Div {
         .h(px(layout::BUTTON_HEIGHT))
         .px(px(12.0))
         .rounded(px(layout::BUTTON_RADIUS))
+        .flex_shrink_0()
         .bg(theme.control)
         .border_1()
         .border_color(theme.border)
@@ -2810,10 +2833,11 @@ fn segmented(theme: &Theme) -> Div {
     div()
         .flex()
         .flex_row()
+        .flex_shrink_0()
         .gap(px(2.0))
         .p(px(2.0))
         .rounded(px(layout::BUTTON_RADIUS))
-        .bg(theme.control)
+        .bg(theme.segment_track)
         .border_1()
         .border_color(theme.border)
 }
@@ -2827,6 +2851,6 @@ fn segment(theme: &Theme, label: &str, selected: bool) -> Div {
         .items_center()
         .text_size(px(layout::CONTROL_TEXT))
         .text_color(if selected { theme.text } else { theme.muted })
-        .when(selected, |button| button.bg(theme.card))
+        .when(selected, |button| button.bg(theme.segment_selected))
         .child(label.to_owned())
 }
