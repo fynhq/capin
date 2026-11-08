@@ -28,6 +28,7 @@ thread_local! {
     static PINS: RefCell<HashMap<u64, PinState>> = RefCell::new(HashMap::new());
     static PIN_MENU: RefCell<Option<AnyWindowHandle>> = const { RefCell::new(None) };
     static MANIFEST_REVISION: Cell<u64> = const { Cell::new(0) };
+    static LAST_PIN_TRIGGER: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -213,7 +214,7 @@ pub fn pin_last(cx: &mut App) {
             let rgba = image.to_rgba8();
             let (width, height) = rgba.dimensions();
             if let Ok(frame) = RgbaFrame::from_pixels(width, height, rgba.into_raw()) {
-                open_image_pin(frame, cx);
+                pin_image(frame, cx);
                 return;
             }
         }
@@ -246,10 +247,24 @@ pub fn pin_last(cx: &mut App) {
     }
 
     if let Some(frame) = LAST_CAPTURE.with(|slot| slot.borrow().clone()) {
-        open_image_pin(frame, cx);
+        pin_image(frame, cx);
     } else {
         eprintln!("capin: no clipboard content or recent capture to pin");
     }
+}
+
+/// Pins an image, or cycles the recent-pin history when the same image is
+/// triggered again without a new clipboard source.
+fn pin_image(frame: RgbaFrame, cx: &mut App) {
+    let hash = crate::pin_history::hash_frame(&frame);
+    let repeated = LAST_PIN_TRIGGER.with(|slot| slot.get() == Some(hash));
+    if repeated && let Some(history_frame) = crate::pin_history::cycle(hash) {
+        remember(&history_frame);
+        open_pin_content(PinContent::from_frame(history_frame), cx);
+        LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
+        return;
+    }
+    open_image_pin(frame, cx);
 }
 
 pub fn open_frame(frame: RgbaFrame, cx: &mut App) {
@@ -257,7 +272,9 @@ pub fn open_frame(frame: RgbaFrame, cx: &mut App) {
 }
 
 fn open_image_pin(frame: RgbaFrame, cx: &mut App) {
+    crate::pin_history::record(&frame);
     remember(&frame);
+    LAST_PIN_TRIGGER.with(|slot| slot.set(Some(crate::pin_history::hash_frame(&frame))));
     open_pin_content(PinContent::from_frame(frame), cx);
 }
 
@@ -499,6 +516,7 @@ pub fn replace_image(id: u64, frame: &RgbaFrame, cx: &mut App) -> bool {
             };
         }
     });
+    crate::pin_history::record(frame);
     save_manifest();
     true
 }

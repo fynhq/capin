@@ -6,6 +6,7 @@ mod image_util;
 mod ocr;
 mod overlay;
 mod pin;
+mod pin_history;
 mod record;
 mod scroll;
 mod settings;
