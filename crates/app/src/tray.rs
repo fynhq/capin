@@ -182,7 +182,7 @@ mod imp {
                     .await;
 
                 ticks = ticks.wrapping_add(1);
-                if ticks % 20 == 0 {
+                if ticks.is_multiple_of(20) {
                     refresh_icon_for_theme();
                 }
 

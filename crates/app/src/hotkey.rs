@@ -170,10 +170,10 @@ mod imp {
             };
             let previous = REGISTERED.with(|registered| registered.borrow().clone());
             let previous_capture = CAPTURE_KEY
-                .with(|slot| slot.borrow().clone())
+                .with(|slot| *slot.borrow())
                 .unwrap_or_else(default_capture);
             let previous_pin = PIN_KEY
-                .with(|slot| slot.borrow().clone())
+                .with(|slot| *slot.borrow())
                 .unwrap_or_else(default_pin);
             if let Err(error) = manager.unregister_all(&previous) {
                 log_warn!("hotkey", "failed to unregister previous shortcuts: {error}");
