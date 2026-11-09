@@ -60,11 +60,11 @@ pub(super) fn accessibility_trusted() -> bool {
 }
 
 pub(super) fn screen_capture_trusted() -> bool {
-    core_graphics::access::ScreenCaptureAccess::default().preflight()
+    core_graphics::access::ScreenCaptureAccess.preflight()
 }
 
 pub(super) fn request_screen_capture_permission() -> bool {
-    core_graphics::access::ScreenCaptureAccess::default().request()
+    core_graphics::access::ScreenCaptureAccess.request()
 }
 
 pub(super) fn set_accessory_activation_policy() {

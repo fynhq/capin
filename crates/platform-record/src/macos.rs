@@ -520,6 +520,7 @@ fn copy_bgra(buffer: &CVPixelBuffer) -> (Vec<u8>, usize, usize) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_loop(
     temp: &Path,
     final_output: &Path,

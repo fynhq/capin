@@ -49,7 +49,7 @@ jobs:
         # Lint the app binary; unit tests are compiled and run by the next step.
         run: |
           set -o pipefail
-          cargo clippy -p app --locked --message-format=json -- -D warnings -A dead_code 2>&1 | tee clippy.json
+          cargo clippy -p app --locked --message-format=json -- -D warnings 2>&1 | tee clippy.json
       - name: Report clippy diagnostics
         if: failure()
         shell: bash

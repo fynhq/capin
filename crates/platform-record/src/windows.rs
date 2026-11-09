@@ -281,9 +281,9 @@ impl GraphicsCaptureApiHandler for Recorder {
         if data.len() < row * height as usize {
             return Ok(());
         }
-        for y in 0..height as usize {
+        for (y, chunk) in frame_bytes.chunks_exact_mut(row).enumerate() {
             let source = (height as usize - 1 - y) * row;
-            frame_bytes[y * row..y * row + row].copy_from_slice(&data[source..source + row]);
+            chunk.copy_from_slice(&data[source..source + row]);
         }
 
         if self.flags.format == RecordFormat::WebP {
