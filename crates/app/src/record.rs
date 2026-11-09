@@ -7,7 +7,7 @@ use core_types::{PhysicalPoint, PhysicalRect, RecordFormat};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use platform_record::Recorder;
-use platform_window::{WindowStyle, apply as apply_window_style};
+use platform_window::{WindowStyle, apply as apply_window_style, system_accent_hex};
 
 use crate::chrome_theme::ChromeTheme;
 use crate::i18n::{Language, t};
@@ -47,6 +47,7 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
     };
 
     let bounds = bar_bounds(target);
+    let bar_overlaps = bar_overlaps_target(target, bounds);
     let display_id = target_monitor(target).map(|monitor| DisplayId::new(monitor.raw()));
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -77,7 +78,17 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
         let excluded: Vec<u64> = platform_window::native_window_id(&*window)
             .into_iter()
             .collect();
-        cx.new(|cx| RecordBar::new(output, config, excluded, format, exclusion_ok, cx))
+        cx.new(|cx| {
+            RecordBar::new(
+                output,
+                config,
+                excluded,
+                format,
+                exclusion_ok,
+                bar_overlaps,
+                cx,
+            )
+        })
     }) {
         Ok(_) => {}
         Err(error) => log_error!("record", "failed to open recording bar: {error}"),
@@ -99,6 +110,7 @@ struct RecordBar {
     paused: bool,
     stopping: bool,
     completed: bool,
+    blocked: bool,
     status: Option<String>,
     language: Language,
 }
@@ -110,13 +122,17 @@ impl RecordBar {
         excluded: Vec<u64>,
         format: RecordFormat,
         exclusion_ok: bool,
+        bar_overlaps: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         let settings = settings_state::get();
         let fps = config.frame_rate.as_u32();
         let language = settings.language;
+        let blocked = !exclusion_ok && bar_overlaps;
         let mut status = None;
-        if !exclusion_ok {
+        if blocked {
+            status = Some(t(language, "record.exclusion_blocked").to_owned());
+        } else if !exclusion_ok {
             status = Some(t(language, "record.exclusion_failed").to_owned());
         }
 
@@ -135,6 +151,7 @@ impl RecordBar {
             paused: false,
             stopping: false,
             completed: false,
+            blocked,
             status,
             language,
         };
@@ -147,6 +164,10 @@ impl RecordBar {
                     .update(cx, |this, cx| {
                         if this.completed {
                             return false;
+                        }
+                        if this.blocked {
+                            cx.notify();
+                            return true;
                         }
                         if this.recorder.is_none() && this.countdown_started.elapsed() < COUNTDOWN {
                             cx.notify();
@@ -274,11 +295,13 @@ impl RecordBar {
 
 impl Render for RecordBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = ChromeTheme::for_window(window, None);
+        let theme = ChromeTheme::for_window(window, system_accent_hex());
         let language = self.language;
         let elapsed = self.elapsed();
-        let counting_down = self.recorder.is_none() && !self.completed;
-        let timer = if counting_down {
+        let counting_down = !self.blocked && self.recorder.is_none() && !self.completed;
+        let timer = if self.blocked {
+            "--:--".to_owned()
+        } else if counting_down {
             format!("00:{:02}", self.countdown_remaining())
         } else {
             format!(
@@ -287,7 +310,9 @@ impl Render for RecordBar {
                 elapsed.as_secs() % 60
             )
         };
-        let state = if self.completed {
+        let state = if self.blocked {
+            t(language, "record.exclusion_blocked_state")
+        } else if self.completed {
             t(language, "record.done")
         } else if self.stopping {
             t(language, "record.saving")
@@ -315,18 +340,19 @@ impl Render for RecordBar {
         } else {
             t(language, "record.pause").to_owned()
         };
-        let pause = (self.recorder.is_some() && !self.stopping && !self.completed).then(|| {
-            crate::ui::bar_button(
-                "record-pause",
-                pause_label,
-                None,
-                crate::ui::BarButtonTone::Neutral,
-                &theme,
-                cx,
-                Self::toggle_pause,
-            )
-        });
-        let stop = (!self.stopping && !self.completed).then(|| {
+        let pause = (!self.blocked && self.recorder.is_some() && !self.stopping && !self.completed)
+            .then(|| {
+                crate::ui::bar_button(
+                    "record-pause",
+                    pause_label,
+                    None,
+                    crate::ui::BarButtonTone::Neutral,
+                    &theme,
+                    cx,
+                    Self::toggle_pause,
+                )
+            });
+        let stop = (!self.blocked && !self.stopping && !self.completed).then(|| {
             crate::ui::bar_button(
                 "record-stop",
                 t(language, "record.stop").to_owned(),
@@ -337,7 +363,7 @@ impl Render for RecordBar {
                 Self::stop,
             )
         });
-        let close = self.completed.then(|| {
+        let close = (self.completed || self.blocked).then(|| {
             crate::ui::bar_button(
                 "record-close",
                 t(language, "record.close").to_owned(),
@@ -349,7 +375,7 @@ impl Render for RecordBar {
             )
         });
         let recording = self.recorder.is_some() && !self.stopping && !self.completed;
-        let dot = if self.paused {
+        let dot = if self.paused || self.blocked {
             theme.muted
         } else if self.completed {
             theme.accent
@@ -458,6 +484,52 @@ fn target_monitor(target: CaptureTarget) -> Option<core_types::MonitorId> {
                 .or_else(|| monitor_for_rect(&monitors, window.bounds))
         }
     }
+}
+
+/// Whether the capture bar sits inside the recorded rectangle. If capture
+/// exclusion fails and this returns true, recording must not start: otherwise
+/// the bar itself would be encoded into the video.
+fn bar_overlaps_target(target: CaptureTarget, bar: Bounds<Pixels>) -> bool {
+    let Ok(monitors) = platform_backend().monitors() else {
+        return true;
+    };
+    let Some(monitor_id) = target_monitor(target) else {
+        return true;
+    };
+    let Some(monitor) = monitors.iter().find(|monitor| monitor.id == monitor_id) else {
+        return true;
+    };
+    let target_rect = match target {
+        CaptureTarget::Monitor(_) => monitor.bounds,
+        CaptureTarget::Region(region) => PhysicalRect::new(
+            monitor.bounds.origin.x + region.rect.origin.x,
+            monitor.bounds.origin.y + region.rect.origin.y,
+            region.rect.size.width,
+            region.rect.size.height,
+        ),
+        CaptureTarget::Window(id) => {
+            let Ok(windows) = platform_backend().windows() else {
+                return true;
+            };
+            let Some(window) = windows.into_iter().find(|window| window.id == id) else {
+                return true;
+            };
+            window.bounds
+        }
+    };
+    let scale = monitor.scale.get().max(0.1);
+    let bar_left = f32::from(bar.origin.x) * scale;
+    let bar_top = f32::from(bar.origin.y) * scale;
+    let bar_right = bar_left + f32::from(bar.size.width) * scale;
+    let bar_bottom = bar_top + f32::from(bar.size.height) * scale;
+    let target_left = target_rect.origin.x as f32;
+    let target_top = target_rect.origin.y as f32;
+    let target_right = target_left + target_rect.size.width as f32;
+    let target_bottom = target_top + target_rect.size.height as f32;
+    bar_right > target_left
+        && bar_left < target_right
+        && bar_bottom > target_top
+        && bar_top < target_bottom
 }
 
 fn monitor_for_rect(

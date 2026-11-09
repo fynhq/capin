@@ -7,7 +7,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use core_types::{PhysicalRect, PhysicalSize, RgbaFrame};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use platform_window::{WindowStyle, apply as apply_window_style, set_click_through};
+use platform_window::{
+    WindowStyle, apply as apply_window_style, set_click_through, system_accent_hex,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::i18n::{Language, t};
@@ -93,9 +95,10 @@ impl PinMenuAction {
 #[derive(Clone)]
 enum PinContent {
     Image {
-        frame: RgbaFrame,
+        frame: Option<Arc<RgbaFrame>>,
         image: Arc<RenderImage>,
         size: PhysicalSize,
+        hash: u64,
     },
     Text(String),
     File(PathBuf),
@@ -108,14 +111,50 @@ enum PinContent {
 
 impl PinContent {
     fn from_frame(frame: RgbaFrame) -> Self {
+        let hash = crate::capture_history::hash_frame(&frame);
+        Self::from_frame_with_hash(frame, hash)
+    }
+
+    fn from_frame_with_hash(frame: RgbaFrame, hash: u64) -> Self {
+        Self::from_frame_shared(Arc::new(frame), hash)
+    }
+
+    fn from_frame_shared(frame: Arc<RgbaFrame>, hash: u64) -> Self {
         let size = PhysicalSize::new(frame.width(), frame.height());
         let image = image_util::render_image(&frame);
-        Self::Image { frame, image, size }
+        Self::Image {
+            frame: Some(frame),
+            image,
+            size,
+            hash,
+        }
     }
 
     fn frame(&self) -> Option<&RgbaFrame> {
         match self {
-            Self::Image { frame, .. } => Some(frame),
+            Self::Image { frame, .. } => frame.as_deref(),
+            _ => None,
+        }
+    }
+
+    fn frame_arc(&self) -> Option<Arc<RgbaFrame>> {
+        match self {
+            Self::Image { frame, .. } => frame.as_ref().map(Arc::clone),
+            _ => None,
+        }
+    }
+
+    /// Drops the CPU copy after OCR has finished; the render image and the
+    /// persisted PNG remain available. Pin actions reload it on demand.
+    fn drop_frame(&mut self) {
+        if let Self::Image { frame, .. } = self {
+            *frame = None;
+        }
+    }
+
+    fn hash(&self) -> Option<u64> {
+        match self {
+            Self::Image { hash, .. } => Some(*hash),
             _ => None,
         }
     }
@@ -352,7 +391,7 @@ fn pin_image(frame: RgbaFrame, cx: &mut App) {
             return;
         }
     }
-    open_image_pin(frame, cx);
+    open_image_pin(frame, hash, cx);
 }
 
 /// Brings the pin holding `hash` to the front and flashes its outline.
@@ -371,26 +410,40 @@ fn flash_existing_pin(hash: u64, cx: &mut App) -> bool {
     true
 }
 
-pub fn open_frame(frame: RgbaFrame, cx: &mut App) {
-    open_image_pin(frame, cx);
+pub fn open_frame_with_hash(frame: RgbaFrame, hash: u64, cx: &mut App) {
+    LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
+    let content = PinContent::from_frame_with_hash(frame, hash);
+    let zoom = content.preferred_zoom();
+    let (width, height) = content.size(zoom);
+    let bounds = default_bounds(cx, width, height);
+    let _ = open_pin_content_at(content, bounds, zoom, true, cx);
 }
 
-/// Pins a capture at the screen rectangle it was taken from. Capture images
-/// are physical pixels, so `zoom` is the inverse monitor scale; that keeps the
-/// pin at the same apparent size instead of growing on high-DPI screens.
-pub fn open_frame_at(
+/// Pins a capture at a screen rectangle using a hash already computed by the
+/// caller. Capture images are physical pixels, so `zoom` is the inverse
+/// monitor scale; that keeps the pin at the same apparent size instead of
+/// growing on high-DPI screens. Reusing the hash avoids a second full-image
+/// pass.
+pub fn open_frame_at_with_hash(
     frame: RgbaFrame,
     bounds: Bounds<Pixels>,
     zoom: f32,
+    hash: u64,
     cx: &mut App,
 ) -> Option<u64> {
-    LAST_PIN_TRIGGER.with(|slot| slot.set(Some(crate::capture_history::hash_frame(&frame))));
-    open_pin_content_at(PinContent::from_frame(frame), bounds, zoom, cx)
+    LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
+    open_pin_content_at(
+        PinContent::from_frame_with_hash(frame, hash),
+        bounds,
+        zoom,
+        true,
+        cx,
+    )
 }
 
-fn open_image_pin(frame: RgbaFrame, cx: &mut App) {
-    LAST_PIN_TRIGGER.with(|slot| slot.set(Some(crate::capture_history::hash_frame(&frame))));
-    open_pin_content(PinContent::from_frame(frame), cx);
+fn open_image_pin(frame: RgbaFrame, hash: u64, cx: &mut App) {
+    LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
+    open_pin_content(PinContent::from_frame_with_hash(frame, hash), cx);
 }
 
 fn open_pin_content(content: PinContent, cx: &mut App) {
@@ -398,13 +451,16 @@ fn open_pin_content(content: PinContent, cx: &mut App) {
     let (width, height) = content.size(zoom);
     log_info!("pin", "opening pin {}x{}", width.round(), height.round());
     let bounds = default_bounds(cx, width, height);
-    let _ = open_pin_inner(content, None, bounds, zoom, 1.0, false, None, true, cx);
+    open_pin_inner(
+        content, None, bounds, zoom, 1.0, false, None, true, false, cx,
+    );
 }
 
 fn open_pin_content_at(
     content: PinContent,
     bounds: Bounds<Pixels>,
     zoom: f32,
+    record_history: bool,
     cx: &mut App,
 ) -> Option<u64> {
     let zoom = zoom.clamp(0.1, 4.0);
@@ -415,7 +471,18 @@ fn open_pin_content_at(
         f32::from(size.width).round(),
         f32::from(size.height).round()
     );
-    open_pin_inner(content, None, bounds, zoom, 1.0, false, None, true, cx)
+    open_pin_inner(
+        content,
+        None,
+        bounds,
+        zoom,
+        1.0,
+        false,
+        None,
+        true,
+        record_history,
+        cx,
+    )
 }
 
 fn default_bounds(cx: &App, width: f32, height: f32) -> Bounds<Pixels> {
@@ -439,12 +506,14 @@ fn open_pin_inner(
     click_through: bool,
     existing_image: Option<PathBuf>,
     persist: bool,
+    record_history: bool,
     cx: &mut App,
 ) -> Option<u64> {
     let id = id.unwrap_or_else(next_pin_id);
     let kind = content.kind();
-    let content_hash = content.frame().map(crate::capture_history::hash_frame);
+    let content_hash = content.hash();
     let had_existing_image = existing_image.is_some();
+    let initial_ocr_path = existing_image.clone();
     let image_path = if let Some(path) = existing_image {
         Some(path)
     } else if let Some(frame) = content.frame() {
@@ -476,9 +545,29 @@ fn open_pin_inner(
         if click_through {
             let _ = set_click_through(&*window, true);
         }
-        cx.new(|cx| PinView::new(id, content_for_view, zoom, opacity, click_through, cx))
+        let view = cx.new(|cx| {
+            PinView::new(
+                id,
+                content_for_view,
+                zoom,
+                opacity,
+                click_through,
+                initial_ocr_path,
+                cx,
+            )
+        });
+        view.update(cx, |view, cx| view.watch_close(window, cx));
+        view
     }) {
         Ok((window, entity)) => {
+            if record_history
+                && let (Some(hash), Some(path)) = (content_hash, image_path.as_deref())
+            {
+                // The pin file is already encoded; copy it into history
+                // instead of encoding the same frame again.
+                crate::capture_history::record_png_file(path, hash);
+            }
+            let view_for_release = entity.clone();
             let state = PinState {
                 kind,
                 entity,
@@ -493,6 +582,9 @@ fn open_pin_inner(
             PINS.with(|pins| {
                 pins.borrow_mut().insert(id, state);
             });
+            // OCR already holds its own Arc source; drop the pin's CPU frame
+            // now that the PNG path is recorded. Actions reload it lazily.
+            let _ = view_for_release.update(cx, |view, _| view.release_frame_if_persisted());
             if persist {
                 save_manifest();
             }
@@ -596,13 +688,15 @@ pub fn restore(cx: &mut App) {
             entry.click_through,
             existing_image,
             false,
+            false,
             cx,
         );
     }
     save_manifest();
 }
 
-pub fn replace_image(id: u64, frame: &RgbaFrame, cx: &mut App) -> bool {
+pub fn replace_image(id: u64, frame: RgbaFrame, cx: &mut App) -> bool {
+    let hash = crate::capture_history::hash_frame(&frame);
     let state = PINS.with(|pins| {
         let pins = pins.borrow();
         let state = pins.get(&id)?;
@@ -631,12 +725,12 @@ pub fn replace_image(id: u64, frame: &RgbaFrame, cx: &mut App) -> bool {
         }
         Some(path)
     } else {
-        save_pin_image(id, frame)
+        save_pin_image(id, &frame)
     };
     let width = frame.width() as f32 * zoom;
     let height = frame.height() as f32 * zoom;
     entity.update(cx, |view, cx| {
-        view.replace_image(frame.clone(), cx);
+        view.replace_image(Arc::new(frame), hash, cx);
     });
     let _ = window_handle.update(cx, |_, window, _| {
         window.resize(size(px(width), px(height)));
@@ -644,7 +738,7 @@ pub fn replace_image(id: u64, frame: &RgbaFrame, cx: &mut App) -> bool {
     PINS.with(|pins| {
         if let Some(state) = pins.borrow_mut().get_mut(&id) {
             state.kind = PinKind::Image;
-            state.content_hash = Some(crate::capture_history::hash_frame(frame));
+            state.content_hash = Some(hash);
             state.image_path = path;
             state.bounds = Bounds {
                 origin,
@@ -668,7 +762,7 @@ pub fn close_pin(id: u64) {
     save_manifest();
 }
 
-fn persist_rotated_image(id: u64, frame: &RgbaFrame, bounds: Bounds<Pixels>) -> bool {
+fn persist_rotated_image(id: u64, frame: &RgbaFrame, hash: u64, bounds: Bounds<Pixels>) -> bool {
     let path = PINS.with(|pins| {
         pins.borrow()
             .get(&id)
@@ -697,7 +791,7 @@ fn persist_rotated_image(id: u64, frame: &RgbaFrame, bounds: Bounds<Pixels>) -> 
     PINS.with(|pins| {
         if let Some(state) = pins.borrow_mut().get_mut(&id) {
             state.kind = PinKind::Image;
-            state.content_hash = Some(crate::capture_history::hash_frame(frame));
+            state.content_hash = Some(hash);
             state.image_path = saved;
             state.bounds = bounds;
         }
@@ -965,6 +1059,8 @@ struct PinTheme {
     menu: Rgba,
     menu_hover: Rgba,
     menu_border: Rgba,
+    accent: Rgba,
+    selection: Rgba,
 }
 
 impl PinTheme {
@@ -973,6 +1069,13 @@ impl PinTheme {
             window.appearance(),
             WindowAppearance::Dark | WindowAppearance::VibrantDark
         );
+        let accent_hex = system_accent_hex().unwrap_or(if cfg!(target_os = "macos") {
+            0x0A84FF
+        } else {
+            0x0067C0
+        });
+        let accent = rgb(accent_hex);
+        let selection = rgba(((accent_hex & 0x00FF_FFFF) << 8) | 0x66);
         if dark {
             Self {
                 card: rgba(0x1E1E1EF2),
@@ -983,6 +1086,8 @@ impl PinTheme {
                 menu: rgba(0x2B2B2BFA),
                 menu_hover: rgba(0xFFFFFF16),
                 menu_border: rgba(0xFFFFFF22),
+                accent,
+                selection,
             }
         } else {
             Self {
@@ -994,6 +1099,8 @@ impl PinTheme {
                 menu: rgba(0xF9F9F9FA),
                 menu_hover: rgba(0x00000010),
                 menu_border: rgba(0x0000001A),
+                accent,
+                selection,
             }
         }
     }
@@ -1007,7 +1114,12 @@ struct PinView {
     click_through: bool,
     notice: Option<String>,
     notice_serial: u64,
+    hud: Option<String>,
+    hud_serial: u64,
     ocr: Option<platform_ocr::OcrOutput>,
+    /// Restored pins start OCR from their saved PNG instead of keeping a
+    /// full-frame Arc queued for every restored window.
+    ocr_path: Option<PathBuf>,
     selection: Option<(usize, usize)>,
     selecting: bool,
     /// Window-local press position while a text click may still turn into a
@@ -1026,6 +1138,7 @@ impl PinView {
         zoom: f32,
         opacity: f32,
         click_through: bool,
+        ocr_path: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut view = Self {
@@ -1034,8 +1147,11 @@ impl PinView {
             zoom,
             opacity,
             click_through,
+            ocr_path,
             notice: None,
             notice_serial: 0,
+            hud: None,
+            hud_serial: 0,
             ocr: None,
             selection: None,
             selecting: false,
@@ -1092,35 +1208,84 @@ impl PinView {
         .detach();
     }
 
+    fn persisted_path(&self) -> Option<PathBuf> {
+        PINS.with(|pins| {
+            pins.borrow()
+                .get(&self.id)
+                .and_then(|state| state.image_path.clone())
+        })
+    }
+
+    /// Returns the CPU frame for an explicit user action (copy/save/edit/
+    /// rotate). After OCR the frame is dropped and reloaded from the pinned
+    /// PNG only when needed.
+    fn frame_for_action(&self) -> Option<Arc<RgbaFrame>> {
+        self.content.frame_arc().or_else(|| {
+            self.persisted_path()
+                .and_then(|path| load_pin_image(&path))
+                .map(Arc::new)
+        })
+    }
+
+    fn ocr_source(&mut self) -> Option<crate::ocr_queue::Source> {
+        if let Some(path) = self.ocr_path.take() {
+            return Some(crate::ocr_queue::Source::Path(path));
+        }
+        if let Some(frame) = self.content.frame_arc() {
+            Some(crate::ocr_queue::Source::Frame(frame))
+        } else {
+            self.persisted_path().map(crate::ocr_queue::Source::Path)
+        }
+    }
+
+    fn release_frame_if_persisted(&mut self) {
+        if self.persisted_path().is_some() {
+            self.content.drop_frame();
+        }
+    }
+
     fn start_ocr(&mut self, cx: &mut Context<Self>) {
-        let Some(frame) = self.content.frame().cloned() else {
-            self.ocr = None;
-            return;
-        };
         let settings = settings_state::get();
         if !settings.pin_text_ocr && !settings.pin_qr {
             self.ocr = None;
+            self.release_frame_if_persisted();
             return;
         }
+        let Some(source) = self.ocr_source() else {
+            self.ocr = None;
+            return;
+        };
         let options = platform_ocr::OcrOptions {
             text: settings.pin_text_ocr,
             qr: settings.pin_qr,
         };
         let generation = self.content_generation;
         cx.spawn(async move |this, cx| {
+            let current = this
+                .update(cx, |this, _| this.content_generation == generation)
+                .unwrap_or(false);
+            if !current {
+                return;
+            }
+            // Sources are either a shared frame or a saved PNG path; queued
+            // jobs therefore hold no duplicate pixel buffers, and the queue
+            // serializes the expensive decode/recognition work.
             let output = cx
                 .background_executor()
-                .spawn(async move { platform_ocr::recognize_with(frame, options) })
+                .spawn(async move { crate::ocr_queue::recognize(source, options) })
                 .await;
             this.update(cx, |this, cx| {
                 if this.content_generation == generation {
                     this.ocr = Some(output);
+                    this.release_frame_if_persisted();
                     cx.notify();
                 }
             })
             .ok();
         })
         .detach();
+        // The OCR task holds its own Arc source; actions reload from disk.
+        self.release_frame_if_persisted();
     }
 
     fn qr_code(&self) -> Option<&str> {
@@ -1378,6 +1543,9 @@ impl PinView {
         );
         update_meta(self.id, self.zoom, self.opacity);
         schedule_manifest_save(cx);
+        let language = settings_state::get().language;
+        let percent = (self.zoom * 100.0).round() as i32;
+        self.show_hud(format!("{} {percent}%", t(language, "pin.zoom_hud")), cx);
         cx.notify();
     }
 
@@ -1385,6 +1553,9 @@ impl PinView {
         self.opacity = opacity.clamp(0.2, 1.0);
         update_meta(self.id, self.zoom, self.opacity);
         schedule_manifest_save(cx);
+        let language = settings_state::get().language;
+        let percent = (self.opacity * 100.0).round() as i32;
+        self.show_hud(format!("{} {percent}%", t(language, "pin.opacity_hud")), cx);
         cx.notify();
     }
 
@@ -1408,8 +1579,21 @@ impl PinView {
         }
     }
 
-    fn replace_image(&mut self, frame: RgbaFrame, cx: &mut Context<Self>) {
-        let previous = std::mem::replace(&mut self.content, PinContent::from_frame(frame));
+    /// Releases the pin texture before a native window-close request removes
+    /// the renderer. App-driven close already calls `release_image` explicitly.
+    fn watch_close(&self, window: &Window, cx: &mut Context<Self>) {
+        let view = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |_, cx| {
+            let _ = view.update(cx, |this, cx| this.release_image(cx));
+            true
+        });
+    }
+
+    fn replace_image(&mut self, frame: Arc<RgbaFrame>, hash: u64, cx: &mut Context<Self>) {
+        let previous = std::mem::replace(
+            &mut self.content,
+            PinContent::from_frame_shared(frame, hash),
+        );
         if let PinContent::Image { image, .. } = previous {
             cx.drop_image(image, None);
         }
@@ -1432,6 +1616,28 @@ impl PinView {
             this.update(cx, |this, cx| {
                 if this.notice_serial == serial {
                     this.notice = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Short-lived numeric feedback for wheel gestures. Kept separate from
+    /// `notice` so a zoom tick does not hide a copy/save message.
+    fn show_hud(&mut self, message: String, cx: &mut Context<Self>) {
+        self.hud = Some(message);
+        self.hud_serial = self.hud_serial.wrapping_add(1);
+        let serial = self.hud_serial;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(900))
+                .await;
+            this.update(cx, |this, cx| {
+                if this.hud_serial == serial {
+                    this.hud = None;
                     cx.notify();
                 }
             })
@@ -1466,21 +1672,36 @@ impl PinView {
     }
 
     fn copy_image(&mut self, cx: &mut Context<Self>) {
-        let Some(frame) = self.content.frame() else {
+        // The persisted PNG is already encoded; copying its bytes avoids
+        // decoding the pin and re-encoding it just to reach the clipboard.
+        if let Some(path) = self.persisted_path()
+            && let Ok(bytes) = std::fs::read(path)
+        {
+            image_util::copy_png_bytes(&bytes, cx);
+            let language = settings_state::get().language;
+            self.show_notice(t(language, "pin.copied").to_owned(), cx);
+            return;
+        }
+        let Some(frame) = self.frame_for_action() else {
             return;
         };
-        if image_util::copy_png(frame, cx).is_ok() {
+        if image_util::copy_png(&frame, cx).is_ok() {
             let language = settings_state::get().language;
             self.show_notice(t(language, "pin.copied").to_owned(), cx);
         }
     }
 
     fn save_image(&mut self, cx: &mut Context<Self>) {
-        let Some(frame) = self.content.frame() else {
-            return;
-        };
         let language = settings_state::get().language;
-        match image_util::save_png(frame) {
+        let result = if let Some(path) = self.persisted_path() {
+            crate::storage::save_png_file(&path)
+        } else {
+            let Some(frame) = self.frame_for_action() else {
+                return;
+            };
+            image_util::save_png(&frame)
+        };
+        match result {
             Ok(path) => {
                 self.show_notice(
                     format!("{} {}", t(language, "pin.saved"), path.display()),
@@ -1494,8 +1715,16 @@ impl PinView {
     }
 
     fn open_editor(&mut self, cx: &mut Context<Self>) {
-        if let Some(frame) = self.content.frame() {
-            crate::editor::open_pin_editor(frame.clone(), self.id, cx);
+        let Some(frame) = self.frame_for_action() else {
+            return;
+        };
+        let bounds = PINS.with(|pins| pins.borrow().get(&self.id).map(|state| state.bounds));
+        let Some(bounds) = bounds else {
+            return;
+        };
+        if !crate::editor::open_pin_editor_overlay(self.id, frame, bounds, cx) {
+            let language = settings_state::get().language;
+            self.show_notice(t(language, "pin.edit_failed").to_owned(), cx);
         }
     }
 
@@ -1657,6 +1886,7 @@ impl Render for PinView {
         let theme = PinTheme::for_window(window);
         let language = settings_state::get().language;
         let notice = self.notice.clone();
+        let hud = self.hud.clone();
         let body = self.body(&theme, language).opacity(self.opacity);
         let zoom = self.zoom.max(0.1);
         let text_layers: Vec<Div> = self
@@ -1669,7 +1899,7 @@ impl Render for PinView {
                     .top(px(rect.origin.y as f32 * zoom))
                     .w(px(rect.size.width as f32 * zoom))
                     .h(px(rect.size.height as f32 * zoom))
-                    .bg(rgba(0x0A84FF66))
+                    .bg(theme.selection)
             })
             .collect();
         let flash = (self.flash_alpha > 0.001).then(|| {
@@ -1677,12 +1907,18 @@ impl Render for PinView {
                 .absolute()
                 .inset_0()
                 .border_4()
-                .border_color(rgb(0x0A84FF))
+                .border_color(theme.accent)
                 .opacity(self.flash_alpha)
         });
+        let cursor = match &self.content {
+            PinContent::Image { .. } => CursorStyle::OpenHand,
+            PinContent::Text(_) => CursorStyle::IBeam,
+            PinContent::File(_) | PinContent::Color { .. } => CursorStyle::PointingHand,
+        };
         let root = div()
             .size_full()
             .id("pin-window")
+            .cursor(cursor)
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 let key = event.keystroke.key.as_str();
@@ -1795,7 +2031,28 @@ impl Render for PinView {
             .children(text_layers)
             .children(flash);
 
-        root.children(notice.map(|notice| {
+        root.children(hud.map(|message| {
+            div()
+                .absolute()
+                .top(px(6.0))
+                .left(px(0.0))
+                .right(px(0.0))
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .px(px(8.0))
+                        .py(px(3.0))
+                        .rounded(px(5.0))
+                        .bg(theme.menu)
+                        .border_1()
+                        .border_color(theme.menu_border)
+                        .text_size(px(10.5))
+                        .text_color(theme.text)
+                        .child(message),
+                )
+        }))
+        .children(notice.map(|notice| {
             div()
                 .absolute()
                 .bottom(px(8.0))
@@ -2045,12 +2302,13 @@ fn perform_pin_action(id: u64, action: PinMenuAction, cx: &mut App) {
 fn rotate_pin(id: u64, entity: &Entity<PinView>, window_handle: AnyWindowHandle, cx: &mut App) {
     let (frame, zoom) = {
         let view = entity.read(cx);
-        (view.content.frame().cloned(), view.zoom)
+        (view.frame_for_action(), view.zoom)
     };
     let Some(frame) = frame else {
         return;
     };
     let rotated = frame.rotated_cw();
+    let hash = crate::capture_history::hash_frame(&rotated);
     let width = rotated.width() as f32 * zoom;
     let height = rotated.height() as f32 * zoom;
     let Ok(origin) = window_handle.update(cx, |_, window, _| window.bounds().origin) else {
@@ -2060,7 +2318,7 @@ fn rotate_pin(id: u64, entity: &Entity<PinView>, window_handle: AnyWindowHandle,
         origin,
         size: size(px(width), px(height)),
     };
-    if !persist_rotated_image(id, &rotated, bounds) {
+    if !persist_rotated_image(id, &rotated, hash, bounds) {
         entity.update(cx, |view, cx| {
             let language = settings_state::get().language;
             view.show_notice(t(language, "pin.rotate_failed").to_owned(), cx);
@@ -2070,7 +2328,9 @@ fn rotate_pin(id: u64, entity: &Entity<PinView>, window_handle: AnyWindowHandle,
     let _ = window_handle.update(cx, |_, window, _| {
         window.resize(size(px(width), px(height)))
     });
-    entity.update(cx, |view, cx| view.replace_image(rotated, cx));
+    entity.update(cx, |view, cx| {
+        view.replace_image(Arc::new(rotated), hash, cx)
+    });
 }
 
 fn enable_click_through(

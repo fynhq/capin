@@ -5,7 +5,7 @@ use core_stitch::{StitchConfig, StitchError, Stitcher};
 use core_types::{CaptureRegion, RgbaFrame};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use platform_window::{WindowStyle, apply as apply_window_style};
+use platform_window::{WindowStyle, apply as apply_window_style, system_accent_hex};
 
 use crate::chrome_theme::ChromeTheme;
 use crate::i18n::{Language, t};
@@ -57,10 +57,14 @@ pub fn open_session(region: CaptureRegion, first_frame: RgbaFrame, cx: &mut App)
     };
 
     match gpui_kit::open_window(options, cx, move |window, cx| {
-        if let Err(error) = apply_window_style(&*window, WindowStyle::CAPTURE_BAR) {
-            log_error!("scroll", "failed to style scroll bar: {error}");
-        }
-        cx.new(|cx| ScrollView::new(region, stitcher, cx))
+        let exclusion_ok = match apply_window_style(&*window, WindowStyle::CAPTURE_BAR) {
+            Ok(()) => true,
+            Err(error) => {
+                log_error!("scroll", "failed to style scroll bar: {error}");
+                false
+            }
+        };
+        cx.new(|cx| ScrollView::new(region, stitcher, exclusion_ok, cx))
     }) {
         Ok(_) => {}
         Err(error) => log_error!("scroll", "failed to open scroll bar: {error}"),
@@ -76,12 +80,21 @@ struct ScrollView {
 }
 
 impl ScrollView {
-    fn new(region: CaptureRegion, stitcher: Stitcher, _cx: &mut Context<Self>) -> Self {
+    fn new(
+        region: CaptureRegion,
+        stitcher: Stitcher,
+        exclusion_ok: bool,
+        _cx: &mut Context<Self>,
+    ) -> Self {
         let language = settings_state::get().language;
         Self {
             region,
             stitcher,
-            status: t(language, "scroll.ready").to_owned(),
+            status: if exclusion_ok {
+                t(language, "scroll.ready").to_owned()
+            } else {
+                t(language, "scroll.exclusion_failed").to_owned()
+            },
             language,
             auto: false,
         }
@@ -185,9 +198,12 @@ impl ScrollView {
         match self.stitcher.finish() {
             Ok(frame) => {
                 let handles = cx.windows();
+                let monitor = self.region.monitor;
                 cx.defer(move |cx| {
                     crate::windows::close_capture_auxiliary(cx, handles);
-                    crate::editor::open_editor(frame, cx);
+                    if !crate::editor::open_long_capture_inline(frame, monitor, cx) {
+                        log_error!("scroll", "failed to open the in-place long-capture editor");
+                    }
                 });
             }
             Err(error) => {
@@ -207,7 +223,7 @@ impl ScrollView {
 
 impl Render for ScrollView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = ChromeTheme::for_window(window, None);
+        let theme = ChromeTheme::for_window(window, system_accent_hex());
         let language = self.language;
         let title = t(language, "scroll.title").to_owned();
         let status = self.status.clone();

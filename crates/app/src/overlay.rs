@@ -445,7 +445,10 @@ struct Magnifier {
 struct OverlayView {
     session: SelectionSession,
     image: Arc<RenderImage>,
-    frame: Arc<RgbaFrame>,
+    /// The raw frame is only needed while the selection toolbar is active.
+    /// Once the inline editor owns the captured pixels this is cleared so a
+    /// 4K edit does not keep two full CPU copies alive.
+    frame: Option<Arc<RgbaFrame>>,
     scale: f32,
     window_size: Size<Pixels>,
     cursor: Option<PhysicalPoint>,
@@ -465,6 +468,7 @@ struct OverlayView {
     notice_serial: u64,
     element_cache: HashMap<WindowId, Vec<PhysicalRect>>,
     element_window: Option<WindowId>,
+    element_pending: Option<WindowId>,
     element_candidates: Vec<PhysicalRect>,
     element_level: usize,
     focus_handle: FocusHandle,
@@ -503,7 +507,7 @@ impl OverlayView {
         Self {
             session,
             image,
-            frame,
+            frame: Some(frame),
             scale,
             window_size,
             cursor: None,
@@ -523,6 +527,7 @@ impl OverlayView {
             notice_serial: 0,
             element_cache: HashMap::new(),
             element_window: None,
+            element_pending: None,
             element_candidates: Vec::new(),
             element_level: 0,
             focus_handle: cx.focus_handle(),
@@ -628,16 +633,18 @@ impl OverlayView {
             return None;
         }
         self.frame
+            .as_ref()?
             .pixel(local_x as u32, local_y as u32)
             .map(|[red, green, blue, _]| (red, green, blue))
     }
 
-    fn refresh_auto_target(&mut self, point: PhysicalPoint) {
+    fn refresh_auto_target(&mut self, point: PhysicalPoint, cx: &mut Context<Self>) {
         if self.session.is_dragging() || self.selected.is_some() {
             return;
         }
         let Some(window) = self.session.hovered_window().cloned() else {
             self.element_window = None;
+            self.element_pending = None;
             self.element_candidates.clear();
             self.element_level = 0;
             self.session.set_hovered_element(None);
@@ -650,21 +657,43 @@ impl OverlayView {
             return;
         }
         if self.element_window != Some(window.id) {
-            self.element_cache
-                .entry(window.id)
-                .or_insert_with(|| core_capture::ui_elements(window.id));
             self.element_window = Some(window.id);
             self.element_level = 0;
+            self.element_candidates.clear();
+            self.session.set_hovered_element(None);
+            if !self.element_cache.contains_key(&window.id) && self.element_pending.is_none() {
+                // UIA's FindAll walks the whole descendant tree. Running it
+                // on the UI thread stalled the first hover on complex windows
+                // (browsers, Explorer), so resolve the element list off-thread.
+                self.element_pending = Some(window.id);
+                let window_id = window.id;
+                cx.spawn(async move |this, cx| {
+                    let elements = cx
+                        .background_executor()
+                        .spawn(async move { core_capture::ui_elements(window_id) })
+                        .await;
+                    this.update(cx, |this, cx| {
+                        if this.element_pending != Some(window_id) {
+                            return;
+                        }
+                        this.element_pending = None;
+                        this.element_cache.insert(window_id, elements);
+                        if let Some(point) = this.cursor {
+                            this.refresh_auto_target(point, cx);
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
         }
+        let Some(cached) = self.element_cache.get(&window.id) else {
+            self.session.set_hovered_element(None);
+            return;
+        };
 
-        let candidates = core_capture::element_candidates(
-            self.element_cache
-                .get(&window.id)
-                .map(Vec::as_slice)
-                .unwrap_or_default(),
-            window.bounds,
-            point,
-        );
+        let candidates = core_capture::element_candidates(cached, window.bounds, point);
         if self.element_level > candidates.len() {
             self.element_level = candidates.len();
         }
@@ -718,9 +747,13 @@ impl OverlayView {
         {
             return;
         }
+        let Some(frame) = self.frame.as_ref() else {
+            self.clear_magnifier(window);
+            return;
+        };
         let monitor = self.session.monitor_bounds();
         let image = image_util::magnifier_image(
-            &self.frame,
+            frame,
             point.x - monitor.origin.x,
             point.y - monitor.origin.y,
             (MAGNIFIER_SOURCE as f32 * self.scale).round().max(1.0) as u32,
@@ -1157,6 +1190,8 @@ impl OverlayView {
 
     fn crop_selected_frame(&self, selected: &Selected) -> Result<RgbaFrame, String> {
         self.frame
+            .as_ref()
+            .ok_or_else(|| "the capture frame is no longer available".to_owned())?
             .cropped(selected.rect)
             .ok_or_else(|| "empty selection".to_owned())
     }
@@ -1170,7 +1205,7 @@ impl OverlayView {
         if matches!(selected.target, CaptureTarget::Window(_)) {
             Ok(frame)
         } else {
-            Ok(self.effects.apply(&frame, selected.scale))
+            Ok(self.effects.apply(frame, selected.scale))
         }
     }
 
@@ -1211,6 +1246,10 @@ impl OverlayView {
             size: size(px(image_width), px(image_height)),
         };
         let monitor_origin = self.session.monitor_bounds().origin;
+        let screen_origin = point(
+            px(monitor_origin.x as f32 / scale),
+            px(monitor_origin.y as f32 / scale),
+        );
         let inline_capture = InlineCapture {
             region,
             target: selected.target,
@@ -1222,6 +1261,10 @@ impl OverlayView {
         self.editing_rect = Some(editor_rect);
         self.selected = None;
         self.session.cancel();
+        // The editor receives the captured pixels; keeping the overlay frame
+        // alive would duplicate a full 4K image for the whole edit session.
+        self.frame = None;
+        let frame = Arc::new(frame);
 
         let handles = cx.windows();
         let current = window.window_handle();
@@ -1233,7 +1276,16 @@ impl OverlayView {
             let _ = current.update(cx, |_, window, cx| {
                 let editor = view.update(cx, |this, cx| {
                     let editor = cx.new(|cx| {
-                        EditorView::new_inline(frame, editor_rect, tool, inline_capture, cx)
+                        EditorView::new_inline(
+                            frame,
+                            editor_rect,
+                            screen_origin,
+                            tool,
+                            Some(inline_capture),
+                            None,
+                            false,
+                            cx,
+                        )
                     });
                     this.editor = Some(editor.clone());
                     this.editing_rect = Some(editor_rect);
@@ -1242,7 +1294,11 @@ impl OverlayView {
                 });
                 let focus = editor.read(cx).focus_handle.clone();
                 window.focus(&focus, cx);
-                editor.update(cx, |this, cx| this.observe_appearance(window, cx));
+                crate::editor::register_view(&editor, window);
+                editor.update(cx, |this, cx| {
+                    this.observe_appearance(window, cx);
+                    this.watch_close(window, cx);
+                });
             });
         });
     }
@@ -1256,10 +1312,11 @@ impl OverlayView {
                 return;
             }
         };
+        let hash = crate::capture_history::hash_frame(&output);
         match image_util::copy_png(&output, cx) {
-            Ok(()) => {
+            Ok(bytes) => {
                 log_info!("overlay", "selection copied to clipboard");
-                crate::capture_history::record(&output);
+                crate::capture_history::record_png_bytes(&bytes, hash);
                 self.close_overlays(cx);
             }
             Err(error) => self.set_notice(error.to_string(), cx),
@@ -1275,10 +1332,11 @@ impl OverlayView {
                 return;
             }
         };
+        let hash = crate::capture_history::hash_frame(&output);
         match image_util::save_png(&output) {
-            Ok(_) => {
+            Ok(path) => {
                 log_info!("overlay", "selection saved");
-                crate::capture_history::record(&output);
+                crate::capture_history::record_png_file(&path, hash);
                 self.close_overlays(cx);
             }
             Err(error) => self.set_notice(error.to_string(), cx),
@@ -1310,8 +1368,8 @@ impl OverlayView {
             size: size(px(width), px(height)),
         };
         log_info!("overlay", "selection pinned");
-        crate::capture_history::record(&output);
-        crate::pin::open_frame_at(output, bounds, 1.0 / scale, cx);
+        let hash = crate::capture_history::hash_frame(&output);
+        crate::pin::open_frame_at_with_hash(output, bounds, 1.0 / scale, hash, cx);
         self.close_overlays(cx);
     }
 
@@ -1357,9 +1415,10 @@ impl OverlayView {
         if let Some(magnifier) = self.magnifier.take() {
             cx.drop_image(magnifier.image, None);
         }
-        self.frame = Arc::new(frame);
+        self.frame = Some(Arc::new(frame));
         self.element_cache.clear();
         self.element_window = None;
+        self.element_pending = None;
         self.element_candidates.clear();
         self.element_level = 0;
         let monitor_bounds = self.session.monitor_bounds();
@@ -2803,7 +2862,7 @@ impl OverlayView {
                 } else {
                     this.session.pointer_moved(point);
                     if !this.session.has_drag() {
-                        this.refresh_auto_target(point);
+                        this.refresh_auto_target(point, cx);
                     }
                 }
                 cx.notify();
@@ -2817,7 +2876,7 @@ impl OverlayView {
                     ScrollDelta::Pixels(delta) => f32::from(delta.y),
                 };
                 if let Some(point) = this.cursor {
-                    this.refresh_auto_target(point);
+                    this.refresh_auto_target(point, cx);
                 }
                 this.adjust_auto_target(delta);
                 cx.notify();
@@ -2880,7 +2939,7 @@ impl OverlayView {
                         this.selected = None;
                     }
                     this.session.pointer_moved(point);
-                    this.refresh_auto_target(point);
+                    this.refresh_auto_target(point, cx);
                     this.session.pointer_pressed(point);
                     cx.notify();
                 }),
@@ -2922,6 +2981,7 @@ impl OverlayView {
                 }
                 this.cursor = None;
                 this.element_window = None;
+                this.element_pending = None;
                 this.element_candidates.clear();
                 this.element_level = 0;
                 this.session.pointer_left();

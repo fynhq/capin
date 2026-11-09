@@ -4,13 +4,14 @@ use std::sync::Arc;
 use core_annotate::{
     Annotation, AnnotationDocument, AnnotationStyle, NumberStyle, Shape, TextAlignment, rasterize,
 };
-use core_capture::CaptureTarget;
+use core_capture::{CaptureTarget, platform_backend};
 use core_types::{
-    CaptureRegion, PhysicalPoint, PhysicalRect, PhysicalSize, RgbaFrame, prefers_dark_foreground,
+    CaptureRegion, MonitorId, PhysicalPoint, PhysicalRect, PhysicalSize, RgbaFrame,
+    prefers_dark_foreground,
 };
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use platform_window::system_accent_hex;
+use platform_window::{WindowStyle, apply as apply_window_style, system_accent_hex};
 
 use crate::chrome_theme::ChromeTheme;
 use crate::effects::RegionEffects;
@@ -18,16 +19,11 @@ use crate::logging::{log_error, log_info};
 use crate::settings_state::AnnotationColorTool;
 use crate::{i18n::t, icons, image_util, settings_state};
 
-const TOOLBAR_HEIGHT: f32 = 48.0;
 const COMPACT_TOOLBAR_HEIGHT: f32 = 40.0;
 const COMPACT_TOOLBAR_WIDTH: f32 = 700.0;
 const OPTIONS_PANEL_HEIGHT: f32 = 46.0;
 const INFO_BAR_HEIGHT: f32 = 28.0;
 const INFO_BAR_WIDTH: f32 = 360.0;
-const PADDING: f32 = 16.0;
-const MAX_IMAGE_WIDTH: f32 = 1200.0;
-const MAX_IMAGE_HEIGHT: f32 = 800.0;
-const MIN_WINDOW_WIDTH: f32 = 1024.0;
 const TOOLBAR_SIZE: u32 = 30;
 const BADGE_SIZE: u32 = 32;
 
@@ -249,8 +245,58 @@ struct PolylineDraft {
     current: PhysicalPoint,
 }
 
+thread_local! {
+    /// Inline editors own full-frame textures but are not OverlayView
+    /// instances. Track their window handles so app-driven close paths can
+    /// release textures before the renderer is torn down.
+    static EDITOR_VIEWS: std::cell::RefCell<Vec<(WeakEntity<EditorView>, AnyWindowHandle)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn register_view(view: &Entity<EditorView>, window: &Window) {
+    let handle = window.window_handle();
+    EDITOR_VIEWS.with(|views| {
+        let mut views = views.borrow_mut();
+        views.retain(|(weak, _)| weak.upgrade().is_some());
+        views.push((view.downgrade(), handle));
+    });
+}
+
+/// Releases editor textures for windows that are about to be removed. This
+/// mirrors the overlay release path and closes the gap for standalone pin and
+/// long-capture editors.
+pub(crate) fn release_images_for_windows(
+    cx: &mut App,
+    handles: &[AnyWindowHandle],
+    keep: Option<AnyWindowHandle>,
+) {
+    let entries: Vec<(Entity<EditorView>, AnyWindowHandle)> = EDITOR_VIEWS.with(|views| {
+        views
+            .borrow()
+            .iter()
+            .filter_map(|(weak, handle)| Some((weak.upgrade()?, *handle)))
+            .collect()
+    });
+    for (view, handle) in entries {
+        if keep.is_some_and(|keep| keep.window_id() == handle.window_id()) {
+            continue;
+        }
+        if handles
+            .iter()
+            .any(|candidate| candidate.window_id() == handle.window_id())
+        {
+            view.update(cx, |editor, cx| editor.release_images(cx));
+        }
+    }
+    EDITOR_VIEWS.with(|views| {
+        views
+            .borrow_mut()
+            .retain(|(weak, _)| weak.upgrade().is_some());
+    });
+}
+
 struct EditorSnapshot {
-    frame: RgbaFrame,
+    frame: Arc<RgbaFrame>,
     image_size: PhysicalSize,
     document: AnnotationDocument,
 }
@@ -262,7 +308,14 @@ struct EditorSnapshot {
 #[derive(Clone, Copy)]
 struct InlineHost {
     image_rect: Bounds<Pixels>,
+    /// Logical origin of the surface that contains `image_rect`. Capture
+    /// overlays use the monitor origin; pin/long-capture editors use their
+    /// display origin, so the pin button can place output on the same screen.
+    screen_origin: Point<Pixels>,
     capture: Option<InlineCapture>,
+    /// Long captures fit the full image first and allow wheel zoom/pan;
+    /// screenshot and pin editors must keep the captured pixel rect exact.
+    zoomable: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -481,8 +534,9 @@ fn estimated_char_width(ch: char, font_size: f32) -> f32 {
 
 pub(crate) struct EditorView {
     image: Arc<RenderImage>,
-    blur_images: [Arc<RenderImage>; BLUR_RADII.len()],
-    frame: RgbaFrame,
+    blur_images: [Option<Arc<RenderImage>>; BLUR_RADII.len()],
+    images_released: bool,
+    frame: Arc<RgbaFrame>,
     pin_target: Option<u64>,
     document: AnnotationDocument,
     image_size: PhysicalSize,
@@ -531,10 +585,13 @@ pub(crate) struct EditorView {
 }
 
 impl EditorView {
-    fn new(frame: RgbaFrame, pin_target: Option<u64>, cx: &mut Context<Self>) -> Self {
+    fn new(frame: Arc<RgbaFrame>, pin_target: Option<u64>, cx: &mut Context<Self>) -> Self {
         let image_size = PhysicalSize::new(frame.width(), frame.height());
         let image = image_util::render_image(&frame);
-        let blur_images = BLUR_RADII.map(|radius| image_util::blurred_image(&frame, radius));
+        // Blur previews are built lazily: most captures never use the blur
+        // tool, and eagerly resizing four full frames cost startup CPU.
+        let blur_images: [Option<Arc<RenderImage>>; BLUR_RADII.len()] =
+            std::array::from_fn(|_| None);
         let accent_hex = system_accent_hex().unwrap_or(0x4C9AFF);
         let settings = settings_state::get();
         let active_color_tool = AnnotationColorTool::Rect;
@@ -552,8 +609,12 @@ impl EditorView {
         let ellipse_filled = settings.annotation_ellipse_filled;
         let spotlight_intensity = settings.annotation_spotlight_intensity;
         cx.on_release(|this, cx| {
+            if this.images_released {
+                return;
+            }
+            this.images_released = true;
             cx.drop_image(this.image.clone(), None);
-            for image in &this.blur_images {
+            for image in this.blur_images.iter().flatten() {
                 cx.drop_image(image.clone(), None);
             }
         })
@@ -561,6 +622,7 @@ impl EditorView {
         Self {
             image,
             blur_images,
+            images_released: false,
             frame,
             pin_target,
             document: AnnotationDocument::new(image_size),
@@ -632,18 +694,25 @@ impl EditorView {
             }));
     }
 
-    /// Builds an editor that paints directly inside the full-screen capture
-    /// overlay. The image stays at its screen position and the frozen desktop
-    /// remains visible around it, so the user never sees a second window.
+    /// Builds an editor that paints directly inside an existing overlay or a
+    /// dedicated inline editor surface. The image stays in place; screenshot
+    /// capture passes `capture: Some`, while pin and long-capture editing pass
+    /// `None` and only need the image rect plus its screen origin.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_inline(
-        frame: RgbaFrame,
+        frame: Arc<RgbaFrame>,
         image_rect: Bounds<Pixels>,
+        screen_origin: Point<Pixels>,
         initial_tool: Tool,
-        capture: InlineCapture,
+        capture: Option<InlineCapture>,
+        pin_target: Option<u64>,
+        zoomable: bool,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut view = Self::new(frame, None, cx);
-        view.effects = capture.effects;
+        let mut view = Self::new(frame, pin_target, cx);
+        if let Some(capture) = capture {
+            view.effects = capture.effects;
+        }
         view.tool = initial_tool;
         if let Some(color_tool) = initial_tool.color_tool() {
             view.active_color_tool = color_tool;
@@ -661,38 +730,34 @@ impl EditorView {
         }
         view.inline = Some(InlineHost {
             image_rect,
-            capture: Some(capture),
+            screen_origin,
+            capture,
+            zoomable,
         });
         view
     }
 
-    pub(crate) fn image_view_rect(&self, window: &Window) -> Bounds<Pixels> {
-        if let Some(inline) = &self.inline {
+    pub(crate) fn image_view_rect(&self, _window: &Window) -> Bounds<Pixels> {
+        let Some(inline) = &self.inline else {
+            return Bounds {
+                origin: point(px(0.0), px(0.0)),
+                size: size(px(0.0), px(0.0)),
+            };
+        };
+        if !inline.zoomable {
             return inline.image_rect;
         }
-        let viewport = window.viewport_size();
-        let available_width = (f32::from(viewport.width) - PADDING * 2.0).max(1.0);
-        let available_height =
-            (f32::from(viewport.height) - COMPACT_TOOLBAR_HEIGHT - PADDING * 2.0).max(1.0);
-        let image_width = self.image_size.width as f32;
-        let image_height = self.image_size.height as f32;
-        let fit_scale = (available_width / image_width)
-            .min(available_height / image_height)
-            .min(1.0);
-        let scale = fit_scale * self.view_zoom;
-        let display_width = image_width * scale;
-        let display_height = image_height * scale;
-        let min_x = PADDING + (available_width - display_width).min(0.0);
-        let max_x = PADDING + (available_width - display_width).max(0.0);
-        let min_y = PADDING + (available_height - display_height).min(0.0);
-        let max_y = PADDING + (available_height - display_height).max(0.0);
-        let x = (PADDING + (available_width - display_width) / 2.0 + f32::from(self.view_pan.x))
-            .clamp(min_x, max_x);
-        let y = (PADDING + (available_height - display_height) / 2.0 + f32::from(self.view_pan.y))
-            .clamp(min_y, max_y);
+        let base = inline.image_rect;
+        let width = f32::from(base.size.width) * self.view_zoom;
+        let height = f32::from(base.size.height) * self.view_zoom;
+        let center_x = f32::from(base.origin.x) + f32::from(base.size.width) / 2.0;
+        let center_y = f32::from(base.origin.y) + f32::from(base.size.height) / 2.0;
         Bounds {
-            origin: point(px(x), px(y)),
-            size: size(px(display_width), px(display_height)),
+            origin: point(
+                px(center_x - width / 2.0 + f32::from(self.view_pan.x)),
+                px(center_y - height / 2.0 + f32::from(self.view_pan.y)),
+            ),
+            size: size(px(width), px(height)),
         }
     }
 
@@ -896,7 +961,7 @@ impl EditorView {
 
     fn push_canvas_snapshot(&mut self) {
         self.canvas_undo.push(EditorSnapshot {
-            frame: self.frame.clone(),
+            frame: Arc::clone(&self.frame),
             image_size: self.image_size,
             document: self.document.clone(),
         });
@@ -912,23 +977,51 @@ impl EditorView {
     /// the previous set explicitly.
     fn refresh_frame_images(&mut self, cx: &mut Context<Self>) {
         let image = image_util::render_image(&self.frame);
-        let blur_images = BLUR_RADII.map(|radius| image_util::blurred_image(&self.frame, radius));
         let old_image = std::mem::replace(&mut self.image, image);
-        let old_blur_images = std::mem::replace(&mut self.blur_images, blur_images);
+        let old_blur_images =
+            std::mem::replace(&mut self.blur_images, std::array::from_fn(|_| None));
+        self.images_released = false;
         cx.drop_image(old_image, None);
-        for image in old_blur_images {
+        for image in old_blur_images.into_iter().flatten() {
             cx.drop_image(image, None);
         }
+    }
+
+    /// Returns the cached blurred preview for `radius`, creating it on first
+    /// use. The blur tool is rare, so the four previews no longer cost a
+    /// resize and blur over the full frame on every editor open.
+    fn blur_image(&mut self, radius: u32, _cx: &mut Context<Self>) -> Arc<RenderImage> {
+        let index = blur_image_index(radius);
+        if let Some(image) = &self.blur_images[index] {
+            return image.clone();
+        }
+        let image = image_util::blurred_image(&self.frame, radius);
+        self.blur_images[index] = Some(image.clone());
+        image
     }
 
     /// Releases the editor's atlas entries before the window is removed.
     /// `on_release` runs after the window has left `App::windows`, so dropping
     /// only there cannot reach the retained Windows renderer.
     pub(crate) fn release_images(&mut self, cx: &mut Context<Self>) {
+        if self.images_released {
+            return;
+        }
+        self.images_released = true;
         cx.drop_image(self.image.clone(), None);
-        for image in &self.blur_images {
+        for image in self.blur_images.iter().flatten() {
             cx.drop_image(image.clone(), None);
         }
+    }
+
+    /// Releases textures when the platform asks to close the window (Alt+F4,
+    /// native close button, app quit) before the window leaves `App::windows`.
+    pub(crate) fn watch_close(&self, window: &Window, cx: &mut Context<Self>) {
+        let view = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |_, cx| {
+            let _ = view.update(cx, |this, cx| this.release_images(cx));
+            true
+        });
     }
 
     fn restore_canvas_snapshot(&mut self, snapshot: EditorSnapshot, cx: &mut Context<Self>) {
@@ -951,7 +1044,7 @@ impl EditorView {
             return false;
         };
         self.canvas_redo.push(EditorSnapshot {
-            frame: self.frame.clone(),
+            frame: Arc::clone(&self.frame),
             image_size: self.image_size,
             document: self.document.clone(),
         });
@@ -964,7 +1057,7 @@ impl EditorView {
             return false;
         };
         self.canvas_undo.push(EditorSnapshot {
-            frame: self.frame.clone(),
+            frame: Arc::clone(&self.frame),
             image_size: self.image_size,
             document: self.document.clone(),
         });
@@ -973,7 +1066,7 @@ impl EditorView {
     }
 
     fn replace_canvas(&mut self, frame: RgbaFrame, cx: &mut Context<Self>) {
-        self.frame = frame;
+        self.frame = Arc::new(frame);
         self.image_size = PhysicalSize::new(self.frame.width(), self.frame.height());
         self.refresh_frame_images(cx);
         self.document = AnnotationDocument::new(self.image_size);
@@ -1063,7 +1156,7 @@ impl EditorView {
         if rect.size.width < 2 || rect.size.height < 2 {
             return;
         }
-        let Some(cropped) = self.frame.cropped(rect) else {
+        let Some(cropped) = self.frame.as_ref().cropped(rect) else {
             return;
         };
         self.push_canvas_snapshot();
@@ -1076,7 +1169,7 @@ impl EditorView {
             document.add(translated.shape, translated.style);
         }
         document.clear_history();
-        self.frame = cropped;
+        self.frame = Arc::new(cropped);
         self.image_size = new_size;
         self.refresh_frame_images(cx);
         self.document = document;
@@ -2321,20 +2414,22 @@ impl EditorView {
         };
 
         let pin_label = t(language, "editor.pin").to_owned();
-        let pin = div()
-            .id("editor-pin")
-            .tooltip(move |_, cx| tooltip_view(pin_label.clone(), cx))
-            .w(px(TOOLBAR_SIZE as f32))
-            .h(px(TOOLBAR_SIZE as f32))
-            .rounded(px(7.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .hover(move |style| style.bg(hover))
-            .active(|style| style.opacity(0.85))
-            .on_click(cx.listener(|this, _, _, cx| this.pin(cx)))
-            .child(icons::icon(icons::PIN, 18.0, text))
-            .into_any_element();
+        let pin = (self.pin_target.is_none()).then(|| {
+            div()
+                .id("editor-pin")
+                .tooltip(move |_, cx| tooltip_view(pin_label.clone(), cx))
+                .w(px(TOOLBAR_SIZE as f32))
+                .h(px(TOOLBAR_SIZE as f32))
+                .rounded(px(7.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .hover(move |style| style.bg(hover))
+                .active(|style| style.opacity(0.85))
+                .on_click(cx.listener(|this, _, _, cx| this.pin(cx)))
+                .child(icons::icon(icons::PIN, 18.0, text))
+                .into_any_element()
+        });
 
         let copy_label = t(language, "editor.copy").to_owned();
         let copy = div()
@@ -2368,9 +2463,9 @@ impl EditorView {
             .child(icons::icon(icons::SAVE, 18.0, text))
             .into_any_element();
 
-        let inline = self.inline.is_some();
+        let capture_actions_enabled = self.inline.and_then(|inline| inline.capture).is_some();
         let mut capture_actions: Vec<AnyElement> = Vec::new();
-        if inline {
+        if capture_actions_enabled {
             let scroll_label = t(language, "menu.scroll_capture").to_owned();
             capture_actions.push(
                 div()
@@ -2407,28 +2502,31 @@ impl EditorView {
             );
         }
 
+        let capture_page = capture_actions_enabled;
         let close_label = t(language, "editor.close").to_owned();
         let more_label = t(language, "editor.more").to_owned();
-        let more = div()
-            .id("editor-more")
-            .tooltip(move |_, cx| tooltip_view(more_label.clone(), cx))
-            .w(px(TOOLBAR_SIZE as f32))
-            .h(px(TOOLBAR_SIZE as f32))
-            .rounded(px(7.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .when(self.more_open, |button| button.bg(chrome.selected))
-            .hover(move |style| style.bg(hover))
-            .active(|style| style.opacity(0.85))
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.more_open = !this.more_open;
-                this.effects_open = false;
-                this.hints_visible = false;
-                cx.notify();
-            }))
-            .child(icons::icon(icons::MORE, 18.0, muted))
-            .into_any_element();
+        let more = (!capture_page).then(|| {
+            div()
+                .id("editor-more")
+                .tooltip(move |_, cx| tooltip_view(more_label.clone(), cx))
+                .w(px(TOOLBAR_SIZE as f32))
+                .h(px(TOOLBAR_SIZE as f32))
+                .rounded(px(7.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(self.more_open, |button| button.bg(chrome.selected))
+                .hover(move |style| style.bg(hover))
+                .active(|style| style.opacity(0.85))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.more_open = !this.more_open;
+                    this.effects_open = false;
+                    this.hints_visible = false;
+                    cx.notify();
+                }))
+                .child(icons::icon(icons::MORE, 18.0, muted))
+                .into_any_element()
+        });
 
         let close = div()
             .id("editor-close")
@@ -2442,11 +2540,11 @@ impl EditorView {
             .hover(move |style| style.bg(hover))
             .active(|style| style.opacity(0.85))
             .on_click(cx.listener(|this, _, window, cx| {
+                this.release_images(cx);
                 if this.inline.is_some() {
                     let handles = cx.windows();
                     cx.defer(move |cx| crate::windows::close_capture_auxiliary(cx, handles));
                 } else {
-                    this.release_images(cx);
                     window.remove_window();
                 }
             }))
@@ -2483,7 +2581,7 @@ impl EditorView {
                 .into_any_element()
         });
 
-        let more_panel = (self.more_open && !self.toolbar_hidden).then(|| {
+        let more_panel = (self.more_open && !self.toolbar_hidden && !capture_page).then(|| {
             let more_rect = self.more_rect(window, bar_rect);
             let panel = div()
                 .id("editor-more-panel")
@@ -2603,10 +2701,10 @@ impl EditorView {
                     .items_center()
                     .gap(px(1.0))
                     .children(capture_actions)
-                    .child(pin)
+                    .children(pin)
                     .child(copy)
                     .child(save)
-                    .child(more)
+                    .children(more)
                     .child(close),
             );
         (bar.into_any_element(), options_panel, more_panel)
@@ -2930,20 +3028,25 @@ impl EditorView {
                     .child(t(language, "editor.hints_title")),
             );
         let pin_hotkey = crate::hotkey::display_hotkey(&settings_state::get().pin_hotkey);
-        let rows = [
+        let mut rows: Vec<(String, &'static str)> = vec![
             (
                 t(language, "editor.hint_key_copy").to_owned(),
                 t(language, "editor.hint_copy"),
             ),
             ("Cmd/Ctrl+S".to_owned(), t(language, "editor.hint_save")),
-            (pin_hotkey, t(language, "editor.hint_pin")),
-            ("Space".to_owned(), t(language, "editor.hint_space")),
-            (
-                "R / F5".to_owned(),
-                t(language, "editor.hint_ratio_refresh"),
-            ),
-            ("Esc".to_owned(), t(language, "editor.hint_cancel")),
         ];
+        if self.inline.and_then(|inline| inline.capture).is_some() {
+            rows.push((pin_hotkey, t(language, "editor.hint_pin")));
+        }
+        rows.push(if self.inline.is_some_and(|inline| inline.zoomable) {
+            ("Space".to_owned(), t(language, "editor.hint_pan"))
+        } else {
+            ("Space".to_owned(), t(language, "editor.hint_space"))
+        });
+        if self.inline.and_then(|inline| inline.capture).is_some() {
+            rows.push(("F5".to_owned(), t(language, "editor.hint_refresh")));
+        }
+        rows.push(("Esc".to_owned(), t(language, "editor.hint_cancel")));
         let mut panel = panel;
         for (key, description) in rows {
             panel = panel.child(
@@ -3015,7 +3118,7 @@ impl EditorView {
         };
         let image_size = PhysicalSize::new(frame.width(), frame.height());
         let size_changed = image_size != self.image_size;
-        self.frame = frame;
+        self.frame = Arc::new(frame);
         self.image_size = image_size;
         self.refresh_frame_images(cx);
         if size_changed {
@@ -3058,7 +3161,7 @@ impl EditorView {
         };
         self.commit_text(cx);
         let first_frame =
-            rasterize(&self.document, &self.frame).unwrap_or_else(|_| self.frame.clone());
+            rasterize(&self.document, &self.frame).unwrap_or_else(|_| self.frame.as_ref().clone());
         let handles = cx.windows();
         cx.defer(move |cx| {
             crate::windows::close_capture_auxiliary(cx, handles);
@@ -3082,41 +3185,39 @@ impl EditorView {
         self.commit_text(cx);
         match rasterize(&self.document, &self.frame) {
             Ok(output) => {
-                let output = if self.region_effects_active() {
-                    self.effects.apply(&output, self.region_effects_scale())
-                } else {
-                    output
-                };
-                if self.pin_target.is_none() {
-                    crate::capture_history::record(&output);
-                }
-                let placement = self.inline.and_then(|inline| {
-                    let capture = inline.capture?;
-                    let scale = capture.scale.max(0.1);
-                    let center_x = (capture.monitor_origin.x
-                        + capture.region.rect.origin.x
-                        + capture.region.rect.size.width as i32 / 2)
-                        as f32
-                        / scale;
-                    let center_y = (capture.monitor_origin.y
-                        + capture.region.rect.origin.y
-                        + capture.region.rect.size.height as i32 / 2)
-                        as f32
-                        / scale;
-                    let width = output.width() as f32 / scale;
-                    let height = output.height() as f32 / scale;
-                    Some((
+                let output = self.effects.apply(output, self.region_effects_scale());
+                let hash = crate::capture_history::hash_frame(&output);
+                let placement = self.inline.map(|inline| {
+                    // The editor image may already be zoomed; use its displayed
+                    // scale so the pin opens at the same size and center. This
+                    // also keeps pins on the same monitor as the capture, long
+                    // capture, or source pin.
+                    let display_scale = if self.image_size.width == 0 {
+                        1.0
+                    } else {
+                        f32::from(inline.image_rect.size.width) / self.image_size.width as f32
+                    }
+                    .max(0.01);
+                    let width = output.width() as f32 * display_scale;
+                    let height = output.height() as f32 * display_scale;
+                    let center_x = f32::from(inline.screen_origin.x)
+                        + f32::from(inline.image_rect.origin.x)
+                        + f32::from(inline.image_rect.size.width) / 2.0;
+                    let center_y = f32::from(inline.screen_origin.y)
+                        + f32::from(inline.image_rect.origin.y)
+                        + f32::from(inline.image_rect.size.height) / 2.0;
+                    (
                         Bounds {
                             origin: point(px(center_x - width / 2.0), px(center_y - height / 2.0)),
                             size: size(px(width), px(height)),
                         },
-                        1.0 / scale,
-                    ))
+                        display_scale,
+                    )
                 });
                 if let Some((bounds, zoom)) = placement {
-                    crate::pin::open_frame_at(output, bounds, zoom, cx);
+                    crate::pin::open_frame_at_with_hash(output, bounds, zoom, hash, cx);
                 } else {
-                    crate::pin::open_frame(output, cx);
+                    crate::pin::open_frame_with_hash(output, hash, cx);
                 }
             }
             Err(error) => {
@@ -3125,6 +3226,7 @@ impl EditorView {
             }
         }
         if self.inline.is_some() {
+            self.release_images(cx);
             let handles = cx.windows();
             cx.defer(move |cx| crate::windows::close_capture_auxiliary(cx, handles));
         }
@@ -3138,19 +3240,19 @@ impl EditorView {
         let mut messages = Vec::new();
         let mut copy_ok = false;
         let mut save_ok = false;
+        let mut pin_ok = false;
         match rasterize(&self.document, &self.frame) {
             Ok(output) => {
-                let output = if self.region_effects_active() {
-                    self.effects.apply(&output, self.region_effects_scale())
-                } else {
-                    output
-                };
-                let mut exported = false;
+                let output = self.effects.apply(output, self.region_effects_scale());
+                let hash = crate::capture_history::hash_frame(&output);
+                let record_history = self.pin_target.is_none();
                 if copy_only || settings_state::get().copy_to_clipboard {
                     match image_util::copy_png(&output, cx) {
-                        Ok(()) => {
-                            exported = true;
+                        Ok(bytes) => {
                             copy_ok = true;
+                            if record_history {
+                                crate::capture_history::record_png_bytes(&bytes, hash);
+                            }
                             messages.push(t(language, "editor.copied").to_owned());
                         }
                         Err(error) => {
@@ -3158,34 +3260,31 @@ impl EditorView {
                         }
                     }
                 }
-                if !copy_only {
-                    if let Some(pin_id) = self.pin_target {
-                        if crate::pin::replace_image(pin_id, &output, cx) {
-                            messages.push(t(language, "editor.pin_updated").to_owned());
-                        } else {
-                            messages.push(t(language, "editor.pin_missing").to_owned());
-                        }
-                    } else {
-                        match image_util::save_png(&output) {
-                            Ok(path) => {
-                                exported = true;
-                                save_ok = true;
-                                messages.push(format!(
-                                    "{} {}",
-                                    t(language, "editor.saved"),
-                                    path.display()
-                                ));
-                            }
-                            Err(error) => messages.push(format!(
+                if !copy_only && self.pin_target.is_none() {
+                    match image_util::save_png(&output) {
+                        Ok(path) => {
+                            save_ok = true;
+                            crate::capture_history::record_png_file(&path, hash);
+                            messages.push(format!(
                                 "{} {}",
-                                t(language, "editor.save_failed"),
-                                error
-                            )),
+                                t(language, "editor.saved"),
+                                path.display()
+                            ));
                         }
+                        Err(error) => messages.push(format!(
+                            "{} {}",
+                            t(language, "editor.save_failed"),
+                            error
+                        )),
                     }
                 }
-                if exported && self.pin_target.is_none() {
-                    crate::capture_history::record(&output);
+                if !copy_only && let Some(pin_id) = self.pin_target {
+                    if crate::pin::replace_image(pin_id, output, cx) {
+                        pin_ok = true;
+                        messages.push(t(language, "editor.pin_updated").to_owned());
+                    } else {
+                        messages.push(t(language, "editor.pin_missing").to_owned());
+                    }
                 }
             }
             Err(error) => {
@@ -3196,7 +3295,7 @@ impl EditorView {
         let close = if copy_only {
             copy_ok
         } else if self.pin_target.is_some() {
-            false
+            pin_ok
         } else {
             save_ok
         };
@@ -3205,6 +3304,7 @@ impl EditorView {
             "export finished: copy_only={copy_only} copy_ok={copy_ok} save_ok={save_ok} close={close}"
         );
         if close && self.inline.is_some() {
+            self.release_images(cx);
             let handles = cx.windows();
             cx.defer(move |cx| crate::windows::close_capture_auxiliary(cx, handles));
         } else {
@@ -3403,8 +3503,7 @@ impl Render for EditorView {
                     let top = rect.origin.y as f32 * scale;
                     let width = px(rect.size.width as f32 * scale);
                     let height = px(rect.size.height as f32 * scale);
-                    let blur_image =
-                        self.blur_images[blur_image_index(annotation.style.blur_radius)].clone();
+                    let blur_image = self.blur_image(annotation.style.blur_radius, cx);
                     object_layers.push(
                         div()
                             .absolute()
@@ -3640,7 +3739,7 @@ impl Render for EditorView {
         let preview_blur_layer = preview_blur.map(|(rect, radius)| {
             let left = rect.origin.x as f32 * scale;
             let top = rect.origin.y as f32 * scale;
-            let blur_image = self.blur_images[blur_image_index(radius)].clone();
+            let blur_image = self.blur_image(radius, cx);
             div()
                 .absolute()
                 .left(px(left))
@@ -3729,7 +3828,8 @@ impl Render for EditorView {
             .child(overlay_canvas)
             .children(text_overlay)
             .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
-                if this.inline.is_some() {
+                let zoomable = this.inline.is_some_and(|inline| inline.zoomable);
+                if this.inline.is_some() && !zoomable {
                     cx.stop_propagation();
                     return;
                 }
@@ -4226,10 +4326,14 @@ impl Render for EditorView {
                 }
                 if key == "space" {
                     if this.inline.is_some() {
-                        this.toolbar_hidden = !this.toolbar_hidden;
-                        this.more_open = false;
-                        this.effects_open = false;
-                        this.hints_visible = false;
+                        if this.inline.is_some_and(|inline| inline.zoomable) {
+                            this.space_down = true;
+                        } else {
+                            this.toolbar_hidden = !this.toolbar_hidden;
+                            this.more_open = false;
+                            this.effects_open = false;
+                            this.hints_visible = false;
+                        }
                     } else {
                         this.space_down = true;
                     }
@@ -4263,11 +4367,11 @@ impl Render for EditorView {
                     return;
                 }
                 if key == "escape" || (command && matches!(key, "w" | "q")) {
+                    this.release_images(cx);
                     if this.inline.is_some() {
                         let handles = cx.windows();
                         cx.defer(move |cx| crate::windows::close_capture_auxiliary(cx, handles));
                     } else {
-                        this.release_images(cx);
                         window.remove_window();
                     }
                     return;
@@ -4380,62 +4484,213 @@ impl Render for EditorView {
     }
 }
 
-pub fn open_editor(frame: RgbaFrame, cx: &mut App) {
-    open_editor_with_pin(frame, None, cx);
+struct EditorOverlayHost {
+    editor: Entity<EditorView>,
 }
 
-pub fn open_pin_editor(frame: RgbaFrame, pin_id: u64, cx: &mut App) {
-    open_editor_with_pin(frame, Some(pin_id), cx);
+impl Render for EditorOverlayHost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        // The editor itself is transparent outside the image. A full-window
+        // scrim keeps pin/long-capture editing modal without opening a second
+        // editor page; the image and toolbar paint above it.
+        div()
+            .relative()
+            .size_full()
+            .bg(rgba(0x0000004d))
+            .child(self.editor.clone())
+    }
 }
 
-fn open_editor_with_pin(frame: RgbaFrame, pin_target: Option<u64>, cx: &mut App) {
-    let image_width = frame.width() as f32;
-    let image_height = frame.height() as f32;
-    let scale = (MAX_IMAGE_WIDTH / image_width)
-        .min(MAX_IMAGE_HEIGHT / image_height)
+fn inline_editor_window_kind() -> WindowKind {
+    #[cfg(target_os = "macos")]
+    {
+        WindowKind::Normal
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        WindowKind::PopUp
+    }
+}
+
+/// Edits a pin at its current screen position. The pin window remains alive
+/// underneath; this surface only replaces the old standalone editor window.
+pub fn open_pin_editor_overlay(
+    pin_id: u64,
+    frame: Arc<RgbaFrame>,
+    pin_bounds: Bounds<Pixels>,
+    cx: &mut App,
+) -> bool {
+    let center_x = f32::from(pin_bounds.origin.x) + f32::from(pin_bounds.size.width) / 2.0;
+    let center_y = f32::from(pin_bounds.origin.y) + f32::from(pin_bounds.size.height) / 2.0;
+    let display = cx
+        .displays()
+        .into_iter()
+        .find(|display| {
+            let bounds = display.bounds();
+            center_x >= f32::from(bounds.origin.x)
+                && center_x < f32::from(bounds.origin.x) + f32::from(bounds.size.width)
+                && center_y >= f32::from(bounds.origin.y)
+                && center_y < f32::from(bounds.origin.y) + f32::from(bounds.size.height)
+        })
+        .or_else(|| cx.primary_display());
+    let Some(display) = display else {
+        log_error!("editor", "no display available for pin editing");
+        return false;
+    };
+    let display_bounds = display.bounds();
+    let image_rect = Bounds {
+        origin: point(
+            px(f32::from(pin_bounds.origin.x) - f32::from(display_bounds.origin.x)),
+            px(f32::from(pin_bounds.origin.y) - f32::from(display_bounds.origin.y)),
+        ),
+        size: pin_bounds.size,
+    };
+    open_inline_editor_window(
+        frame,
+        image_rect,
+        display_bounds,
+        Some(display.id()),
+        display_bounds.origin,
+        Some(pin_id),
+        false,
+        Tool::Select,
+        cx,
+    )
+}
+
+/// Opens a stitched long capture in the same in-place editor surface. The
+/// tall image is initially fit to the capture monitor; wheel zoom/pan keeps
+/// full-resolution detail reachable without a separate editor page.
+pub fn open_long_capture_inline(frame: RgbaFrame, monitor_id: MonitorId, cx: &mut App) -> bool {
+    let frame = Arc::new(frame);
+    let monitors = platform_backend().monitors().unwrap_or_default();
+    let monitor = monitors.iter().find(|monitor| monitor.id == monitor_id);
+    let (window_bounds, display_id) = match monitor {
+        Some(monitor) => {
+            let scale = monitor.scale.get().max(0.1);
+            (
+                Bounds {
+                    origin: point(
+                        px(monitor.bounds.origin.x as f32 / scale),
+                        px(monitor.bounds.origin.y as f32 / scale),
+                    ),
+                    size: size(
+                        px(monitor.bounds.size.width as f32 / scale),
+                        px(monitor.bounds.size.height as f32 / scale),
+                    ),
+                },
+                Some(DisplayId::new(monitor.id.raw())),
+            )
+        }
+        None => match cx.primary_display() {
+            Some(display) => (display.bounds(), Some(display.id())),
+            None => {
+                log_error!("editor", "no display available for long capture");
+                return false;
+            }
+        },
+    };
+    let image_rect = fit_long_capture_rect(&frame, window_bounds);
+    open_inline_editor_window(
+        frame,
+        image_rect,
+        window_bounds,
+        display_id,
+        window_bounds.origin,
+        None,
+        true,
+        Tool::Select,
+        cx,
+    )
+}
+
+fn fit_long_capture_rect(frame: &RgbaFrame, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+    const MARGIN: f32 = 24.0;
+    const GAP: f32 = 8.0;
+    let window_width = f32::from(bounds.size.width);
+    let window_height = f32::from(bounds.size.height);
+    let available_width = (window_width - MARGIN * 2.0).max(1.0);
+    let available_height = (window_height - MARGIN * 2.0 - COMPACT_TOOLBAR_HEIGHT - GAP).max(1.0);
+    let fit = (available_width / frame.width().max(1) as f32)
+        .min(available_height / frame.height().max(1) as f32)
         .min(1.0);
-    let content_width = (image_width * scale).max(320.0);
-    let content_height = (image_height * scale).max(240.0);
-    let window_width = (content_width + PADDING * 2.0).max(MIN_WINDOW_WIDTH);
-    let window_height = (content_height + TOOLBAR_HEIGHT + PADDING * 2.0).max(480.0);
-    let bounds = crate::ui::centered_bounds(cx, window_width, window_height);
-    let display_id = cx.primary_display().map(|display| display.id());
-    let language = settings_state::get().language;
+    let width = frame.width() as f32 * fit;
+    let height = frame.height() as f32 * fit;
+    let x = (window_width - width) / 2.0;
+    let y = MARGIN + (available_height - height) / 2.0;
+    Bounds {
+        origin: point(px(x), px(y)),
+        size: size(px(width), px(height)),
+    }
+}
 
+#[allow(clippy::too_many_arguments)]
+fn open_inline_editor_window(
+    frame: Arc<RgbaFrame>,
+    image_rect: Bounds<Pixels>,
+    window_bounds: Bounds<Pixels>,
+    display_id: Option<DisplayId>,
+    screen_origin: Point<Pixels>,
+    pin_target: Option<u64>,
+    zoomable: bool,
+    initial_tool: Tool,
+    cx: &mut App,
+) -> bool {
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: Some(TitlebarOptions {
-            title: Some(t(language, "editor.title").into()),
-            ..Default::default()
-        }),
+        window_bounds: Some(WindowBounds::Windowed(window_bounds)),
+        titlebar: None,
         focus: true,
         show: true,
-        kind: WindowKind::Normal,
-        is_movable: true,
-        is_resizable: true,
-        is_minimizable: true,
+        kind: inline_editor_window_kind(),
+        is_movable: false,
+        is_resizable: false,
+        is_minimizable: false,
         display_id,
-        window_background: WindowBackgroundAppearance::Opaque,
-        window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(360.0))),
-        app_id: Some("capin-editor".to_owned()),
+        window_background: WindowBackgroundAppearance::Transparent,
+        app_id: Some("capin-editor-inline".to_owned()),
         ..Default::default()
     };
 
+    // Accessories are not brought forward by ordering a window front; make
+    // sure the pin/long-capture editor can become key before opening it.
+    cx.activate(true);
     match gpui_kit::open_window(options, cx, move |window, cx| {
-        let view = cx.new(|cx| EditorView::new(frame, pin_target, cx));
-        let focus = view.read(cx).focus_handle.clone();
-        view.update(cx, |this, cx| this.observe_appearance(window, cx));
+        if let Err(error) = apply_window_style(&*window, WindowStyle::INLINE_EDITOR) {
+            log_error!("editor", "failed to style inline editor: {error}");
+        }
+        let editor = cx.new(|cx| {
+            EditorView::new_inline(
+                frame,
+                image_rect,
+                screen_origin,
+                initial_tool,
+                None,
+                pin_target,
+                zoomable,
+                cx,
+            )
+        });
+        let focus = editor.read(cx).focus_handle.clone();
+        register_view(&editor, window);
+        editor.update(cx, |this, cx| {
+            this.observe_appearance(window, cx);
+            this.watch_close(window, cx);
+        });
         window.defer(cx, move |window, cx| {
             window.focus(&focus, cx);
             window.activate_window();
         });
-        view
+        cx.new(|_| EditorOverlayHost { editor })
     }) {
         Ok((handle, _)) => {
             let _ = handle.update(cx, |_, window, _| window.activate_window());
             cx.activate(true);
+            true
         }
-        Err(error) => log_error!("editor", "failed to open editor: {error}"),
+        Err(error) => {
+            log_error!("editor", "failed to open inline editor: {error}");
+            false
+        }
     }
 }
 

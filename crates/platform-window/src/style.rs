@@ -56,4 +56,17 @@ impl WindowStyle {
         borderless: false,
         opaque: false,
     };
+
+    /// Full-screen inline annotation surface used for pin editing and long
+    /// captures. It must stay focusable for keyboard input, be borderless and
+    /// transparent so the image paints over the live desktop, and never
+    /// appear in another capture.
+    pub const INLINE_EDITOR: Self = Self {
+        always_on_top: true,
+        skip_taskbar: true,
+        no_activate: false,
+        exclude_from_capture: true,
+        borderless: true,
+        opaque: false,
+    };
 }
