@@ -4,6 +4,7 @@ mod color;
 mod color_space;
 mod dpi;
 mod frame;
+mod frame_ops;
 mod geometry;
 mod ids;
 mod record;

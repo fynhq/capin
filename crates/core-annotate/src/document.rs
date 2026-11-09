@@ -100,7 +100,8 @@ pub enum Shape {
 }
 
 impl Shape {
-    fn bounds(&self) -> PhysicalRect {
+    /// Axis-aligned bounds in image physical pixels.
+    pub fn bounds(&self) -> PhysicalRect {
         match self {
             Self::Rect(rect)
             | Self::Ellipse(rect)
