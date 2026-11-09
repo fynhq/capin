@@ -45,8 +45,8 @@ jobs:
       - name: Check platform crates
         run: cargo check -p platform-window -p platform-ocr -p platform-record -p app --locked
       - name: Clippy app
-        # The bin test target replaces main, so helpers only used by main look dead.
-        run: cargo clippy -p app --all-targets --locked -- -D warnings -A dead_code
+        # Lint the app binary; unit tests are compiled and run by the next step.
+        run: cargo clippy -p app --locked -- -D warnings -A dead_code
       - name: Test app
         run: cargo test -p app --locked
 
