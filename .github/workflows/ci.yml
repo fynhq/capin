@@ -53,7 +53,9 @@ jobs:
       - name: Report clippy diagnostics
         if: failure()
         shell: bash
+        # Earlier steps can fail before clippy runs, so the log may not exist.
         run: |
+          test -f clippy.json || exit 0
           python3 - <<'PY'
           import json
           for raw in open("clippy.json", encoding="utf-8"):
