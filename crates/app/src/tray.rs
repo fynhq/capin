@@ -8,7 +8,9 @@ mod imp {
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
     use crate::i18n::t;
-    use crate::logging::{log_error, log_info, log_warn};
+    #[cfg(target_os = "windows")]
+    use crate::logging::log_warn;
+    use crate::logging::{log_error, log_info};
     use crate::settings_state;
 
     const MENU_START: &str = "start";
@@ -39,7 +41,7 @@ mod imp {
             log_error!("tray", "failed to load tray icon");
             return false;
         };
-        TRAY_LIGHT.with(|slot| slot.set(taskbar_is_light()));
+        TRAY_LIGHT.with(|slot| slot.set(Some(taskbar_is_light())));
 
         let builder = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
