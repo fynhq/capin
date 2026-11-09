@@ -811,7 +811,7 @@ impl SettingsView {
         .detach();
     }
 
-    fn sidebar(&self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn sidebar(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let mut nav: Vec<AnyElement> = Vec::new();
         for section in SettingsSection::ALL {
             let selected = self.section == section;
@@ -885,7 +885,6 @@ impl SettingsView {
         // navigation starts below the 48pt caption as before.
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = window;
             sidebar = sidebar.pt(px(layout::TITLEBAR_HEIGHT + 8.0)).child(nav);
         }
 
@@ -2796,7 +2795,7 @@ impl Render for SettingsView {
                 }
                 this.handle_shortcut_key(event, window, cx);
             }))
-            .child(self.sidebar(&theme, window, cx))
+            .child(self.sidebar(&theme, cx))
             .child(self.content(&theme, cx))
             .children(titlebar)
             .children(select_backdrop)

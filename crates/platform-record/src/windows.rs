@@ -316,7 +316,7 @@ impl GraphicsCaptureApiHandler for Recorder {
         }
 
         if self.encoder.is_none() {
-            let bitrate = ((u64::from(width) * u64::from(height) * u64::from(self.flags.fps)) / 4);
+            let bitrate = (u64::from(width) * u64::from(height) * u64::from(self.flags.fps)) / 4;
             let bitrate = (bitrate as f32 * self.flags.quality.bitrate_multiplier())
                 .clamp(4_000_000.0, 60_000_000.0) as u32;
             let encoder = match VideoEncoder::new(
