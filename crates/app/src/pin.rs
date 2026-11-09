@@ -584,7 +584,7 @@ fn open_pin_inner(
             });
             // OCR already holds its own Arc source; drop the pin's CPU frame
             // now that the PNG path is recorded. Actions reload it lazily.
-            let _ = view_for_release.update(cx, |view, _| view.release_frame_if_persisted());
+            view_for_release.update(cx, |view, _| view.release_frame_if_persisted());
             if persist {
                 save_manifest();
             }
