@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use core_types::{PhysicalRect, RgbaFrame};
 use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
 use windows::Media::Ocr::OcrEngine;
@@ -6,8 +8,7 @@ use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
 
 use crate::{OcrError, OcrLine, build_line, build_line_from_words};
 
-pub(super) fn recognize_text(frame: &RgbaFrame) -> Result<Vec<OcrLine>, OcrError> {
-    let frame = frame.clone();
+pub(super) fn recognize_text(frame: Arc<RgbaFrame>) -> Result<Vec<OcrLine>, OcrError> {
     std::thread::spawn(move || recognize_on_thread(&frame))
         .join()
         .map_err(|_| OcrError::Platform("text recognition thread panicked".to_owned()))?

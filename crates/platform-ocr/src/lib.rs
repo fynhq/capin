@@ -1,5 +1,7 @@
 //! Platform text recognition and QR decoding for captured frames.
 
+use std::sync::Arc;
+
 use core_types::{PhysicalRect, RgbaFrame};
 use thiserror::Error;
 
@@ -56,11 +58,13 @@ mod windows_impl;
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 mod unsupported {
+    use std::sync::Arc;
+
     use core_types::RgbaFrame;
 
     use crate::OcrError;
 
-    pub(super) fn recognize_text(_frame: &RgbaFrame) -> Result<Vec<crate::OcrLine>, OcrError> {
+    pub(super) fn recognize_text(_frame: Arc<RgbaFrame>) -> Result<Vec<crate::OcrLine>, OcrError> {
         Err(OcrError::Unsupported)
     }
 }
@@ -78,6 +82,14 @@ pub fn recognize(frame: RgbaFrame) -> OcrOutput {
 }
 
 pub fn recognize_with(frame: RgbaFrame, options: OcrOptions) -> OcrOutput {
+    recognize_shared(Arc::new(frame), options)
+}
+
+/// Recognizes text and/or QR codes from a shared frame.
+///
+/// Callers that already hold a pinned image can pass its `Arc` so queued OCR
+/// work does not duplicate the full RGBA buffer.
+pub fn recognize_shared(frame: Arc<RgbaFrame>, options: OcrOptions) -> OcrOutput {
     let qr_codes = if options.qr {
         decode_qr(&frame)
     } else {
@@ -89,7 +101,7 @@ pub fn recognize_with(frame: RgbaFrame, options: OcrOptions) -> OcrOutput {
             ..Default::default()
         };
     }
-    match platform::recognize_text(&frame) {
+    match platform::recognize_text(frame) {
         Ok(lines) => {
             let text = lines
                 .iter()
@@ -251,6 +263,23 @@ fn decode_qr(frame: &RgbaFrame) -> Vec<String> {
                 / 1000;
         *target = image::Luma([luminance as u8]);
     }
+
+    // rqrr scans the whole bitmap. A 4K screenshot is mostly wasted work for
+    // QR detection; cap the long edge while keeping typical codes well above
+    // the minimum module size.
+    const QR_MAX_EDGE: u32 = 2048;
+    let long_edge = gray.width().max(gray.height());
+    let gray = if long_edge > QR_MAX_EDGE {
+        let scale = QR_MAX_EDGE as f32 / long_edge as f32;
+        image::imageops::resize(
+            &gray,
+            ((gray.width() as f32 * scale).round() as u32).max(1),
+            ((gray.height() as f32 * scale).round() as u32).max(1),
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        gray
+    };
 
     let mut prepared = rqrr::PreparedImage::prepare(gray);
     let mut codes = Vec::new();

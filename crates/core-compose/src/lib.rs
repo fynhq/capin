@@ -4,6 +4,8 @@
 //! The input is a raw window frame in non-premultiplied RGBA. The output keeps
 //! alpha so callers can save a transparent PNG or paste the image directly.
 
+use std::sync::Arc;
+
 use core_types::RgbaFrame;
 use image::imageops::FilterType;
 use thiserror::Error;
@@ -52,7 +54,10 @@ pub enum Background {
     /// A vertical gradient between two non-premultiplied RGBA colors.
     VerticalGradient([u8; 4], [u8; 4]),
     /// A wallpaper image, scaled and center-cropped to cover the canvas.
-    Image(RgbaFrame),
+    ///
+    /// Shared so repeated window captures can reuse one decoded wallpaper
+    /// without copying the full image into every canvas.
+    Image(Arc<RgbaFrame>),
 }
 
 /// Layout and paint options for a window capture.
@@ -324,19 +329,21 @@ fn paint_window(
     window: &RgbaFrame,
     corner_radius: u32,
 ) {
-    for y in 0..window.height() {
+    let width = window.width();
+    let height = window.height();
+    for y in 0..height {
         let Some(row) = window.row(y) else {
             continue;
         };
-        for x in 0..window.width() {
-            let coverage = rounded_coverage(x, y, window.width(), window.height(), corner_radius);
-            if coverage <= 0.0 {
-                continue;
-            }
+        for x in 0..width {
             let source_offset = x as usize * 4;
             let Some(source) = row.get(source_offset..source_offset + 4) else {
                 continue;
             };
+            let coverage = rounded_coverage(x, y, width, height, corner_radius);
+            if coverage <= 0.0 {
+                continue;
+            }
             let alpha = (f32::from(source[3]) * coverage).round().clamp(0.0, 255.0) as u8;
             if alpha == 0 {
                 continue;
@@ -344,10 +351,16 @@ fn paint_window(
             let target_x = padding + x;
             let target_y = padding + y;
             let target_offset = (target_y as usize * canvas_width as usize + target_x as usize) * 4;
-            blend_pixel(
-                &mut pixels[target_offset..target_offset + 4],
-                [source[0], source[1], source[2], alpha],
-            );
+            if alpha == 255 {
+                // Opaque window pixels are the common case. Copying avoids
+                // the float alpha blend for every interior pixel.
+                pixels[target_offset..target_offset + 4].copy_from_slice(source);
+            } else {
+                blend_pixel(
+                    &mut pixels[target_offset..target_offset + 4],
+                    [source[0], source[1], source[2], alpha],
+                );
+            }
         }
     }
 }
@@ -416,17 +429,26 @@ fn rounded_coverage(x: u32, y: u32, width: u32, height: u32, radius: u32) -> f32
         return 0.0;
     }
     let radius = radius.min(width / 2).min(height / 2) as f32;
+    if radius <= 0.0 {
+        return 1.0;
+    }
+
     let half_width = width as f32 / 2.0;
     let half_height = height as f32 / 2.0;
     let point_x = x as f32 + 0.5;
     let point_y = y as f32 + 0.5;
-
     let qx = (point_x - half_width).abs() - (half_width - radius);
     let qy = (point_y - half_height).abs() - (half_height - radius);
-    let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
-    let inside = qx.max(qy).min(0.0);
-    let distance = inside + outside - radius;
 
+    // Every interior row/column is a straight edge; only the four corner
+    // quadrants need the rounded-distance sqrt. This keeps 4K window
+    // captures from evaluating the corner math for millions of pixels.
+    if qx <= 0.0 || qy <= 0.0 {
+        return 1.0;
+    }
+
+    let outside = (qx * qx + qy * qy).sqrt();
+    let distance = outside - radius;
     (0.5 - distance).clamp(0.0, 1.0)
 }
 
@@ -654,7 +676,7 @@ mod tests {
             padding: 1,
             corner_radius: 0,
             shadow: None,
-            background: Background::Image(background),
+            background: Background::Image(Arc::new(background)),
             border: None,
         };
         let output = compose_window(&window, &options).unwrap();

@@ -12,6 +12,10 @@ pub struct StitchConfig {
     /// Rows that may be ignored at the top of later frames, for fixed headers.
     pub max_top_inset_rows: u32,
     pub max_height: u32,
+    /// Upper bound for the retained RGBA buffer. `0` disables the byte cap.
+    /// This prevents a very wide monitor from turning `max_height` into an
+    /// unexpectedly large allocation.
+    pub max_bytes: usize,
 }
 
 impl Default for StitchConfig {
@@ -24,6 +28,7 @@ impl Default for StitchConfig {
             tolerance: 14,
             max_top_inset_rows: 160,
             max_height: 16_000,
+            max_bytes: 256 * 1024 * 1024,
         }
     }
 }
@@ -36,6 +41,8 @@ pub enum StitchError {
     EmptyFrame,
     #[error("stitched image reached the maximum height of {0} rows")]
     HeightLimit(u32),
+    #[error("stitched image would exceed the {0}-byte memory budget")]
+    MemoryLimit(usize),
     #[error("no vertical overlap was found between frames")]
     NoOverlap,
     #[error(transparent)]
@@ -97,8 +104,8 @@ impl Stitcher {
         }
 
         if self.frames == 0 {
-            if frame.height() > self.config.max_height {
-                return Err(StitchError::HeightLimit(self.config.max_height));
+            if frame.height() > self.height_limit() {
+                return Err(self.limit_error());
             }
             self.pixels.extend_from_slice(frame.pixels());
             self.height = frame.height();
@@ -124,9 +131,9 @@ impl Stitcher {
                 frames: self.frames,
             });
         }
-        let room = self.config.max_height.saturating_sub(self.height);
+        let room = self.height_limit().saturating_sub(self.height);
         if room < appended {
-            return Err(StitchError::HeightLimit(self.config.max_height));
+            return Err(self.limit_error());
         }
         let start = (inset + overlap) as usize * self.width as usize * 4;
         let end = start + appended as usize * self.width as usize * 4;
@@ -153,6 +160,25 @@ impl Stitcher {
         self.height = 0;
         self.frames = 0;
         Ok(RgbaFrame::from_pixels(width, height, pixels)?)
+    }
+
+    fn height_limit(&self) -> u32 {
+        if self.config.max_bytes == 0 {
+            return self.config.max_height;
+        }
+        let row_bytes = (self.width as usize).saturating_mul(4).max(1);
+        let rows_by_bytes = (self.config.max_bytes / row_bytes).max(1);
+        self.config
+            .max_height
+            .min(rows_by_bytes.min(u32::MAX as usize) as u32)
+    }
+
+    fn limit_error(&self) -> StitchError {
+        if self.height_limit() < self.config.max_height {
+            StitchError::MemoryLimit(self.config.max_bytes)
+        } else {
+            StitchError::HeightLimit(self.config.max_height)
+        }
     }
 
     fn find_overlap(&self, frame: &RgbaFrame) -> Option<(u32, u32)> {
@@ -200,12 +226,11 @@ impl Stitcher {
         // periodic or mostly blank content.
         let mean_difference = |inset: u32, overlap: u32, row_step: u32| -> Option<f64> {
             let previous_offset = (max_overlap - overlap) as usize * samples as usize;
-            let mut rows: Vec<u32> = (0..overlap).step_by(row_step.max(1) as usize).collect();
-            if rows.last().copied() != Some(overlap - 1) {
-                rows.push(overlap - 1);
-            }
+            let step = row_step.max(1);
             let mut difference = 0u64;
-            for row in rows {
+            let mut compared_rows = 0u64;
+            let mut row = 0u32;
+            while row < overlap {
                 let previous = &previous_signatures
                     [previous_offset + row as usize * samples as usize..][..samples as usize];
                 let next_index = (inset + row) as usize * samples as usize;
@@ -213,8 +238,25 @@ impl Stitcher {
                 for (left, right) in previous.iter().zip(next) {
                     difference += u64::from(left.abs_diff(*right));
                 }
+                compared_rows += 1;
+                row += step;
             }
-            let compared = (overlap.div_ceil(row_step.max(1)) as f64) * sample_count;
+            // Always verify the last row even when it is not on the sample
+            // stride. This keeps the old "last row must match" guarantee
+            // without allocating a row vector for every candidate.
+            let last_row = overlap - 1;
+            if !last_row.is_multiple_of(step) {
+                let previous = &previous_signatures
+                    [previous_offset + last_row as usize * samples as usize..]
+                    [..samples as usize];
+                let next_index = (inset + last_row) as usize * samples as usize;
+                let next = &next_signatures[next_index..][..samples as usize];
+                for (left, right) in previous.iter().zip(next) {
+                    difference += u64::from(left.abs_diff(*right));
+                }
+                compared_rows += 1;
+            }
+            let compared = compared_rows as f64 * sample_count;
             (compared > 0.0).then_some(difference as f64 / compared)
         };
 
@@ -456,5 +498,22 @@ mod tests {
         stitches.push(&slice_rows(&original, 0, 180)).unwrap();
         let result = stitches.push(&slice_rows(&original, 140, 240));
         assert!(matches!(result, Err(StitchError::HeightLimit(180))));
+    }
+
+    #[test]
+    fn memory_budget_stops_wide_frames() {
+        let mut stitches = Stitcher::new(
+            64,
+            StitchConfig {
+                max_height: 10_000,
+                max_bytes: 64 * 4 * 60,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let original = patterned_frame(64, 120, 31);
+        stitches.push(&slice_rows(&original, 0, 60)).unwrap();
+        let result = stitches.push(&slice_rows(&original, 30, 90));
+        assert!(matches!(result, Err(StitchError::MemoryLimit(_))));
     }
 }

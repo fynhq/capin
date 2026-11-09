@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use core_types::{PhysicalRect, RgbaFrame};
 use objc2::{AnyThread, ClassType};
 use objc2_foundation::{NSArray, NSData, NSDictionary};
@@ -7,7 +9,7 @@ use objc2_vision::{
 
 use crate::{OcrError, OcrLine, build_line};
 
-pub(super) fn recognize_text(frame: &RgbaFrame) -> Result<Vec<OcrLine>, OcrError> {
+pub(super) fn recognize_text(frame: Arc<RgbaFrame>) -> Result<Vec<OcrLine>, OcrError> {
     let image = image::RgbaImage::from_raw(frame.width(), frame.height(), frame.pixels().to_vec())
         .ok_or_else(|| OcrError::Platform("invalid image buffer".to_owned()))?;
     let mut png = Vec::new();

@@ -316,7 +316,13 @@ struct Recorder {
     encoder: Option<VideoEncoder>,
     webp: Option<WebpEncoder>,
     output_size: Option<(u32, u32)>,
-    last_buffer: Option<Vec<u8>>,
+    /// The last encoded frame, retained for the final stop timestamp.
+    frame_front: Vec<u8>,
+    /// Scratch frame buffer; swapped with `frame_front` after each encode so
+    /// steady-state recording does not allocate or zero a full frame.
+    frame_back: Vec<u8>,
+    /// Reused scratch for `Frame::as_nopadding_buffer`.
+    packed: Vec<u8>,
     last_pts: i64,
     frame_ticks: i64,
     timeline: FrameTimeline,
@@ -335,7 +341,9 @@ impl GraphicsCaptureApiHandler for Recorder {
             encoder: None,
             webp: None,
             output_size: None,
-            last_buffer: None,
+            frame_front: Vec::new(),
+            frame_back: Vec::new(),
+            packed: Vec::new(),
             last_pts: 0,
             frame_ticks: 10_000_000 / i64::from(fps),
             timeline: FrameTimeline::new(frame_rate),
@@ -400,30 +408,35 @@ impl GraphicsCaptureApiHandler for Recorder {
         }
 
         let row = width as usize * 4;
-        let mut frame_bytes = vec![0u8; row * height as usize];
+        let frame_len = row * height as usize;
+        if self.frame_back.len() != frame_len {
+            self.frame_back.resize(frame_len, 0);
+        }
 
         let buffer = frame.buffer_crop(x0, y0, x1, y1)?;
-        let mut packed = Vec::new();
+        let mut packed = std::mem::take(&mut self.packed);
         let data = buffer.as_nopadding_buffer(&mut packed);
-        if data.len() < row * height as usize {
+        if data.len() < frame_len {
+            self.packed = packed;
             return Ok(());
         }
-        for (y, chunk) in frame_bytes.chunks_exact_mut(row).enumerate() {
+        for (y, chunk) in self.frame_back.chunks_exact_mut(row).enumerate() {
             let source = (height as usize - 1 - y) * row;
             chunk.copy_from_slice(&data[source..source + row]);
         }
+        self.packed = packed;
 
-        if let Some(highlight) = self.flags.cursor_highlight
-            && let Some((cursor_x, cursor_y)) =
-                self.flags.cursor_space.cursor_in_frame(width, height)
-        {
+        let highlight = self.flags.cursor_highlight;
+        let cursor = highlight.and_then(|_| self.flags.cursor_space.cursor_in_frame(width, height));
+        if let (Some(highlight), Some((cursor_x, cursor_y))) = (highlight, cursor) {
+            let radius = CURSOR_HIGHLIGHT_RADIUS * self.flags.cursor_space.dpi();
             paint_cursor_highlight_bgra(
-                &mut frame_bytes,
+                &mut self.frame_back,
                 width,
                 height,
                 cursor_x,
                 cursor_y,
-                CURSOR_HIGHLIGHT_RADIUS * self.flags.cursor_space.dpi(),
+                radius,
                 highlight.color,
                 CURSOR_HIGHLIGHT_ALPHA,
             );
@@ -450,11 +463,12 @@ impl GraphicsCaptureApiHandler for Recorder {
             if let Some(encoder) = self.webp.as_mut() {
                 let pts_millis =
                     (index.saturating_mul(1000) / u64::from(self.flags.fps.max(1))) as i64;
-                if let Err(error) = encoder.push_bgra(&frame_bytes, pts_millis) {
+                if let Err(error) = encoder.push_bgra(&self.frame_back, pts_millis) {
                     self.flags.shared.fail(error.to_string());
                     capture_control.stop();
                 }
             }
+            std::mem::swap(&mut self.frame_front, &mut self.frame_back);
             return Ok(());
         }
 
@@ -483,10 +497,10 @@ impl GraphicsCaptureApiHandler for Recorder {
 
         let pts = (index as i64).saturating_mul(self.frame_ticks);
         if let Some(encoder) = self.encoder.as_mut() {
-            encoder.send_frame_buffer(&frame_bytes, pts)?;
+            encoder.send_frame_buffer(&self.frame_back, pts)?;
         }
         self.last_pts = pts;
-        self.last_buffer = Some(frame_bytes);
+        std::mem::swap(&mut self.frame_front, &mut self.frame_back);
         Ok(())
     }
 }
@@ -540,7 +554,8 @@ impl Drop for Recorder {
 
         // Hold the last frame until the stop timestamp so static content does
         // not produce a file much shorter than the on-screen timer.
-        if let Some(buffer) = self.last_buffer.take() {
+        if !self.frame_front.is_empty() {
+            let buffer = std::mem::take(&mut self.frame_front);
             let elapsed_ticks = (self.flags.shared.elapsed_active().as_nanos() / 100) as i64;
             let final_pts = elapsed_ticks.max(self.last_pts.saturating_add(self.frame_ticks));
             if let Err(error) = encoder.send_frame_buffer(&buffer, final_pts) {
