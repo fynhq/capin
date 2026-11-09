@@ -94,6 +94,7 @@ impl AnnotationColorTool {
 pub enum WindowBackground {
     #[default]
     Transparent,
+    System,
     Light,
     Dark,
     Gradient,
@@ -101,8 +102,9 @@ pub enum WindowBackground {
 }
 
 impl WindowBackground {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Transparent,
+        Self::System,
         Self::Light,
         Self::Dark,
         Self::Gradient,
@@ -112,6 +114,7 @@ impl WindowBackground {
     pub const fn code(self) -> &'static str {
         match self {
             Self::Transparent => "transparent",
+            Self::System => "system",
             Self::Light => "light",
             Self::Dark => "dark",
             Self::Gradient => "gradient",
@@ -122,10 +125,110 @@ impl WindowBackground {
     pub fn from_code(code: &str) -> Option<Self> {
         match code {
             "transparent" => Some(Self::Transparent),
+            "system" => Some(Self::System),
             "light" => Some(Self::Light),
             "dark" => Some(Self::Dark),
             "gradient" => Some(Self::Gradient),
             "wallpaper" => Some(Self::Wallpaper),
+            _ => None,
+        }
+    }
+}
+
+/// Built-in gradient pairings used when the window background is a gradient.
+/// `Accent` derives its pair from the system accent color; `Custom` reads the
+/// two stored color values.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GradientPreset {
+    #[default]
+    Accent,
+    Sunset,
+    Ocean,
+    Aurora,
+    Mint,
+    Blossom,
+    Graphite,
+    Custom,
+}
+
+impl GradientPreset {
+    pub const ALL: [Self; 8] = [
+        Self::Accent,
+        Self::Sunset,
+        Self::Ocean,
+        Self::Aurora,
+        Self::Mint,
+        Self::Blossom,
+        Self::Graphite,
+        Self::Custom,
+    ];
+
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Accent => "accent",
+            Self::Sunset => "sunset",
+            Self::Ocean => "ocean",
+            Self::Aurora => "aurora",
+            Self::Mint => "mint",
+            Self::Blossom => "blossom",
+            Self::Graphite => "graphite",
+            Self::Custom => "custom",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "accent" => Some(Self::Accent),
+            "sunset" => Some(Self::Sunset),
+            "ocean" => Some(Self::Ocean),
+            "aurora" => Some(Self::Aurora),
+            "mint" => Some(Self::Mint),
+            "blossom" => Some(Self::Blossom),
+            "graphite" => Some(Self::Graphite),
+            "custom" => Some(Self::Custom),
+            _ => None,
+        }
+    }
+
+    /// Fixed top/bottom colors for the curated presets.
+    pub const fn colors(self) -> Option<(u32, u32)> {
+        match self {
+            Self::Sunset => Some((0xFF7E5F, 0xFEB47B)),
+            Self::Ocean => Some((0x2193B0, 0x6DD5ED)),
+            Self::Aurora => Some((0x667EEA, 0x764BA2)),
+            Self::Mint => Some((0x11998E, 0x38EF7D)),
+            Self::Blossom => Some((0xFBC2EB, 0xA6C1EE)),
+            Self::Graphite => Some((0x232526, 0x414345)),
+            Self::Accent | Self::Custom => None,
+        }
+    }
+}
+
+/// What the pin shortcut does when it is triggered again for an image that is
+/// already on screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RepeatPinBehavior {
+    /// Cycle to an older screenshot in the recent-capture history.
+    #[default]
+    RestoreHistory,
+    /// Flash the existing pin instead of creating another copy.
+    FlashCurrent,
+}
+
+impl RepeatPinBehavior {
+    pub const ALL: [Self; 2] = [Self::RestoreHistory, Self::FlashCurrent];
+
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::RestoreHistory => "history",
+            Self::FlashCurrent => "flash",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "history" => Some(Self::RestoreHistory),
+            "flash" => Some(Self::FlashCurrent),
             _ => None,
         }
     }
@@ -141,13 +244,22 @@ pub struct AppSettings {
     pub record_frame_rate: FrameRate,
     pub record_quality: RecordQuality,
     pub record_cursor: bool,
+    /// Draws a translucent colored disc under the cursor while recording.
+    pub record_cursor_highlight: bool,
+    /// Disc color as packed `0xRRGGBB`; opacity is fixed by the recorder.
+    pub record_cursor_highlight_color: u32,
     pub capture_hotkey: String,
     pub pin_hotkey: String,
+    /// Behavior when the pin shortcut repeats for an image already on screen.
+    pub repeat_pin: RepeatPinBehavior,
     pub screenshot_dir: Option<PathBuf>,
     pub recording_dir: Option<PathBuf>,
     pub filename_template: String,
     pub window_composition: bool,
     pub window_background: WindowBackground,
+    pub window_gradient: GradientPreset,
+    pub window_gradient_top: u32,
+    pub window_gradient_bottom: u32,
     pub window_padding: u32,
     pub window_shadow: bool,
     pub window_wallpaper: Option<PathBuf>,
@@ -207,13 +319,19 @@ impl Default for AppSettings {
             record_frame_rate: FrameRate::Fps30,
             record_quality: RecordQuality::Standard,
             record_cursor: true,
+            record_cursor_highlight: false,
+            record_cursor_highlight_color: 0xFFCC00,
             capture_hotkey: DEFAULT_CAPTURE_HOTKEY.to_owned(),
             pin_hotkey: DEFAULT_PIN_HOTKEY.to_owned(),
+            repeat_pin: RepeatPinBehavior::RestoreHistory,
             screenshot_dir: None,
             recording_dir: None,
             filename_template: DEFAULT_FILENAME_TEMPLATE.to_owned(),
             window_composition: true,
             window_background: WindowBackground::Transparent,
+            window_gradient: GradientPreset::Accent,
+            window_gradient_top: 0x667EEA,
+            window_gradient_bottom: 0x764BA2,
             window_padding: 48,
             window_shadow: true,
             window_wallpaper: None,
@@ -317,8 +435,19 @@ fn parse(text: &str) -> AppSettings {
                 }
             }
             "record_cursor" => settings.record_cursor = value != "false",
+            "record_cursor_highlight" => settings.record_cursor_highlight = value != "false",
+            "record_cursor_highlight_color" => {
+                if let Some(color) = parse_rgba(value) {
+                    settings.record_cursor_highlight_color = color >> 8;
+                }
+            }
             "capture_hotkey" => settings.capture_hotkey = value.to_owned(),
             "pin_hotkey" => settings.pin_hotkey = value.to_owned(),
+            "repeat_pin" => {
+                if let Some(behavior) = RepeatPinBehavior::from_code(value) {
+                    settings.repeat_pin = behavior;
+                }
+            }
             "screenshot_dir" => settings.screenshot_dir = parse_directory(value),
             "recording_dir" => settings.recording_dir = parse_directory(value),
             "filename_template" => {
@@ -330,6 +459,21 @@ fn parse(text: &str) -> AppSettings {
             "window_background" => {
                 if let Some(background) = WindowBackground::from_code(value) {
                     settings.window_background = background;
+                }
+            }
+            "window_gradient" => {
+                if let Some(preset) = GradientPreset::from_code(value) {
+                    settings.window_gradient = preset;
+                }
+            }
+            "window_gradient_top" => {
+                if let Some(color) = parse_rgba(value) {
+                    settings.window_gradient_top = color >> 8;
+                }
+            }
+            "window_gradient_bottom" => {
+                if let Some(color) = parse_rgba(value) {
+                    settings.window_gradient_bottom = color >> 8;
                 }
             }
             "window_padding" => {
@@ -543,6 +687,15 @@ fn serialize(settings: &AppSettings) -> String {
         settings.pin_qr,
     );
     text.push_str(&format!(
+        "record_cursor_highlight={}\nrecord_cursor_highlight_color={:06x}\nrepeat_pin={}\nwindow_gradient={}\nwindow_gradient_top={:06x}\nwindow_gradient_bottom={:06x}\n",
+        settings.record_cursor_highlight,
+        settings.record_cursor_highlight_color & 0x00FF_FFFF,
+        settings.repeat_pin.code(),
+        settings.window_gradient.code(),
+        settings.window_gradient_top & 0x00FF_FFFF,
+        settings.window_gradient_bottom & 0x00FF_FFFF,
+    ));
+    text.push_str(&format!(
         "annotation_uniform_color={}\nannotation_stroke_width={}\nannotation_font_size={}\nannotation_arrow_start={}\nannotation_arrow_end={}\nannotation_text_background={}\nannotation_text_outline={}\nannotation_text_alignment={}\nannotation_number_style={}\nannotation_corner_radius={}\nannotation_blur_radius={}\nannotation_rect_filled={}\nannotation_ellipse_filled={}\nannotation_spotlight_intensity={}\n",
         settings.annotation_uniform_color,
         settings.annotation_stroke_width,
@@ -707,6 +860,37 @@ mod tests {
         settings.apply_annotation_color(AnnotationColorTool::Text, 0x0A84FFFF);
 
         assert_eq!(parse(&serialize(&settings)), settings);
+    }
+
+    #[test]
+    fn serialized_recording_and_background_options_round_trip() {
+        let settings = AppSettings {
+            record_cursor_highlight: true,
+            record_cursor_highlight_color: 0x34C759,
+            repeat_pin: RepeatPinBehavior::FlashCurrent,
+            window_background: WindowBackground::Gradient,
+            window_gradient: GradientPreset::Custom,
+            window_gradient_top: 0x112233,
+            window_gradient_bottom: 0x445566,
+            ..Default::default()
+        };
+        assert_eq!(parse(&serialize(&settings)), settings);
+    }
+
+    #[test]
+    fn parses_the_follow_system_background_and_defaults_to_it() {
+        let defaults = AppSettings::default();
+        assert_eq!(defaults.record_cursor_highlight_color, 0xFFCC00);
+        assert_eq!(defaults.repeat_pin, RepeatPinBehavior::RestoreHistory);
+        assert_eq!(defaults.window_gradient, GradientPreset::Accent);
+        assert_eq!(
+            parse("window_background=system\n").window_background,
+            WindowBackground::System
+        );
+        assert_eq!(
+            parse("window_gradient=aurora\n").window_gradient,
+            GradientPreset::Aurora
+        );
     }
 
     #[test]

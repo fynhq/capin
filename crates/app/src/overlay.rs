@@ -3164,6 +3164,6 @@ fn border(rect: Bounds<Pixels>, color: Rgba) -> Div {
         .top(rect.origin.y)
         .w(rect.size.width)
         .h(rect.size.height)
-        .border_2()
+        .border_4()
         .border_color(color)
 }

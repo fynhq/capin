@@ -77,8 +77,11 @@ pub fn cycle(hash: u64) -> Option<RgbaFrame> {
     };
 
     if entries.len() == 1 {
+        // The single entry is the image that triggered the repeat, so there is
+        // no older screenshot to restore. Returning it again used to pin a
+        // duplicate every time the shortcut repeated.
         CURSOR.with(|slot| slot.set(0));
-        return load_entry(&directory, &entries[0]);
+        return None;
     }
 
     for _ in 0..entries.len() {

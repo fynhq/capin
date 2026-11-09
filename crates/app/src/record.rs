@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use core_capture::{CaptureTarget, MonitorInfo, platform_backend};
-use core_record::{FrameRate, RecordConfig, RecordQuality};
+use core_record::{CursorHighlight, FrameRate, RecordConfig, RecordQuality};
 use core_types::{PhysicalPoint, PhysicalRect, RecordFormat};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -38,7 +38,12 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
             settings.record_frame_rate
         },
         quality: settings.record_quality,
-        include_cursor: settings.record_cursor,
+        // The highlight is only meaningful with the cursor in frame, so it
+        // implies cursor capture even when "include cursor" is off.
+        include_cursor: settings.record_cursor || settings.record_cursor_highlight,
+        cursor_highlight: settings.record_cursor_highlight.then_some(CursorHighlight {
+            color: settings.record_cursor_highlight_color & 0x00FF_FFFF,
+        }),
     };
 
     let bounds = bar_bounds(target);

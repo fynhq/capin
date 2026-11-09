@@ -3,9 +3,10 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use core_capture::CaptureTarget;
+use core_capture::{CaptureTarget, platform_backend};
 use core_record::{
-    FrameDecision, FrameRate, FrameTimeline, RecordConfig, RecordQuality, WebpEncoder,
+    CURSOR_HIGHLIGHT_ALPHA, CURSOR_HIGHLIGHT_RADIUS, CursorHighlight, FrameDecision, FrameRate,
+    FrameTimeline, RecordConfig, RecordQuality, WebpEncoder, paint_cursor_highlight_bgra,
     webp_output_size,
 };
 use core_types::{PhysicalRect, PhysicalSize, RecordFormat};
@@ -42,7 +43,62 @@ struct CaptureInfo {
     fps: u32,
     quality: RecordQuality,
     include_cursor: bool,
+    cursor_highlight: Option<CursorHighlight>,
+    cursor_space: CursorSpace,
     shared: Arc<Flags>,
+}
+
+/// Maps screen-space cursor positions into the captured frame.
+#[derive(Clone, Copy, Debug)]
+enum CursorSpace {
+    /// The frame starts at a physical desktop origin and covers `width`x`height`.
+    Screen {
+        origin_x: i32,
+        origin_y: i32,
+        width: u32,
+        height: u32,
+        dpi: f32,
+    },
+    /// The frame follows a window, so its origin is queried per frame.
+    Window { hwnd: isize, dpi: f32 },
+}
+
+impl CursorSpace {
+    fn dpi(self) -> f32 {
+        match self {
+            Self::Screen { dpi, .. } | Self::Window { dpi, .. } => dpi.clamp(1.0, 4.0),
+        }
+    }
+
+    /// Returns the cursor position in frame pixels for a frame of `width`x`height`.
+    fn cursor_in_frame(self, width: u32, height: u32) -> Option<(f32, f32)> {
+        let (cursor_x, cursor_y) = cursor_position()?;
+        match self {
+            Self::Screen {
+                origin_x,
+                origin_y,
+                width: source_width,
+                height: source_height,
+                ..
+            } => {
+                let scale_x = width as f32 / source_width.max(1) as f32;
+                let scale_y = height as f32 / source_height.max(1) as f32;
+                Some((
+                    (cursor_x - origin_x) as f32 * scale_x,
+                    (cursor_y - origin_y) as f32 * scale_y,
+                ))
+            }
+            Self::Window { hwnd, .. } => {
+                let (left, top, source_width, source_height) = window_rect(hwnd)?;
+                let scale_x = width as f32 / source_width.max(1) as f32;
+                let scale_y = height as f32 / source_height.max(1) as f32;
+                Some((
+                    (cursor_x - left) as f32 * scale_x,
+                    (cursor_y - top) as f32 * scale_y,
+                ))
+            }
+        }
+    }
 }
 
 pub(crate) fn start(
@@ -58,9 +114,33 @@ pub(crate) fn start(
     }
 
     let fps = config.frame_rate.as_u32();
+    // Cursor geometry is only needed for the demo highlight; skip the extra
+    // monitor/window enumeration otherwise.
+    let monitors = config
+        .cursor_highlight
+        .map(|_| platform_backend().monitors().unwrap_or_default())
+        .unwrap_or_default();
+    let windows =
+        if config.cursor_highlight.is_some() && matches!(config.target, CaptureTarget::Window(_)) {
+            platform_backend().windows().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
     match config.target {
         CaptureTarget::Region(region) => {
             let monitor = find_monitor(region.monitor.raw())?;
+            let monitor_info = monitors.iter().find(|info| info.id == region.monitor);
+            let cursor_space = CursorSpace::Screen {
+                origin_x: monitor_info.map_or(region.rect.origin.x, |info| {
+                    info.bounds.origin.x + region.rect.origin.x
+                }),
+                origin_y: monitor_info.map_or(region.rect.origin.y, |info| {
+                    info.bounds.origin.y + region.rect.origin.y
+                }),
+                width: region.rect.size.width,
+                height: region.rect.size.height,
+                dpi: monitor_info.map_or(1.0, |info| info.scale.get()),
+            };
             let info = CaptureInfo {
                 source: Source::Region(region.rect),
                 output: temp,
@@ -69,12 +149,22 @@ pub(crate) fn start(
                 fps,
                 quality: config.quality,
                 include_cursor: config.include_cursor,
+                cursor_highlight: config.cursor_highlight,
+                cursor_space,
                 shared,
             };
             spawn_monitor(monitor, info)
         }
         CaptureTarget::Monitor(id) => {
             let monitor = find_monitor(id.raw())?;
+            let monitor_info = monitors.iter().find(|info| info.id == id);
+            let cursor_space = CursorSpace::Screen {
+                origin_x: monitor_info.map_or(0, |info| info.bounds.origin.x),
+                origin_y: monitor_info.map_or(0, |info| info.bounds.origin.y),
+                width: monitor_info.map_or(1, |info| info.bounds.size.width),
+                height: monitor_info.map_or(1, |info| info.bounds.size.height),
+                dpi: monitor_info.map_or(1.0, |info| info.scale.get()),
+            };
             let info = CaptureInfo {
                 source: Source::Monitor,
                 output: temp,
@@ -83,6 +173,8 @@ pub(crate) fn start(
                 fps,
                 quality: config.quality,
                 include_cursor: config.include_cursor,
+                cursor_highlight: config.cursor_highlight,
+                cursor_space,
                 shared,
             };
             spawn_monitor(monitor, info)
@@ -90,6 +182,13 @@ pub(crate) fn start(
         CaptureTarget::Window(id) => {
             let raw = id.raw() as usize as *mut std::ffi::c_void;
             let window = Window::from_raw_hwnd(raw);
+            let cursor_space = CursorSpace::Window {
+                hwnd: id.raw() as isize,
+                dpi: windows
+                    .iter()
+                    .find(|info| info.id == id)
+                    .map_or(1.0, |info| info.scale.get()),
+            };
             let info = CaptureInfo {
                 source: Source::Window,
                 output: temp,
@@ -98,6 +197,8 @@ pub(crate) fn start(
                 fps,
                 quality: config.quality,
                 include_cursor: config.include_cursor,
+                cursor_highlight: config.cursor_highlight,
+                cursor_space,
                 shared,
             };
             spawn_window(window, info)
@@ -115,7 +216,7 @@ fn find_monitor(raw: u64) -> Result<Monitor, String> {
 
 fn spawn_monitor(monitor: Monitor, info: CaptureInfo) -> Result<(), String> {
     let shared = Arc::clone(&info.shared);
-    let cursor = cursor_settings(info.include_cursor);
+    let cursor = cursor_settings(info.include_cursor || info.cursor_highlight.is_some());
     let settings = CaptureSettings::new(
         monitor,
         cursor,
@@ -133,7 +234,7 @@ fn spawn_monitor(monitor: Monitor, info: CaptureInfo) -> Result<(), String> {
 
 fn spawn_window(window: Window, info: CaptureInfo) -> Result<(), String> {
     let shared = Arc::clone(&info.shared);
-    let cursor = cursor_settings(info.include_cursor);
+    let cursor = cursor_settings(info.include_cursor || info.cursor_highlight.is_some());
     let settings = CaptureSettings::new(
         window,
         cursor,
@@ -183,6 +284,32 @@ fn cursor_settings(include_cursor: bool) -> CursorCaptureSettings {
     } else {
         CursorCaptureSettings::WithoutCursor
     }
+}
+
+fn cursor_position() -> Option<(i32, i32)> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    let mut point = POINT::default();
+    unsafe { GetCursorPos(&mut point).ok()? };
+    Some((point.x, point.y))
+}
+
+/// Returns the window's physical outer rectangle as `(left, top, width, height)`.
+fn window_rect(hwnd: isize) -> Option<(i32, i32, u32, u32)> {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+
+    let mut rect = RECT::default();
+    unsafe {
+        GetWindowRect(HWND(hwnd as *mut std::ffi::c_void), &mut rect).ok()?;
+    }
+    Some((
+        rect.left,
+        rect.top,
+        (rect.right - rect.left).max(1) as u32,
+        (rect.bottom - rect.top).max(1) as u32,
+    ))
 }
 
 struct Recorder {
@@ -284,6 +411,22 @@ impl GraphicsCaptureApiHandler for Recorder {
         for (y, chunk) in frame_bytes.chunks_exact_mut(row).enumerate() {
             let source = (height as usize - 1 - y) * row;
             chunk.copy_from_slice(&data[source..source + row]);
+        }
+
+        if let Some(highlight) = self.flags.cursor_highlight
+            && let Some((cursor_x, cursor_y)) =
+                self.flags.cursor_space.cursor_in_frame(width, height)
+        {
+            paint_cursor_highlight_bgra(
+                &mut frame_bytes,
+                width,
+                height,
+                cursor_x,
+                cursor_y,
+                CURSOR_HIGHLIGHT_RADIUS * self.flags.cursor_space.dpi(),
+                highlight.color,
+                CURSOR_HIGHLIGHT_ALPHA,
+            );
         }
 
         if self.flags.format == RecordFormat::WebP {

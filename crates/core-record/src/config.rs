@@ -52,6 +52,13 @@ impl RecordQuality {
     }
 }
 
+/// The translucent disc painted under the system cursor during a recording.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CursorHighlight {
+    /// Disc color as packed `0xRRGGBB`. Opacity is fixed by the recorder.
+    pub color: u32,
+}
+
 /// Inputs for one recording session. Audio is intentionally absent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordConfig {
@@ -60,6 +67,7 @@ pub struct RecordConfig {
     pub frame_rate: FrameRate,
     pub quality: RecordQuality,
     pub include_cursor: bool,
+    pub cursor_highlight: Option<CursorHighlight>,
 }
 
 impl RecordConfig {
@@ -70,6 +78,7 @@ impl RecordConfig {
             frame_rate: FrameRate::Fps30,
             quality: RecordQuality::Standard,
             include_cursor: true,
+            cursor_highlight: None,
         }
     }
 

@@ -89,7 +89,8 @@ pub fn system_accent_hex() -> Option<u32> {
     None
 }
 
-/// Whether the Windows app theme is light, used to pick a tray glyph.
+/// Whether the Windows app theme is light, used to pick a tray glyph and the
+/// "follow system" window background.
 #[cfg(windows)]
 pub fn system_uses_light_theme() -> Option<bool> {
     const PERSONALIZE_KEY: &str =
@@ -97,7 +98,21 @@ pub fn system_uses_light_theme() -> Option<bool> {
     hkcu_dword(PERSONALIZE_KEY, "AppsUseLightTheme").map(|value| value != 0)
 }
 
-#[cfg(not(windows))]
+/// Whether the app is running under the light system appearance. AppKit reads
+/// the effective appearance of the shared application, so an explicit app
+/// override would be reflected too.
+#[cfg(target_os = "macos")]
+pub fn system_uses_light_theme() -> Option<bool> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+
+    let marker = MainThreadMarker::new()?;
+    let application = NSApplication::sharedApplication(marker);
+    let appearance = application.effectiveAppearance();
+    Some(!appearance.name().to_string().contains("Dark"))
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn system_uses_light_theme() -> Option<bool> {
     None
 }

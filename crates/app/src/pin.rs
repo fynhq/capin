@@ -246,6 +246,9 @@ struct PinState {
     entity: Entity<PinView>,
     window: AnyWindowHandle,
     image_path: Option<PathBuf>,
+    /// Hash of the pinned image, used to find the pin when the same image is
+    /// triggered again.
+    content_hash: Option<u64>,
     bounds: Bounds<Pixels>,
     opacity: f32,
     zoom: f32,
@@ -321,20 +324,51 @@ pub fn pin_last(cx: &mut App) {
     }
 }
 
-/// Pins an image, or cycles recent screenshots when the same screenshot is
-/// triggered again without a new clipboard source.
+/// Pins an image, or applies the configured repeat behavior when the same
+/// screenshot is triggered again without a new clipboard source.
 fn pin_image(frame: RgbaFrame, cx: &mut App) {
     let hash = crate::capture_history::hash_frame(&frame);
-    let repeated = LAST_PIN_TRIGGER.with(|slot| slot.get() == Some(hash));
-    if repeated
-        && crate::capture_history::contains(hash)
-        && let Some(history_frame) = crate::capture_history::cycle(hash)
-    {
-        open_pin_content(PinContent::from_frame(history_frame), cx);
-        LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
-        return;
+    let repeated = LAST_PIN_TRIGGER.with(|slot| slot.get() == Some(hash))
+        || PINS.with(|pins| {
+            pins.borrow()
+                .values()
+                .any(|state| state.content_hash == Some(hash))
+        });
+    if repeated {
+        let behavior = settings_state::get().repeat_pin;
+        if behavior == settings_state::RepeatPinBehavior::RestoreHistory
+            && crate::capture_history::contains(hash)
+            && let Some(history_frame) = crate::capture_history::cycle(hash)
+        {
+            open_pin_content(PinContent::from_frame(history_frame), cx);
+            // Keep the trigger hash stable so another press advances the
+            // history cursor instead of pinning the source again.
+            LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
+            return;
+        }
+        // Flash an on-screen pin with the same image. When every matching pin
+        // was closed, fall through so the shortcut still reopens the image.
+        if flash_existing_pin(hash, cx) {
+            return;
+        }
     }
     open_image_pin(frame, cx);
+}
+
+/// Brings the pin holding `hash` to the front and flashes its outline.
+fn flash_existing_pin(hash: u64, cx: &mut App) -> bool {
+    let target = PINS.with(|pins| {
+        pins.borrow()
+            .values()
+            .find(|state| state.content_hash == Some(hash))
+            .map(|state| (state.entity.clone(), state.window))
+    });
+    let Some((entity, window)) = target else {
+        return false;
+    };
+    entity.update(cx, |view, cx| view.flash(cx));
+    let _ = window.update(cx, |_, window, _| window.activate_window());
+    true
 }
 
 pub fn open_frame(frame: RgbaFrame, cx: &mut App) {
@@ -409,6 +443,7 @@ fn open_pin_inner(
 ) -> Option<u64> {
     let id = id.unwrap_or_else(next_pin_id);
     let kind = content.kind();
+    let content_hash = content.frame().map(crate::capture_history::hash_frame);
     let had_existing_image = existing_image.is_some();
     let image_path = if let Some(path) = existing_image {
         Some(path)
@@ -449,6 +484,7 @@ fn open_pin_inner(
                 entity,
                 window,
                 image_path,
+                content_hash,
                 bounds,
                 opacity,
                 zoom,
@@ -608,6 +644,7 @@ pub fn replace_image(id: u64, frame: &RgbaFrame, cx: &mut App) -> bool {
     PINS.with(|pins| {
         if let Some(state) = pins.borrow_mut().get_mut(&id) {
             state.kind = PinKind::Image;
+            state.content_hash = Some(crate::capture_history::hash_frame(frame));
             state.image_path = path;
             state.bounds = Bounds {
                 origin,
@@ -660,6 +697,7 @@ fn persist_rotated_image(id: u64, frame: &RgbaFrame, bounds: Bounds<Pixels>) -> 
     PINS.with(|pins| {
         if let Some(state) = pins.borrow_mut().get_mut(&id) {
             state.kind = PinKind::Image;
+            state.content_hash = Some(crate::capture_history::hash_frame(frame));
             state.image_path = saved;
             state.bounds = bounds;
         }
@@ -976,6 +1014,8 @@ struct PinView {
     /// window drag.
     press: Option<Point<Pixels>>,
     content_generation: u64,
+    flash_alpha: f32,
+    flash_generation: u64,
     focus_handle: FocusHandle,
 }
 
@@ -1001,6 +1041,8 @@ impl PinView {
             selecting: false,
             press: None,
             content_generation: 1,
+            flash_alpha: 0.0,
+            flash_generation: 0,
             focus_handle: cx.focus_handle(),
         };
         cx.on_release(|this, cx| {
@@ -1011,6 +1053,43 @@ impl PinView {
         .detach();
         view.start_ocr(cx);
         view
+    }
+
+    /// Pulses a bright outline so a repeated pin shortcut makes the existing
+    /// pin easy to find instead of stacking another copy on top.
+    fn flash(&mut self, cx: &mut Context<Self>) {
+        self.flash_generation = self.flash_generation.wrapping_add(1);
+        let generation = self.flash_generation;
+        self.flash_alpha = 1.0;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            for step in 0..5 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(110))
+                    .await;
+                let alive = this
+                    .update(cx, |this, cx| {
+                        if this.flash_generation != generation {
+                            return false;
+                        }
+                        this.flash_alpha = if step % 2 == 0 { 0.2 } else { 1.0 };
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !alive {
+                    return;
+                }
+            }
+            this.update(cx, |this, cx| {
+                if this.flash_generation == generation {
+                    this.flash_alpha = 0.0;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn start_ocr(&mut self, cx: &mut Context<Self>) {
@@ -1593,6 +1672,14 @@ impl Render for PinView {
                     .bg(rgba(0x0A84FF66))
             })
             .collect();
+        let flash = (self.flash_alpha > 0.001).then(|| {
+            div()
+                .absolute()
+                .inset_0()
+                .border_4()
+                .border_color(rgb(0x0A84FF))
+                .opacity(self.flash_alpha)
+        });
         let root = div()
             .size_full()
             .id("pin-window")
@@ -1705,7 +1792,8 @@ impl Render for PinView {
                 }
             }))
             .child(body)
-            .children(text_layers);
+            .children(text_layers)
+            .children(flash);
 
         root.children(notice.map(|notice| {
             div()

@@ -7,7 +7,8 @@ use std::time::Duration;
 use block2::RcBlock;
 use core_capture::CaptureTarget;
 use core_record::{
-    FrameDecision, FrameRate, FrameTimeline, RecordConfig, RecordQuality, WebpEncoder,
+    CURSOR_HIGHLIGHT_ALPHA, CURSOR_HIGHLIGHT_RADIUS, CursorHighlight, FrameDecision, FrameRate,
+    FrameTimeline, RecordConfig, RecordQuality, WebpEncoder, paint_cursor_highlight_bgra,
     webp_output_size,
 };
 use core_types::{PhysicalRect, PhysicalSize, RecordFormat};
@@ -22,7 +23,7 @@ use objc2_av_foundation::{
     AVVideoMaxKeyFrameIntervalKey, AVVideoWidthKey,
 };
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
-use objc2_core_graphics::{CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess};
+use objc2_core_graphics::{CGEvent, CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess};
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
@@ -102,6 +103,68 @@ struct SessionPlan {
     height: usize,
     source_rect: Option<CGRect>,
     single_window: bool,
+    cursor_space: CursorSpace,
+}
+
+/// Maps the global cursor position (screen points, top-left origin) into the
+/// recorded frame. All geometry is captured when the session starts.
+#[derive(Clone, Copy, Debug)]
+enum CursorSpace {
+    Screen {
+        frame_x: f64,
+        frame_y: f64,
+        source_x: f64,
+        source_y: f64,
+        source_width: f64,
+        source_height: f64,
+        scale: f64,
+    },
+    Window {
+        origin_x: f64,
+        origin_y: f64,
+        width: f64,
+        height: f64,
+        scale: f64,
+    },
+}
+
+impl CursorSpace {
+    fn dpi(self) -> f32 {
+        let scale = match self {
+            Self::Screen { scale, .. } | Self::Window { scale, .. } => scale,
+        };
+        scale.clamp(1.0, 4.0) as f32
+    }
+
+    fn cursor_in_frame(self, width: usize, height: usize) -> Option<(f32, f32)> {
+        let event = CGEvent::new(None)?;
+        let location = CGEvent::location(Some(&*event));
+        let (x, y) = match self {
+            Self::Screen {
+                frame_x,
+                frame_y,
+                source_x,
+                source_y,
+                source_width,
+                source_height,
+                ..
+            } => (
+                (location.x - frame_x - source_x) * (width as f64 / source_width.max(1.0)),
+                (location.y - frame_y - source_y) * (height as f64 / source_height.max(1.0)),
+            ),
+            Self::Window {
+                origin_x,
+                origin_y,
+                width: source_width,
+                height: source_height,
+                ..
+            } => (
+                (location.x - origin_x) * (width as f64 / source_width.max(1.0)),
+                (location.y - origin_y) * (height as f64 / source_height.max(1.0)),
+            ),
+        };
+        Some((x as f32, y as f32))
+    }
 }
 
 fn build_plan(
@@ -112,6 +175,8 @@ fn build_plan(
     match config.target {
         CaptureTarget::Monitor(id) => {
             let display = find_display(content, id.raw())?;
+            let frame = unsafe { display.frame() };
+            let scale = display_scale(&display);
             let excluded = own_windows(content, extra_exclusions);
             let windows = NSArray::from_retained_slice(&excluded);
             let filter = unsafe {
@@ -127,10 +192,20 @@ fn build_plan(
                 height: even(display_height(&display)),
                 source_rect: None,
                 single_window: false,
+                cursor_space: CursorSpace::Screen {
+                    frame_x: frame.origin.x,
+                    frame_y: frame.origin.y,
+                    source_x: 0.0,
+                    source_y: 0.0,
+                    source_width: frame.size.width,
+                    source_height: frame.size.height,
+                    scale,
+                },
             })
         }
         CaptureTarget::Region(region) => {
             let display = find_display(content, region.monitor.raw())?;
+            let frame = unsafe { display.frame() };
             let (width, height) = region_size(region.rect)?;
             let scale = display_scale(&display);
             let source_rect = CGRect::new(
@@ -158,11 +233,22 @@ fn build_plan(
                 height,
                 source_rect: Some(source_rect),
                 single_window: false,
+                cursor_space: CursorSpace::Screen {
+                    frame_x: frame.origin.x,
+                    frame_y: frame.origin.y,
+                    source_x: source_rect.origin.x,
+                    source_y: source_rect.origin.y,
+                    source_width: source_rect.size.width,
+                    source_height: source_rect.size.height,
+                    scale,
+                },
             })
         }
         CaptureTarget::Window(id) => {
             let window = find_window(content, id.raw())?;
+            let frame = unsafe { window.frame() };
             let (width, height) = window_size(&window, content)?;
+            let scale = window_scale(&window, content).unwrap_or(1.0);
             let filter = unsafe {
                 SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &window)
             };
@@ -172,6 +258,13 @@ fn build_plan(
                 height,
                 source_rect: None,
                 single_window: true,
+                cursor_space: CursorSpace::Window {
+                    origin_x: frame.origin.x,
+                    origin_y: frame.origin.y,
+                    width: frame.size.width,
+                    height: frame.size.height,
+                    scale,
+                },
             })
         }
     }
@@ -287,7 +380,13 @@ fn capture_session(
         )
     };
 
-    let output = ScreenOutput::new(tx, Arc::clone(&flags), config.frame_rate.as_u32());
+    let output = ScreenOutput::new(
+        tx,
+        Arc::clone(&flags),
+        config.frame_rate.as_u32(),
+        config.cursor_highlight,
+        plan.cursor_space,
+    );
     let output_protocol: &ProtocolObject<dyn SCStreamOutput> = ProtocolObject::from_ref(&*output);
     let queue = DispatchQueue::new("io.github.fynhq.capin.record", None);
     unsafe {
@@ -342,7 +441,7 @@ fn build_stream_config(
         stream_config.setWidth(plan.width);
         stream_config.setHeight(plan.height);
         stream_config.setPixelFormat(kCVPixelFormatType_32BGRA);
-        stream_config.setShowsCursor(config.include_cursor);
+        stream_config.setShowsCursor(config.include_cursor || config.cursor_highlight.is_some());
         stream_config.setCapturesAudio(false);
         stream_config.setQueueDepth(QUEUE_DEPTH);
         stream_config.setScalesToFit(true);
@@ -421,6 +520,8 @@ struct OutputIvars {
     flags: Arc<Flags>,
     fps: u32,
     timeline: Mutex<FrameTimeline>,
+    cursor_highlight: Option<CursorHighlight>,
+    cursor_space: CursorSpace,
 }
 
 define_class!(
@@ -459,9 +560,24 @@ define_class!(
             };
             drop(timeline);
 
-            let (data, width, height) = copy_bgra(&buffer);
+            let (mut data, width, height) = copy_bgra(&buffer);
             if data.is_empty() {
                 return;
+            }
+            if let Some(highlight) = ivars.cursor_highlight
+                && let Some((cursor_x, cursor_y)) =
+                    ivars.cursor_space.cursor_in_frame(width, height)
+            {
+                paint_cursor_highlight_bgra(
+                    &mut data,
+                    width as u32,
+                    height as u32,
+                    cursor_x,
+                    cursor_y,
+                    CURSOR_HIGHLIGHT_RADIUS * ivars.cursor_space.dpi(),
+                    highlight.color,
+                    CURSOR_HIGHLIGHT_ALPHA,
+                );
             }
             let pts_millis = (index.saturating_mul(1000) / u64::from(ivars.fps.max(1))) as i64;
             let _ = ivars.tx.try_send(EncodedFrame {
@@ -475,13 +591,21 @@ define_class!(
 );
 
 impl ScreenOutput {
-    fn new(tx: SyncSender<EncodedFrame>, flags: Arc<Flags>, fps: u32) -> Retained<Self> {
+    fn new(
+        tx: SyncSender<EncodedFrame>,
+        flags: Arc<Flags>,
+        fps: u32,
+        cursor_highlight: Option<CursorHighlight>,
+        cursor_space: CursorSpace,
+    ) -> Retained<Self> {
         let frame_rate = FrameRate::from_u32(fps).unwrap_or(FrameRate::Fps30);
         let this = Self::alloc().set_ivars(OutputIvars {
             tx,
             flags,
             fps: fps.max(1),
             timeline: Mutex::new(FrameTimeline::new(frame_rate)),
+            cursor_highlight,
+            cursor_space,
         });
         unsafe { msg_send![super(this), init] }
     }
