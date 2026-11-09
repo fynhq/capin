@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use core_annotate::{NumberStyle, TextAlignment};
 use core_record::{FrameRate, RecordQuality};
@@ -358,23 +358,27 @@ impl Default for AppSettings {
     }
 }
 
-static SETTINGS: OnceLock<Mutex<AppSettings>> = OnceLock::new();
+static SETTINGS: OnceLock<Mutex<Arc<AppSettings>>> = OnceLock::new();
 
-pub fn get() -> AppSettings {
+/// Returns a cheap snapshot of the current settings. Callers that only read
+/// fields get an `Arc` clone instead of copying strings and paths on every
+/// render.
+pub fn get() -> Arc<AppSettings> {
     SETTINGS
-        .get_or_init(|| Mutex::new(load().unwrap_or_default()))
+        .get_or_init(|| Mutex::new(Arc::new(load().unwrap_or_default())))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone()
 }
 
 pub fn update(update: impl FnOnce(&mut AppSettings)) {
-    let mut settings = SETTINGS
-        .get_or_init(|| Mutex::new(load().unwrap_or_default()))
+    let mut slot = SETTINGS
+        .get_or_init(|| Mutex::new(Arc::new(load().unwrap_or_default())))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    update(&mut settings);
-    persist(&settings);
+    let settings = Arc::make_mut(&mut *slot);
+    update(settings);
+    persist(settings);
 }
 
 /// Applies an explicit or previously enabled login-startup preference at

@@ -10,6 +10,7 @@ use gpui_kit::*;
 /// windows that deliberately survive a new capture or a mode switch.
 pub fn close_auxiliary(cx: &mut App, handles: Vec<AnyWindowHandle>) {
     crate::overlay::release_textures(cx);
+    crate::editor::release_images_for_windows(cx, &handles, None);
     for handle in handles {
         if !crate::pin::is_pin_window(&handle) {
             let _ = handle.update(cx, |_, window, _| window.remove_window());
@@ -22,6 +23,7 @@ pub fn close_auxiliary(cx: &mut App, handles: Vec<AnyWindowHandle>) {
 /// switch, so settings has to survive the overlay and editor lifecycles.
 pub fn close_capture_auxiliary(cx: &mut App, handles: Vec<AnyWindowHandle>) {
     crate::overlay::release_textures(cx);
+    crate::editor::release_images_for_windows(cx, &handles, None);
     for handle in handles {
         if !crate::pin::is_pin_window(&handle) && !crate::settings::is_settings_window(&handle) {
             let _ = handle.update(cx, |_, window, _| window.remove_window());
@@ -34,6 +36,7 @@ pub fn close_capture_auxiliary_except(
     handles: Vec<AnyWindowHandle>,
     keep: AnyWindowHandle,
 ) {
+    crate::editor::release_images_for_windows(cx, &handles, Some(keep));
     for handle in handles {
         if handle != keep
             && !crate::pin::is_pin_window(&handle)

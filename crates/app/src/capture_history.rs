@@ -24,13 +24,22 @@ thread_local! {
     static LAST_HASH: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
-/// Records a completed screenshot for the recent-screenshot history.
-/// Consecutive identical images are deduplicated so repeated exports do not
-/// fill the list.
-pub fn record(frame: &RgbaFrame) {
-    let hash = hash_frame(frame);
+/// Records an already encoded PNG. Copying a screenshot to the clipboard
+/// produces PNG bytes; history writes those bytes instead of encoding the
+/// same image a second time.
+pub fn record_png_bytes(bytes: &[u8], hash: u64) {
+    record_png(hash, |path| std::fs::write(path, bytes).is_ok());
+}
+
+/// Records an existing exported PNG by copying the file. Saving a screenshot
+/// already paid for PNG encoding, so history only duplicates the bytes.
+pub fn record_png_file(source: &Path, hash: u64) -> bool {
+    record_png(hash, |path| std::fs::copy(source, path).is_ok())
+}
+
+fn record_png(hash: u64, write: impl FnOnce(&Path) -> bool) -> bool {
     let Some(directory) = history_dir() else {
-        return;
+        return false;
     };
     let now = now_millis();
     let mut entries = entries();
@@ -41,11 +50,18 @@ pub fn record(frame: &RgbaFrame) {
         write_entries(&directory, &entries);
         ENTRIES.with(|slot| *slot.borrow_mut() = Some(entries));
         reset_cursor(hash);
-        return;
+        return true;
     }
 
-    let Some(file) = save_image(&directory, frame, now) else {
-        return;
+    let path = unique_history_path(&directory, now);
+    if !write(&path) {
+        return false;
+    }
+    let Some(file) = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+    else {
+        return false;
     };
     entries.insert(
         0,
@@ -59,6 +75,7 @@ pub fn record(frame: &RgbaFrame) {
     write_entries(&directory, &entries);
     ENTRIES.with(|slot| *slot.borrow_mut() = Some(entries));
     reset_cursor(hash);
+    true
 }
 
 /// Returns the next older screenshot after the one matching `hash`.
@@ -196,23 +213,14 @@ fn load_entry(directory: &Path, entry: &HistoryEntry) -> Option<RgbaFrame> {
     RgbaFrame::from_pixels(width, height, image.into_raw()).ok()
 }
 
-fn save_image(directory: &Path, frame: &RgbaFrame, now: u64) -> Option<String> {
+fn unique_history_path(directory: &Path, now: u64) -> PathBuf {
     let mut path = directory.join(format!("history-{now}.png"));
     let mut suffix = 1u32;
     while path.exists() {
         path = directory.join(format!("history-{now}-{suffix}.png"));
         suffix += 1;
     }
-    image::save_buffer(
-        &path,
-        frame.pixels(),
-        frame.width(),
-        frame.height(),
-        image::ColorType::Rgba8,
-    )
-    .ok()?;
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
+    path
 }
 
 fn history_dir() -> Option<PathBuf> {

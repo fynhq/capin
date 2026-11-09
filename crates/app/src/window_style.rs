@@ -1,4 +1,7 @@
-use std::path::Path;
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::SystemTime;
 
 use core_compose::{Background, Shadow, WindowCanvas, compose_window};
 use core_types::{RgbaFrame, WindowId};
@@ -13,8 +16,25 @@ const SHADOW_OFFSET: f32 = 12.0;
 const SHADOW_BLUR: f32 = 32.0;
 const SHADOW_OPACITY: f32 = 0.35;
 
+#[derive(Clone)]
+struct WallpaperCacheEntry {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+    length: u64,
+    frame: Arc<RgbaFrame>,
+}
+
+thread_local! {
+    /// Decoding a 4K wallpaper for every window capture is pure CPU. Reuse
+    /// the decoded frame until the file's size or mtime changes.
+    static WALLPAPER_CACHE: RefCell<Option<WallpaperCacheEntry>> = const { RefCell::new(None) };
+}
+
 pub fn compose_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> RgbaFrame {
     let settings = settings_state::get();
+    if settings.window_background != WindowBackground::Wallpaper || !settings.window_composition {
+        WALLPAPER_CACHE.with(|cache| *cache.borrow_mut() = None);
+    }
     if !settings.window_composition {
         return frame;
     }
@@ -78,7 +98,7 @@ fn background(settings: &AppSettings) -> Background {
 
 /// A custom image wins; otherwise the current system wallpaper is used, so
 /// choosing "Wallpaper" works without asking the user to pick a file first.
-fn wallpaper(settings: &AppSettings) -> Option<RgbaFrame> {
+fn wallpaper(settings: &AppSettings) -> Option<Arc<RgbaFrame>> {
     if let Some(path) = settings.window_wallpaper.as_deref()
         && let Some(frame) = load_wallpaper(path)
     {
@@ -87,7 +107,7 @@ fn wallpaper(settings: &AppSettings) -> Option<RgbaFrame> {
     platform_window::desktop_wallpaper_path()
         .as_deref()
         .and_then(load_wallpaper)
-        .or_else(platform_window::desktop_wallpaper_frame)
+        .or_else(|| platform_window::desktop_wallpaper_frame().map(Arc::new))
 }
 
 fn gradient(settings: &AppSettings) -> Background {
@@ -125,8 +145,31 @@ fn rgb_pair(color: u32) -> [u8; 4] {
     ]
 }
 
-fn load_wallpaper(path: &Path) -> Option<RgbaFrame> {
+fn load_wallpaper(path: &Path) -> Option<Arc<RgbaFrame>> {
+    let metadata = std::fs::metadata(path).ok();
+    let modified = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.modified().ok());
+    let length = metadata.as_ref().map_or(0, std::fs::Metadata::len);
+
+    if let Some(cached) = WALLPAPER_CACHE.with(|cache| cache.borrow().clone())
+        && cached.path == path
+        && cached.modified == modified
+        && cached.length == length
+    {
+        return Some(cached.frame);
+    }
+
     let image = image::open(path).ok()?.into_rgba8();
     let (width, height) = image.dimensions();
-    RgbaFrame::from_pixels(width, height, image.into_raw()).ok()
+    let frame = Arc::new(RgbaFrame::from_pixels(width, height, image.into_raw()).ok()?);
+    WALLPAPER_CACHE.with(|cache| {
+        *cache.borrow_mut() = Some(WallpaperCacheEntry {
+            path: path.to_path_buf(),
+            modified,
+            length,
+            frame: frame.clone(),
+        });
+    });
+    Some(frame)
 }

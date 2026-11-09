@@ -47,20 +47,34 @@ pub fn magnifier_image(
     let source_size = source_size.max(1);
     let half_source = source_size as i32 / 2;
     let mut pixels = vec![0u8; output_size as usize * output_size as usize * 4];
+    let source_columns: Vec<i32> = (0..output_size)
+        .map(|output_x| {
+            center_x - half_source
+                + (i64::from(output_x) * i64::from(source_size) / i64::from(output_size)) as i32
+        })
+        .collect();
 
     for output_y in 0..output_size {
         let source_y = center_y - half_source
             + (i64::from(output_y) * i64::from(source_size) / i64::from(output_size)) as i32;
-        for output_x in 0..output_size {
-            let source_x = center_x - half_source
-                + (i64::from(output_x) * i64::from(source_size) / i64::from(output_size)) as i32;
-            let target = (output_y as usize * output_size as usize + output_x as usize) * 4;
-            let Some([red, green, blue, alpha]) = frame
-                .pixel(source_x.max(0) as u32, source_y.max(0) as u32)
-                .filter(|_| source_x >= 0 && source_y >= 0)
+        if source_y < 0 {
+            continue;
+        }
+        let Some(row) = frame.row(source_y as u32) else {
+            continue;
+        };
+        for (output_x, &source_x) in source_columns.iter().enumerate() {
+            if source_x < 0 {
+                continue;
+            }
+            let source_offset = source_x as usize * 4;
+            let Some([red, green, blue, alpha]) = row
+                .get(source_offset..source_offset + 4)
+                .map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]])
             else {
                 continue;
             };
+            let target = (output_y as usize * output_size as usize + output_x) * 4;
             pixels[target] = blue;
             pixels[target + 1] = green;
             pixels[target + 2] = red;
@@ -112,11 +126,15 @@ pub fn encode_png(frame: &RgbaFrame) -> Result<Vec<u8>, image::ImageError> {
     Ok(cursor.into_inner())
 }
 
-pub fn copy_png(frame: &RgbaFrame, cx: &mut App) -> Result<(), image::ImageError> {
+pub fn copy_png(frame: &RgbaFrame, cx: &mut App) -> Result<Vec<u8>, image::ImageError> {
     let bytes = encode_png(frame)?;
-    let image = Image::from_bytes(ImageFormat::Png, bytes);
+    copy_png_bytes(&bytes, cx);
+    Ok(bytes)
+}
+
+pub fn copy_png_bytes(bytes: &[u8], cx: &mut App) {
+    let image = Image::from_bytes(ImageFormat::Png, bytes.to_vec());
     cx.write_to_clipboard(ClipboardItem::new_image(&image));
-    Ok(())
 }
 
 pub fn save_png(frame: &RgbaFrame) -> Result<PathBuf, std::io::Error> {

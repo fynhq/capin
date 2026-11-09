@@ -12,6 +12,7 @@ mod i18n;
 mod icons;
 mod image_util;
 mod logging;
+mod ocr_queue;
 mod overlay;
 mod pin;
 mod record;

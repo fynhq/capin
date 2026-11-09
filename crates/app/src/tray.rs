@@ -165,11 +165,11 @@ mod imp {
             let mut ticks = 0u32;
             loop {
                 cx.background_executor()
-                    .timer(Duration::from_millis(50))
+                    .timer(Duration::from_millis(100))
                     .await;
 
                 ticks = ticks.wrapping_add(1);
-                if ticks.is_multiple_of(20) {
+                if ticks.is_multiple_of(10) {
                     refresh_icon_for_theme();
                 }
 

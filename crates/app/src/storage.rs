@@ -61,12 +61,14 @@ pub fn release_single_instance() {
 pub fn screenshot_dir() -> PathBuf {
     settings_state::get()
         .screenshot_dir
+        .clone()
         .unwrap_or_else(default_screenshot_dir)
 }
 
 pub fn recording_dir() -> PathBuf {
     settings_state::get()
         .recording_dir
+        .clone()
         .unwrap_or_else(default_recording_dir)
 }
 
@@ -109,7 +111,7 @@ pub fn pins_dir() -> Option<PathBuf> {
 pub fn save_png(frame: &RgbaFrame) -> Result<PathBuf, std::io::Error> {
     let directory = screenshot_dir();
     ensure_directory(&directory)?;
-    let template = settings_state::get().filename_template;
+    let template = settings_state::get().filename_template.clone();
     let stem = render_filename(&template, frame.width(), frame.height());
     let (path, mut file) = create_unique_file(&directory, &stem, "png")?;
     if let Err(error) = image::write_buffer_with_format(
@@ -123,6 +125,23 @@ pub fn save_png(frame: &RgbaFrame) -> Result<PathBuf, std::io::Error> {
         drop(file);
         let _ = std::fs::remove_file(&path);
         return Err(std::io::Error::other(error));
+    }
+    Ok(path)
+}
+
+/// Saves an existing PNG by copying its encoded bytes. Used by pin "save"
+/// after OCR has released the CPU frame.
+pub fn save_png_file(source: &Path) -> Result<PathBuf, std::io::Error> {
+    let (width, height) = image::image_dimensions(source).map_err(std::io::Error::other)?;
+    let directory = screenshot_dir();
+    ensure_directory(&directory)?;
+    let template = settings_state::get().filename_template.clone();
+    let stem = render_filename(&template, width, height);
+    let (path, file) = create_unique_file(&directory, &stem, "png")?;
+    drop(file);
+    if let Err(error) = std::fs::copy(source, &path) {
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
     }
     Ok(path)
 }

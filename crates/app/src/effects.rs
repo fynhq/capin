@@ -20,9 +20,12 @@ impl RegionEffects {
         self.corner_radius > 0 || self.shadow || self.border
     }
 
-    pub fn apply(self, frame: &RgbaFrame, scale: f32) -> RgbaFrame {
+    /// Applies the effects, returning the original frame unchanged when they
+    /// are disabled. Taking the frame by value avoids a full-image clone on
+    /// the common path where no region effect is configured.
+    pub fn apply(self, frame: RgbaFrame, scale: f32) -> RgbaFrame {
         if !self.active() || frame.width() == 0 || frame.height() == 0 {
-            return frame.clone();
+            return frame;
         }
 
         let scale = scale.max(0.1);
@@ -47,11 +50,11 @@ impl RegionEffects {
             }),
         };
 
-        match compose_window(frame, &canvas) {
+        match compose_window(&frame, &canvas) {
             Ok(frame) => frame,
             Err(error) => {
                 log_error!("effects", "failed to apply capture effects: {error}");
-                frame.clone()
+                frame
             }
         }
     }

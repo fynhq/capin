@@ -627,7 +627,7 @@ struct SettingsView {
 
 impl SettingsView {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let settings = settings_state::get();
+        let settings = settings_state::get().as_ref().clone();
         let theme = Theme::for_window(window, None);
         let filename_input =
             cx.new(|cx| InputState::new(window, cx).default_value(&settings.filename_template));
