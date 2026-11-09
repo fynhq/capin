@@ -1,9 +1,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use core_annotate::{NumberStyle, TextAlignment};
-use core_record::{FrameRate, RecordQuality};
-use core_types::RecordFormat;
+use core_annotate::TextAlignment;
 use platform_window::{AutostartState, set_autostart};
 
 use crate::i18n::Language;
@@ -97,19 +95,10 @@ pub enum WindowBackground {
     System,
     Light,
     Dark,
-    Gradient,
-    Wallpaper,
 }
 
 impl WindowBackground {
-    pub const ALL: [Self; 6] = [
-        Self::Transparent,
-        Self::System,
-        Self::Light,
-        Self::Dark,
-        Self::Gradient,
-        Self::Wallpaper,
-    ];
+    pub const ALL: [Self; 4] = [Self::Transparent, Self::System, Self::Light, Self::Dark];
 
     pub const fn code(self) -> &'static str {
         match self {
@@ -117,8 +106,6 @@ impl WindowBackground {
             Self::System => "system",
             Self::Light => "light",
             Self::Dark => "dark",
-            Self::Gradient => "gradient",
-            Self::Wallpaper => "wallpaper",
         }
     }
 
@@ -128,78 +115,7 @@ impl WindowBackground {
             "system" => Some(Self::System),
             "light" => Some(Self::Light),
             "dark" => Some(Self::Dark),
-            "gradient" => Some(Self::Gradient),
-            "wallpaper" => Some(Self::Wallpaper),
             _ => None,
-        }
-    }
-}
-
-/// Built-in gradient pairings used when the window background is a gradient.
-/// `Accent` derives its pair from the system accent color; `Custom` reads the
-/// two stored color values.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum GradientPreset {
-    #[default]
-    Accent,
-    Sunset,
-    Ocean,
-    Aurora,
-    Mint,
-    Blossom,
-    Graphite,
-    Custom,
-}
-
-impl GradientPreset {
-    pub const ALL: [Self; 8] = [
-        Self::Accent,
-        Self::Sunset,
-        Self::Ocean,
-        Self::Aurora,
-        Self::Mint,
-        Self::Blossom,
-        Self::Graphite,
-        Self::Custom,
-    ];
-
-    pub const fn code(self) -> &'static str {
-        match self {
-            Self::Accent => "accent",
-            Self::Sunset => "sunset",
-            Self::Ocean => "ocean",
-            Self::Aurora => "aurora",
-            Self::Mint => "mint",
-            Self::Blossom => "blossom",
-            Self::Graphite => "graphite",
-            Self::Custom => "custom",
-        }
-    }
-
-    pub fn from_code(code: &str) -> Option<Self> {
-        match code {
-            "accent" => Some(Self::Accent),
-            "sunset" => Some(Self::Sunset),
-            "ocean" => Some(Self::Ocean),
-            "aurora" => Some(Self::Aurora),
-            "mint" => Some(Self::Mint),
-            "blossom" => Some(Self::Blossom),
-            "graphite" => Some(Self::Graphite),
-            "custom" => Some(Self::Custom),
-            _ => None,
-        }
-    }
-
-    /// Fixed top/bottom colors for the curated presets.
-    pub const fn colors(self) -> Option<(u32, u32)> {
-        match self {
-            Self::Sunset => Some((0xFF7E5F, 0xFEB47B)),
-            Self::Ocean => Some((0x2193B0, 0x6DD5ED)),
-            Self::Aurora => Some((0x667EEA, 0x764BA2)),
-            Self::Mint => Some((0x11998E, 0x38EF7D)),
-            Self::Blossom => Some((0xFBC2EB, 0xA6C1EE)),
-            Self::Graphite => Some((0x232526, 0x414345)),
-            Self::Accent | Self::Custom => None,
         }
     }
 }
@@ -240,9 +156,6 @@ pub struct AppSettings {
     pub auto_start: bool,
     pub auto_start_explicit: bool,
     pub copy_to_clipboard: bool,
-    pub record_format: RecordFormat,
-    pub record_frame_rate: FrameRate,
-    pub record_quality: RecordQuality,
     pub record_cursor: bool,
     /// Draws a translucent colored disc under the cursor while recording.
     pub record_cursor_highlight: bool,
@@ -257,12 +170,8 @@ pub struct AppSettings {
     pub filename_template: String,
     pub window_composition: bool,
     pub window_background: WindowBackground,
-    pub window_gradient: GradientPreset,
-    pub window_gradient_top: u32,
-    pub window_gradient_bottom: u32,
     pub window_padding: u32,
     pub window_shadow: bool,
-    pub window_wallpaper: Option<PathBuf>,
     pub capture_cursor: bool,
     /// Shared color used when `annotation_uniform_color` is enabled.
     pub annotation_color: u32,
@@ -276,7 +185,6 @@ pub struct AppSettings {
     pub annotation_text_background: bool,
     pub annotation_text_outline: bool,
     pub annotation_text_alignment: TextAlignment,
-    pub annotation_number_style: NumberStyle,
     pub annotation_corner_radius: f32,
     pub annotation_blur_radius: u32,
     pub annotation_rect_filled: bool,
@@ -315,9 +223,6 @@ impl Default for AppSettings {
             auto_start: false,
             auto_start_explicit: false,
             copy_to_clipboard: true,
-            record_format: RecordFormat::Mp4,
-            record_frame_rate: FrameRate::Fps30,
-            record_quality: RecordQuality::Standard,
             record_cursor: true,
             record_cursor_highlight: false,
             record_cursor_highlight_color: 0xFFCC00,
@@ -329,12 +234,8 @@ impl Default for AppSettings {
             filename_template: DEFAULT_FILENAME_TEMPLATE.to_owned(),
             window_composition: true,
             window_background: WindowBackground::Transparent,
-            window_gradient: GradientPreset::Accent,
-            window_gradient_top: 0x667EEA,
-            window_gradient_bottom: 0x764BA2,
             window_padding: 48,
             window_shadow: true,
-            window_wallpaper: None,
             capture_cursor: false,
             annotation_color: DEFAULT_ANNOTATION_COLOR,
             annotation_colors: [DEFAULT_ANNOTATION_COLOR; ANNOTATION_COLOR_TOOL_COUNT],
@@ -346,7 +247,6 @@ impl Default for AppSettings {
             annotation_text_background: false,
             annotation_text_outline: false,
             annotation_text_alignment: TextAlignment::Left,
-            annotation_number_style: NumberStyle::Circle,
             annotation_corner_radius: 0.0,
             annotation_blur_radius: 16,
             annotation_rect_filled: false,
@@ -422,22 +322,6 @@ fn parse(text: &str) -> AppSettings {
             "auto_start" => settings.auto_start = value == "true",
             "auto_start_explicit" => settings.auto_start_explicit = value == "true",
             "copy_to_clipboard" => settings.copy_to_clipboard = value != "false",
-            "record_format" => match value {
-                // Earlier builds reserved "webm"; treat it as the WebP choice.
-                "webm" | "webp" => settings.record_format = RecordFormat::WebP,
-                "mp4" => settings.record_format = RecordFormat::Mp4,
-                _ => {}
-            },
-            "record_frame_rate" => match value {
-                "60" => settings.record_frame_rate = FrameRate::Fps60,
-                "30" => settings.record_frame_rate = FrameRate::Fps30,
-                _ => {}
-            },
-            "record_quality" => {
-                if let Some(quality) = RecordQuality::from_code(value) {
-                    settings.record_quality = quality;
-                }
-            }
             "record_cursor" => settings.record_cursor = value != "false",
             "record_cursor_highlight" => settings.record_cursor_highlight = value != "false",
             "record_cursor_highlight_color" => {
@@ -465,28 +349,12 @@ fn parse(text: &str) -> AppSettings {
                     settings.window_background = background;
                 }
             }
-            "window_gradient" => {
-                if let Some(preset) = GradientPreset::from_code(value) {
-                    settings.window_gradient = preset;
-                }
-            }
-            "window_gradient_top" => {
-                if let Some(color) = parse_rgba(value) {
-                    settings.window_gradient_top = color >> 8;
-                }
-            }
-            "window_gradient_bottom" => {
-                if let Some(color) = parse_rgba(value) {
-                    settings.window_gradient_bottom = color >> 8;
-                }
-            }
             "window_padding" => {
                 if let Ok(padding) = value.parse::<u32>() {
                     settings.window_padding = padding.min(256);
                 }
             }
             "window_shadow" => settings.window_shadow = value != "false",
-            "window_wallpaper" => settings.window_wallpaper = parse_directory(value),
             "capture_cursor" => settings.capture_cursor = value != "false",
             "annotation_color" => {
                 if let Some(color) = parse_rgba(value) {
@@ -521,11 +389,6 @@ fn parse(text: &str) -> AppSettings {
                     settings.annotation_text_alignment = alignment;
                 }
             }
-            "annotation_number_style" => {
-                if let Some(style) = parse_number_style(value) {
-                    settings.annotation_number_style = style;
-                }
-            }
             "annotation_corner_radius" => {
                 if let Ok(radius) = value.parse::<f32>()
                     && radius.is_finite()
@@ -558,9 +421,6 @@ fn parse(text: &str) -> AppSettings {
             _ => {}
         }
     }
-    if settings.record_format == RecordFormat::WebP {
-        settings.record_frame_rate = FrameRate::Fps30;
-    }
     #[cfg(target_os = "windows")]
     {
         // Older Windows builds persisted the Win+Shift combinations, which
@@ -589,23 +449,6 @@ fn text_alignment_code(value: TextAlignment) -> &'static str {
         TextAlignment::Left => "left",
         TextAlignment::Center => "center",
         TextAlignment::Right => "right",
-    }
-}
-
-fn parse_number_style(value: &str) -> Option<NumberStyle> {
-    match value {
-        "circle" => Some(NumberStyle::Circle),
-        "square" => Some(NumberStyle::Square),
-        "plain" => Some(NumberStyle::Plain),
-        _ => None,
-    }
-}
-
-fn number_style_code(value: NumberStyle) -> &'static str {
-    match value {
-        NumberStyle::Circle => "circle",
-        NumberStyle::Square => "square",
-        NumberStyle::Plain => "plain",
     }
 }
 
@@ -642,14 +485,6 @@ fn persist(settings: &AppSettings) {
 }
 
 fn serialize(settings: &AppSettings) -> String {
-    let frame_rate = match settings.record_frame_rate {
-        FrameRate::Fps30 => "30",
-        FrameRate::Fps60 => "60",
-    };
-    let format = match settings.record_format {
-        RecordFormat::Mp4 => "mp4",
-        RecordFormat::WebP => "webp",
-    };
     let screenshot_dir = settings
         .screenshot_dir
         .as_ref()
@@ -660,20 +495,12 @@ fn serialize(settings: &AppSettings) -> String {
         .as_ref()
         .map(|path| path.display().to_string())
         .unwrap_or_default();
-    let window_wallpaper = settings
-        .window_wallpaper
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
     let mut text = format!(
-        "language={}\nauto_start={}\nauto_start_explicit={}\ncopy_to_clipboard={}\nrecord_format={}\nrecord_frame_rate={}\nrecord_quality={}\nrecord_cursor={}\ncapture_hotkey={}\npin_hotkey={}\nscreenshot_dir={}\nrecording_dir={}\nfilename_template={}\nwindow_composition={}\nwindow_background={}\nwindow_padding={}\nwindow_shadow={}\nwindow_wallpaper={}\ncapture_cursor={}\nannotation_color={:08x}\npin_text_ocr={}\npin_qr={}\n",
+        "language={}\nauto_start={}\nauto_start_explicit={}\ncopy_to_clipboard={}\nrecord_cursor={}\ncapture_hotkey={}\npin_hotkey={}\nscreenshot_dir={}\nrecording_dir={}\nfilename_template={}\nwindow_composition={}\nwindow_background={}\nwindow_padding={}\nwindow_shadow={}\ncapture_cursor={}\nannotation_color={:08x}\npin_text_ocr={}\npin_qr={}\n",
         settings.language.code(),
         settings.auto_start,
         settings.auto_start_explicit,
         settings.copy_to_clipboard,
-        format,
-        frame_rate,
-        settings.record_quality.code(),
         settings.record_cursor,
         settings.capture_hotkey,
         settings.pin_hotkey,
@@ -684,23 +511,19 @@ fn serialize(settings: &AppSettings) -> String {
         settings.window_background.code(),
         settings.window_padding,
         settings.window_shadow,
-        window_wallpaper,
         settings.capture_cursor,
         settings.annotation_color,
         settings.pin_text_ocr,
         settings.pin_qr,
     );
     text.push_str(&format!(
-        "record_cursor_highlight={}\nrecord_cursor_highlight_color={:06x}\nrepeat_pin={}\nwindow_gradient={}\nwindow_gradient_top={:06x}\nwindow_gradient_bottom={:06x}\n",
+        "record_cursor_highlight={}\nrecord_cursor_highlight_color={:06x}\nrepeat_pin={}\n",
         settings.record_cursor_highlight,
         settings.record_cursor_highlight_color & 0x00FF_FFFF,
         settings.repeat_pin.code(),
-        settings.window_gradient.code(),
-        settings.window_gradient_top & 0x00FF_FFFF,
-        settings.window_gradient_bottom & 0x00FF_FFFF,
     ));
     text.push_str(&format!(
-        "annotation_uniform_color={}\nannotation_stroke_width={}\nannotation_font_size={}\nannotation_arrow_start={}\nannotation_arrow_end={}\nannotation_text_background={}\nannotation_text_outline={}\nannotation_text_alignment={}\nannotation_number_style={}\nannotation_corner_radius={}\nannotation_blur_radius={}\nannotation_rect_filled={}\nannotation_ellipse_filled={}\nannotation_spotlight_intensity={}\n",
+        "annotation_uniform_color={}\nannotation_stroke_width={}\nannotation_font_size={}\nannotation_arrow_start={}\nannotation_arrow_end={}\nannotation_text_background={}\nannotation_text_outline={}\nannotation_text_alignment={}\nannotation_corner_radius={}\nannotation_blur_radius={}\nannotation_rect_filled={}\nannotation_ellipse_filled={}\nannotation_spotlight_intensity={}\n",
         settings.annotation_uniform_color,
         settings.annotation_stroke_width,
         settings.annotation_font_size,
@@ -709,7 +532,6 @@ fn serialize(settings: &AppSettings) -> String {
         settings.annotation_text_background,
         settings.annotation_text_outline,
         text_alignment_code(settings.annotation_text_alignment),
-        number_style_code(settings.annotation_number_style),
         settings.annotation_corner_radius,
         settings.annotation_blur_radius,
         settings.annotation_rect_filled,
@@ -816,7 +638,6 @@ mod tests {
         assert!(!defaults.annotation_text_background);
         assert!(!defaults.annotation_text_outline);
         assert_eq!(defaults.annotation_text_alignment, TextAlignment::Left);
-        assert_eq!(defaults.annotation_number_style, NumberStyle::Circle);
         assert_eq!(defaults.annotation_corner_radius, 0.0);
         assert_eq!(defaults.annotation_blur_radius, 16);
         assert!(!defaults.annotation_rect_filled);
@@ -824,7 +645,7 @@ mod tests {
         assert_eq!(defaults.annotation_spotlight_intensity, 60);
 
         let settings = parse(
-            "annotation_stroke_width=8\nannotation_font_size=32\nannotation_arrow_start=true\nannotation_arrow_end=false\nannotation_text_background=true\nannotation_text_outline=true\nannotation_text_alignment=center\nannotation_number_style=square\nannotation_corner_radius=16\nannotation_blur_radius=32\nannotation_rect_filled=true\nannotation_ellipse_filled=true\nannotation_spotlight_intensity=80\n",
+            "annotation_stroke_width=8\nannotation_font_size=32\nannotation_arrow_start=true\nannotation_arrow_end=false\nannotation_text_background=true\nannotation_text_outline=true\nannotation_text_alignment=center\nannotation_corner_radius=16\nannotation_blur_radius=32\nannotation_rect_filled=true\nannotation_ellipse_filled=true\nannotation_spotlight_intensity=80\n",
         );
         assert_eq!(settings.annotation_stroke_width, 8.0);
         assert_eq!(settings.annotation_font_size, 32.0);
@@ -833,7 +654,6 @@ mod tests {
         assert!(settings.annotation_text_background);
         assert!(settings.annotation_text_outline);
         assert_eq!(settings.annotation_text_alignment, TextAlignment::Center);
-        assert_eq!(settings.annotation_number_style, NumberStyle::Square);
         assert_eq!(settings.annotation_corner_radius, 16.0);
         assert_eq!(settings.annotation_blur_radius, 32);
         assert!(settings.annotation_rect_filled);
@@ -852,7 +672,6 @@ mod tests {
             annotation_text_background: true,
             annotation_text_outline: true,
             annotation_text_alignment: TextAlignment::Center,
-            annotation_number_style: NumberStyle::Square,
             annotation_corner_radius: 16.0,
             annotation_blur_radius: 32,
             annotation_rect_filled: true,
@@ -872,10 +691,7 @@ mod tests {
             record_cursor_highlight: true,
             record_cursor_highlight_color: 0x34C759,
             repeat_pin: RepeatPinBehavior::FlashCurrent,
-            window_background: WindowBackground::Gradient,
-            window_gradient: GradientPreset::Custom,
-            window_gradient_top: 0x112233,
-            window_gradient_bottom: 0x445566,
+            window_background: WindowBackground::Dark,
             ..Default::default()
         };
         assert_eq!(parse(&serialize(&settings)), settings);
@@ -886,14 +702,14 @@ mod tests {
         let defaults = AppSettings::default();
         assert_eq!(defaults.record_cursor_highlight_color, 0xFFCC00);
         assert_eq!(defaults.repeat_pin, RepeatPinBehavior::RestoreHistory);
-        assert_eq!(defaults.window_gradient, GradientPreset::Accent);
+        assert_eq!(defaults.window_background, WindowBackground::Transparent);
         assert_eq!(
             parse("window_background=system\n").window_background,
             WindowBackground::System
         );
         assert_eq!(
-            parse("window_gradient=aurora\n").window_gradient,
-            GradientPreset::Aurora
+            parse("window_background=gradient\n").window_background,
+            WindowBackground::Transparent
         );
     }
 
@@ -908,14 +724,6 @@ mod tests {
 
         let empty = parse("filename_template=\n");
         assert_eq!(empty.filename_template, DEFAULT_FILENAME_TEMPLATE);
-    }
-
-    #[test]
-    fn migrates_the_legacy_webm_choice_to_webp() {
-        let settings = parse("record_format=webm\nrecord_frame_rate=60\n");
-        assert_eq!(settings.record_format, RecordFormat::WebP);
-        assert_eq!(settings.record_frame_rate, FrameRate::Fps30);
-        assert!(serialize(&settings).contains("record_format=webp"));
     }
 
     #[test]

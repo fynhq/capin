@@ -4,8 +4,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use core_record::FrameRate;
-use core_types::RecordFormat;
 use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -14,9 +12,7 @@ use platform_window::{AutostartState, set_autostart, system_accent_hex};
 use crate::i18n::{Language, t};
 use crate::icons;
 use crate::logging::{log_error, log_info};
-use crate::settings_state::{
-    self, AppSettings, GradientPreset, RepeatPinBehavior, WindowBackground,
-};
+use crate::settings_state::{self, AppSettings, RepeatPinBehavior, WindowBackground};
 use crate::storage;
 
 const PROJECT_URL: &str = "https://github.com/fynhq/capin";
@@ -355,7 +351,6 @@ struct ToggleRow {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SelectKind {
     Background,
-    Gradient,
     Padding,
 }
 
@@ -610,10 +605,6 @@ struct SettingsView {
     recording_shortcut: Option<ShortcutSlot>,
     filename_input: Entity<InputState>,
     filename_subscription: Option<Subscription>,
-    gradient_top_input: Entity<InputState>,
-    gradient_bottom_input: Entity<InputState>,
-    gradient_top_subscription: Option<Subscription>,
-    gradient_bottom_subscription: Option<Subscription>,
     focus_handle: FocusHandle,
     #[cfg(target_os = "macos")]
     titlebar_drag: bool,
@@ -635,16 +626,6 @@ impl SettingsView {
             state.set_placeholder(settings_state::DEFAULT_FILENAME_TEMPLATE, window, cx);
             state.set_editor_style(input_editor_style(&theme));
         });
-        let (gradient_top, gradient_bottom) = crate::window_style::gradient_colors(&settings);
-        let gradient_top_input =
-            cx.new(|cx| InputState::new(window, cx).default_value(format!("#{gradient_top:06x}")));
-        let gradient_bottom_input = cx
-            .new(|cx| InputState::new(window, cx).default_value(format!("#{gradient_bottom:06x}")));
-        for input in [&gradient_top_input, &gradient_bottom_input] {
-            input.update(cx, |state, _| {
-                state.set_editor_style(input_editor_style(&theme));
-            });
-        }
         let mut view = Self {
             section: SettingsSection::General,
             settings,
@@ -655,10 +636,6 @@ impl SettingsView {
             recording_shortcut: None,
             filename_input,
             filename_subscription: None,
-            gradient_top_input,
-            gradient_bottom_input,
-            gradient_top_subscription: None,
-            gradient_bottom_subscription: None,
             focus_handle: cx.focus_handle(),
             #[cfg(target_os = "macos")]
             titlebar_drag: false,
@@ -686,36 +663,6 @@ impl SettingsView {
                 }
             },
         ));
-        let top_input = view.gradient_top_input.clone();
-        view.gradient_top_subscription = Some(cx.subscribe_in(
-            &top_input,
-            window,
-            |this: &mut SettingsView, input, event: &InputEvent, window, cx| match event {
-                InputEvent::Change | InputEvent::Focus => cx.notify(),
-                InputEvent::Blur => {
-                    this.commit_gradient_color(true, input, window, cx);
-                    cx.notify();
-                }
-                InputEvent::PressEnter { .. } => {
-                    this.commit_gradient_color(true, input, window, cx);
-                }
-            },
-        ));
-        let bottom_input = view.gradient_bottom_input.clone();
-        view.gradient_bottom_subscription = Some(cx.subscribe_in(
-            &bottom_input,
-            window,
-            |this: &mut SettingsView, input, event: &InputEvent, window, cx| match event {
-                InputEvent::Change | InputEvent::Focus => cx.notify(),
-                InputEvent::Blur => {
-                    this.commit_gradient_color(false, input, window, cx);
-                    cx.notify();
-                }
-                InputEvent::PressEnter { .. } => {
-                    this.commit_gradient_color(false, input, window, cx);
-                }
-            },
-        ));
         cx.on_release(|this, cx| {
             let template: String = this
                 .filename_input
@@ -728,10 +675,6 @@ impl SettingsView {
             if !template.is_empty() && template != settings_state::get().filename_template {
                 settings_state::update(|settings| settings.filename_template = template);
             }
-            let top = this.gradient_top_input.read(cx).value().to_string();
-            let bottom = this.gradient_bottom_input.read(cx).value().to_string();
-            this.commit_gradient_color_text(true, &top);
-            this.commit_gradient_color_text(false, &bottom);
             if let Some(logo) = this.logo.take() {
                 cx.drop_image(logo, None);
             }
@@ -1114,9 +1057,7 @@ impl SettingsView {
                             .gap(px(layout::CONTENT_GAP))
                             .child(match self.section {
                                 SettingsSection::General => self.general(theme, window, cx),
-                                SettingsSection::Capture => {
-                                    self.capture_settings(theme, window, cx)
-                                }
+                                SettingsSection::Capture => self.capture_settings(theme, cx),
                                 SettingsSection::Recording => self.recording(theme, cx),
                                 SettingsSection::Shortcuts => self.shortcuts(theme, cx),
                             }),
@@ -1401,7 +1342,7 @@ impl SettingsView {
             .child(open)
     }
 
-    fn capture_settings(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> Div {
+    fn capture_settings(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
         let mut window_rows = vec![self.toggle_row(
             theme,
@@ -1418,17 +1359,6 @@ impl SettingsView {
         )];
         if self.settings.window_composition {
             window_rows.push(self.window_background_row(theme, cx));
-            match self.settings.window_background {
-                WindowBackground::Gradient => {
-                    window_rows.push(self.window_gradient_row(theme, cx));
-                    window_rows.push(self.gradient_color_row(true, theme, window, cx));
-                    window_rows.push(self.gradient_color_row(false, theme, window, cx));
-                }
-                WindowBackground::Wallpaper => {
-                    window_rows.push(self.window_wallpaper_row(theme, cx));
-                }
-                _ => {}
-            }
             window_rows.push(self.window_padding_row(theme, cx));
             window_rows.push(self.toggle_row(
                 theme,
@@ -1606,113 +1536,6 @@ impl SettingsView {
                 cx,
             ))
     }
-
-    fn window_gradient_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
-        let language = self.settings.language;
-        let current = t(language, gradient_label_key(self.settings.window_gradient));
-        row_shell()
-            .child(row_label_with_icon(
-                theme,
-                icons::PALETTE,
-                t(language, "settings.window_gradient"),
-                t(language, "settings.window_gradient_desc"),
-            ))
-            .child(self.select_trigger(
-                theme,
-                current,
-                "settings-window-gradient",
-                SelectKind::Gradient,
-                cx,
-            ))
-    }
-
-    fn gradient_color_row(
-        &self,
-        top: bool,
-        theme: &Theme,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let language = self.settings.language;
-        let input = if top {
-            self.gradient_top_input.clone()
-        } else {
-            self.gradient_bottom_input.clone()
-        };
-        let field = self.gradient_color_field(top, &input, theme, window, cx);
-        row_shell()
-            .child(row_label_with_icon(
-                theme,
-                icons::PALETTE,
-                t(
-                    language,
-                    if top {
-                        "settings.gradient_top"
-                    } else {
-                        "settings.gradient_bottom"
-                    },
-                ),
-                t(language, "settings.gradient_color_desc"),
-            ))
-            .child(field)
-    }
-
-    fn gradient_color_field(
-        &self,
-        top: bool,
-        input: &Entity<InputState>,
-        theme: &Theme,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let colors = crate::window_style::gradient_colors(&self.settings);
-        let color = if top { colors.0 } else { colors.1 };
-        let preview = rgb(color & 0x00FF_FFFF);
-        let focused = input
-            .read(cx)
-            .presentation()
-            .focus_handle()
-            .is_focused(window);
-        let input = input.clone();
-        div()
-            .id(if top {
-                "settings-gradient-top-field"
-            } else {
-                "settings-gradient-bottom-field"
-            })
-            .w(px(160.0))
-            .h(px(layout::BUTTON_HEIGHT))
-            .flex_shrink_0()
-            .px(px(9.0))
-            .rounded(px(layout::BUTTON_RADIUS))
-            .bg(theme.control)
-            .border_1()
-            .border_color(if focused { theme.accent } else { theme.border })
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .overflow_hidden()
-            .text_size(px(layout::CONTROL_TEXT))
-            .cursor_text()
-            .child(
-                div()
-                    .w(px(14.0))
-                    .h(px(14.0))
-                    .flex_shrink_0()
-                    .rounded(px(7.0))
-                    .bg(preview)
-                    .border_1()
-                    .border_color(theme.card_border),
-            )
-            .child(div().flex_1().min_w(px(0.0)).child(Input::new(&input)))
-            .on_mouse_down_out(cx.listener(|_, _: &MouseDownEvent, window, cx| window.blur(cx)))
-            .on_click(cx.listener(move |_, _, window, cx| {
-                let focus = input.read(cx).presentation().focus_handle().clone();
-                window.focus(&focus, cx);
-            }))
-    }
-
     fn repeat_pin_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
         let mut control = segmented();
@@ -1842,15 +1665,6 @@ impl SettingsView {
                     ));
                 }
             }
-            SelectKind::Gradient => {
-                for (index, preset) in GradientPreset::ALL.into_iter().enumerate() {
-                    entries.push((
-                        t(language, gradient_label_key(preset)).to_owned(),
-                        index as u32,
-                        self.settings.window_gradient == preset,
-                    ));
-                }
-            }
             SelectKind::Padding => {
                 for padding in [0u32, 24, 48, 96] {
                     entries.push((
@@ -1915,7 +1729,7 @@ impl SettingsView {
                     .when(!selected, |item| {
                         item.text_color(text).hover(move |style| style.bg(hover))
                     })
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                    .on_click(cx.listener(move |this, _, _window, cx| {
                         match menu.kind {
                             SelectKind::Background => {
                                 let background = WindowBackground::ALL[value as usize];
@@ -1923,10 +1737,6 @@ impl SettingsView {
                                 settings_state::update(|settings| {
                                     settings.window_background = background
                                 });
-                            }
-                            SelectKind::Gradient => {
-                                let preset = GradientPreset::ALL[value as usize];
-                                this.apply_gradient_preset(preset, window, cx);
                             }
                             SelectKind::Padding => {
                                 this.settings.window_padding = value;
@@ -1963,133 +1773,6 @@ impl SettingsView {
                 .into_any_element(),
         )
     }
-
-    fn window_wallpaper_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
-        let language = self.settings.language;
-        let path = self
-            .settings
-            .window_wallpaper
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| t(language, "settings.system_wallpaper").to_owned());
-        let choose = action_button(theme, t(language, "settings.choose_image").to_owned())
-            .id("settings-wallpaper-choose")
-            .active(|style| style.opacity(0.88))
-            .on_click(cx.listener(|this, _, _, cx| this.choose_wallpaper(cx)));
-        let clear = self.settings.window_wallpaper.as_ref().map(|_| {
-            action_button(theme, t(language, "settings.clear_image").to_owned())
-                .id("settings-wallpaper-clear")
-                .active(|style| style.opacity(0.88))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.settings.window_wallpaper = None;
-                    settings_state::update(|settings| settings.window_wallpaper = None);
-                    this.status = None;
-                    cx.notify();
-                }))
-        });
-
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .px(px(layout::ROW_PAD_X))
-            .py(px(layout::ROW_PAD_Y))
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(24.0))
-                    .child(row_label_with_icon(
-                        theme,
-                        icons::WALLPAPER,
-                        t(language, "settings.window_wallpaper"),
-                        t(language, "settings.window_wallpaper_desc"),
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_shrink_0()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(choose)
-                            .children(clear),
-                    ),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .pl(px(28.0))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis_start()
-                    .text_size(px(layout::CAPTION))
-                    .text_color(theme.muted)
-                    .child(path),
-            )
-    }
-
-    fn choose_wallpaper(&mut self, cx: &mut Context<Self>) {
-        let language = self.settings.language;
-        let prompt = t(language, "settings.choose_image").to_owned();
-        let receiver = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some(prompt.into()),
-        });
-        cx.spawn(async move |this, cx| {
-            let (selected, error) = match receiver.await {
-                Ok(Ok(Some(mut paths))) => (paths.pop(), None),
-                Ok(Ok(None)) => (None, None),
-                Ok(Err(error)) => (None, Some(error.to_string())),
-                Err(_) => (None, None),
-            };
-            this.update(cx, |this, cx| {
-                this.apply_wallpaper_choice(selected, error, cx);
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    fn apply_wallpaper_choice(
-        &mut self,
-        selected: Option<PathBuf>,
-        error: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        let language = self.settings.language;
-        if let Some(error) = error {
-            self.show_status(
-                format!("{} {}", t(language, "settings.status_picker_failed"), error),
-                cx,
-            );
-            return;
-        }
-        let Some(path) = selected else {
-            return;
-        };
-        if image::open(&path).is_err() {
-            self.show_status(
-                t(language, "settings.status_wallpaper_invalid").to_owned(),
-                cx,
-            );
-            return;
-        }
-        self.settings.window_wallpaper = Some(path.clone());
-        settings_state::update(|settings| settings.window_wallpaper = Some(path));
-        self.show_status(
-            t(language, "settings.status_wallpaper_updated").to_owned(),
-            cx,
-        );
-    }
-
     fn save_location_row(&self, target: SaveTarget, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
         let custom = target.selected_directory(&self.settings).is_some();
@@ -2256,89 +1939,6 @@ impl SettingsView {
         let message = t(self.settings.language, "settings.filename_template_saved").to_owned();
         self.show_status(message, cx);
     }
-
-    /// Applies the hex value from one gradient stop field. Invalid input
-    /// reverts to the color currently painted instead of leaving the field in a
-    /// half-edited state.
-    fn commit_gradient_color(
-        &mut self,
-        top: bool,
-        input: &Entity<InputState>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let raw = input.read(cx).value().to_string();
-        let current = crate::window_style::gradient_colors(&self.settings);
-        let fallback = if top { current.0 } else { current.1 };
-        let Some(color) = parse_hex_color(&raw) else {
-            let message = t(self.settings.language, "settings.gradient_color_invalid").to_owned();
-            self.show_status(message, cx);
-            input.update(cx, |state, cx| {
-                state.set_value(format!("#{fallback:06x}"), window, cx);
-            });
-            return;
-        };
-        let canonical = format!("#{color:06x}");
-        if canonical != raw {
-            input.update(cx, |state, cx| {
-                state.set_value(canonical.clone(), window, cx);
-            });
-        }
-        self.apply_gradient_color(top, color, current);
-    }
-
-    /// Commits a stop value without UI access, used when the settings window
-    /// closes while a field still has text that was not blurred.
-    fn commit_gradient_color_text(&mut self, top: bool, raw: &str) {
-        let Some(color) = parse_hex_color(raw) else {
-            return;
-        };
-        let current = crate::window_style::gradient_colors(&self.settings);
-        self.apply_gradient_color(top, color, current);
-    }
-
-    fn apply_gradient_color(&mut self, top: bool, color: u32, current: (u32, u32)) {
-        let fallback = if top { current.0 } else { current.1 };
-        if color == fallback {
-            return;
-        }
-        let (top_color, bottom_color) = if top {
-            (color, current.1)
-        } else {
-            (current.0, color)
-        };
-        self.settings.window_gradient = GradientPreset::Custom;
-        self.settings.window_gradient_top = top_color;
-        self.settings.window_gradient_bottom = bottom_color;
-        settings_state::update(|settings| {
-            settings.window_gradient = GradientPreset::Custom;
-            settings.window_gradient_top = top_color;
-            settings.window_gradient_bottom = bottom_color;
-        });
-        self.status = None;
-    }
-
-    fn apply_gradient_preset(
-        &mut self,
-        preset: GradientPreset,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.settings.window_gradient = preset;
-        settings_state::update(|settings| settings.window_gradient = preset);
-        let (top, bottom) = crate::window_style::gradient_colors(&self.settings);
-        for (input, color) in [
-            (&self.gradient_top_input, top),
-            (&self.gradient_bottom_input, bottom),
-        ] {
-            input.update(cx, |state, cx| {
-                state.set_value(format!("#{color:06x}"), window, cx);
-            });
-        }
-        self.status = None;
-        cx.notify();
-    }
-
     fn choose_directory(&mut self, target: SaveTarget, cx: &mut Context<Self>) {
         let language = self.settings.language;
         let prompt = t(language, "settings.choose_folder").to_owned();
@@ -2418,9 +2018,6 @@ impl SettingsView {
     fn recording(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
         let mut rows = vec![
-            self.recording_format_row(theme, cx),
-            self.recording_frame_rate_row(theme, cx),
-            self.recording_quality_row(theme, cx),
             self.toggle_row(
                 theme,
                 cx,
@@ -2513,120 +2110,6 @@ impl SettingsView {
                     .gap(px(4.0))
                     .children(swatches),
             )
-    }
-
-    fn recording_format_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
-        let language = self.settings.language;
-        let mut control = segmented();
-        for (format, label) in [
-            (RecordFormat::Mp4, t(language, "format.mp4")),
-            (RecordFormat::WebP, t(language, "format.webp")),
-        ] {
-            let selected = self.settings.record_format == format;
-            control = control.child(
-                segment(theme, label, selected)
-                    .id(label)
-                    .active(|style| style.opacity(0.9))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.settings.record_format = format;
-                        let frame_rate = if format == RecordFormat::WebP {
-                            FrameRate::Fps30
-                        } else {
-                            this.settings.record_frame_rate
-                        };
-                        this.settings.record_frame_rate = frame_rate;
-                        settings_state::update(|settings| {
-                            settings.record_format = format;
-                            settings.record_frame_rate = frame_rate;
-                        });
-                        cx.notify();
-                    })),
-            );
-        }
-
-        row_shell()
-            .child(row_label_with_icon(
-                theme,
-                icons::FILM,
-                t(language, "settings.format"),
-                t(language, "settings.format_desc"),
-            ))
-            .child(control)
-    }
-
-    fn recording_frame_rate_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
-        let language = self.settings.language;
-        let mut control = segmented();
-        for (frame_rate, label) in [
-            (FrameRate::Fps30, t(language, "fps.30")),
-            (FrameRate::Fps60, t(language, "fps.60")),
-        ] {
-            let selected = self.settings.record_frame_rate == frame_rate;
-            let disabled =
-                self.settings.record_format == RecordFormat::WebP && frame_rate == FrameRate::Fps60;
-            let button = if disabled {
-                segment(theme, label, selected)
-                    .opacity(0.4)
-                    .into_any_element()
-            } else {
-                segment(theme, label, selected)
-                    .id(label)
-                    .active(|style| style.opacity(0.9))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.settings.record_frame_rate = frame_rate;
-                        settings_state::update(|settings| {
-                            settings.record_frame_rate = frame_rate;
-                        });
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            };
-            control = control.child(button);
-        }
-
-        row_shell()
-            .child(row_label_with_icon(
-                theme,
-                icons::GAUGE,
-                t(language, "settings.frame_rate"),
-                t(language, "settings.frame_rate_desc"),
-            ))
-            .child(control)
-    }
-
-    fn recording_quality_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
-        let language = self.settings.language;
-        let mut control = segmented();
-        for quality in core_record::RecordQuality::ALL {
-            let selected = self.settings.record_quality == quality;
-            let label = t(
-                language,
-                match quality {
-                    core_record::RecordQuality::Low => "quality.low",
-                    core_record::RecordQuality::Standard => "quality.standard",
-                    core_record::RecordQuality::High => "quality.high",
-                },
-            );
-            control = control.child(
-                segment(theme, label, selected)
-                    .id(format!("record-quality-{}", quality.code()))
-                    .active(|style| style.opacity(0.9))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.settings.record_quality = quality;
-                        settings_state::update(|settings| settings.record_quality = quality);
-                        cx.notify();
-                    })),
-            );
-        }
-
-        row_shell()
-            .child(row_label_with_icon(
-                theme,
-                icons::QUALITY,
-                t(language, "settings.quality"),
-                t(language, "settings.quality_desc"),
-            ))
-            .child(control)
     }
 
     fn shortcuts(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
@@ -3401,32 +2884,7 @@ fn background_label_key(background: WindowBackground) -> &'static str {
         WindowBackground::System => "window_background.system",
         WindowBackground::Light => "window_background.light",
         WindowBackground::Dark => "window_background.dark",
-        WindowBackground::Gradient => "window_background.gradient",
-        WindowBackground::Wallpaper => "window_background.wallpaper",
     }
-}
-
-fn gradient_label_key(preset: GradientPreset) -> &'static str {
-    match preset {
-        GradientPreset::Accent => "gradient.accent",
-        GradientPreset::Sunset => "gradient.sunset",
-        GradientPreset::Ocean => "gradient.ocean",
-        GradientPreset::Aurora => "gradient.aurora",
-        GradientPreset::Mint => "gradient.mint",
-        GradientPreset::Blossom => "gradient.blossom",
-        GradientPreset::Graphite => "gradient.graphite",
-        GradientPreset::Custom => "gradient.custom",
-    }
-}
-
-/// Parses a `#RRGGBB` or `RRGGBB` color value.
-fn parse_hex_color(value: &str) -> Option<u32> {
-    let text = value.trim();
-    let hex = text.strip_prefix('#').unwrap_or(text);
-    if hex.len() != 6 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        return None;
-    }
-    u32::from_str_radix(hex, 16).ok()
 }
 
 fn padding_key(padding: u32) -> &'static str {

@@ -1,25 +1,20 @@
-use std::mem::ManuallyDrop;
 use std::path::PathBuf;
 
 use core_foundation::base::TCFType;
 use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::CFDictionary;
 use core_foundation::string::CFString;
-use core_graphics::base::{CGFloat, kCGBitmapByteOrder32Big, kCGImageAlphaPremultipliedLast};
-use core_graphics::color_space::CGColorSpace;
-use core_graphics::context::CGContext;
 use core_graphics::display::CGDisplay;
 use core_graphics::event::{
     CGEvent, CGEventTapLocation, CGEventType, CGMouseButton, ScrollEventUnit,
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+use core_graphics::geometry::CGPoint;
 use foreign_types_shared::ForeignType;
-use objc2::{AnyThread, MainThreadMarker};
+use objc2::MainThreadMarker;
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSColor, NSImage, NSScreen,
-    NSScreenSaverWindowLevel, NSView, NSWindowCollectionBehavior, NSWindowSharingType,
-    NSWindowStyleMask, NSWorkspace,
+    NSApplication, NSApplicationActivationPolicy, NSColor, NSScreenSaverWindowLevel, NSView,
+    NSWindowCollectionBehavior, NSWindowSharingType, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{NSString, NSURL};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -135,68 +130,6 @@ fn open_url(url: &str) -> bool {
         return false;
     };
     NSWorkspace::sharedWorkspace().openURL(&url)
-}
-
-pub(super) fn desktop_wallpaper_path() -> Option<PathBuf> {
-    let marker = MainThreadMarker::new()?;
-    let screen = NSScreen::mainScreen(marker)?;
-    let url = NSWorkspace::sharedWorkspace().desktopImageURLForScreen(&screen)?;
-    Some(PathBuf::from(url.path()?.to_string()))
-}
-
-pub(super) fn desktop_wallpaper_frame() -> Option<core_types::RgbaFrame> {
-    let marker = MainThreadMarker::new()?;
-    let screen = NSScreen::mainScreen(marker)?;
-    let url = NSWorkspace::sharedWorkspace().desktopImageURLForScreen(&screen)?;
-    let image = NSImage::initWithContentsOfURL(NSImage::alloc(), &url)?;
-    let cg_image =
-        unsafe { image.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None) }?;
-    let borrowed = ManuallyDrop::new(unsafe {
-        core_graphics::image::CGImage::from_ptr(
-            objc2::rc::Retained::as_ptr(&cg_image) as *mut core_graphics::sys::CGImage
-        )
-    });
-    cgimage_to_frame(&borrowed)
-}
-
-fn cgimage_to_frame(image: &core_graphics::image::CGImage) -> Option<core_types::RgbaFrame> {
-    let width = image.width();
-    let height = image.height();
-    if width == 0 || height == 0 {
-        return None;
-    }
-    let color_space = CGColorSpace::create_device_rgb();
-    let mut context = CGContext::create_bitmap_context(
-        None,
-        width,
-        height,
-        8,
-        width * 4,
-        &color_space,
-        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big,
-    );
-    context.draw_image(
-        CGRect::new(
-            &CGPoint::new(0.0, 0.0),
-            &CGSize::new(width as CGFloat, height as CGFloat),
-        ),
-        image,
-    );
-    let mut pixels = context.data().to_vec();
-    for pixel in pixels.as_chunks_mut::<4>().0 {
-        let alpha = u32::from(pixel[3]);
-        if alpha > 0 && alpha < 255 {
-            for channel in &mut pixel[..3] {
-                *channel = ((u32::from(*channel) * 255) / alpha).min(255) as u8;
-            }
-        }
-    }
-    core_types::RgbaFrame::from_pixels(
-        u32::try_from(width).ok()?,
-        u32::try_from(height).ok()?,
-        pixels,
-    )
-    .ok()
 }
 
 pub(super) fn apply(

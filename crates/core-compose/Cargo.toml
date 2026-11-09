@@ -9,7 +9,6 @@ publish = false
 
 [dependencies]
 core-types.workspace = true
-image = { version = "0.25.10", default-features = false }
 thiserror.workspace = true
 
 [lints]

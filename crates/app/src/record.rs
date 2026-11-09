@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use core_capture::{CaptureTarget, MonitorInfo, platform_backend};
-use core_record::{CursorHighlight, FrameRate, RecordConfig, RecordQuality};
-use core_types::{PhysicalPoint, PhysicalRect, RecordFormat};
+use core_record::{CursorHighlight, FRAME_RATE, RecordConfig};
+use core_types::{PhysicalPoint, PhysicalRect};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use platform_record::Recorder;
@@ -21,8 +21,7 @@ const COUNTDOWN: Duration = Duration::from_secs(3);
 pub fn start(target: CaptureTarget, cx: &mut App) {
     log_info!("record", "recording requested for {:?}", target);
     let settings = settings_state::get();
-    let format = settings.record_format;
-    let output = match crate::storage::recording_path(format) {
+    let output = match crate::storage::recording_path() {
         Ok(path) => path,
         Err(error) => {
             log_error!("record", "failed to prepare the recording output: {error}");
@@ -31,13 +30,6 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
     };
     let config = RecordConfig {
         target,
-        format,
-        frame_rate: if format == RecordFormat::WebP {
-            FrameRate::Fps30
-        } else {
-            settings.record_frame_rate
-        },
-        quality: settings.record_quality,
         // The highlight is only meaningful with the cursor in frame, so it
         // implies cursor capture even when "include cursor" is off.
         include_cursor: settings.record_cursor || settings.record_cursor_highlight,
@@ -78,17 +70,7 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
         let excluded: Vec<u64> = platform_window::native_window_id(&*window)
             .into_iter()
             .collect();
-        cx.new(|cx| {
-            RecordBar::new(
-                output,
-                config,
-                excluded,
-                format,
-                exclusion_ok,
-                bar_overlaps,
-                cx,
-            )
-        })
+        cx.new(|cx| RecordBar::new(output, config, excluded, exclusion_ok, bar_overlaps, cx))
     }) {
         Ok(_) => {}
         Err(error) => log_error!("record", "failed to open recording bar: {error}"),
@@ -100,9 +82,6 @@ struct RecordBar {
     recorder: Option<Recorder>,
     config: RecordConfig,
     excluded: Vec<u64>,
-    format: RecordFormat,
-    fps: u32,
-    quality: RecordQuality,
     started: Option<Instant>,
     countdown_started: Instant,
     paused_total: Duration,
@@ -120,13 +99,11 @@ impl RecordBar {
         output: PathBuf,
         config: RecordConfig,
         excluded: Vec<u64>,
-        format: RecordFormat,
         exclusion_ok: bool,
         bar_overlaps: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         let settings = settings_state::get();
-        let fps = config.frame_rate.as_u32();
         let language = settings.language;
         let blocked = !exclusion_ok && bar_overlaps;
         let mut status = None;
@@ -141,9 +118,6 @@ impl RecordBar {
             recorder: None,
             config,
             excluded,
-            format,
-            fps,
-            quality: settings.record_quality,
             started: None,
             countdown_started: Instant::now(),
             paused_total: Duration::ZERO,
@@ -327,14 +301,6 @@ impl Render for RecordBar {
             .status
             .clone()
             .unwrap_or_else(|| self.output.display().to_string());
-        let quality = t(
-            language,
-            match self.quality {
-                RecordQuality::Low => "quality.low",
-                RecordQuality::Standard => "quality.standard",
-                RecordQuality::High => "quality.high",
-            },
-        );
         let pause_label = if self.paused {
             t(language, "record.resume").to_owned()
         } else {
@@ -445,14 +411,12 @@ impl Render for RecordBar {
                                         .text_color(theme.accent)
                                         .child(timer),
                                 )
-                                .child(div().text_size(px(10.5)).text_color(theme.muted).child(
-                                    format!(
-                                        "{} · {} fps · {}",
-                                        self.format.display_name(),
-                                        self.fps,
-                                        quality
-                                    ),
-                                )),
+                                .child(
+                                    div()
+                                        .text_size(px(10.5))
+                                        .text_color(theme.muted)
+                                        .child(format!("MP4 · {} fps", FRAME_RATE)),
+                                ),
                         )
                         .child(
                             div()

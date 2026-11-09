@@ -108,37 +108,6 @@ pub fn open_privacy_settings(pane: PrivacyPane) {
     }
 }
 
-/// The current desktop wallpaper path, when the platform exposes one.
-pub fn desktop_wallpaper_path() -> Option<std::path::PathBuf> {
-    #[cfg(target_os = "windows")]
-    {
-        windows::desktop_wallpaper_path()
-    }
-    #[cfg(target_os = "macos")]
-    {
-        macos::desktop_wallpaper_path()
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        None
-    }
-}
-
-/// Decodes the current desktop wallpaper through the platform image stack.
-///
-/// macOS wallpapers are commonly HEIC, which the `image` crate cannot decode;
-/// AppKit owns the decode there. Windows falls back to the path loader.
-pub fn desktop_wallpaper_frame() -> Option<core_types::RgbaFrame> {
-    #[cfg(target_os = "macos")]
-    {
-        macos::desktop_wallpaper_frame()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
-    }
-}
-
 /// Returns the current user's Pictures folder.
 ///
 /// On Windows this is the known folder, so redirected libraries (for example

@@ -4,10 +4,10 @@ Capin includes open-source third-party components. This notice is
 included in the Windows packages and in the macOS app bundle.
 
 The list covers the components used by the Windows and macOS binaries
-(465 packages in the union of all four shipped targets).
+(464 packages in the union of all four shipped targets).
 A package may be present on only some platforms or architectures.
 
-Generated from Cargo.lock. Dependency-set fingerprint: 57b7c0dda982c60435cc6f0388201a5e10605242a28cf7b467250bece0a6fad1.
+Generated from Cargo.lock. Dependency-set fingerprint: 7bd0bf7695959c1ec830bfe0708a8b434bfb40aaa53e29a9b8925b5358db6dab.
 
 License expressions are shown as declared by the upstream package (usually
 SPDX syntax). Where a component is offered under several licenses, Capin
@@ -197,7 +197,6 @@ authoritative.
 | lebe | 0.5.3 | BSD-3-Clause | https://github.com/johannesvollmer/lebe |
 | libc | 0.2.191 | MIT OR Apache-2.0 | https://github.com/rust-lang/libc |
 | libm | 0.2.16 | MIT | https://github.com/rust-lang/compiler-builtins |
-| libwebp-sys | 0.9.6 | MIT | https://github.com/NoXF/libwebp-sys |
 | linebender_resource_handle | 0.1.1 | Apache-2.0 OR MIT | https://github.com/linebender/raw_resource_handle |
 | link-section | 0.19.3 | Apache-2.0 OR MIT | https://github.com/mmastrac/linktime |
 | linktime-proc-macro | 0.2.3 | Apache-2.0 OR MIT | https://github.com/mmastrac/linktime |
@@ -7716,42 +7715,6 @@ have been licensed under extremely permissive terms.
 ------------------------------------------------------------------------------
 
 Copyright notices are retained in src/* files where relevant.
-</pre>
-
-### NoXF__libwebp-sys / main__COPYING
-
-Used by: libwebp-sys 0.9.6
-
-<pre>
-Copyright (c) 2010, Google Inc. All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are
-met:
-
-  * Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
-
-  * Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in
-    the documentation and/or other materials provided with the
-    distribution.
-
-  * Neither the name of Google nor the names of its contributors may
-    be used to endorse or promote products derived from this software
-    without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 </pre>
 
 ### LICENSE-MIT

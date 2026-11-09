@@ -2,7 +2,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use core_annotate::{
-    Annotation, AnnotationDocument, AnnotationStyle, NumberStyle, Shape, TextAlignment, rasterize,
+    Annotation, AnnotationDocument, AnnotationStyle, Shape, TextAlignment, rasterize,
 };
 use core_capture::{CaptureTarget, platform_backend};
 use core_types::{
@@ -41,7 +41,6 @@ pub(crate) enum Tool {
     Ellipse,
     Arrow,
     Polyline,
-    Curve,
     Highlighter,
     Blur,
     Text,
@@ -50,13 +49,12 @@ pub(crate) enum Tool {
 }
 
 impl Tool {
-    pub(crate) const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 10] = [
         Self::Select,
         Self::Rect,
         Self::Ellipse,
         Self::Arrow,
         Self::Polyline,
-        Self::Curve,
         Self::Highlighter,
         Self::Blur,
         Self::Text,
@@ -71,7 +69,6 @@ impl Tool {
             Self::Ellipse => "editor-tool-ellipse",
             Self::Arrow => "editor-tool-arrow",
             Self::Polyline => "editor-tool-polyline",
-            Self::Curve => "editor-tool-curve",
             Self::Highlighter => "editor-tool-highlighter",
             Self::Blur => "editor-tool-blur",
             Self::Text => "editor-tool-text",
@@ -87,7 +84,6 @@ impl Tool {
             Self::Ellipse => icons::ELLIPSE,
             Self::Arrow => icons::ARROW,
             Self::Polyline => icons::POLYLINE,
-            Self::Curve => icons::CURVE,
             Self::Highlighter => icons::HIGHLIGHTER,
             Self::Blur => icons::BLUR,
             Self::Text => icons::TEXT,
@@ -103,7 +99,6 @@ impl Tool {
             Self::Ellipse => "editor.tool.ellipse",
             Self::Arrow => "editor.tool.arrow",
             Self::Polyline => "editor.tool.polyline",
-            Self::Curve => "editor.tool.curve",
             Self::Highlighter => "editor.tool.highlighter",
             Self::Blur => "editor.tool.blur",
             Self::Text => "editor.tool.text",
@@ -116,7 +111,7 @@ impl Tool {
         match self {
             Self::Rect => Some(AnnotationColorTool::Rect),
             Self::Ellipse => Some(AnnotationColorTool::Ellipse),
-            Self::Arrow | Self::Polyline | Self::Curve => Some(AnnotationColorTool::Arrow),
+            Self::Arrow | Self::Polyline => Some(AnnotationColorTool::Arrow),
             Self::Highlighter => Some(AnnotationColorTool::Highlighter),
             Self::Text => Some(AnnotationColorTool::Text),
             Self::Number => Some(AnnotationColorTool::Number),
@@ -130,7 +125,6 @@ impl Tool {
             Shape::Ellipse(_) => Some(Self::Ellipse),
             Shape::Arrow { .. } => Some(Self::Arrow),
             Shape::Polyline { .. } => Some(Self::Polyline),
-            Shape::Curve { .. } => Some(Self::Curve),
             Shape::HighlighterBox(_) => Some(Self::Highlighter),
             Shape::Blur(_) => Some(Self::Blur),
             Shape::Text { .. } => Some(Self::Text),
@@ -208,9 +202,6 @@ enum ResizeHandle {
     W,
     ArrowStart,
     ArrowEnd,
-    CurveStart,
-    CurveControl,
-    CurveEnd,
 }
 
 /// What the pointer is currently over inside the image, used to swap the
@@ -548,7 +539,6 @@ pub(crate) struct EditorView {
     text_background: bool,
     text_outline: bool,
     text_alignment: TextAlignment,
-    number_style: NumberStyle,
     corner_radius: f32,
     blur_radius: u32,
     rect_filled: bool,
@@ -602,7 +592,6 @@ impl EditorView {
         let text_background = settings.annotation_text_background;
         let text_outline = settings.annotation_text_outline;
         let text_alignment = settings.annotation_text_alignment;
-        let number_style = settings.annotation_number_style;
         let corner_radius = settings.annotation_corner_radius;
         let blur_radius = settings.annotation_blur_radius;
         let rect_filled = settings.annotation_rect_filled;
@@ -640,7 +629,6 @@ impl EditorView {
                 text_background,
                 text_outline,
                 text_alignment,
-                number_style,
                 spotlight_intensity,
             },
             font_size,
@@ -649,7 +637,6 @@ impl EditorView {
             text_background,
             text_outline,
             text_alignment,
-            number_style,
             corner_radius,
             blur_radius,
             rect_filled,
@@ -890,7 +877,11 @@ impl EditorView {
         let window_width = f32::from(window.viewport_size().width);
         let window_height = f32::from(window.viewport_size().height);
         let width = 196.0;
-        let height = 136.0;
+        let height = if self.pin_target.is_some() {
+            136.0
+        } else {
+            42.0
+        };
         let left = (f32::from(toolbar.origin.x) + f32::from(toolbar.size.width) - width)
             .clamp(8.0, (window_width - width - 8.0).max(8.0));
         let mut top = f32::from(toolbar.origin.y) + f32::from(toolbar.size.height) + 6.0;
@@ -1221,10 +1212,7 @@ impl EditorView {
             style.text_outline = self.text_outline;
             style.text_alignment = self.text_alignment;
         }
-        if self.tool == Tool::Number {
-            style.number_style = self.number_style;
-        }
-        if matches!(self.tool, Tool::Arrow | Tool::Polyline | Tool::Curve) {
+        if matches!(self.tool, Tool::Arrow | Tool::Polyline) {
             style.arrow_start = self.arrow_start;
             style.arrow_end = self.arrow_end;
         }
@@ -1311,12 +1299,6 @@ impl EditorView {
             edit.style.text_alignment = alignment;
         }
         settings_state::update(|settings| settings.annotation_text_alignment = alignment);
-    }
-
-    fn apply_number_style(&mut self, number_style: NumberStyle) {
-        self.number_style = number_style;
-        self.update_style(|style| style.number_style = number_style);
-        settings_state::update(|settings| settings.annotation_number_style = number_style);
     }
 
     fn apply_arrow_heads(&mut self, start: bool, end: bool) {
@@ -1483,7 +1465,7 @@ impl EditorView {
                         self.text_outline = annotation.style.text_outline;
                         self.text_alignment = annotation.style.text_alignment;
                     }
-                    Tool::Number => self.number_style = annotation.style.number_style,
+                    Tool::Number => {}
                     Tool::Arrow => {
                         self.arrow_start = annotation.style.arrow_start;
                         self.arrow_end = annotation.style.arrow_end;
@@ -1764,7 +1746,6 @@ impl EditorView {
         };
         let show_font = config_tool == Some(Tool::Text);
         let show_text_style = config_tool == Some(Tool::Text);
-        let show_number_style = config_tool == Some(Tool::Number);
         let show_arrow_heads = config_tool == Some(Tool::Arrow);
         let show_corner = config_tool == Some(Tool::Rect);
         let show_blur = config_tool == Some(Tool::Blur);
@@ -2044,67 +2025,6 @@ impl EditorView {
                     .child(background)
                     .child(outline)
                     .child(alignment_button)
-                    .into_any_element(),
-            );
-        }
-
-        if show_number_style {
-            let mut buttons = Vec::new();
-            for (style, label, tooltip_key, id) in [
-                (
-                    NumberStyle::Circle,
-                    "○",
-                    "editor.number_circle",
-                    "editor-number-circle",
-                ),
-                (
-                    NumberStyle::Square,
-                    "□",
-                    "editor.number_square",
-                    "editor-number-square",
-                ),
-                (
-                    NumberStyle::Plain,
-                    "A",
-                    "editor.number_plain",
-                    "editor-number-plain",
-                ),
-            ] {
-                let selected = config_style.number_style == style;
-                let tooltip = t(language, tooltip_key).to_owned();
-                let button = div()
-                    .id(id)
-                    .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
-                    .w(px(24.0))
-                    .h(px(22.0))
-                    .rounded(px(5.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(selected, |button| button.bg(accent_selected))
-                    .hover(move |style| style.bg(hover))
-                    .active(|style| style.opacity(0.85))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.commit_text(cx);
-                        this.apply_number_style(style);
-                        this.status = None;
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .text_color(if selected { accent } else { muted })
-                            .child(label),
-                    );
-                buttons.push(button.into_any_element());
-            }
-            groups.push(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(2.0))
-                    .children(buttons)
                     .into_any_element(),
             );
         }
@@ -2583,7 +2503,7 @@ impl EditorView {
 
         let more_panel = (self.more_open && !self.toolbar_hidden && !capture_page).then(|| {
             let more_rect = self.more_rect(window, bar_rect);
-            let panel = div()
+            let mut panel = div()
                 .id("editor-more-panel")
                 .absolute()
                 .left(more_rect.origin.x)
@@ -2602,37 +2522,42 @@ impl EditorView {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|_, _, _, cx| cx.stop_propagation()),
-                );
-
-            panel
+                )
                 .child(self.more_row(
                     "editor-more-crop",
                     icons::CROP,
                     t(language, "editor.crop"),
                     cx,
                     |this, cx| this.toggle_crop(cx),
-                ))
-                .child(self.more_row(
-                    "editor-more-rotate",
-                    icons::ROTATE,
-                    t(language, "editor.rotate"),
-                    cx,
-                    |this, cx| this.rotate_canvas(cx),
-                ))
-                .child(self.more_row(
-                    "editor-more-flip-horizontal",
-                    icons::FLIP_H,
-                    t(language, "editor.flip_horizontal"),
-                    cx,
-                    |this, cx| this.flip_canvas(true, cx),
-                ))
-                .child(self.more_row(
-                    "editor-more-flip-vertical",
-                    icons::FLIP_V,
-                    t(language, "editor.flip_vertical"),
-                    cx,
-                    |this, cx| this.flip_canvas(false, cx),
-                ))
+                ));
+
+            // Long captures only support cropping; rotation and flipping are
+            // reserved for pins, which keep the full image transform set.
+            if self.pin_target.is_some() {
+                panel = panel
+                    .child(self.more_row(
+                        "editor-more-rotate",
+                        icons::ROTATE,
+                        t(language, "editor.rotate"),
+                        cx,
+                        |this, cx| this.rotate_canvas(cx),
+                    ))
+                    .child(self.more_row(
+                        "editor-more-flip-horizontal",
+                        icons::FLIP_H,
+                        t(language, "editor.flip_horizontal"),
+                        cx,
+                        |this, cx| this.flip_canvas(true, cx),
+                    ))
+                    .child(self.more_row(
+                        "editor-more-flip-vertical",
+                        icons::FLIP_V,
+                        t(language, "editor.flip_vertical"),
+                        cx,
+                        |this, cx| this.flip_canvas(false, cx),
+                    ));
+            }
+            panel
         });
 
         let more_panel = more_panel.map(|panel| {
@@ -3590,19 +3515,9 @@ impl Render for EditorView {
                     let width = bounds.size.width as f32 * scale;
                     let height = bounds.size.height as f32 * scale;
                     let badge_foreground = core_annotate::badge_foreground(color);
-                    let (foreground, background, radius) = match annotation.style.number_style {
-                        NumberStyle::Circle => (
-                            rgb((badge_foreground >> 8) & 0x00FF_FFFF),
-                            rgb(color),
-                            height.min(width) / 2.0,
-                        ),
-                        NumberStyle::Square => (
-                            rgb((badge_foreground >> 8) & 0x00FF_FFFF),
-                            rgb(color),
-                            height.min(width) * 0.18,
-                        ),
-                        NumberStyle::Plain => (rgb(color), rgba(0x00000000), 0.0),
-                    };
+                    let foreground = rgb((badge_foreground >> 8) & 0x00FF_FFFF);
+                    let background = rgb(color);
+                    let radius = height.min(width) / 2.0;
                     object_layers.push(
                         div()
                             .absolute()
@@ -4716,31 +4631,12 @@ fn finalize_shape(draft: &Draft, end: PhysicalPoint) -> Option<Shape> {
             start: draft.start,
             end,
         }),
-        Tool::Curve => (distance(draft.start, end) >= 2.0).then_some(Shape::Curve {
-            start: draft.start,
-            control: default_curve_control(draft.start, end),
-            end,
-        }),
         Tool::Highlighter => {
             let rect = normalized_rect(draft.start, end);
             (rect.size.width >= 2 && rect.size.height >= 2).then_some(Shape::HighlighterBox(rect))
         }
         Tool::Text | Tool::Select | Tool::Number | Tool::Polyline => None,
     }
-}
-
-fn default_curve_control(start: PhysicalPoint, end: PhysicalPoint) -> PhysicalPoint {
-    let dx = (end.x - start.x) as f32;
-    let dy = (end.y - start.y) as f32;
-    let length = (dx * dx + dy * dy).sqrt();
-    if length < f32::EPSILON {
-        return start;
-    }
-    let offset = length * 0.18;
-    PhysicalPoint::new(
-        (start.x as f32 + dx * 0.5 - dy / length * offset).round() as i32,
-        (start.y as f32 + dy * 0.5 + dx / length * offset).round() as i32,
-    )
 }
 
 fn normalized_rect(start: PhysicalPoint, end: PhysicalPoint) -> PhysicalRect {
@@ -4778,29 +4674,13 @@ fn handle_cursor(handle: ResizeHandle) -> CursorStyle {
         ResizeHandle::Ne | ResizeHandle::Sw => CursorStyle::ResizeUpRightDownLeft,
         ResizeHandle::N | ResizeHandle::S => CursorStyle::ResizeUpDown,
         ResizeHandle::E | ResizeHandle::W => CursorStyle::ResizeLeftRight,
-        ResizeHandle::ArrowStart
-        | ResizeHandle::ArrowEnd
-        | ResizeHandle::CurveStart
-        | ResizeHandle::CurveControl
-        | ResizeHandle::CurveEnd => CursorStyle::Crosshair,
+        ResizeHandle::ArrowStart | ResizeHandle::ArrowEnd => CursorStyle::Crosshair,
     }
 }
 
 fn handle_points(shape: &Shape) -> Vec<(ResizeHandle, PhysicalPoint)> {
     if let Shape::Polyline { .. } = shape {
         return Vec::new();
-    }
-    if let Shape::Curve {
-        start,
-        control,
-        end,
-    } = shape
-    {
-        return vec![
-            (ResizeHandle::CurveStart, *start),
-            (ResizeHandle::CurveControl, *control),
-            (ResizeHandle::CurveEnd, *end),
-        ];
     }
     if let Shape::Arrow { start, end } = shape {
         return vec![
@@ -4848,30 +4728,6 @@ fn resize_shape(
     current: PhysicalPoint,
     min_size: i32,
 ) -> Shape {
-    if let Shape::Curve {
-        start: original_start,
-        control: original_control,
-        end: original_end,
-    } = original
-    {
-        return Shape::Curve {
-            start: if handle == ResizeHandle::CurveStart {
-                current
-            } else {
-                *original_start
-            },
-            control: if handle == ResizeHandle::CurveControl {
-                current
-            } else {
-                *original_control
-            },
-            end: if handle == ResizeHandle::CurveEnd {
-                current
-            } else {
-                *original_end
-            },
-        };
-    }
     if let Shape::Arrow {
         start: original_start,
         end: original_end,
@@ -4919,11 +4775,7 @@ fn resize_shape(
             bottom += dy;
         }
         ResizeHandle::W => left += dx,
-        ResizeHandle::ArrowStart
-        | ResizeHandle::ArrowEnd
-        | ResizeHandle::CurveStart
-        | ResizeHandle::CurveControl
-        | ResizeHandle::CurveEnd => {}
+        ResizeHandle::ArrowStart | ResizeHandle::ArrowEnd => {}
     }
     if right - left < min_size {
         if matches!(
@@ -4967,7 +4819,6 @@ fn resize_shape(
         },
         Shape::Arrow { .. } => unreachable!("arrow handled above"),
         Shape::Polyline { .. } => original.clone(),
-        Shape::Curve { .. } => unreachable!("curve handled above"),
     }
 }
 
@@ -5205,53 +5056,6 @@ fn paint_shape(
                     start.x as f32,
                     start.y as f32,
                     (-dy).atan2(-dx),
-                );
-            }
-            if let Ok(path) = builder.build() {
-                window.paint_path(path, color);
-            }
-        }
-        Shape::Curve {
-            start,
-            control,
-            end,
-        } => {
-            let mut builder = PathBuilder::stroke(stroke);
-            builder.move_to(to_point(start.x as f32, start.y as f32));
-            // GPUI names the arguments (to, control); an earlier call passed
-            // control as the endpoint, so the preview curved to the wrong point
-            // while the exported raster used the correct quadratic.
-            builder.curve_to(
-                to_point(end.x as f32, end.y as f32),
-                to_point(control.x as f32, control.y as f32),
-            );
-            let head = (style.stroke_width * 3.5).max(10.0);
-            let spread = 0.55;
-            let push_head = |builder: &mut PathBuilder, tip: PhysicalPoint, angle: f32| {
-                let left = (
-                    tip.x as f32 - head * (angle - spread).cos(),
-                    tip.y as f32 - head * (angle - spread).sin(),
-                );
-                let right = (
-                    tip.x as f32 - head * (angle + spread).cos(),
-                    tip.y as f32 - head * (angle + spread).sin(),
-                );
-                builder.move_to(to_point(left.0, left.1));
-                builder.line_to(to_point(tip.x as f32, tip.y as f32));
-                builder.line_to(to_point(right.0, right.1));
-            };
-            if style.arrow_end {
-                push_head(
-                    &mut builder,
-                    *end,
-                    ((end.y - control.y) as f32).atan2((end.x - control.x) as f32),
-                );
-            }
-            if style.arrow_start {
-                push_head(
-                    &mut builder,
-                    *start,
-                    ((start.y - control.y) as f32).atan2((start.x - control.x) as f32),
                 );
             }
             if let Ok(path) = builder.build() {

@@ -968,7 +968,6 @@ name = "core-compose"
 version = "0.1.0"
 dependencies = [
  "core-types",
- "image",
  "thiserror 2.0.21",
 ]
 
@@ -1065,7 +1064,6 @@ version = "0.1.0"
 dependencies = [
  "core-capture",
  "core-types",
- "libwebp-sys",
  "thiserror 2.0.21",
 ]
 
@@ -2093,12 +2091,6 @@ dependencies = [
  "libc",
  "system-deps",
 ]
-
-[[package]]
-name = "glob"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "global-hotkey"
@@ -3350,16 +3342,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61ff90caf6077a803a240f62fdbe88645a890bbca49ef8174c3cb0404362171d"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "libwebp-sys"
-version = "0.9.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54cd30df7c7165ce74a456e4ca9732c603e8dc5e60784558c1c6dc047f876733"
-dependencies = [
- "cc",
- "glob",
 ]
 
 [[package]]

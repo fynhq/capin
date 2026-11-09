@@ -56,7 +56,6 @@ enum PinMenuAction {
     Save,
     CopyQr,
     Through,
-    Open,
     Close,
 }
 
@@ -69,7 +68,6 @@ impl PinMenuAction {
             Self::Save => "pin-menu-save",
             Self::CopyQr => "pin-menu-copy-qr",
             Self::Through => "pin-menu-through",
-            Self::Open => "pin-menu-open",
             Self::Close => "pin-menu-close",
         }
     }
@@ -82,7 +80,6 @@ impl PinMenuAction {
             Self::Save => "pin.save",
             Self::CopyQr => "pin.copy_qr",
             Self::Through => "pin.through",
-            Self::Open => "pin.open",
             Self::Close => "pin.close",
         }
     }
@@ -101,12 +98,6 @@ enum PinContent {
         hash: u64,
     },
     Text(String),
-    File(PathBuf),
-    Color {
-        red: u8,
-        green: u8,
-        blue: u8,
-    },
 }
 
 impl PinContent {
@@ -170,10 +161,6 @@ impl PinContent {
         match self {
             Self::Image { .. } => None,
             Self::Text(text) => Some(text.clone()),
-            Self::File(path) => Some(path.display().to_string()),
-            Self::Color { red, green, blue } => {
-                Some(format!("#{:02x}{:02x}{:02x}", *red, *green, *blue))
-            }
         }
     }
 
@@ -181,8 +168,6 @@ impl PinContent {
         match self {
             Self::Image { .. } => PinKind::Image,
             Self::Text(text) => PinKind::Text(text.clone()),
-            Self::File(path) => PinKind::File(path.clone()),
-            Self::Color { red, green, blue } => PinKind::Color(*red, *green, *blue),
         }
     }
 
@@ -191,7 +176,7 @@ impl PinContent {
             Self::Image { size, .. } => (900.0 / size.width as f32)
                 .min(700.0 / size.height as f32)
                 .min(1.0),
-            _ => 1.0,
+            Self::Text(_) => 1.0,
         }
     }
 
@@ -199,8 +184,6 @@ impl PinContent {
         match self {
             Self::Image { size, .. } => (size.width as f32 * zoom, size.height as f32 * zoom),
             Self::Text(text) => text_pin_size(text),
-            Self::File(path) => file_pin_size(path),
-            Self::Color { .. } => (300.0, 110.0),
         }
     }
 }
@@ -263,21 +246,10 @@ fn text_pin_size(text: &str) -> (f32, f32) {
     (width, height)
 }
 
-fn file_pin_size(path: &Path) -> (f32, f32) {
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy())
-        .unwrap_or_else(|| path.as_os_str().to_string_lossy());
-    let width = (estimated_text_width(&name, 13.0) + 96.0).clamp(200.0, 340.0);
-    (width, 64.0)
-}
-
 #[derive(Clone)]
 enum PinKind {
     Image,
     Text(String),
-    File(PathBuf),
-    Color(u8, u8, u8),
 }
 
 struct PinState {
@@ -300,8 +272,6 @@ struct PersistedPin {
     kind: String,
     image: Option<String>,
     text: Option<String>,
-    path: Option<String>,
-    color: Option<String>,
     x: f32,
     y: f32,
     width: f32,
@@ -329,17 +299,6 @@ pub fn pin_last(cx: &mut App) {
             }
         }
         for entry in item.entries() {
-            let ClipboardEntry::ExternalPaths(paths) = entry else {
-                continue;
-            };
-            if let Some(path) = paths.paths().first()
-                && path.exists()
-            {
-                open_pin_content(PinContent::File(path.clone()), cx);
-                return;
-            }
-        }
-        for entry in item.entries() {
             let ClipboardEntry::String(text) = entry else {
                 continue;
             };
@@ -347,11 +306,7 @@ pub fn pin_last(cx: &mut App) {
             if text.is_empty() {
                 continue;
             }
-            if let Some((red, green, blue)) = parse_color(text) {
-                open_pin_content(PinContent::Color { red, green, blue }, cx);
-            } else {
-                open_pin_content(PinContent::Text(text.to_owned()), cx);
-            }
+            open_pin_content(PinContent::Text(text.to_owned()), cx);
             return;
         }
     }
@@ -645,18 +600,6 @@ pub fn restore(cx: &mut App) {
                     continue;
                 };
                 PinContent::Text(text)
-            }
-            "file" => {
-                let Some(path) = entry.path.map(PathBuf::from).filter(|path| path.exists()) else {
-                    continue;
-                };
-                PinContent::File(path)
-            }
-            "color" => {
-                let Some((red, green, blue)) = entry.color.as_deref().and_then(parse_color) else {
-                    continue;
-                };
-                PinContent::Color { red, green, blue }
             }
             _ => continue,
         };
@@ -963,34 +906,22 @@ fn save_manifest() {
             .borrow()
             .iter()
             .filter_map(|(id, state)| {
-                let (kind, image, text, file, color) = match &state.kind {
+                let (kind, image, text) = match &state.kind {
                     PinKind::Image => {
                         let image = state
                             .image_path
                             .as_ref()
                             .and_then(|path| path.file_name())
                             .map(|name| name.to_string_lossy().to_string())?;
-                        ("image", Some(image), None, None, None)
+                        ("image", Some(image), None)
                     }
-                    PinKind::Text(text) => ("text", None, Some(text.clone()), None, None),
-                    PinKind::File(path) => {
-                        ("file", None, None, Some(path.display().to_string()), None)
-                    }
-                    PinKind::Color(red, green, blue) => (
-                        "color",
-                        None,
-                        None,
-                        None,
-                        Some(format!("#{:02x}{:02x}{:02x}", *red, *green, *blue)),
-                    ),
+                    PinKind::Text(text) => ("text", None, Some(text.clone())),
                 };
                 Some(PersistedPin {
                     id: *id,
                     kind: kind.to_owned(),
                     image,
                     text,
-                    path: file,
-                    color,
                     x: f32::from(state.bounds.origin.x),
                     y: f32::from(state.bounds.origin.y),
                     width: f32::from(state.bounds.size.width),
@@ -1013,49 +944,10 @@ fn save_manifest() {
     }
 }
 
-fn parse_color(text: &str) -> Option<(u8, u8, u8)> {
-    let text = text.trim();
-    if let Some(hex) = text.strip_prefix('#') {
-        return match hex.len() {
-            3 => {
-                let mut chars = hex.chars();
-                let red = chars.next()?.to_digit(16)? as u8 * 17;
-                let green = chars.next()?.to_digit(16)? as u8 * 17;
-                let blue = chars.next()?.to_digit(16)? as u8 * 17;
-                Some((red, green, blue))
-            }
-            6 | 8 => {
-                // Parse the whole string instead of slicing by byte offsets:
-                // clipboard text can contain multi-byte UTF-8 and slicing at
-                // arbitrary offsets would panic.
-                let value = u32::from_str_radix(hex, 16).ok()?;
-                Some((
-                    ((value >> 16) & 0xFF) as u8,
-                    ((value >> 8) & 0xFF) as u8,
-                    (value & 0xFF) as u8,
-                ))
-            }
-            _ => None,
-        };
-    }
-    let lower = text.to_ascii_lowercase();
-    let inner = lower.strip_prefix("rgb(")?.strip_suffix(')')?;
-    let mut channels = inner.split(',').map(str::trim);
-    let red = channels.next()?.parse::<u8>().ok()?;
-    let green = channels.next()?.parse::<u8>().ok()?;
-    let blue = channels.next()?.parse::<u8>().ok()?;
-    if channels.next().is_some() {
-        return None;
-    }
-    Some((red, green, blue))
-}
-
 struct PinTheme {
     card: Rgba,
     text: Rgba,
-    muted: Rgba,
     border: Rgba,
-    control: Rgba,
     menu: Rgba,
     menu_hover: Rgba,
     menu_border: Rgba,
@@ -1080,9 +972,7 @@ impl PinTheme {
             Self {
                 card: rgba(0x1E1E1EF2),
                 text: rgb(0xF2F2F2),
-                muted: rgba(0xFFFFFF99),
                 border: rgba(0xFFFFFF24),
-                control: rgba(0xFFFFFF1A),
                 menu: rgba(0x2B2B2BFA),
                 menu_hover: rgba(0xFFFFFF16),
                 menu_border: rgba(0xFFFFFF22),
@@ -1093,9 +983,7 @@ impl PinTheme {
             Self {
                 card: rgba(0xFFFFFFF2),
                 text: rgb(0x1A1A1A),
-                muted: rgba(0x00000088),
                 border: rgba(0x0000001A),
-                control: rgba(0x0000000F),
                 menu: rgba(0xF9F9F9FA),
                 menu_hover: rgba(0x00000010),
                 menu_border: rgba(0x0000001A),
@@ -1665,12 +1553,6 @@ impl PinView {
         self.show_notice(t(language, "pin.copied").to_owned(), cx);
     }
 
-    fn open_file(&mut self, cx: &mut Context<Self>) {
-        if let PinContent::File(path) = &self.content {
-            cx.open_with_system(path);
-        }
-    }
-
     fn copy_image(&mut self, cx: &mut Context<Self>) {
         // The persisted PNG is already encoded; copying its bytes avoids
         // decoding the pin and re-encoding it just to reach the clipboard.
@@ -1740,11 +1622,7 @@ impl PinView {
                     items.push(PinMenuAction::CopyQr);
                 }
             }
-            PinContent::File(_) => {
-                items.push(PinMenuAction::Open);
-                items.push(PinMenuAction::Copy);
-            }
-            PinContent::Text(_) | PinContent::Color { .. } => {
+            PinContent::Text(_) => {
                 items.push(PinMenuAction::Copy);
             }
         }
@@ -1772,111 +1650,6 @@ impl PinView {
                 .text_size(px(14.0))
                 .text_color(theme.text)
                 .child(text.clone()),
-            PinContent::File(path) => {
-                let name = path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.display().to_string());
-                let parent = path
-                    .parent()
-                    .map(|parent| parent.display().to_string())
-                    .unwrap_or_default();
-                let extension = path
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .unwrap_or("FILE")
-                    .to_uppercase();
-                div()
-                    .size_full()
-                    .p(px(10.0))
-                    .rounded(px(8.0))
-                    .bg(theme.card)
-                    .border_1()
-                    .border_color(theme.border)
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(9.0))
-                    .child(
-                        div()
-                            .w(px(32.0))
-                            .h(px(32.0))
-                            .flex_shrink_0()
-                            .rounded(px(6.0))
-                            .bg(theme.control)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_size(px(9.0))
-                            .text_color(theme.muted)
-                            .child(extension),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .child(
-                                div()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .text_size(px(13.0))
-                                    .text_color(theme.text)
-                                    .child(name),
-                            )
-                            .child(
-                                div()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .text_size(px(10.0))
-                                    .text_color(theme.muted)
-                                    .child(parent),
-                            ),
-                    )
-            }
-            PinContent::Color { red, green, blue } => div()
-                .size_full()
-                .p(px(12.0))
-                .rounded(px(10.0))
-                .bg(theme.card)
-                .border_1()
-                .border_color(theme.border)
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(12.0))
-                .child(
-                    div()
-                        .w(px(48.0))
-                        .h(px(48.0))
-                        .rounded(px(8.0))
-                        .bg(rgb((u32::from(*red) << 16)
-                            | (u32::from(*green) << 8)
-                            | u32::from(*blue))),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.0))
-                        .child(
-                            div()
-                                .text_size(px(16.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.text)
-                                .child(format!("#{:02x}{:02x}{:02x}", *red, *green, *blue)),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(theme.muted)
-                                .child(format!("rgb({red}, {green}, {blue})")),
-                        ),
-                ),
         }
     }
 }
@@ -1913,7 +1686,6 @@ impl Render for PinView {
         let cursor = match &self.content {
             PinContent::Image { .. } => CursorStyle::OpenHand,
             PinContent::Text(_) => CursorStyle::IBeam,
-            PinContent::File(_) | PinContent::Color { .. } => CursorStyle::PointingHand,
         };
         let root = div()
             .size_full()
@@ -2288,9 +2060,6 @@ fn perform_pin_action(id: u64, action: PinMenuAction, cx: &mut App) {
         PinMenuAction::Through => {
             enable_click_through(id, &entity, window_handle, cx);
         }
-        PinMenuAction::Open => {
-            entity.update(cx, |view, cx| view.open_file(cx));
-        }
         PinMenuAction::Close => {
             entity.update(cx, |view, cx| view.release_image(cx));
             close_pin(id);
@@ -2397,23 +2166,7 @@ fn ensure_visible(cx: &App, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_pin_size, parse_color, text_pin_size};
-    use std::path::Path;
-
-    #[test]
-    fn parse_color_accepts_hex_and_rgb_forms() {
-        assert_eq!(parse_color("#f80"), Some((255, 136, 0)));
-        assert_eq!(parse_color("#ff8800"), Some((255, 136, 0)));
-        assert_eq!(parse_color("#80ff8800"), Some((255, 136, 0)));
-        assert_eq!(parse_color("rgb(255, 136, 0)"), Some((255, 136, 0)));
-    }
-
-    #[test]
-    fn parse_color_does_not_panic_on_multibyte_hex_text() {
-        // Eight bytes after '#', but 'é' spans two bytes and used to split a
-        // UTF-8 code point when the string was sliced by byte offsets.
-        assert_eq!(parse_color("#aéééa"), None);
-    }
+    use super::text_pin_size;
 
     #[test]
     fn text_pins_hug_short_content() {
@@ -2433,12 +2186,5 @@ mod tests {
         let (width, height) = text_pin_size(&"wide ".repeat(80));
         assert!(width <= super::CARD_WIDTH);
         assert!(height > 48.0);
-    }
-
-    #[test]
-    fn file_pins_stay_compact() {
-        let (width, height) = file_pin_size(Path::new("D:/notes/report.pdf"));
-        assert!((200.0..=340.0).contains(&width));
-        assert_eq!(height, 64.0);
     }
 }

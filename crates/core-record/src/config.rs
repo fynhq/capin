@@ -1,56 +1,9 @@
 use core_capture::CaptureTarget;
-use core_types::{PhysicalSize, RecordFormat};
+use core_types::PhysicalSize;
 use thiserror::Error;
 
-use crate::FrameRate;
-
-const WEBP_MAX_LONG_EDGE: u32 = 1920;
-const WEBP_MAX_SHORT_EDGE: u32 = 1080;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum RecordQuality {
-    Low,
-    #[default]
-    Standard,
-    High,
-}
-
-impl RecordQuality {
-    pub const ALL: [Self; 3] = [Self::Low, Self::Standard, Self::High];
-
-    pub const fn code(self) -> &'static str {
-        match self {
-            Self::Low => "low",
-            Self::Standard => "standard",
-            Self::High => "high",
-        }
-    }
-
-    pub fn from_code(code: &str) -> Option<Self> {
-        match code {
-            "low" => Some(Self::Low),
-            "standard" => Some(Self::Standard),
-            "high" => Some(Self::High),
-            _ => None,
-        }
-    }
-
-    pub const fn bitrate_multiplier(self) -> f32 {
-        match self {
-            Self::Low => 0.5,
-            Self::Standard => 1.0,
-            Self::High => 1.5,
-        }
-    }
-
-    pub const fn webp_quality(self) -> f32 {
-        match self {
-            Self::Low => 55.0,
-            Self::Standard => 72.0,
-            Self::High => 88.0,
-        }
-    }
-}
+/// Fixed output frame rate for every recording.
+pub const FRAME_RATE: u32 = 30;
 
 /// The translucent disc painted under the system cursor during a recording.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,30 +12,25 @@ pub struct CursorHighlight {
     pub color: u32,
 }
 
-/// Inputs for one recording session. Audio is intentionally absent.
+/// Inputs for one recording session. Audio and format choice are intentionally
+/// absent: recordings are always MP4 without sound.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordConfig {
     pub target: CaptureTarget,
-    pub format: RecordFormat,
-    pub frame_rate: FrameRate,
-    pub quality: RecordQuality,
     pub include_cursor: bool,
     pub cursor_highlight: Option<CursorHighlight>,
 }
 
 impl RecordConfig {
-    pub fn new(target: CaptureTarget, format: RecordFormat) -> Self {
+    pub fn new(target: CaptureTarget) -> Self {
         Self {
             target,
-            format,
-            frame_rate: FrameRate::Fps30,
-            quality: RecordQuality::Standard,
             include_cursor: true,
             cursor_highlight: None,
         }
     }
 
-    /// Validates the format-specific limits before a recorder starts.
+    /// Validates the target before a recorder starts.
     pub fn validate(&self, dimensions: PhysicalSize) -> Result<(), RecordError> {
         if dimensions.is_empty() {
             return Err(RecordError::EmptyDimensions);
@@ -93,34 +41,8 @@ impl RecordConfig {
             return Err(RecordError::EmptyTarget);
         }
 
-        if self.format == RecordFormat::WebP && self.frame_rate != FrameRate::Fps30 {
-            return Err(RecordError::WebpFrameRate(self.frame_rate));
-        }
-
         Ok(())
     }
-}
-
-/// Output canvas for animated WebP recordings.
-///
-/// WebP is encoded in software, so large displays are scaled down to keep
-/// real-time 30 fps capture viable. Aspect ratio is preserved.
-pub fn webp_output_size(input: PhysicalSize) -> PhysicalSize {
-    if input.is_empty() {
-        return input;
-    }
-    let long_edge = input.width.max(input.height) as f32;
-    let short_edge = input.width.min(input.height) as f32;
-    let scale = (WEBP_MAX_LONG_EDGE as f32 / long_edge)
-        .min(WEBP_MAX_SHORT_EDGE as f32 / short_edge)
-        .min(1.0);
-    if scale >= 1.0 {
-        return input;
-    }
-    PhysicalSize::new(
-        ((input.width as f32 * scale).round() as u32).max(2),
-        ((input.height as f32 * scale).round() as u32).max(2),
-    )
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -129,16 +51,12 @@ pub enum RecordError {
     EmptyDimensions,
     #[error("recording target is empty")]
     EmptyTarget,
-    #[error("WebP recording supports 30 fps, got {0}")]
-    WebpFrameRate(FrameRate),
-    #[error("WebP encoding failed: {0}")]
-    Webp(String),
 }
 
 #[cfg(test)]
 mod tests {
     use core_capture::CaptureTarget;
-    use core_types::{CaptureRegion, MonitorId, PhysicalRect, PhysicalSize, RecordFormat};
+    use core_types::{CaptureRegion, MonitorId, PhysicalRect, PhysicalSize};
 
     use super::*;
 
@@ -147,65 +65,14 @@ mod tests {
     }
 
     #[test]
-    fn webp_accepts_1080p30() {
-        let config = RecordConfig::new(monitor_target(), RecordFormat::WebP);
-        assert_eq!(config.validate(PhysicalSize::new(1920, 1080)), Ok(()));
-    }
-
-    #[test]
-    fn webp_accepts_portrait_1080p() {
-        let config = RecordConfig::new(monitor_target(), RecordFormat::WebP);
-        assert_eq!(config.validate(PhysicalSize::new(1080, 1920)), Ok(()));
-    }
-
-    #[test]
-    fn webp_rejects_60_fps() {
-        let mut config = RecordConfig::new(monitor_target(), RecordFormat::WebP);
-        config.frame_rate = FrameRate::Fps60;
-        assert_eq!(
-            config.validate(PhysicalSize::new(1920, 1080)),
-            Err(RecordError::WebpFrameRate(FrameRate::Fps60))
-        );
-    }
-
-    #[test]
-    fn webp_scales_large_canvases_to_1080p() {
-        assert_eq!(
-            webp_output_size(PhysicalSize::new(2560, 1600)),
-            PhysicalSize::new(1728, 1080)
-        );
-        assert_eq!(
-            webp_output_size(PhysicalSize::new(3840, 2160)),
-            PhysicalSize::new(1920, 1080)
-        );
-        assert_eq!(
-            webp_output_size(PhysicalSize::new(1000, 2000)),
-            PhysicalSize::new(960, 1920)
-        );
-    }
-
-    #[test]
-    fn webp_keeps_canvases_within_the_limit() {
-        assert_eq!(
-            webp_output_size(PhysicalSize::new(1920, 1080)),
-            PhysicalSize::new(1920, 1080)
-        );
-        assert_eq!(
-            webp_output_size(PhysicalSize::new(1080, 1920)),
-            PhysicalSize::new(1080, 1920)
-        );
-    }
-
-    #[test]
-    fn mp4_accepts_4k60() {
-        let mut config = RecordConfig::new(monitor_target(), RecordFormat::Mp4);
-        config.frame_rate = FrameRate::Fps60;
+    fn accepts_a_monitor_canvas() {
+        let config = RecordConfig::new(monitor_target());
         assert_eq!(config.validate(PhysicalSize::new(3840, 2160)), Ok(()));
     }
 
     #[test]
     fn rejects_empty_dimensions() {
-        let config = RecordConfig::new(monitor_target(), RecordFormat::Mp4);
+        let config = RecordConfig::new(monitor_target());
         assert_eq!(
             config.validate(PhysicalSize::new(0, 1080)),
             Err(RecordError::EmptyDimensions)
@@ -218,7 +85,7 @@ mod tests {
             MonitorId::from_raw(1),
             PhysicalRect::new(0, 0, 0, 0),
         ));
-        let config = RecordConfig::new(target, RecordFormat::Mp4);
+        let config = RecordConfig::new(target);
         assert_eq!(
             config.validate(PhysicalSize::new(1920, 1080)),
             Err(RecordError::EmptyTarget)

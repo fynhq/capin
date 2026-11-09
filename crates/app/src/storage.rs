@@ -220,14 +220,10 @@ fn create_unique_file(
     ))
 }
 
-pub fn recording_path(format: core_types::RecordFormat) -> Result<PathBuf, std::io::Error> {
+pub fn recording_path() -> Result<PathBuf, std::io::Error> {
     let directory = recording_dir();
     ensure_directory(&directory)?;
-    Ok(unique_path(
-        &directory,
-        "capin-recording",
-        format.extension(),
-    ))
+    Ok(unique_path(&directory, "capin-recording", "mp4"))
 }
 
 fn fallback_dir(name: &str) -> PathBuf {

@@ -11,10 +11,7 @@ use tiny_skia::{
     IntSize, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, Transform,
 };
 
-use crate::{
-    Annotation, AnnotationDocument, AnnotationId, AnnotationStyle, NumberStyle, Shape,
-    TextAlignment,
-};
+use crate::{Annotation, AnnotationDocument, AnnotationId, AnnotationStyle, Shape, TextAlignment};
 
 /// Label color for a sequence badge. Badges read as solid chips, so the
 /// foreground only flips to dark on light fills; mid-tone colors such as the
@@ -180,31 +177,6 @@ fn build_path(annotation: &Annotation) -> Result<Path, RasterError> {
                 let next = points[1];
                 let angle = ((first.y - next.y) as f32).atan2((first.x - next.x) as f32);
                 push_arrow_head(&mut builder, first, angle, head_length, spread);
-            }
-            builder.finish().ok_or(RasterError::InvalidGeometry)
-        }
-        Shape::Curve {
-            start,
-            control,
-            end,
-        } => {
-            let mut builder = PathBuilder::new();
-            builder.move_to(start.x as f32, start.y as f32);
-            builder.quad_to(
-                control.x as f32,
-                control.y as f32,
-                end.x as f32,
-                end.y as f32,
-            );
-            let head_length = (annotation.style.stroke_width * 3.5).max(10.0);
-            let spread = 0.55;
-            if annotation.style.arrow_end {
-                let angle = ((end.y - control.y) as f32).atan2((end.x - control.x) as f32);
-                push_arrow_head(&mut builder, *end, angle, head_length, spread);
-            }
-            if annotation.style.arrow_start {
-                let angle = ((start.y - control.y) as f32).atan2((start.x - control.x) as f32);
-                push_arrow_head(&mut builder, *start, angle, head_length, spread);
             }
             builder.finish().ok_or(RasterError::InvalidGeometry)
         }
@@ -456,26 +428,13 @@ fn draw_number(pixmap: &mut Pixmap, annotation: &Annotation) {
     }
     let (red, green, blue, alpha) = unpack(annotation.style.color);
     let rgb = (u32::from(red) << 16) | (u32::from(green) << 8) | u32::from(blue);
-    let foreground = match annotation.style.number_style {
-        NumberStyle::Plain => annotation.style.color,
-        NumberStyle::Circle | NumberStyle::Square => badge_foreground(rgb),
-    };
+    let foreground = badge_foreground(rgb);
 
-    let background = match annotation.style.number_style {
-        NumberStyle::Circle => {
-            let rect = to_skia_rect(*bounds).ok();
-            rect.and_then(|rect| {
-                let mut builder = PathBuilder::new();
-                builder.push_oval(rect);
-                builder.finish()
-            })
-        }
-        NumberStyle::Square => {
-            let radius = bounds.size.width.min(bounds.size.height) as f32 * 0.18;
-            rounded_rect_path(*bounds, radius).ok()
-        }
-        NumberStyle::Plain => None,
-    };
+    let background = to_skia_rect(*bounds).ok().and_then(|rect| {
+        let mut builder = PathBuilder::new();
+        builder.push_oval(rect);
+        builder.finish()
+    });
     if let Some(path) = background {
         let mut paint = Paint::default();
         paint.set_color_rgba8(red, green, blue, alpha);
@@ -936,25 +895,6 @@ mod tests {
     }
 
     #[test]
-    fn curve_arrow_renders_without_error() {
-        let frame = black_frame(100, 100);
-        let mut document = document(100, 100);
-        document.add(
-            Shape::Curve {
-                start: PhysicalPoint::new(10, 80),
-                control: PhysicalPoint::new(50, 10),
-                end: PhysicalPoint::new(90, 70),
-            },
-            AnnotationStyle {
-                arrow_start: true,
-                arrow_end: true,
-                ..Default::default()
-            },
-        );
-        assert!(rasterize(&document, &frame).is_ok());
-    }
-
-    #[test]
     fn arrow_heads_can_be_rendered_at_both_ends() {
         let frame = black_frame(80, 80);
         let mut document = document(80, 80);
@@ -1092,26 +1032,6 @@ mod tests {
         );
         let output = rasterize(&document, &frame).unwrap();
         assert_eq!(output.width(), 120);
-    }
-
-    #[test]
-    fn number_badge_supports_square_and_plain_styles() {
-        let frame = black_frame(80, 80);
-        for style in [NumberStyle::Square, NumberStyle::Plain] {
-            let mut document = document(80, 80);
-            document.add(
-                Shape::Number {
-                    bounds: PhysicalRect::new(20, 20, 36, 36),
-                    value: 1,
-                },
-                AnnotationStyle {
-                    color: 0xFF0000FF,
-                    number_style: style,
-                    ..Default::default()
-                },
-            );
-            assert!(rasterize(&document, &frame).is_ok());
-        }
     }
 
     #[test]

@@ -7,11 +7,10 @@ use std::time::Duration;
 use block2::RcBlock;
 use core_capture::CaptureTarget;
 use core_record::{
-    CURSOR_HIGHLIGHT_ALPHA, CURSOR_HIGHLIGHT_RADIUS, CursorHighlight, FrameDecision, FrameRate,
-    FrameTimeline, RecordConfig, RecordQuality, WebpEncoder, paint_cursor_highlight_bgra,
-    webp_output_size,
+    CURSOR_HIGHLIGHT_ALPHA, CURSOR_HIGHLIGHT_RADIUS, CursorHighlight, FRAME_RATE, FrameDecision,
+    FrameTimeline, RecordConfig, paint_cursor_highlight_bgra,
 };
-use core_types::{PhysicalRect, PhysicalSize, RecordFormat};
+use core_types::PhysicalRect;
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
@@ -56,9 +55,6 @@ pub(crate) fn start(
     flags.restart_started();
     let (tx, rx) = sync_channel::<EncodedFrame>(FRAME_QUEUE);
     let (width, height) = (plan.width, plan.height);
-    let fps = config.frame_rate.as_u32();
-    let format = config.format;
-    let quality = config.quality;
     let encoder_flags = Arc::clone(&flags);
     let encoder_temp = temp.clone();
     let encoder_output = output.clone();
@@ -69,11 +65,8 @@ pub(crate) fn start(
                 &encoder_temp,
                 &encoder_output,
                 rx,
-                format,
                 width,
                 height,
-                fps,
-                quality,
                 encoder_flags,
             )
         })
@@ -383,7 +376,6 @@ fn capture_session(
     let output = ScreenOutput::new(
         tx,
         Arc::clone(&flags),
-        config.frame_rate.as_u32(),
         config.cursor_highlight,
         plan.cursor_space,
     );
@@ -447,7 +439,7 @@ fn build_stream_config(
         stream_config.setScalesToFit(true);
         stream_config.setPreservesAspectRatio(true);
         stream_config.setShouldBeOpaque(true);
-        stream_config.setMinimumFrameInterval(CMTime::new(1, config.frame_rate.as_u32() as i32));
+        stream_config.setMinimumFrameInterval(CMTime::new(1, FRAME_RATE as i32));
     }
 
     if let Some(rect) = plan.source_rect {
@@ -518,7 +510,6 @@ fn ns_error(error: &NSError) -> String {
 struct OutputIvars {
     tx: SyncSender<EncodedFrame>,
     flags: Arc<Flags>,
-    fps: u32,
     timeline: Mutex<FrameTimeline>,
     cursor_highlight: Option<CursorHighlight>,
     cursor_space: CursorSpace,
@@ -579,7 +570,7 @@ define_class!(
                     CURSOR_HIGHLIGHT_ALPHA,
                 );
             }
-            let pts_millis = (index.saturating_mul(1000) / u64::from(ivars.fps.max(1))) as i64;
+            let pts_millis = (index.saturating_mul(1000) / u64::from(FRAME_RATE)) as i64;
             let _ = ivars.tx.try_send(EncodedFrame {
                 data,
                 width,
@@ -594,16 +585,13 @@ impl ScreenOutput {
     fn new(
         tx: SyncSender<EncodedFrame>,
         flags: Arc<Flags>,
-        fps: u32,
         cursor_highlight: Option<CursorHighlight>,
         cursor_space: CursorSpace,
     ) -> Retained<Self> {
-        let frame_rate = FrameRate::from_u32(fps).unwrap_or(FrameRate::Fps30);
         let this = Self::alloc().set_ivars(OutputIvars {
             tx,
             flags,
-            fps: fps.max(1),
-            timeline: Mutex::new(FrameTimeline::new(frame_rate)),
+            timeline: Mutex::new(FrameTimeline::new()),
             cursor_highlight,
             cursor_space,
         });
@@ -644,56 +632,25 @@ fn copy_bgra(buffer: &CVPixelBuffer) -> (Vec<u8>, usize, usize) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn encode_loop(
     temp: &Path,
     final_output: &Path,
     rx: std::sync::mpsc::Receiver<EncodedFrame>,
-    format: RecordFormat,
     width: usize,
     height: usize,
-    fps: u32,
-    quality: RecordQuality,
     flags: Arc<Flags>,
 ) -> Result<(), String> {
     let result = (|| {
         let mut writer: Option<Writer> = None;
-        let mut webp: Option<WebpEncoder> = None;
         while let Ok(frame) = rx.recv() {
-            if format == RecordFormat::WebP {
-                if webp.is_none() {
-                    let input = PhysicalSize::new(frame.width as u32, frame.height as u32);
-                    let output = webp_output_size(input);
-                    webp = Some(
-                        WebpEncoder::new(input, output, fps, quality.webp_quality())
-                            .map_err(|error| error.to_string())?,
-                    );
-                }
-                if let Some(encoder) = webp.as_mut() {
-                    encoder
-                        .push_bgra(&frame.data, frame.pts_millis)
-                        .map_err(|error| error.to_string())?;
-                }
-                continue;
-            }
             if writer.is_none() {
-                writer = Some(Writer::new(temp, width, height, fps, quality)?);
+                writer = Some(Writer::new(temp, width, height)?);
             }
             if let Some(writer) = writer.as_mut() {
                 writer.append(&frame)?;
             }
         }
         let final_pts = flags.elapsed_active().as_millis() as i64;
-        if format == RecordFormat::WebP {
-            let Some(encoder) = webp else {
-                return Err("no frames were captured before the recording stopped".to_owned());
-            };
-            encoder
-                .finish(final_pts, temp)
-                .map_err(|error| error.to_string())?;
-            return std::fs::rename(temp, final_output)
-                .map_err(|error| format!("failed to publish the recording: {error}"));
-        }
         let Some(writer) = writer else {
             return Err("no frames were captured before the recording stopped".to_owned());
         };
@@ -718,13 +675,7 @@ struct Writer {
 }
 
 impl Writer {
-    fn new(
-        path: &Path,
-        width: usize,
-        height: usize,
-        fps: u32,
-        quality: RecordQuality,
-    ) -> Result<Self, String> {
+    fn new(path: &Path, width: usize, height: usize) -> Result<Self, String> {
         if path.exists() {
             let _ = std::fs::remove_file(path);
         }
@@ -737,7 +688,7 @@ impl Writer {
         }
         .map_err(|error| format!("failed to create the movie writer: {}", ns_error(&error)))?;
 
-        let settings = video_settings(width, height, fps, quality)?;
+        let settings = video_settings(width, height)?;
         let media_type = unsafe { AVMediaTypeVideo }
             .ok_or_else(|| "video media type is unavailable".to_owned())?;
         let input = unsafe {
@@ -896,15 +847,12 @@ fn string_key(key: &objc2_core_foundation::CFString) -> Retained<NSString> {
 fn video_settings(
     width: usize,
     height: usize,
-    fps: u32,
-    quality: RecordQuality,
 ) -> Result<Retained<NSDictionary<NSString, AnyObject>>, String> {
     let codec = unsafe { AVVideoCodecTypeH264 }.ok_or_else(|| "H.264 is unavailable".to_owned())?;
-    let base_bitrate = ((width as u64 * height as u64 * u64::from(fps.max(1))) / 4) as f32;
-    let bitrate =
-        (base_bitrate * quality.bitrate_multiplier()).clamp(4_000_000.0, 60_000_000.0) as u32;
+    let base_bitrate = ((width as u64 * height as u64 * u64::from(FRAME_RATE)) / 4) as f32;
+    let bitrate = base_bitrate.clamp(4_000_000.0, 60_000_000.0) as u32;
     let bitrate = NSNumber::new_u32(bitrate);
-    let interval = NSNumber::new_u32(fps.max(1));
+    let interval = NSNumber::new_u32(FRAME_RATE);
     let compression = NSDictionary::from_slices(
         &[
             unsafe { AVVideoAverageBitRateKey }.unwrap(),

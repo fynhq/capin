@@ -10,7 +10,6 @@ publish = false
 [dependencies]
 core-capture.workspace = true
 core-types.workspace = true
-libwebp-sys = "0.9.6"
 thiserror.workspace = true
 
 [lints]

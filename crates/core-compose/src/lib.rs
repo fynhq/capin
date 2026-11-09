@@ -4,10 +4,7 @@
 //! The input is a raw window frame in non-premultiplied RGBA. The output keeps
 //! alpha so callers can save a transparent PNG or paste the image directly.
 
-use std::sync::Arc;
-
 use core_types::RgbaFrame;
-use image::imageops::FilterType;
 use thiserror::Error;
 
 const MAX_PADDING: u32 = 2048;
@@ -51,13 +48,6 @@ pub enum Background {
     Transparent,
     /// Paint every canvas pixel with this non-premultiplied RGBA color.
     Solid([u8; 4]),
-    /// A vertical gradient between two non-premultiplied RGBA colors.
-    VerticalGradient([u8; 4], [u8; 4]),
-    /// A wallpaper image, scaled and center-cropped to cover the canvas.
-    ///
-    /// Shared so repeated window captures can reuse one decoded wallpaper
-    /// without copying the full image into every canvas.
-    Image(Arc<RgbaFrame>),
 }
 
 /// Layout and paint options for a window capture.
@@ -91,8 +81,6 @@ pub enum ComposeError {
     EmptyWindow,
     #[error("composed canvas is too large")]
     SizeOverflow,
-    #[error("background image is empty")]
-    EmptyBackground,
 }
 
 /// Composites `window` onto a new canvas according to `canvas`.
@@ -129,7 +117,7 @@ pub fn compose_window(
         .ok_or(ComposeError::SizeOverflow)?;
 
     let mut pixels = vec![0u8; buffer_len];
-    paint_background(&mut pixels, width, height, &canvas.background)?;
+    paint_background(&mut pixels, &canvas.background);
 
     if let Some(shadow) = &canvas.shadow {
         paint_shadow(
@@ -161,90 +149,12 @@ pub fn compose_window(
     RgbaFrame::from_pixels(width, height, pixels).map_err(|_| ComposeError::SizeOverflow)
 }
 
-fn paint_background(
-    pixels: &mut [u8],
-    width: u32,
-    height: u32,
-    background: &Background,
-) -> Result<(), ComposeError> {
-    match background {
-        Background::Transparent => {}
-        Background::Solid(color) => {
-            for pixel in pixels.as_chunks_mut::<4>().0 {
-                *pixel = *color;
-            }
+fn paint_background(pixels: &mut [u8], background: &Background) {
+    if let Background::Solid(color) = background {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
+            *pixel = *color;
         }
-        Background::VerticalGradient(top, bottom) => {
-            for y in 0..height {
-                let t = if height > 1 {
-                    y as f32 / (height - 1) as f32
-                } else {
-                    0.0
-                };
-                let color = lerp_color(*top, *bottom, t);
-                let row = y as usize * width as usize * 4;
-                for x in 0..width as usize {
-                    let offset = row + x * 4;
-                    pixels[offset..offset + 4].copy_from_slice(&color);
-                }
-            }
-        }
-        Background::Image(frame) => paint_background_image(pixels, width, height, frame)?,
     }
-    Ok(())
-}
-
-fn paint_background_image(
-    pixels: &mut [u8],
-    width: u32,
-    height: u32,
-    frame: &RgbaFrame,
-) -> Result<(), ComposeError> {
-    if frame.width() == 0 || frame.height() == 0 {
-        return Err(ComposeError::EmptyBackground);
-    }
-
-    let mut raw = Vec::with_capacity(frame.width() as usize * frame.height() as usize * 4);
-    for y in 0..frame.height() {
-        let row = frame.row(y).ok_or(ComposeError::EmptyBackground)?;
-        let end = frame.width() as usize * 4;
-        if row.len() < end {
-            return Err(ComposeError::EmptyBackground);
-        }
-        raw.extend_from_slice(&row[..end]);
-    }
-    let image = image::RgbaImage::from_raw(frame.width(), frame.height(), raw)
-        .ok_or(ComposeError::EmptyBackground)?;
-
-    // Crop to the target aspect ratio before scaling. Resizing a very wide or
-    // tall wallpaper directly to "cover" can allocate an enormous temporary
-    // image (a 1x10000 source would be scaled to tens of millions of pixels).
-    let target_aspect = f64::from(width) / f64::from(height);
-    let source_width = f64::from(frame.width());
-    let source_height = f64::from(frame.height());
-    let source_aspect = source_width / source_height;
-    let (crop_width, crop_height) = if source_aspect > target_aspect {
-        let crop_width = (source_height * target_aspect).round().max(1.0) as u32;
-        (crop_width.min(frame.width()), frame.height())
-    } else {
-        let crop_height = (source_width / target_aspect).round().max(1.0) as u32;
-        (frame.width(), crop_height.min(frame.height()))
-    };
-    let crop_x = (frame.width().saturating_sub(crop_width)) / 2;
-    let crop_y = (frame.height().saturating_sub(crop_height)) / 2;
-    let cropped = image::imageops::crop_imm(&image, crop_x, crop_y, crop_width, crop_height);
-    let resized = image::imageops::resize(&cropped.to_image(), width, height, FilterType::Triangle);
-
-    for y in 0..height as usize {
-        let start = y * width as usize * 4;
-        let end = start + width as usize * 4;
-        let source = resized
-            .as_raw()
-            .get(start..end)
-            .ok_or(ComposeError::SizeOverflow)?;
-        pixels[start..end].copy_from_slice(source);
-    }
-    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -521,17 +431,6 @@ fn blend_pixel(target: &mut [u8], source: [u8; 4]) {
     target[3] = (out_alpha * 255.0).round().clamp(0.0, 255.0) as u8;
 }
 
-fn lerp_color(from: [u8; 4], to: [u8; 4], t: f32) -> [u8; 4] {
-    let t = t.clamp(0.0, 1.0);
-    let mut color = [0u8; 4];
-    for channel in 0..4 {
-        let value =
-            f32::from(from[channel]) + (f32::from(to[channel]) - f32::from(from[channel])) * t;
-        color[channel] = value.round().clamp(0.0, 255.0) as u8;
-    }
-    color
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -649,40 +548,5 @@ mod tests {
         assert_eq!(border[3], 255);
         assert!(border[0] < 200, "border should darken the edge pixel");
         assert_eq!(output.pixel(6, 6).unwrap(), [200, 50, 50, 255]);
-    }
-
-    #[test]
-    fn vertical_gradient_uses_both_ends() {
-        let window = solid_frame(4, 4, [200, 50, 50, 255]);
-        let options = WindowCanvas {
-            padding: 2,
-            corner_radius: 0,
-            shadow: None,
-            background: Background::VerticalGradient([10, 20, 30, 255], [40, 50, 60, 255]),
-            border: None,
-        };
-        let output = compose_window(&window, &options).unwrap();
-
-        assert_eq!(output.pixel(0, 0).unwrap(), [10, 20, 30, 255]);
-        let height = output.height();
-        assert_eq!(output.pixel(0, height - 1).unwrap(), [40, 50, 60, 255]);
-    }
-
-    #[test]
-    fn background_image_is_cover_scaled() {
-        let window = solid_frame(2, 2, [200, 50, 50, 255]);
-        let background = solid_frame(2, 1, [10, 20, 30, 255]);
-        let options = WindowCanvas {
-            padding: 1,
-            corner_radius: 0,
-            shadow: None,
-            background: Background::Image(Arc::new(background)),
-            border: None,
-        };
-        let output = compose_window(&window, &options).unwrap();
-
-        assert_eq!(output.width(), 4);
-        assert_eq!(output.height(), 4);
-        assert_eq!(output.pixel(0, 0).unwrap()[3], 255);
     }
 }

@@ -1,9 +1,8 @@
-//! Platform screen recorders for MP4 and animated WebP output.
+//! Platform screen recorders for MP4 output.
 //!
 //! The recorder captures a monitor, a region, or a single window without audio
 //! and reports progress through [`Recorder`]. MP4 uses the platform encoder
-//! (Media Foundation on Windows, AVFoundation on macOS); WebP is encoded in
-//! software with libwebp on both platforms.
+//! (Media Foundation on Windows, AVFoundation on macOS).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -288,25 +287,22 @@ fn platform_start(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_types::{CaptureRegion, MonitorId, PhysicalRect, RecordFormat};
+    use core_types::{CaptureRegion, MonitorId, PhysicalRect};
 
     #[test]
     fn part_files_keep_the_output_extension() {
         assert_eq!(
-            part_path(Path::new("capin-recording.webp")),
-            Path::new(".capin-recording.part.webp")
+            part_path(Path::new("capin-recording.mp4")),
+            Path::new(".capin-recording.part.mp4")
         );
     }
 
     #[test]
     fn empty_regions_are_rejected_before_starting() {
-        let config = RecordConfig::new(
-            CaptureTarget::Region(CaptureRegion::new(
-                MonitorId::from_raw(1),
-                PhysicalRect::new(0, 0, 0, 0),
-            )),
-            RecordFormat::Mp4,
-        );
+        let config = RecordConfig::new(CaptureTarget::Region(CaptureRegion::new(
+            MonitorId::from_raw(1),
+            PhysicalRect::new(0, 0, 0, 0),
+        )));
         let output = std::env::temp_dir().join("capin-empty-test.mp4");
         assert_eq!(
             Recorder::start(config, output).err(),
