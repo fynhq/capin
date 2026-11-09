@@ -16,6 +16,17 @@ use crate::{
     TextAlignment,
 };
 
+/// Label color for a sequence badge. Badges read as solid chips, so the
+/// foreground only flips to dark on light fills; mid-tone colors such as the
+/// default red keep white text instead of picking the slightly better contrast.
+pub fn badge_foreground(color: u32) -> u32 {
+    if core_types::relative_luminance(color & 0x00FF_FFFF) > 0.55 {
+        0x111111FF
+    } else {
+        0xFFFFFFFF
+    }
+}
+
 pub fn rasterize(
     document: &AnnotationDocument,
     frame: &RgbaFrame,
@@ -419,6 +430,23 @@ fn rounded_rect_path(rect: PhysicalRect, radius: f32) -> Result<Path, RasterErro
     builder.finish().ok_or(RasterError::InvalidGeometry)
 }
 
+#[cfg(test)]
+mod badge_tests {
+    use super::badge_foreground;
+
+    #[test]
+    fn sequence_badges_default_to_white_on_mid_tones() {
+        assert_eq!(badge_foreground(0xFF3B30), 0xFFFFFFFF);
+        assert_eq!(badge_foreground(0x0067C0), 0xFFFFFFFF);
+    }
+
+    #[test]
+    fn sequence_badges_flip_to_dark_only_on_light_fills() {
+        assert_eq!(badge_foreground(0xFFD60A), 0x111111FF);
+        assert_eq!(badge_foreground(0xFFFFFF), 0x111111FF);
+    }
+}
+
 fn draw_number(pixmap: &mut Pixmap, annotation: &Annotation) {
     let Shape::Number { bounds, value } = &annotation.shape else {
         return;
@@ -430,13 +458,7 @@ fn draw_number(pixmap: &mut Pixmap, annotation: &Annotation) {
     let rgb = (u32::from(red) << 16) | (u32::from(green) << 8) | u32::from(blue);
     let foreground = match annotation.style.number_style {
         NumberStyle::Plain => annotation.style.color,
-        NumberStyle::Circle | NumberStyle::Square => {
-            if prefers_dark_foreground(rgb) {
-                0x111111FF
-            } else {
-                0xFFFFFFFF
-            }
-        }
+        NumberStyle::Circle | NumberStyle::Square => badge_foreground(rgb),
     };
 
     let background = match annotation.style.number_style {

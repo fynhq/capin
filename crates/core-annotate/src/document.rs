@@ -708,6 +708,22 @@ mod tests {
     }
 
     #[test]
+    fn a_new_document_restarts_sequence_numbers() {
+        let mut first = document();
+        first.add(
+            Shape::Number {
+                bounds: PhysicalRect::new(0, 0, 30, 30),
+                value: 1,
+            },
+            AnnotationStyle::default(),
+        );
+        assert_eq!(first.next_number(), 2);
+
+        let second = document();
+        assert_eq!(second.next_number(), 1);
+    }
+
+    #[test]
     fn removing_a_number_compacts_the_following_numbers() {
         let mut doc = document();
         let first = doc.add(

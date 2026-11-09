@@ -21,7 +21,7 @@ pub fn centered_bounds(cx: &App, width: f32, height: f32) -> Bounds<Pixels> {
     }
 }
 
-/// Compact text button used by the recording, scrolling, and OCR bars.
+/// Compact text button used by the recording and scrolling bars.
 pub fn flat_button<View: 'static>(
     id: &'static str,
     label: String,

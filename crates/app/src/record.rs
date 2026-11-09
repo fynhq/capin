@@ -363,7 +363,7 @@ impl RecordBar {
     fn close(&mut self, cx: &mut Context<Self>) {
         let handles = cx.windows();
         cx.defer(move |cx| {
-            crate::windows::close_auxiliary(cx, handles);
+            crate::windows::close_capture_auxiliary(cx, handles);
         });
     }
 }

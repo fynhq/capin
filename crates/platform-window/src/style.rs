@@ -40,7 +40,9 @@ impl WindowStyle {
     pub const PIN: Self = Self {
         always_on_top: true,
         skip_taskbar: true,
-        no_activate: true,
+        // Pins must accept keyboard focus so the system copy shortcut works on
+        // a selected text run; a nonactivating window never receives it.
+        no_activate: false,
         exclude_from_capture: true,
         borderless: false,
         opaque: false,

@@ -1,4 +1,3 @@
-use std::cell::Cell;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -21,7 +20,7 @@ use crate::{i18n::t, icons, image_util, settings_state};
 
 const TOOLBAR_HEIGHT: f32 = 48.0;
 const COMPACT_TOOLBAR_HEIGHT: f32 = 40.0;
-const COMPACT_TOOLBAR_WIDTH: f32 = 640.0;
+const COMPACT_TOOLBAR_WIDTH: f32 = 700.0;
 const OPTIONS_PANEL_HEIGHT: f32 = 46.0;
 const INFO_BAR_HEIGHT: f32 = 28.0;
 const INFO_BAR_WIDTH: f32 = 360.0;
@@ -38,11 +37,6 @@ const CORNER_RADII: [f32; 4] = [0.0, 8.0, 16.0, 24.0];
 const BLUR_RADII: [u32; 4] = [8, 16, 24, 32];
 const SPOTLIGHT_INTENSITIES: [u8; 3] = [40, 60, 80];
 const CANVAS_HISTORY_LIMIT: usize = 3;
-
-thread_local! {
-    /// Continues numbered badges across editors in one app session.
-    static NEXT_SEQUENCE: Cell<u32> = const { Cell::new(1) };
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Tool {
@@ -822,7 +816,7 @@ impl EditorView {
         let window_width = f32::from(window.viewport_size().width);
         let window_height = f32::from(window.viewport_size().height);
         let width = 196.0;
-        let height = if self.inline.is_some() { 238.0 } else { 172.0 };
+        let height = 136.0;
         let left = (f32::from(toolbar.origin.x) + f32::from(toolbar.size.width) - width)
             .clamp(8.0, (window_width - width - 8.0).max(8.0));
         let mut top = f32::from(toolbar.origin.y) + f32::from(toolbar.size.height) + 6.0;
@@ -1012,6 +1006,10 @@ impl EditorView {
         self.draft = None;
         self.move_draft = None;
         self.resize_draft = None;
+        if self.crop_mode {
+            self.document.select(None);
+            self.selection_hover = SelectionHover::None;
+        }
         self.status = self
             .crop_mode
             .then(|| t(settings_state::get().language, "editor.crop_hint").to_owned());
@@ -2342,8 +2340,46 @@ impl EditorView {
             .child(icons::icon(icons::SAVE, 18.0, text))
             .into_any_element();
 
-        let close_label = t(language, "editor.close").to_owned();
         let inline = self.inline.is_some();
+        let mut capture_actions: Vec<AnyElement> = Vec::new();
+        if inline {
+            let scroll_label = t(language, "menu.scroll_capture").to_owned();
+            capture_actions.push(
+                div()
+                    .id("editor-scroll-capture")
+                    .tooltip(move |_, cx| tooltip_view(scroll_label.clone(), cx))
+                    .w(px(TOOLBAR_SIZE as f32))
+                    .h(px(TOOLBAR_SIZE as f32))
+                    .rounded(px(7.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .hover(move |style| style.bg(hover))
+                    .active(|style| style.opacity(0.85))
+                    .on_click(cx.listener(|this, _, _, cx| this.start_scroll_capture(cx)))
+                    .child(icons::icon(icons::SCROLL, 18.0, muted))
+                    .into_any_element(),
+            );
+            let record_label = t(language, "menu.record").to_owned();
+            capture_actions.push(
+                div()
+                    .id("editor-record")
+                    .tooltip(move |_, cx| tooltip_view(record_label.clone(), cx))
+                    .w(px(TOOLBAR_SIZE as f32))
+                    .h(px(TOOLBAR_SIZE as f32))
+                    .rounded(px(7.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .hover(move |style| style.bg(hover))
+                    .active(|style| style.opacity(0.85))
+                    .on_click(cx.listener(|this, _, _, cx| this.start_recording(cx)))
+                    .child(icons::icon(icons::RECORDING, 18.0, muted))
+                    .into_any_element(),
+            );
+        }
+
+        let close_label = t(language, "editor.close").to_owned();
         let more_label = t(language, "editor.more").to_owned();
         let more = div()
             .id("editor-more")
@@ -2380,7 +2416,7 @@ impl EditorView {
             .on_click(cx.listener(|this, _, window, cx| {
                 if this.inline.is_some() {
                     let handles = cx.windows();
-                    cx.defer(move |cx| crate::windows::close_auxiliary(cx, handles));
+                    cx.defer(move |cx| crate::windows::close_capture_auxiliary(cx, handles));
                 } else {
                     window.remove_window();
                 }
@@ -2420,7 +2456,7 @@ impl EditorView {
 
         let more_panel = (self.more_open && !self.toolbar_hidden).then(|| {
             let more_rect = self.more_rect(window, bar_rect);
-            let mut panel = div()
+            let panel = div()
                 .id("editor-more-panel")
                 .absolute()
                 .left(more_rect.origin.x)
@@ -2441,31 +2477,6 @@ impl EditorView {
                     cx.listener(|_, _, _, cx| cx.stop_propagation()),
                 );
 
-            if inline {
-                panel = panel
-                    .child(self.more_row(
-                        "editor-more-scroll",
-                        icons::SCROLL,
-                        t(language, "menu.scroll_capture"),
-                        cx,
-                        |this, cx| this.start_scroll_capture(cx),
-                    ))
-                    .child(self.more_row(
-                        "editor-more-record",
-                        icons::RECORDING,
-                        t(language, "menu.record"),
-                        cx,
-                        |this, cx| this.start_recording(cx),
-                    ))
-                    .child(self.more_row(
-                        "editor-more-ocr",
-                        icons::OCR,
-                        t(language, "editor.ocr"),
-                        cx,
-                        |this, cx| this.start_ocr(cx),
-                    ))
-                    .child(div().h(px(1.0)).bg(border));
-            }
             panel
                 .child(self.more_row(
                     "editor-more-crop",
@@ -2562,6 +2573,7 @@ impl EditorView {
                     .flex_row()
                     .items_center()
                     .gap(px(1.0))
+                    .children(capture_actions)
                     .child(pin)
                     .child(copy)
                     .child(save)
@@ -2888,16 +2900,20 @@ impl EditorView {
                     .text_color(self.chrome.text)
                     .child(t(language, "editor.hints_title")),
             );
+        let pin_hotkey = crate::hotkey::display_hotkey(&settings_state::get().pin_hotkey);
         let rows = [
             (
-                t(language, "editor.hint_key_copy"),
+                t(language, "editor.hint_key_copy").to_owned(),
                 t(language, "editor.hint_copy"),
             ),
-            ("Cmd/Ctrl+S", t(language, "editor.hint_save")),
-            ("Cmd/Ctrl+T", t(language, "editor.hint_pin")),
-            ("Space", t(language, "editor.hint_space")),
-            ("R / F5", t(language, "editor.hint_ratio_refresh")),
-            ("Esc", t(language, "editor.hint_cancel")),
+            ("Cmd/Ctrl+S".to_owned(), t(language, "editor.hint_save")),
+            (pin_hotkey, t(language, "editor.hint_pin")),
+            ("Space".to_owned(), t(language, "editor.hint_space")),
+            (
+                "R / F5".to_owned(),
+                t(language, "editor.hint_ratio_refresh"),
+            ),
+            ("Esc".to_owned(), t(language, "editor.hint_cancel")),
         ];
         let mut panel = panel;
         for (key, description) in rows {
@@ -3017,21 +3033,8 @@ impl EditorView {
             rasterize(&self.document, &self.frame).unwrap_or_else(|_| self.frame.clone());
         let handles = cx.windows();
         cx.defer(move |cx| {
-            crate::windows::close_auxiliary(cx, handles);
+            crate::windows::close_capture_auxiliary(cx, handles);
             crate::scroll::open_session(capture.region, first_frame, cx);
-        });
-    }
-
-    fn start_ocr(&mut self, cx: &mut Context<Self>) {
-        if self.inline.is_none() {
-            return;
-        }
-        self.commit_text(cx);
-        let frame = rasterize(&self.document, &self.frame).unwrap_or_else(|_| self.frame.clone());
-        let handles = cx.windows();
-        cx.defer(move |cx| {
-            crate::windows::close_auxiliary(cx, handles);
-            crate::ocr::start(frame, cx);
         });
     }
 
@@ -3042,12 +3045,12 @@ impl EditorView {
         self.commit_text(cx);
         let handles = cx.windows();
         cx.defer(move |cx| {
-            crate::windows::close_auxiliary(cx, handles);
+            crate::windows::close_capture_auxiliary(cx, handles);
             crate::record::start(capture.target, cx);
         });
     }
 
-    fn pin(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn pin(&mut self, cx: &mut Context<Self>) {
         self.commit_text(cx);
         match rasterize(&self.document, &self.frame) {
             Ok(output) => {
@@ -3059,7 +3062,34 @@ impl EditorView {
                 if self.pin_target.is_none() {
                     crate::capture_history::record(&output);
                 }
-                crate::pin::open_frame(output, cx);
+                let placement = self.inline.and_then(|inline| {
+                    let capture = inline.capture?;
+                    let scale = capture.scale.max(0.1);
+                    let center_x = (capture.monitor_origin.x
+                        + capture.region.rect.origin.x
+                        + capture.region.rect.size.width as i32 / 2)
+                        as f32
+                        / scale;
+                    let center_y = (capture.monitor_origin.y
+                        + capture.region.rect.origin.y
+                        + capture.region.rect.size.height as i32 / 2)
+                        as f32
+                        / scale;
+                    let width = output.width() as f32 / scale;
+                    let height = output.height() as f32 / scale;
+                    Some((
+                        Bounds {
+                            origin: point(px(center_x - width / 2.0), px(center_y - height / 2.0)),
+                            size: size(px(width), px(height)),
+                        },
+                        1.0 / scale,
+                    ))
+                });
+                if let Some((bounds, zoom)) = placement {
+                    crate::pin::open_frame_at(output, bounds, zoom, cx);
+                } else {
+                    crate::pin::open_frame(output, cx);
+                }
             }
             Err(error) => {
                 let language = settings_state::get().language;
@@ -3068,7 +3098,7 @@ impl EditorView {
         }
         if self.inline.is_some() {
             let handles = cx.windows();
-            cx.defer(move |cx| crate::windows::close_auxiliary(cx, handles));
+            cx.defer(move |cx| crate::windows::close_capture_auxiliary(cx, handles));
         }
         log_info!("editor", "pin requested");
         cx.notify();
@@ -3149,7 +3179,7 @@ impl EditorView {
         );
         if close && self.inline.is_some() {
             let handles = cx.windows();
-            cx.defer(move |cx| crate::windows::close_auxiliary(cx, handles));
+            cx.defer(move |cx| crate::windows::close_capture_auxiliary(cx, handles));
         } else {
             cx.notify();
         }
@@ -3325,6 +3355,10 @@ impl Render for EditorView {
             .as_ref()
             .map(|draft| normalized_rect(draft.start, draft.current));
         let preview = self.preview_shape();
+        let preview_blur = preview.as_ref().and_then(|(shape, style)| match shape {
+            Shape::Blur(rect) if !rect.is_empty() => Some((*rect, style.blur_radius)),
+            _ => None,
+        });
         let status = self.status.clone();
         let accent_hex = self.accent_hex;
 
@@ -3429,22 +3463,15 @@ impl Render for EditorView {
                     let color = (annotation.style.color >> 8) & 0x00FF_FFFF;
                     let width = bounds.size.width as f32 * scale;
                     let height = bounds.size.height as f32 * scale;
+                    let badge_foreground = core_annotate::badge_foreground(color);
                     let (foreground, background, radius) = match annotation.style.number_style {
                         NumberStyle::Circle => (
-                            if prefers_dark_foreground(color) {
-                                rgb(0x111111)
-                            } else {
-                                rgb(0xFFFFFF)
-                            },
+                            rgb((badge_foreground >> 8) & 0x00FF_FFFF),
                             rgb(color),
                             height.min(width) / 2.0,
                         ),
                         NumberStyle::Square => (
-                            if prefers_dark_foreground(color) {
-                                rgb(0x111111)
-                            } else {
-                                rgb(0xFFFFFF)
-                            },
+                            rgb((badge_foreground >> 8) & 0x00FF_FFFF),
                             rgb(color),
                             height.min(width) * 0.18,
                         ),
@@ -3532,19 +3559,34 @@ impl Render for EditorView {
             } else {
                 format!("{}|{}", &edit.content[..cursor], &edit.content[cursor..])
             };
-            div()
+            let text_rgb = (color >> 8) & 0x00FF_FFFF;
+            let mut layer = div()
                 .absolute()
                 .left(px(left))
                 .top(px(top))
                 .w(px(width))
-                .px(px(3.0))
-                .py(px(1.0))
-                .rounded(px(3.0))
-                .bg(rgba(0x00000080))
-                .border_1()
-                .border_color(rgba((accent_hex << 8) | 0xB3))
                 .text_size(px(font_size))
-                .text_color(rgb((color >> 8) & 0x00FF_FFFF))
+                .text_color(if edit.content.is_empty() {
+                    rgb(accent_hex)
+                } else {
+                    rgb(text_rgb)
+                })
+                .text_align(match edit.style.text_alignment {
+                    TextAlignment::Left => TextAlign::Left,
+                    TextAlignment::Center => TextAlign::Center,
+                    TextAlignment::Right => TextAlign::Right,
+                });
+            if edit.style.text_background {
+                layer =
+                    layer
+                        .rounded(px(font_size * 0.2))
+                        .bg(if prefers_dark_foreground(text_rgb) {
+                            rgba(0x000000A0)
+                        } else {
+                            rgba(0xFFFFFFBE)
+                        });
+            }
+            layer
                 .child(text)
                 .child(input)
                 .on_mouse_down(
@@ -3564,6 +3606,31 @@ impl Render for EditorView {
                         }
                         cx.stop_propagation();
                     }),
+                )
+                .into_any_element()
+        });
+
+        let preview_blur_layer = preview_blur.map(|(rect, radius)| {
+            let left = rect.origin.x as f32 * scale;
+            let top = rect.origin.y as f32 * scale;
+            let blur_image = self.blur_images[blur_image_index(radius)].clone();
+            div()
+                .absolute()
+                .left(px(left))
+                .top(px(top))
+                .w(px(rect.size.width as f32 * scale))
+                .h(px(rect.size.height as f32 * scale))
+                .overflow_hidden()
+                .border_1()
+                .border_color(rgba((accent_hex << 8) | 0xCC))
+                .child(
+                    img(blur_image)
+                        .absolute()
+                        .left(px(-left))
+                        .top(px(-top))
+                        .w(image_rect.size.width)
+                        .h(image_rect.size.height)
+                        .object_fit(ObjectFit::Fill),
                 )
                 .into_any_element()
         });
@@ -3631,6 +3698,7 @@ impl Render for EditorView {
                     .object_fit(ObjectFit::Fill),
             )
             .children(object_layers)
+            .children(preview_blur_layer)
             .child(overlay_canvas)
             .children(text_overlay)
             .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
@@ -3692,12 +3760,6 @@ impl Render for EditorView {
                         cx.notify();
                         return;
                     }
-                    // Starting another annotation with a drawing tool drops
-                    // the previous selection before the new draft begins.
-                    if this.tool != Tool::Select && this.document.selected().is_some() {
-                        this.document.select(None);
-                        this.selection_hover = SelectionHover::None;
-                    }
                     if this.crop_mode {
                         this.crop_draft = Some(CropDraft {
                             start: point,
@@ -3705,6 +3767,39 @@ impl Render for EditorView {
                         });
                         cx.notify();
                         return;
+                    }
+                    let hit = this.document.hit_test(point);
+                    // Text edits are a double-click affordance on the object
+                    // itself, not on the Select tool, so a just-created text
+                    // annotation can be reopened without switching tools.
+                    if event.click_count >= 2 && hit.is_some() && this.edit_text_at(point, cx) {
+                        let focus = this.focus_handle.clone();
+                        window.focus(&focus, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                    // The selected object stays draggable with the drawing tool
+                    // still active. Without this, clicking the shape just drawn
+                    // started another draft and the object could never be moved.
+                    if this.polyline_draft.is_none()
+                        && let Some(id) = this.document.selected()
+                        && hit == Some(id)
+                    {
+                        this.draft = None;
+                        this.move_draft = Some(MoveDraft {
+                            id,
+                            start: point,
+                            current: point,
+                        });
+                        this.status = None;
+                        cx.notify();
+                        return;
+                    }
+                    // Starting another annotation with a drawing tool drops
+                    // the previous selection before the new draft begins.
+                    if this.tool != Tool::Select && this.document.selected().is_some() {
+                        this.document.select(None);
+                        this.selection_hover = SelectionHover::None;
                     }
                     if event.click_count >= 2
                         && this.inline.is_some()
@@ -3746,12 +3841,7 @@ impl Render for EditorView {
                         this.commit_text(cx);
                     }
                     if this.tool == Tool::Select {
-                        if event.click_count >= 2 && this.edit_text_at(point, cx) {
-                            let focus = this.focus_handle.clone();
-                            window.focus(&focus, cx);
-                            return;
-                        }
-                        let selected = this.document.hit_test(point);
+                        let selected = hit;
                         this.resize_draft = None;
                         this.select_annotation(selected);
                         this.move_draft = selected.map(|id| MoveDraft {
@@ -3770,7 +3860,7 @@ impl Render for EditorView {
                         let max_top = (this.image_size.height.saturating_sub(BADGE_SIZE)) as i32;
                         let left = (point.x - BADGE_SIZE as i32 / 2).clamp(0, max_left);
                         let top = (point.y - BADGE_SIZE as i32 / 2).clamp(0, max_top);
-                        let value = next_sequence(&this.document);
+                        let value = this.document.next_number();
                         this.document.add(
                             Shape::Number {
                                 bounds: PhysicalRect::new(left, top, BADGE_SIZE, BADGE_SIZE),
@@ -3955,20 +4045,25 @@ impl Render for EditorView {
             .track_focus(&self.focus_handle)
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                    // Right click is the staged escape hatch: cancel the
-                    // in-flight text/crop/polyline, then drop a selection, and
-                    // only close the capture when nothing is left to cancel.
+                cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                    // Right click confirms the annotation in progress instead
+                    // of tearing the capture down: commit text, finish a
+                    // multi-segment arrow, apply a crop, or close a panel.
+                    cx.stop_propagation();
                     if this.text_edit.is_some() {
-                        this.cancel_text(cx);
-                        return;
-                    }
-                    if this.crop_mode {
-                        this.cancel_crop(cx);
+                        this.commit_text(cx);
                         return;
                     }
                     if this.polyline_draft.is_some() {
-                        this.cancel_polyline(cx);
+                        this.finish_polyline(cx);
+                        return;
+                    }
+                    if this.crop_mode {
+                        if this.crop_draft.is_some() {
+                            this.apply_crop(cx);
+                        } else {
+                            this.cancel_crop(cx);
+                        }
                         return;
                     }
                     if this.document.selected().is_some()
@@ -3982,13 +4077,6 @@ impl Render for EditorView {
                         this.hints_visible = false;
                         this.selection_hover = SelectionHover::None;
                         cx.notify();
-                        return;
-                    }
-                    if this.inline.is_some() {
-                        let handles = cx.windows();
-                        cx.defer(move |cx| crate::windows::close_auxiliary(cx, handles));
-                    } else {
-                        window.remove_window();
                     }
                 }),
             )
@@ -4115,10 +4203,6 @@ impl Render for EditorView {
                     this.export(true, cx);
                     return;
                 }
-                if command && key == "t" && !event.keystroke.modifiers.shift {
-                    this.pin(cx);
-                    return;
-                }
                 if command && key == "0" {
                     this.reset_view(cx);
                     return;
@@ -4140,7 +4224,7 @@ impl Render for EditorView {
                 if key == "escape" || (command && matches!(key, "w" | "q")) {
                     if this.inline.is_some() {
                         let handles = cx.windows();
-                        cx.defer(move |cx| crate::windows::close_auxiliary(cx, handles));
+                        cx.defer(move |cx| crate::windows::close_capture_auxiliary(cx, handles));
                     } else {
                         window.remove_window();
                     }
@@ -4280,12 +4364,6 @@ fn open_editor_with_pin(frame: RgbaFrame, pin_target: Option<u64>, cx: &mut App)
         }
         Err(error) => log_error!("editor", "failed to open editor: {error}"),
     }
-}
-
-fn next_sequence(document: &AnnotationDocument) -> u32 {
-    let next = document.next_number().max(NEXT_SEQUENCE.with(Cell::get));
-    NEXT_SEQUENCE.with(|slot| slot.set(next.saturating_add(1)));
-    next
 }
 
 fn finalize_shape(draft: &Draft, end: PhysicalPoint) -> Option<Shape> {

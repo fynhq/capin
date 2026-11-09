@@ -7,4 +7,4 @@ pub use document::{
     Annotation, AnnotationDocument, AnnotationId, AnnotationStyle, NumberStyle, Shape,
     TextAlignment,
 };
-pub use raster::{RasterError, measure_text_height, rasterize};
+pub use raster::{RasterError, badge_foreground, measure_text_height, rasterize};

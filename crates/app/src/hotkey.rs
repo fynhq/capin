@@ -135,11 +135,20 @@ mod imp {
                             if crate::overlay::has_open_overlays() {
                                 crate::overlay::close_open_overlays(cx);
                             } else {
-                                crate::tray::replace_windows(cx, crate::overlay::open_overlays);
+                                // Keep an open settings window: capture only
+                                // freezes the screen, it is not a mode switch.
+                                crate::overlay::open_overlays(cx);
                             }
                         } else if pin_enabled && id == pin_id {
                             log_info!("hotkey", "pin shortcut pressed");
-                            crate::pin::pin_last(cx);
+                            if crate::overlay::has_open_overlays() {
+                                // Capture owns the shortcut while it is open:
+                                // pin the current selection/editor, not an old
+                                // clipboard image behind the overlay.
+                                let _ = crate::overlay::pin_current(cx);
+                            } else {
+                                crate::pin::pin_last(cx);
+                            }
                         }
                     }
                 });

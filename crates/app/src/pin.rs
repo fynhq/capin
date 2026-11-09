@@ -18,10 +18,25 @@ use crate::storage;
 use crate::ui::centered_bounds;
 
 const MAX_RESTORED_PINS: usize = 20;
+
+/// macOS `WindowKind::PopUp` is an `NSPanel` with `NonactivatingPanel`, which
+/// can never take keyboard focus; pins need key status for the system copy
+/// shortcut on selected OCR text. Windows keeps the popup tool window.
+fn pin_window_kind() -> WindowKind {
+    #[cfg(target_os = "macos")]
+    {
+        WindowKind::Floating
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        WindowKind::PopUp
+    }
+}
 const CARD_WIDTH: f32 = 380.0;
-const PIN_MENU_WIDTH: f32 = 180.0;
-const PIN_MENU_ITEM_HEIGHT: f32 = 28.0;
-const PIN_MENU_PADDING: f32 = 8.0;
+const PIN_MENU_WIDTH: f32 = 190.0;
+const PIN_MENU_ITEM_HEIGHT: f32 = 30.0;
+const PIN_MENU_PADDING: f32 = 5.0;
+const PIN_MENU_SEPARATOR: f32 = 9.0;
 
 thread_local! {
     static PIN_CASCADE: Cell<u32> = const { Cell::new(0) };
@@ -39,7 +54,6 @@ enum PinMenuAction {
     Copy,
     Save,
     CopyQr,
-    Ocr,
     Through,
     Open,
     Close,
@@ -53,7 +67,6 @@ impl PinMenuAction {
             Self::Copy => "pin-menu-copy",
             Self::Save => "pin-menu-save",
             Self::CopyQr => "pin-menu-copy-qr",
-            Self::Ocr => "pin-menu-ocr",
             Self::Through => "pin-menu-through",
             Self::Open => "pin-menu-open",
             Self::Close => "pin-menu-close",
@@ -67,11 +80,14 @@ impl PinMenuAction {
             Self::Copy => "pin.copy",
             Self::Save => "pin.save",
             Self::CopyQr => "pin.copy_qr",
-            Self::Ocr => "pin.ocr",
             Self::Through => "pin.through",
             Self::Open => "pin.open",
             Self::Close => "pin.close",
         }
+    }
+
+    fn separated(self) -> bool {
+        matches!(self, Self::Through | Self::Close)
     }
 }
 
@@ -149,21 +165,77 @@ impl PinContent {
         match self {
             Self::Image { size, .. } => (size.width as f32 * zoom, size.height as f32 * zoom),
             Self::Text(text) => text_pin_size(text),
-            Self::File(_) => (340.0, 92.0),
+            Self::File(path) => file_pin_size(path),
             Self::Color { .. } => (300.0, 110.0),
         }
     }
 }
 
+fn estimated_text_width(text: &str, font_size: f32) -> f32 {
+    text.chars()
+        .map(|ch| {
+            if ch.is_whitespace() {
+                font_size * 0.35
+            } else if ch.is_ascii() {
+                font_size * 0.6
+            } else {
+                font_size
+            }
+        })
+        .sum()
+}
+
+fn wrapped_line_count(line: &str, width: f32, font_size: f32) -> usize {
+    if line.is_empty() {
+        return 1;
+    }
+    let mut lines = 1usize;
+    let mut current = 0.0f32;
+    for ch in line.chars() {
+        let advance = if ch.is_whitespace() {
+            font_size * 0.35
+        } else if ch.is_ascii() {
+            font_size * 0.6
+        } else {
+            font_size
+        };
+        if current + advance > width && current > 0.0 {
+            lines += 1;
+            current = 0.0;
+        }
+        current += advance;
+    }
+    lines
+}
+
+/// Text pins hug their content instead of taking a card-width block: the width
+/// follows the longest line up to a readable cap, and the height only counts
+/// the lines that actually wrap at that width.
 fn text_pin_size(text: &str) -> (f32, f32) {
-    let chars_per_line = 24usize;
+    const FONT: f32 = 14.0;
+    const LINE_HEIGHT: f32 = 20.0;
+    const PAD: f32 = 24.0;
+    let widest = text
+        .lines()
+        .map(|line| estimated_text_width(line, FONT))
+        .fold(0.0f32, f32::max);
+    let width = (widest + PAD).clamp(140.0, CARD_WIDTH);
     let lines = text
         .lines()
-        .map(|line| line.chars().count().max(1).div_ceil(chars_per_line))
+        .map(|line| wrapped_line_count(line, width - PAD, FONT))
         .sum::<usize>()
         .max(1);
-    let height = (lines as f32 * 20.0 + 30.0).clamp(80.0, 600.0);
-    (CARD_WIDTH, height)
+    let height = (lines as f32 * LINE_HEIGHT + PAD).clamp(44.0, 600.0);
+    (width, height)
+}
+
+fn file_pin_size(path: &Path) -> (f32, f32) {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| path.as_os_str().to_string_lossy());
+    let width = (estimated_text_width(&name, 13.0) + 96.0).clamp(200.0, 340.0);
+    (width, 64.0)
 }
 
 #[derive(Clone)]
@@ -275,6 +347,20 @@ pub fn open_frame(frame: RgbaFrame, cx: &mut App) {
     open_image_pin(frame, cx);
 }
 
+/// Pins a capture at the screen rectangle it was taken from. Capture images
+/// are physical pixels, so `zoom` is the inverse monitor scale; that keeps the
+/// pin at the same apparent size instead of growing on high-DPI screens.
+pub fn open_frame_at(
+    frame: RgbaFrame,
+    bounds: Bounds<Pixels>,
+    zoom: f32,
+    cx: &mut App,
+) -> Option<u64> {
+    remember(&frame);
+    LAST_PIN_TRIGGER.with(|slot| slot.set(Some(crate::capture_history::hash_frame(&frame))));
+    open_pin_content_at(PinContent::from_frame(frame), bounds, zoom, cx)
+}
+
 fn open_image_pin(frame: RgbaFrame, cx: &mut App) {
     remember(&frame);
     LAST_PIN_TRIGGER.with(|slot| slot.set(Some(crate::capture_history::hash_frame(&frame))));
@@ -287,6 +373,23 @@ fn open_pin_content(content: PinContent, cx: &mut App) {
     log_info!("pin", "opening pin {}x{}", width.round(), height.round());
     let bounds = default_bounds(cx, width, height);
     let _ = open_pin_inner(content, None, bounds, zoom, 1.0, false, None, true, cx);
+}
+
+fn open_pin_content_at(
+    content: PinContent,
+    bounds: Bounds<Pixels>,
+    zoom: f32,
+    cx: &mut App,
+) -> Option<u64> {
+    let zoom = zoom.clamp(0.1, 4.0);
+    let size = bounds.size;
+    log_info!(
+        "pin",
+        "opening pin at {}x{}",
+        f32::from(size.width).round(),
+        f32::from(size.height).round()
+    );
+    open_pin_inner(content, None, bounds, zoom, 1.0, false, None, true, cx)
 }
 
 fn default_bounds(cx: &App, width: f32, height: f32) -> Bounds<Pixels> {
@@ -328,7 +431,7 @@ fn open_pin_inner(
         titlebar: None,
         focus: false,
         show: true,
-        kind: WindowKind::PopUp,
+        kind: pin_window_kind(),
         is_movable: false,
         is_resizable: false,
         is_minimizable: false,
@@ -829,6 +932,9 @@ struct PinTheme {
     muted: Rgba,
     border: Rgba,
     control: Rgba,
+    menu: Rgba,
+    menu_hover: Rgba,
+    menu_border: Rgba,
 }
 
 impl PinTheme {
@@ -844,6 +950,9 @@ impl PinTheme {
                 muted: rgba(0xFFFFFF99),
                 border: rgba(0xFFFFFF24),
                 control: rgba(0xFFFFFF1A),
+                menu: rgba(0x2B2B2BFA),
+                menu_hover: rgba(0xFFFFFF16),
+                menu_border: rgba(0xFFFFFF22),
             }
         } else {
             Self {
@@ -852,6 +961,9 @@ impl PinTheme {
                 muted: rgba(0x00000088),
                 border: rgba(0x0000001A),
                 control: rgba(0x0000000F),
+                menu: rgba(0xF9F9F9FA),
+                menu_hover: rgba(0x00000010),
+                menu_border: rgba(0x0000001A),
             }
         }
     }
@@ -869,6 +981,7 @@ struct PinView {
     selection: Option<(usize, usize)>,
     selecting: bool,
     content_generation: u64,
+    focus_handle: FocusHandle,
 }
 
 impl PinView {
@@ -892,6 +1005,7 @@ impl PinView {
             selection: None,
             selecting: false,
             content_generation: 1,
+            focus_handle: cx.focus_handle(),
         };
         view.start_ocr(cx);
         view
@@ -956,28 +1070,40 @@ impl PinView {
         for line in lines {
             let top = line.rect.origin.y as f32;
             let bottom = top + line.rect.size.height as f32;
-            let vertical = if y < top {
-                top - y
-            } else if y > bottom {
-                y - bottom
-            } else {
-                0.0
-            };
-            if vertical <= line.rect.size.height as f32 * 0.75 + 2.0 {
-                for (index, ch) in line.chars.iter().enumerate() {
-                    let left = ch.rect.origin.x as f32;
-                    let right = left + ch.rect.size.width as f32;
-                    let horizontal = if x < left {
-                        left - x
-                    } else if x > right {
-                        x - right
-                    } else {
-                        0.0
-                    };
-                    let distance = vertical + horizontal;
-                    if best.is_none_or(|(best_distance, _)| distance < best_distance) {
-                        best = Some((distance, base + index));
-                    }
+            if y < top - 2.0 || y > bottom + 2.0 {
+                base += line.chars.len();
+                continue;
+            }
+            let line_left = line
+                .chars
+                .first()
+                .map(|ch| ch.rect.origin.x as f32)
+                .unwrap_or(0.0);
+            let line_right = line
+                .chars
+                .last()
+                .map(|ch| (ch.rect.origin.x + ch.rect.size.width as i32) as f32)
+                .unwrap_or(line_left);
+            // Only a click inside the line's own glyph run selects text.
+            // Falling back to the nearest character anywhere in the image made
+            // every drag over a text screenshot start a selection, so the pin
+            // could not be moved by its body.
+            if x < line_left - 3.0 || x > line_right + 3.0 {
+                base += line.chars.len();
+                continue;
+            }
+            for (index, ch) in line.chars.iter().enumerate() {
+                let left = ch.rect.origin.x as f32;
+                let right = left + ch.rect.size.width as f32;
+                let horizontal = if x < left {
+                    left - x
+                } else if x > right {
+                    x - right
+                } else {
+                    0.0
+                };
+                if best.is_none_or(|(best_distance, _)| horizontal < best_distance) {
+                    best = Some((horizontal, base + index));
                 }
             }
             base += line.chars.len();
@@ -1115,8 +1241,6 @@ impl PinView {
         };
         if start == end {
             self.selection = None;
-        } else {
-            self.copy_selected_text(cx);
         }
         cx.notify();
     }
@@ -1130,7 +1254,22 @@ impl PinView {
         };
         self.selection = Some((start, end));
         self.selecting = false;
-        self.copy_selected_text(cx);
+        cx.notify();
+        true
+    }
+
+    fn select_all_text(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(total) = self
+            .text_lines()
+            .map(|lines| lines.iter().map(|line| line.chars.len()).sum::<usize>())
+        else {
+            return false;
+        };
+        if total == 0 {
+            return false;
+        }
+        self.selection = Some((0, total - 1));
+        self.selecting = false;
         cx.notify();
         true
     }
@@ -1250,12 +1389,6 @@ impl PinView {
         }
     }
 
-    fn run_ocr(&mut self, cx: &mut Context<Self>) {
-        if let Some(frame) = self.content.frame() {
-            crate::ocr::start(frame.clone(), cx);
-        }
-    }
-
     fn menu_items(&self, language: Language) -> Vec<(PinMenuAction, String)> {
         let mut items = Vec::new();
         match &self.content {
@@ -1267,7 +1400,6 @@ impl PinView {
                 if self.qr_code().is_some() {
                     items.push(PinMenuAction::CopyQr);
                 }
-                items.push(PinMenuAction::Ocr);
             }
             PinContent::File(_) => {
                 items.push(PinMenuAction::Open);
@@ -1285,7 +1417,7 @@ impl PinView {
             .collect()
     }
 
-    fn body(&self, theme: &PinTheme, language: Language) -> Div {
+    fn body(&self, theme: &PinTheme, _language: Language) -> Div {
         match &self.content {
             PinContent::Image { image, .. } => div()
                 .size_full()
@@ -1317,34 +1449,36 @@ impl PinView {
                     .to_uppercase();
                 div()
                     .size_full()
-                    .p(px(12.0))
-                    .rounded(px(10.0))
+                    .p(px(10.0))
+                    .rounded(px(8.0))
                     .bg(theme.card)
                     .border_1()
                     .border_color(theme.border)
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(10.0))
+                    .gap(px(9.0))
                     .child(
                         div()
-                            .w(px(40.0))
-                            .h(px(40.0))
-                            .rounded(px(8.0))
+                            .w(px(32.0))
+                            .h(px(32.0))
+                            .flex_shrink_0()
+                            .rounded(px(6.0))
                             .bg(theme.control)
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_size(px(10.0))
+                            .text_size(px(9.0))
                             .text_color(theme.muted)
                             .child(extension),
                     )
                     .child(
                         div()
                             .flex_1()
+                            .min_w(px(0.0))
                             .flex()
                             .flex_col()
-                            .gap(px(3.0))
+                            .gap(px(2.0))
                             .child(
                                 div()
                                     .overflow_hidden()
@@ -1363,12 +1497,6 @@ impl PinView {
                                     .text_color(theme.muted)
                                     .child(parent),
                             ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .text_color(theme.muted)
-                            .child(t(language, "pin.right_click")),
                     )
             }
             PinContent::Color { red, green, blue } => div()
@@ -1437,16 +1565,48 @@ impl Render for PinView {
         let root = div()
             .size_full()
             .id("pin-window")
+            .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                let key = event.keystroke.key.as_str();
+                let command =
+                    event.keystroke.modifiers.platform || event.keystroke.modifiers.control;
+                if command && key == "c" {
+                    this.copy_selected_text(cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                if command && key == "a" && this.select_all_text(cx) {
+                    cx.stop_propagation();
+                    return;
+                }
+                if key == "escape" {
+                    this.selection = None;
+                    this.selecting = false;
+                    cx.notify();
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     crate::pin::close_pin_menu(cx);
+                    window.focus(&this.focus_handle, cx);
                     if event.click_count >= 2 {
                         this.select_word_at(event.position, cx);
                         cx.notify();
                         return;
                     }
-                    if !this.begin_text_selection(event.position) {
+                    let bounds = window.bounds().size;
+                    let x = f32::from(event.position.x);
+                    let y = f32::from(event.position.y);
+                    let margin = 6.0;
+                    let near_edge = x < margin
+                        || y < margin
+                        || x > f32::from(bounds.width) - margin
+                        || y > f32::from(bounds.height) - margin;
+                    if near_edge
+                        || event.modifiers.alt
+                        || !this.begin_text_selection(event.position)
+                    {
                         this.selection = None;
                         this.selecting = false;
                         window.start_window_move();
@@ -1527,17 +1687,20 @@ struct PinMenuView {
 }
 
 impl Render for PinMenuView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = PinTheme::for_window(window);
+        let mut menu = div()
             .size_full()
-            .p(px(4.0))
-            .rounded(px(9.0))
-            .bg(rgba(0x000000F2))
+            .p(px(PIN_MENU_PADDING))
+            .rounded(px(8.0))
+            .bg(theme.menu)
             .border_1()
-            .border_color(rgba(0xFFFFFF24))
+            .border_color(theme.menu_border)
+            .shadow(vec![
+                BoxShadow::new(px(0.0), px(6.0), hsla(0.0, 0.0, 0.0, 0.28)).blur_radius(px(18.0)),
+            ])
             .flex()
             .flex_col()
-            .gap(px(1.0))
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
@@ -1545,20 +1708,31 @@ impl Render for PinMenuView {
                     window.remove_window();
                     cx.stop_propagation();
                 }
-            }))
-            .children(self.items.iter().map(|(action, label)| {
-                let action = *action;
-                let label = label.clone();
-                let pin_id = self.pin_id;
+            }));
+        for (index, (action, label)) in self.items.iter().enumerate() {
+            let action = *action;
+            let label = label.clone();
+            let pin_id = self.pin_id;
+            if index > 0 && action.separated() {
+                menu = menu.child(
+                    div()
+                        .w_full()
+                        .py(px(4.0))
+                        .child(div().h(px(1.0)).mx(px(4.0)).bg(theme.menu_border)),
+                );
+            }
+            menu = menu.child(
                 div()
                     .id(action.id())
                     .occlude()
+                    .h(px(PIN_MENU_ITEM_HEIGHT))
                     .px(px(10.0))
-                    .py(px(6.0))
-                    .rounded(px(5.0))
-                    .text_size(px(12.0))
-                    .text_color(rgb(0xFFFFFF))
-                    .hover(move |style| style.bg(rgba(0xFFFFFF1A)))
+                    .rounded(px(4.0))
+                    .flex()
+                    .items_center()
+                    .text_size(px(12.5))
+                    .text_color(theme.text)
+                    .hover(move |style| style.bg(theme.menu_hover))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|_, _, _, cx| cx.stop_propagation()),
@@ -1568,8 +1742,10 @@ impl Render for PinMenuView {
                         perform_pin_action(pin_id, action, cx);
                         window.remove_window();
                     }))
-                    .child(label)
-            }))
+                    .child(label),
+            );
+        }
+        menu
     }
 }
 
@@ -1594,7 +1770,15 @@ fn open_pin_menu(
 ) {
     close_pin_menu(cx);
     let width = PIN_MENU_WIDTH;
-    let height = PIN_MENU_PADDING * 2.0 + PIN_MENU_ITEM_HEIGHT * items.len() as f32;
+    let separators = items
+        .iter()
+        .enumerate()
+        .filter(|(index, (action, _))| *index > 0 && action.separated())
+        .count() as f32;
+    let height = PIN_MENU_PADDING * 2.0
+        + PIN_MENU_ITEM_HEIGHT * items.len() as f32
+        + PIN_MENU_SEPARATOR * separators
+        + 2.0;
     let position_x = f32::from(position.x);
     let position_y = f32::from(position.y);
     let display = cx.displays().into_iter().find(|display| {
@@ -1629,7 +1813,7 @@ fn open_pin_menu(
         titlebar: None,
         focus: true,
         show: true,
-        kind: WindowKind::PopUp,
+        kind: pin_window_kind(),
         is_movable: false,
         is_resizable: false,
         is_minimizable: false,
@@ -1705,9 +1889,6 @@ fn perform_pin_action(id: u64, action: PinMenuAction, cx: &mut App) {
         }
         PinMenuAction::CopyQr => {
             entity.update(cx, |view, cx| view.copy_qr(cx));
-        }
-        PinMenuAction::Ocr => {
-            entity.update(cx, |view, cx| view.run_ocr(cx));
         }
         PinMenuAction::Through => {
             enable_click_through(id, &entity, window_handle, cx);
@@ -1817,7 +1998,8 @@ fn ensure_visible(cx: &App, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_color;
+    use super::{file_pin_size, parse_color, text_pin_size};
+    use std::path::Path;
 
     #[test]
     fn parse_color_accepts_hex_and_rgb_forms() {
@@ -1832,5 +2014,32 @@ mod tests {
         // Eight bytes after '#', but 'é' spans two bytes and used to split a
         // UTF-8 code point when the string was sliced by byte offsets.
         assert_eq!(parse_color("#aéééa"), None);
+    }
+
+    #[test]
+    fn text_pins_hug_short_content() {
+        let (width, height) = text_pin_size("Hi");
+        assert!(
+            width < 200.0,
+            "short text should not take card width: {width}"
+        );
+        assert!(
+            height <= 48.0,
+            "one line should stay near one row: {height}"
+        );
+    }
+
+    #[test]
+    fn text_pins_grow_with_wrapping_and_cap_the_width() {
+        let (width, height) = text_pin_size(&"wide ".repeat(80));
+        assert!(width <= super::CARD_WIDTH);
+        assert!(height > 48.0);
+    }
+
+    #[test]
+    fn file_pins_stay_compact() {
+        let (width, height) = file_pin_size(Path::new("D:/notes/report.pdf"));
+        assert!((200.0..=340.0).contains(&width));
+        assert_eq!(height, 64.0);
     }
 }

@@ -207,7 +207,15 @@ mod imp {
 
     fn handle_action(action: &str, cx: &mut App) {
         match action {
-            MENU_START => replace_windows(cx, crate::overlay::open_overlays),
+            // Starting a capture keeps an open settings window in place; it is
+            // part of the frozen screen the user sees in the overlay.
+            MENU_START => {
+                if crate::overlay::has_open_overlays() {
+                    crate::overlay::close_open_overlays(cx);
+                } else {
+                    crate::overlay::open_overlays(cx);
+                }
+            }
             MENU_SETTINGS => replace_windows(cx, crate::settings::open_settings),
             MENU_RECOVER => {
                 if let Some(directory) = crate::record_session::pending_sessions().last() {

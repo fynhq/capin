@@ -25,6 +25,31 @@ thread_local! {
     /// fails before it can open its own surface (for example a denied screen
     /// recording permission), so the click never ends as a silent no-op.
     static PENDING_STATUS: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Open settings windows. Capture only freezes the screen, so its close
+    /// path must leave these windows alive.
+    static SETTINGS_WINDOWS: RefCell<Vec<AnyWindowHandle>> = const { RefCell::new(Vec::new()) };
+}
+
+pub fn is_settings_window(handle: &AnyWindowHandle) -> bool {
+    SETTINGS_WINDOWS.with(|handles| {
+        handles
+            .borrow()
+            .iter()
+            .any(|open| open.window_id() == handle.window_id())
+    })
+}
+
+pub fn has_open_settings(cx: &mut App) -> bool {
+    let handles = SETTINGS_WINDOWS.with(|handles| handles.borrow().clone());
+    let mut live = Vec::with_capacity(handles.len());
+    for handle in handles {
+        if handle.update(cx, |_, _, _| {}).is_ok() {
+            live.push(handle);
+        }
+    }
+    let alive = !live.is_empty();
+    SETTINGS_WINDOWS.with(|handles| *handles.borrow_mut() = live);
+    alive
 }
 
 #[cfg(target_os = "windows")]
@@ -46,14 +71,14 @@ const FALLBACK_ACCENT_DARK: u32 = 0x4CC2FF;
 /// follows System Settings, so paddings, corner radii and type sizes match the host.
 #[cfg(target_os = "windows")]
 mod layout {
-    pub const WINDOW_WIDTH: f32 = 1000.0;
+    pub const WINDOW_WIDTH: f32 = 940.0;
     pub const WINDOW_HEIGHT: f32 = 700.0;
-    pub const MIN_WIDTH: f32 = 820.0;
+    pub const MIN_WIDTH: f32 = 760.0;
     pub const MIN_HEIGHT: f32 = 560.0;
     pub const TITLEBAR_HEIGHT: f32 = 48.0;
     pub const CAPTION_BUTTON_WIDTH: f32 = 46.0;
     pub const CAPTION_BUTTON_HEIGHT: f32 = 32.0;
-    pub const SIDEBAR_WIDTH: f32 = 240.0;
+    pub const SIDEBAR_WIDTH: f32 = 180.0;
     pub const SIDEBAR_PAD: f32 = 12.0;
     pub const SIDEBAR_DIVIDER: bool = false;
     pub const NAV_ITEM_HEIGHT: f32 = 36.0;
@@ -64,13 +89,13 @@ mod layout {
     pub const NAV_FONT: f32 = 14.0;
     pub const CONTENT_MAX_WIDTH: f32 = 720.0;
     pub const CONTENT_PAD_X: f32 = 32.0;
-    pub const CONTENT_PAD_TOP: f32 = 20.0;
+    pub const CONTENT_PAD_TOP: f32 = 10.0;
     pub const CONTENT_PAD_BOTTOM: f32 = 32.0;
     pub const CONTENT_GAP: f32 = 24.0;
     pub const GROUP_GAP: f32 = 28.0;
     pub const GROUP_HEADER_GAP: f32 = 8.0;
     pub const PAGE_TITLE: f32 = 28.0;
-    pub const SECTION_TITLE: f32 = 14.0;
+    pub const SECTION_TITLE: f32 = 16.0;
     pub const BODY: f32 = 14.0;
     pub const CAPTION: f32 = 12.0;
     pub const CARD_RADIUS: f32 = 4.0;
@@ -83,12 +108,12 @@ mod layout {
 
 #[cfg(target_os = "macos")]
 mod layout {
-    pub const WINDOW_WIDTH: f32 = 920.0;
+    pub const WINDOW_WIDTH: f32 = 870.0;
     pub const WINDOW_HEIGHT: f32 = 640.0;
-    pub const MIN_WIDTH: f32 = 760.0;
+    pub const MIN_WIDTH: f32 = 710.0;
     pub const MIN_HEIGHT: f32 = 520.0;
     pub const TITLEBAR_HEIGHT: f32 = 52.0;
-    pub const SIDEBAR_WIDTH: f32 = 200.0;
+    pub const SIDEBAR_WIDTH: f32 = 150.0;
     pub const SIDEBAR_PAD: f32 = 10.0;
     pub const SIDEBAR_DIVIDER: bool = true;
     pub const NAV_ITEM_HEIGHT: f32 = 28.0;
@@ -99,13 +124,13 @@ mod layout {
     pub const NAV_FONT: f32 = 13.0;
     pub const CONTENT_MAX_WIDTH: f32 = 680.0;
     pub const CONTENT_PAD_X: f32 = 28.0;
-    pub const CONTENT_PAD_TOP: f32 = 24.0;
+    pub const CONTENT_PAD_TOP: f32 = 12.0;
     pub const CONTENT_PAD_BOTTOM: f32 = 24.0;
     pub const CONTENT_GAP: f32 = 20.0;
     pub const GROUP_GAP: f32 = 22.0;
     pub const GROUP_HEADER_GAP: f32 = 6.0;
     pub const PAGE_TITLE: f32 = 22.0;
-    pub const SECTION_TITLE: f32 = 13.0;
+    pub const SECTION_TITLE: f32 = 15.0;
     pub const BODY: f32 = 13.0;
     pub const CAPTION: f32 = 11.0;
     pub const CARD_RADIUS: f32 = 10.0;
@@ -118,12 +143,12 @@ mod layout {
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 mod layout {
-    pub const WINDOW_WIDTH: f32 = 920.0;
+    pub const WINDOW_WIDTH: f32 = 870.0;
     pub const WINDOW_HEIGHT: f32 = 640.0;
-    pub const MIN_WIDTH: f32 = 760.0;
+    pub const MIN_WIDTH: f32 = 710.0;
     pub const MIN_HEIGHT: f32 = 520.0;
     pub const TITLEBAR_HEIGHT: f32 = 0.0;
-    pub const SIDEBAR_WIDTH: f32 = 200.0;
+    pub const SIDEBAR_WIDTH: f32 = 150.0;
     pub const SIDEBAR_PAD: f32 = 10.0;
     pub const SIDEBAR_DIVIDER: bool = true;
     pub const NAV_ITEM_HEIGHT: f32 = 28.0;
@@ -134,13 +159,13 @@ mod layout {
     pub const NAV_FONT: f32 = 13.0;
     pub const CONTENT_MAX_WIDTH: f32 = 680.0;
     pub const CONTENT_PAD_X: f32 = 28.0;
-    pub const CONTENT_PAD_TOP: f32 = 16.0;
+    pub const CONTENT_PAD_TOP: f32 = 10.0;
     pub const CONTENT_PAD_BOTTOM: f32 = 24.0;
     pub const CONTENT_GAP: f32 = 20.0;
     pub const GROUP_GAP: f32 = 22.0;
     pub const GROUP_HEADER_GAP: f32 = 6.0;
     pub const PAGE_TITLE: f32 = 22.0;
-    pub const SECTION_TITLE: f32 = 13.0;
+    pub const SECTION_TITLE: f32 = 15.0;
     pub const BODY: f32 = 13.0;
     pub const CAPTION: f32 = 11.0;
     pub const CARD_RADIUS: f32 = 10.0;
@@ -1397,7 +1422,7 @@ impl SettingsView {
                         }
                         cx.notify();
                     }))
-                    .child(toggle(theme, value)),
+                    .child(toggle(theme, value, "settings-auto-start-toggle")),
             )
     }
 
@@ -1593,7 +1618,7 @@ impl SettingsView {
                             this.status = None;
                             cx.notify();
                         }))
-                        .child(toggle(theme, row.value)),
+                        .child(toggle(theme, row.value, row.id)),
                 ),
         )
     }
@@ -1700,7 +1725,7 @@ impl SettingsView {
         theme: &Theme,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<Stateful<Div>> {
+    ) -> Option<AnyElement> {
         let menu = self.select_menu?;
         let language = self.settings.language;
         let mut entries: Vec<(String, u32, bool)> = Vec::new();
@@ -1804,7 +1829,23 @@ impl SettingsView {
                     .child(label),
             );
         }
-        Some(popup)
+        let spring = SpringAnimation::new(SpringConfig::new(900.0, 52.0, 1.0))
+            .to(1.0f32)
+            .from(0.0);
+        let base_top = y;
+        Some(
+            popup
+                .with_spring(
+                    SharedString::from(format!("settings-select-popup-{}", menu.kind as u8)),
+                    spring,
+                    move |popup, progress| {
+                        popup
+                            .top(px(base_top + (1.0 - progress.clamp(0.0, 1.0)) * 5.0))
+                            .opacity(progress.clamp(0.0, 1.0))
+                    },
+                )
+                .into_any_element(),
+        )
     }
 
     fn window_wallpaper_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
@@ -2058,25 +2099,30 @@ impl SettingsView {
         // feature disabled. It supplies the text-input role, focus semantics,
         // and semantic focus styling while the template editor below keeps
         // its compact inline look.
+        let field_bg = if editing { theme.card } else { theme.control };
+        let field_border = if editing { theme.accent } else { theme.border };
         let field = InputBase::new("settings-filename-template-field")
             .track_focus(&self.filename_focus)
             .focused(editing)
-            .styles(move |styles| styles.focused(move |style| style.border_color(theme.accent)))
+            .styles(move |styles| {
+                styles.focused(move |style| style.border_color(theme.accent).bg(theme.card))
+            })
             .relative()
-            .w(px(220.0))
+            .w(px(230.0))
             .h(px(layout::BUTTON_HEIGHT))
             .flex_shrink_0()
-            .px(px(10.0))
+            .px(px(9.0))
             .rounded(px(layout::BUTTON_RADIUS))
-            .bg(theme.control)
+            .bg(field_bg)
             .border_1()
-            .border_color(theme.border)
+            .border_color(field_border)
             .flex()
             .items_center()
             .overflow_hidden()
             .whitespace_nowrap()
             .text_size(px(layout::CONTROL_TEXT))
             .text_color(theme.text)
+            .cursor_text()
             .child(shown)
             .children(input)
             .on_click(cx.listener(|this, _, window, cx| {
@@ -3006,10 +3052,18 @@ pub fn open_settings(cx: &mut App) {
     };
 
     match gpui_kit::open_window(options, cx, |window, cx| {
-        window.on_window_should_close(cx, |_, _| {
+        window.on_window_should_close(cx, |window, cx| {
+            let handle = window.window_handle();
+            SETTINGS_WINDOWS.with(|handles| {
+                handles
+                    .borrow_mut()
+                    .retain(|open| open.window_id() != handle.window_id());
+            });
             // Closing the last real window returns Capin to its menu-bar
             // utility role (no Dock icon, no app-switcher entry).
-            platform_window::set_macos_accessory_activation_policy();
+            if !has_open_settings(cx) {
+                platform_window::set_macos_accessory_activation_policy();
+            }
             true
         });
         let view = cx.new(SettingsView::new);
@@ -3018,6 +3072,7 @@ pub fn open_settings(cx: &mut App) {
         view
     }) {
         Ok((handle, _)) => {
+            SETTINGS_WINDOWS.with(|handles| handles.borrow_mut().push(handle));
             let _ = handle.update(cx, |_, window, _| window.activate_window());
             cx.activate(true);
         }
@@ -3132,7 +3187,6 @@ fn group_header(theme: &Theme, title: &str, description: &str) -> Div {
         .child(
             div()
                 .text_size(px(layout::SECTION_TITLE))
-                .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.text)
                 .child(title.to_owned()),
         )
@@ -3254,27 +3308,52 @@ fn info_row(
     row_shell().child(label).child(value_side)
 }
 
-fn toggle(theme: &Theme, value: bool) -> Div {
-    // Native-style 36x20 switch used on both platforms: a 16px white thumb,
-    // 1px transparent border and 2px travel. The unchecked track is a neutral
-    // translucent fill.
+fn toggle(theme: &Theme, value: bool, id: &'static str) -> impl IntoElement {
+    // Native-style 36x20 switch: a 16px white thumb travels 16px inside a
+    // 1px border. The thumb and the accent wash are driven by one spring, so
+    // an interrupted click reverses from where the thumb actually is.
     let accent = theme.accent;
     let off = theme.toggle_off;
     let knob = theme.knob;
+    let spring = SpringAnimation::new(SpringConfig::new(700.0, 46.0, 1.0)).to(if value {
+        1.0f32
+    } else {
+        0.0
+    });
     div()
+        .relative()
         .w(px(36.0))
         .h(px(20.0))
         .flex_shrink_0()
         .rounded(px(10.0))
         .border_1()
         .border_color(rgba(0x00000000))
-        .p(px(1.0))
-        .bg(if value { accent } else { off })
-        .flex()
-        .items_center()
-        .when(value, |toggle| toggle.justify_end())
-        .when(!value, |toggle| toggle.justify_start())
-        .child(div().w(px(16.0)).h(px(16.0)).rounded(px(8.0)).bg(knob))
+        .bg(off)
+        .with_spring(
+            SharedString::from(format!("settings-toggle-{id}")),
+            spring,
+            move |track, progress| {
+                track
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .rounded(px(9.0))
+                            .bg(accent)
+                            .opacity(progress.clamp(0.0, 1.0)),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(1.0 + progress.clamp(0.0, 1.0) * 18.0))
+                            .top(px(1.0))
+                            .w(px(16.0))
+                            .h(px(16.0))
+                            .rounded(px(8.0))
+                            .bg(knob),
+                    )
+            },
+        )
 }
 
 fn background_label_key(background: WindowBackground) -> &'static str {
