@@ -1728,7 +1728,7 @@ fn rotate_pin(id: u64, entity: &Entity<PinView>, window_handle: AnyWindowHandle,
     let Some(frame) = frame else {
         return;
     };
-    let rotated = image_util::rotate_cw(&frame);
+    let rotated = frame.rotated_cw();
     let width = rotated.width() as f32 * zoom;
     let height = rotated.height() as f32 * zoom;
     let Ok(origin) = window_handle.update(cx, |_, window, _| window.bounds().origin) else {

@@ -74,26 +74,6 @@ pub fn magnifier_image(
     Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))
 }
 
-/// Rotates a frame 90 degrees clockwise. Used by image pins so the saved
-/// PNG, OCR pass, and restored pin all share the same orientation.
-pub fn rotate_cw(frame: &RgbaFrame) -> RgbaFrame {
-    let width = frame.width();
-    let height = frame.height();
-    let mut pixels = vec![0u8; frame.pixels().len()];
-    let source = frame.pixels();
-    for y in 0..height {
-        for x in 0..width {
-            let source_index = ((y * width + x) * 4) as usize;
-            let target_x = height - 1 - y;
-            let target_y = x;
-            let target_index = ((target_y * height + target_x) * 4) as usize;
-            pixels[target_index..target_index + 4]
-                .copy_from_slice(&source[source_index..source_index + 4]);
-        }
-    }
-    RgbaFrame::from_pixels(height, width, pixels).expect("rotated frame keeps valid dimensions")
-}
-
 /// Builds the downscaled preview for a box-blur radius. A radius of 16 maps
 /// to the historical preview sigma of 2.0 at one eighth resolution.
 pub fn blurred_image(frame: &RgbaFrame, radius: u32) -> Arc<RenderImage> {

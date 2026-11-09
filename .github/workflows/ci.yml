@@ -44,6 +44,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Check platform crates
         run: cargo check -p platform-window -p platform-ocr -p platform-record -p app --locked
+      - name: Clippy app
+        run: cargo clippy -p app --all-targets --locked -- -D warnings
+      - name: Test app
+        run: cargo test -p app --locked
 
   third-party:
     name: Third-party notices

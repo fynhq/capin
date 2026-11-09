@@ -711,6 +711,7 @@ struct SettingsView {
     filename_edit: Option<TemplateEdit>,
     filename_focus: FocusHandle,
     focus_handle: FocusHandle,
+    #[cfg(target_os = "macos")]
     titlebar_drag: bool,
     select_menu: Option<SelectMenu>,
     logo: Option<Arc<RenderImage>>,
@@ -732,6 +733,7 @@ impl SettingsView {
             filename_edit: None,
             filename_focus: cx.focus_handle(),
             focus_handle: cx.focus_handle(),
+            #[cfg(target_os = "macos")]
             titlebar_drag: false,
             select_menu: None,
             logo: crate::image_util::render_png(include_bytes!(

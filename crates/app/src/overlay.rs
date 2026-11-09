@@ -1047,28 +1047,9 @@ impl OverlayView {
     }
 
     fn crop_selected_frame(&self, selected: &Selected) -> Result<RgbaFrame, String> {
-        let frame = &*self.frame;
-        let rect = selected.rect;
-        let left = rect.origin.x.max(0) as u32;
-        let top = rect.origin.y.max(0) as u32;
-        let width = rect.size.width.min(frame.width().saturating_sub(left));
-        let height = rect.size.height.min(frame.height().saturating_sub(top));
-        if width == 0 || height == 0 {
-            return Err("empty selection".to_owned());
-        }
-        let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
-        for y in 0..height {
-            let row = frame
-                .row(top + y)
-                .ok_or_else(|| "selection outside the frame".to_owned())?;
-            let start = left as usize * 4;
-            let end = start + width as usize * 4;
-            let slice = row
-                .get(start..end)
-                .ok_or_else(|| "selection outside the frame".to_owned())?;
-            pixels.extend_from_slice(slice);
-        }
-        RgbaFrame::from_pixels(width, height, pixels).map_err(|error| error.to_string())
+        self.frame
+            .cropped(selected.rect)
+            .ok_or_else(|| "empty selection".to_owned())
     }
 
     fn selected_output(&self) -> Result<RgbaFrame, String> {
@@ -1143,7 +1124,7 @@ impl OverlayView {
                 });
                 let focus = editor.read(cx).focus_handle.clone();
                 window.focus(&focus, cx);
-                let _ = editor.update(cx, |this, cx| this.observe_appearance(window, cx));
+                editor.update(cx, |this, cx| this.observe_appearance(window, cx));
             });
         });
     }

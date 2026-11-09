@@ -934,7 +934,7 @@ impl EditorView {
             return;
         };
         self.push_canvas_snapshot();
-        let rotated = rotate_frame_cw(&output);
+        let rotated = output.rotated_cw();
         self.replace_canvas(rotated, cx);
         self.status = Some(t(language, "editor.rotated").to_owned());
         cx.notify();
@@ -949,7 +949,7 @@ impl EditorView {
             return;
         };
         self.push_canvas_snapshot();
-        let flipped = flip_frame(&output, horizontal);
+        let flipped = output.flipped(horizontal);
         self.replace_canvas(flipped, cx);
         self.status = Some(
             t(
@@ -997,7 +997,7 @@ impl EditorView {
         if rect.size.width < 2 || rect.size.height < 2 {
             return;
         }
-        let Some(cropped) = crop_frame(&self.frame, rect) else {
+        let Some(cropped) = self.frame.cropped(rect) else {
             return;
         };
         self.push_canvas_snapshot();
@@ -3222,19 +3222,18 @@ impl Render for EditorView {
                 *annotation = annotation.clone().translated(dx, dy);
             }
         }
-        if let Some(resize_draft) = &self.resize_draft {
-            if let Some(annotation) = objects
+        if let Some(resize_draft) = &self.resize_draft
+            && let Some(annotation) = objects
                 .iter_mut()
                 .find(|annotation| annotation.id == resize_draft.id)
-            {
-                annotation.shape = resize_shape(
-                    &resize_draft.original,
-                    resize_draft.handle,
-                    resize_draft.start,
-                    resize_draft.current,
-                    4,
-                );
-            }
+        {
+            annotation.shape = resize_shape(
+                &resize_draft.original,
+                resize_draft.handle,
+                resize_draft.start,
+                resize_draft.current,
+                4,
+            );
         }
         let selected_shape = self
             .document
@@ -4116,7 +4115,7 @@ fn open_editor_with_pin(frame: RgbaFrame, pin_target: Option<u64>, cx: &mut App)
     match gpui_kit::open_window(options, cx, move |window, cx| {
         let view = cx.new(|cx| EditorView::new(frame, pin_target, cx));
         let focus = view.read(cx).focus_handle.clone();
-        let _ = view.update(cx, |this, cx| this.observe_appearance(window, cx));
+        view.update(cx, |this, cx| this.observe_appearance(window, cx));
         window.defer(cx, move |window, cx| {
             window.focus(&focus, cx);
             window.activate_window();
@@ -4129,64 +4128,6 @@ fn open_editor_with_pin(frame: RgbaFrame, pin_target: Option<u64>, cx: &mut App)
         }
         Err(error) => eprintln!("capin: failed to open editor: {error}"),
     }
-}
-
-fn rotate_frame_cw(frame: &RgbaFrame) -> RgbaFrame {
-    let width = frame.width();
-    let height = frame.height();
-    let mut pixels = vec![0u8; frame.pixels().len()];
-    let source = frame.pixels();
-    for y in 0..height {
-        for x in 0..width {
-            let source_index = ((y * width + x) * 4) as usize;
-            let destination_index = ((x * height + (height - 1 - y)) * 4) as usize;
-            pixels[destination_index..destination_index + 4]
-                .copy_from_slice(&source[source_index..source_index + 4]);
-        }
-    }
-    RgbaFrame::from_pixels(height, width, pixels).expect("rotated frame keeps valid dimensions")
-}
-
-fn flip_frame(frame: &RgbaFrame, horizontal: bool) -> RgbaFrame {
-    let width = frame.width();
-    let height = frame.height();
-    let mut pixels = vec![0u8; frame.pixels().len()];
-    let source = frame.pixels();
-    for y in 0..height {
-        for x in 0..width {
-            let source_index = ((y * width + x) * 4) as usize;
-            let destination_x = if horizontal { width - 1 - x } else { x };
-            let destination_y = if horizontal { y } else { height - 1 - y };
-            let destination_index = ((destination_y * width + destination_x) * 4) as usize;
-            pixels[destination_index..destination_index + 4]
-                .copy_from_slice(&source[source_index..source_index + 4]);
-        }
-    }
-    RgbaFrame::from_pixels(width, height, pixels).expect("flipped frame keeps valid dimensions")
-}
-
-fn crop_frame(frame: &RgbaFrame, rect: PhysicalRect) -> Option<RgbaFrame> {
-    let source_width = frame.width();
-    let source_height = frame.height();
-    let left = rect.origin.x.clamp(0, source_width as i32) as u32;
-    let top = rect.origin.y.clamp(0, source_height as i32) as u32;
-    let right =
-        (rect.origin.x + rect.size.width as i32).clamp(left as i32, source_width as i32) as u32;
-    let bottom =
-        (rect.origin.y + rect.size.height as i32).clamp(top as i32, source_height as i32) as u32;
-    let width = right.checked_sub(left)?;
-    let height = bottom.checked_sub(top)?;
-    if width == 0 || height == 0 {
-        return None;
-    }
-    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
-    let source = frame.pixels();
-    for row in top..bottom {
-        let start = ((row * source_width + left) * 4) as usize;
-        let end = start + (width * 4) as usize;
-        pixels.extend_from_slice(&source[start..end]);
-    }
-    RgbaFrame::from_pixels(width, height, pixels).ok()
 }
 
 fn next_sequence(document: &AnnotationDocument) -> u32 {
@@ -4258,53 +4199,6 @@ fn distance(a: PhysicalPoint, b: PhysicalPoint) -> f32 {
     (dx * dx + dy * dy).sqrt()
 }
 
-fn shape_bounds(shape: &Shape) -> PhysicalRect {
-    match shape {
-        Shape::Rect(rect)
-        | Shape::Ellipse(rect)
-        | Shape::HighlighterBox(rect)
-        | Shape::Blur(rect)
-        | Shape::Spotlight(rect)
-        | Shape::Text { bounds: rect, .. }
-        | Shape::Number { bounds: rect, .. } => *rect,
-        Shape::Arrow { start, end } => {
-            let left = start.x.min(end.x);
-            let top = start.y.min(end.y);
-            let right = start.x.max(end.x);
-            let bottom = start.y.max(end.y);
-            PhysicalRect::new(left, top, (right - left) as u32, (bottom - top) as u32)
-        }
-        Shape::Polyline { points } => {
-            let Some(first) = points.first() else {
-                return PhysicalRect::new(0, 0, 0, 0);
-            };
-            let mut left = first.x;
-            let mut top = first.y;
-            let mut right = first.x;
-            let mut bottom = first.y;
-            for point in points {
-                left = left.min(point.x);
-                top = top.min(point.y);
-                right = right.max(point.x);
-                bottom = bottom.max(point.y);
-            }
-            PhysicalRect::new(left, top, (right - left) as u32, (bottom - top) as u32)
-        }
-        Shape::Curve {
-            start,
-            control,
-            end,
-        } => {
-            let points = [*start, *control, *end];
-            let left = points.iter().map(|point| point.x).min().unwrap_or(0);
-            let top = points.iter().map(|point| point.y).min().unwrap_or(0);
-            let right = points.iter().map(|point| point.x).max().unwrap_or(0);
-            let bottom = points.iter().map(|point| point.y).max().unwrap_or(0);
-            PhysicalRect::new(left, top, (right - left) as u32, (bottom - top) as u32)
-        }
-    }
-}
-
 fn handle_points(shape: &Shape) -> Vec<(ResizeHandle, PhysicalPoint)> {
     if let Shape::Polyline { .. } = shape {
         return Vec::new();
@@ -4327,7 +4221,7 @@ fn handle_points(shape: &Shape) -> Vec<(ResizeHandle, PhysicalPoint)> {
             (ResizeHandle::ArrowEnd, *end),
         ];
     }
-    let rect = shape_bounds(shape);
+    let rect = shape.bounds();
     let left = rect.origin.x;
     let top = rect.origin.y;
     let right = left + rect.size.width as i32;
@@ -4410,7 +4304,7 @@ fn resize_shape(
         };
     }
 
-    let rect = shape_bounds(original);
+    let rect = original.bounds();
     let mut left = rect.origin.x;
     let mut top = rect.origin.y;
     let mut right = left + rect.size.width as i32;
@@ -4560,7 +4454,7 @@ fn paint_selection(
     shape: &Shape,
     accent_hex: u32,
 ) {
-    let rect = shape_bounds(shape);
+    let rect = shape.bounds();
     let left = rect.origin.x as f32;
     let top = rect.origin.y as f32;
     let right = left + rect.size.width as f32;
