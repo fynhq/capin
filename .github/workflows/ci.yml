@@ -49,14 +49,34 @@ jobs:
         # Lint the app binary; unit tests are compiled and run by the next step.
         run: |
           set -o pipefail
-          cargo clippy -p app --locked -- -D warnings -A dead_code 2>&1 | tee clippy.log
-          status=${PIPESTATUS[0]}
-          if [ "$status" -ne 0 ]; then
-            grep -E '^(error|warning)(\[|:)|^ *-->' clippy.log | head -60 | while IFS= read -r line; do
-              echo "::error::$line"
-            done
-          fi
-          exit "$status"
+          cargo clippy -p app --locked --message-format=json -- -D warnings -A dead_code 2>&1 | tee clippy.json
+      - name: Report clippy diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          for raw in open("clippy.json", encoding="utf-8"):
+              try:
+                  entry = json.loads(raw)
+              except json.JSONDecodeError:
+                  continue
+              if entry.get("reason") != "compiler-message":
+                  continue
+              message = entry.get("message") or {}
+              if message.get("level") not in {"error", "warning"}:
+                  continue
+              spans = message.get("spans") or []
+              span = spans[0] if spans else {}
+              file = span.get("file_name")
+              line = span.get("line_start")
+              col = span.get("column_start")
+              text = message.get("message", "")
+              if file and line:
+                  print(f"::error file={file},line={line},col={col}::{text}")
+              else:
+                  print(f"::error::{text}")
+          PY
       - name: Test app
         run: cargo test -p app --locked
 
