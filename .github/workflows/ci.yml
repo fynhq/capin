@@ -45,8 +45,18 @@ jobs:
       - name: Check platform crates
         run: cargo check -p platform-window -p platform-ocr -p platform-record -p app --locked
       - name: Clippy app
+        shell: bash
         # Lint the app binary; unit tests are compiled and run by the next step.
-        run: cargo clippy -p app --locked -- -D warnings -A dead_code
+        run: |
+          set -o pipefail
+          cargo clippy -p app --locked -- -D warnings -A dead_code 2>&1 | tee clippy.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            grep -E '^(error|warning)(\[|:)|^ *-->' clippy.log | head -60 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+          fi
+          exit "$status"
       - name: Test app
         run: cargo test -p app --locked
 
