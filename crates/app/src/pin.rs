@@ -40,7 +40,6 @@ const PIN_MENU_SEPARATOR: f32 = 9.0;
 
 thread_local! {
     static PIN_CASCADE: Cell<u32> = const { Cell::new(0) };
-    static LAST_CAPTURE: RefCell<Option<RgbaFrame>> = const { RefCell::new(None) };
     static PINS: RefCell<HashMap<u64, PinState>> = RefCell::new(HashMap::new());
     static PIN_MENU: RefCell<Option<AnyWindowHandle>> = const { RefCell::new(None) };
     static MANIFEST_REVISION: Cell<u64> = const { Cell::new(0) };
@@ -89,10 +88,6 @@ impl PinMenuAction {
     fn separated(self) -> bool {
         matches!(self, Self::Through | Self::Close)
     }
-}
-
-pub fn remember(frame: &RgbaFrame) {
-    LAST_CAPTURE.with(|slot| *slot.borrow_mut() = Some(frame.clone()));
 }
 
 #[derive(Clone)]
@@ -319,7 +314,7 @@ pub fn pin_last(cx: &mut App) {
         }
     }
 
-    if let Some(frame) = LAST_CAPTURE.with(|slot| slot.borrow().clone()) {
+    if let Some(frame) = crate::capture_history::latest() {
         pin_image(frame, cx);
     } else {
         log_warn!("pin", "no clipboard content or recent capture to pin");
@@ -335,7 +330,6 @@ fn pin_image(frame: RgbaFrame, cx: &mut App) {
         && crate::capture_history::contains(hash)
         && let Some(history_frame) = crate::capture_history::cycle(hash)
     {
-        remember(&history_frame);
         open_pin_content(PinContent::from_frame(history_frame), cx);
         LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
         return;
@@ -356,13 +350,11 @@ pub fn open_frame_at(
     zoom: f32,
     cx: &mut App,
 ) -> Option<u64> {
-    remember(&frame);
     LAST_PIN_TRIGGER.with(|slot| slot.set(Some(crate::capture_history::hash_frame(&frame))));
     open_pin_content_at(PinContent::from_frame(frame), bounds, zoom, cx)
 }
 
 fn open_image_pin(frame: RgbaFrame, cx: &mut App) {
-    remember(&frame);
     LAST_PIN_TRIGGER.with(|slot| slot.set(Some(crate::capture_history::hash_frame(&frame))));
     open_pin_content(PinContent::from_frame(frame), cx);
 }
@@ -1302,7 +1294,10 @@ impl PinView {
     }
 
     fn replace_image(&mut self, frame: RgbaFrame, cx: &mut Context<Self>) {
-        self.content = PinContent::from_frame(frame);
+        let previous = std::mem::replace(&mut self.content, PinContent::from_frame(frame));
+        if let PinContent::Image { image, .. } = previous {
+            cx.drop_image(image, None);
+        }
         self.content_generation = self.content_generation.wrapping_add(1);
         self.ocr = None;
         self.selection = None;

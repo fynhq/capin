@@ -549,6 +549,13 @@ impl EditorView {
         let rect_filled = settings.annotation_rect_filled;
         let ellipse_filled = settings.annotation_ellipse_filled;
         let spotlight_intensity = settings.annotation_spotlight_intensity;
+        cx.on_release(|this, cx| {
+            cx.drop_image(this.image.clone(), None);
+            for image in &this.blur_images {
+                cx.drop_image(image.clone(), None);
+            }
+        })
+        .detach();
         Self {
             image,
             blur_images,
@@ -900,12 +907,26 @@ impl EditorView {
         self.canvas_redo.clear();
     }
 
+    /// Rebuilds the GPUI images for the current frame and returns the old
+    /// uploads to the window atlas. Direct `img(RenderImage)` entries stay in
+    /// the atlas until dropped, so every canvas replacement has to release
+    /// the previous set explicitly.
+    fn refresh_frame_images(&mut self, cx: &mut Context<Self>) {
+        let image = image_util::render_image(&self.frame);
+        let blur_images = BLUR_RADII.map(|radius| image_util::blurred_image(&self.frame, radius));
+        let old_image = std::mem::replace(&mut self.image, image);
+        let old_blur_images = std::mem::replace(&mut self.blur_images, blur_images);
+        cx.drop_image(old_image, None);
+        for image in old_blur_images {
+            cx.drop_image(image, None);
+        }
+    }
+
     fn restore_canvas_snapshot(&mut self, snapshot: EditorSnapshot, cx: &mut Context<Self>) {
         self.frame = snapshot.frame;
         self.image_size = snapshot.image_size;
         self.document = snapshot.document;
-        self.image = image_util::render_image(&self.frame);
-        self.blur_images = BLUR_RADII.map(|radius| image_util::blurred_image(&self.frame, radius));
+        self.refresh_frame_images(cx);
         self.text_edit = None;
         self.draft = None;
         self.move_draft = None;
@@ -945,8 +966,7 @@ impl EditorView {
     fn replace_canvas(&mut self, frame: RgbaFrame, cx: &mut Context<Self>) {
         self.frame = frame;
         self.image_size = PhysicalSize::new(self.frame.width(), self.frame.height());
-        self.image = image_util::render_image(&self.frame);
-        self.blur_images = BLUR_RADII.map(|radius| image_util::blurred_image(&self.frame, radius));
+        self.refresh_frame_images(cx);
         self.document = AnnotationDocument::new(self.image_size);
         self.text_edit = None;
         self.draft = None;
@@ -1049,8 +1069,7 @@ impl EditorView {
         document.clear_history();
         self.frame = cropped;
         self.image_size = new_size;
-        self.image = image_util::render_image(&self.frame);
-        self.blur_images = BLUR_RADII.map(|radius| image_util::blurred_image(&self.frame, radius));
+        self.refresh_frame_images(cx);
         self.document = document;
         self.crop_mode = false;
         self.crop_draft = None;
@@ -2986,10 +3005,9 @@ impl EditorView {
         };
         let image_size = PhysicalSize::new(frame.width(), frame.height());
         let size_changed = image_size != self.image_size;
-        self.blur_images = BLUR_RADII.map(|radius| image_util::blurred_image(&frame, radius));
-        self.image = image_util::render_image(&frame);
         self.frame = frame;
         self.image_size = image_size;
+        self.refresh_frame_images(cx);
         if size_changed {
             self.document = AnnotationDocument::new(image_size);
             self.canvas_undo.clear();
@@ -3117,7 +3135,6 @@ impl EditorView {
                 } else {
                     output
                 };
-                crate::pin::remember(&output);
                 let mut exported = false;
                 if copy_only || settings_state::get().copy_to_clipboard {
                     match image_util::copy_png(&output, cx) {
@@ -4315,7 +4332,6 @@ pub fn open_pin_editor(frame: RgbaFrame, pin_id: u64, cx: &mut App) {
 }
 
 fn open_editor_with_pin(frame: RgbaFrame, pin_target: Option<u64>, cx: &mut App) {
-    crate::pin::remember(&frame);
     let image_width = frame.width() as f32;
     let image_height = frame.height() as f32;
     let scale = (MAX_IMAGE_WIDTH / image_width)

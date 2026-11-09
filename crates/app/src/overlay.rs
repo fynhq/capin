@@ -654,13 +654,13 @@ impl OverlayView {
         }
     }
 
-    fn update_magnifier(&mut self) {
+    fn update_magnifier(&mut self, window: &mut Window) {
         if self.mode != OverlayMode::Capture || self.selected.is_some() {
-            self.magnifier = None;
+            self.clear_magnifier(window);
             return;
         }
         let Some(point) = self.cursor else {
-            self.magnifier = None;
+            self.clear_magnifier(window);
             return;
         };
         if self
@@ -678,7 +678,18 @@ impl OverlayView {
             (MAGNIFIER_SOURCE as f32 * self.scale).round().max(1.0) as u32,
             MAGNIFIER_SIZE,
         );
-        self.magnifier = Some(Magnifier { point, image });
+        // GPUI keeps direct `img(RenderImage)` uploads in the window atlas
+        // until they are dropped explicitly; a fresh image per pointer move
+        // would otherwise grow without bound.
+        if let Some(previous) = self.magnifier.replace(Magnifier { point, image }) {
+            let _ = window.drop_image(previous.image);
+        }
+    }
+
+    fn clear_magnifier(&mut self, window: &mut Window) {
+        if let Some(magnifier) = self.magnifier.take() {
+            let _ = window.drop_image(magnifier.image);
+        }
     }
 
     fn copy_color(&mut self, cx: &mut Context<Self>) {
@@ -1159,6 +1170,7 @@ impl OverlayView {
             monitor_origin,
             effects: self.effects,
         };
+        self.clear_magnifier(window);
         self.editing_rect = Some(editor_rect);
         self.selected = None;
         self.session.cancel();
@@ -1197,7 +1209,6 @@ impl OverlayView {
         match image_util::copy_png(&output, cx) {
             Ok(()) => {
                 log_info!("overlay", "selection copied to clipboard");
-                crate::pin::remember(&output);
                 crate::capture_history::record(&output);
                 self.close_overlays(cx);
             }
@@ -1217,7 +1228,6 @@ impl OverlayView {
         match image_util::save_png(&output) {
             Ok(_) => {
                 log_info!("overlay", "selection saved");
-                crate::pin::remember(&output);
                 crate::capture_history::record(&output);
                 self.close_overlays(cx);
             }
@@ -1292,9 +1302,12 @@ impl OverlayView {
             }
         };
         let image = image_util::render_image(&frame);
+        let old_image = std::mem::replace(&mut self.image, image);
+        cx.drop_image(old_image, None);
+        if let Some(magnifier) = self.magnifier.take() {
+            cx.drop_image(magnifier.image, None);
+        }
         self.frame = Arc::new(frame);
-        self.image = image;
-        self.magnifier = None;
         self.element_cache.clear();
         self.element_window = None;
         self.element_candidates.clear();
@@ -2336,7 +2349,7 @@ impl OverlayView {
                 .child(editor)
                 .into_any_element();
         }
-        self.update_magnifier();
+        self.update_magnifier(window);
         let language = settings_state::get().language;
         let selected_bounds = self.selection_bounds();
         let drag_selection = self

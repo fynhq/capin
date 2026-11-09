@@ -99,6 +99,16 @@ pub fn contains(hash: u64) -> bool {
     entries().iter().any(|entry| entry.hash == hash)
 }
 
+/// Loads the newest exported screenshot. The pin shortcut falls back to this
+/// instead of keeping a full decoded frame in memory for the whole session.
+pub fn latest() -> Option<RgbaFrame> {
+    let entries = entries();
+    let directory = history_dir()?;
+    entries
+        .iter()
+        .find_map(|entry| load_entry(&directory, entry))
+}
+
 /// Stable in-process hash for matching an image against history.
 pub fn hash_frame(frame: &RgbaFrame) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;

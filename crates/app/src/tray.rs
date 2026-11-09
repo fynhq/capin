@@ -256,12 +256,18 @@ mod imp {
     }
 
     pub fn restart(cx: &mut App) {
+        // Release the single-instance lock before spawning: the replacement
+        // process starts while this one is still exiting.
+        crate::storage::release_single_instance();
         match relaunch() {
             Ok(()) => {
                 log_info!("tray", "restarting");
                 cx.quit();
             }
-            Err(error) => log_error!("tray", "failed to restart: {error}"),
+            Err(error) => {
+                log_error!("tray", "failed to restart: {error}");
+                crate::storage::acquire_single_instance();
+            }
         }
     }
 

@@ -1,6 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use core_types::RgbaFrame;
@@ -11,7 +11,11 @@ const APP_FOLDER: &str = "Capin";
 
 /// Keeps the lock file open for the lifetime of the process. Two instances
 /// would otherwise share `pins.json` and delete each other's pin images.
-static INSTANCE_LOCK: OnceLock<Option<File>> = OnceLock::new();
+static INSTANCE_LOCK: OnceLock<Mutex<Option<File>>> = OnceLock::new();
+
+fn instance_lock() -> &'static Mutex<Option<File>> {
+    INSTANCE_LOCK.get_or_init(|| Mutex::new(None))
+}
 
 pub fn acquire_single_instance() -> bool {
     let Some(directory) = app_data_dir() else {
@@ -33,8 +37,25 @@ pub fn acquire_single_instance() -> bool {
     if file.try_lock().is_err() {
         return false;
     }
-    let _ = INSTANCE_LOCK.set(Some(file));
+    let mut slot = instance_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if slot.is_none() {
+        *slot = Some(file);
+    }
     true
+}
+
+/// Drops the lock before a relaunch. The replacement process starts while
+/// this one is still shutting down and would otherwise see the lock held and
+/// exit immediately, which made the tray restart a plain quit.
+pub fn release_single_instance() {
+    if let Some(lock) = INSTANCE_LOCK.get() {
+        let mut slot = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+        if let Some(file) = slot.take() {
+            drop(file);
+        }
+    }
 }
 
 pub fn screenshot_dir() -> PathBuf {
