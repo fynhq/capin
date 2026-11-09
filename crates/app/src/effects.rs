@@ -1,6 +1,8 @@
 use core_compose::{Background, Border, Shadow, WindowCanvas, compose_window};
 use core_types::RgbaFrame;
 
+use crate::logging::log_error;
+
 /// Capture-level decoration applied to region and monitor captures.
 ///
 /// Window captures already run through the window composition pipeline, so
@@ -48,7 +50,7 @@ impl RegionEffects {
         match compose_window(frame, &canvas) {
             Ok(frame) => frame,
             Err(error) => {
-                eprintln!("capin: failed to apply capture effects: {error}");
+                log_error!("effects", "failed to apply capture effects: {error}");
                 frame.clone()
             }
         }

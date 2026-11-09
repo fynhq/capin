@@ -1,3 +1,8 @@
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 mod capture_history;
 mod chrome_theme;
 mod editor;
@@ -6,6 +11,7 @@ mod hotkey;
 mod i18n;
 mod icons;
 mod image_util;
+mod logging;
 mod ocr;
 mod overlay;
 mod pin;
@@ -20,9 +26,20 @@ mod ui;
 mod window_style;
 mod windows;
 
+use logging::{log_error, log_info, log_warn};
+
 fn main() {
+    logging::init();
+    log_info!(
+        "app",
+        "capin {} starting on {} ({})",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+
     if !storage::acquire_single_instance() {
-        eprintln!("capin: another instance is already running");
+        log_warn!("app", "another instance is already running");
         return;
     }
     gpui_kit::application()
@@ -33,7 +50,7 @@ fn main() {
             settings_state::apply_startup_autostart();
 
             if !tray::install(cx) {
-                eprintln!("capin: tray icon is required for normal startup");
+                log_error!("app", "tray icon is required for normal startup");
                 cx.quit();
                 return;
             }
@@ -42,10 +59,12 @@ fn main() {
             tray::refresh_menu();
 
             let args: Vec<String> = std::env::args().skip(1).collect();
+            log_info!("app", "startup arguments: {args:?}");
             if args.iter().any(|argument| argument == "--settings") {
                 settings::open_settings(cx);
             } else if args.iter().any(|argument| argument == "--capture") {
                 overlay::open_overlays(cx);
             }
         });
+    log_info!("app", "event loop exited");
 }

@@ -3,6 +3,7 @@ use std::path::Path;
 use core_compose::{Background, Shadow, WindowCanvas, compose_window};
 use core_types::{RgbaFrame, WindowId};
 
+use crate::logging::{log_error, log_warn};
 use crate::settings_state::{self, AppSettings, WindowBackground};
 
 const LIGHT_CANVAS: [u8; 4] = [0xF5, 0xF5, 0xF7, 0xFF];
@@ -38,7 +39,7 @@ pub fn compose_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> Rgb
     match compose_window(&frame, &canvas) {
         Ok(frame) => frame,
         Err(error) => {
-            eprintln!("capin: failed to compose the window capture: {error}");
+            log_error!("window", "failed to compose the window capture: {error}");
             frame
         }
     }
@@ -54,7 +55,10 @@ fn background(settings: &AppSettings) -> Background {
             wallpaper(settings)
                 .map(Background::Image)
                 .unwrap_or_else(|| {
-                    eprintln!("capin: window wallpaper is unavailable; using a transparent canvas");
+                    log_warn!(
+                        "window",
+                        "window wallpaper is unavailable; using a transparent canvas"
+                    );
                     Background::Transparent
                 })
         }

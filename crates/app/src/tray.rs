@@ -8,6 +8,7 @@ mod imp {
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
     use crate::i18n::t;
+    use crate::logging::{log_error, log_info, log_warn};
     use crate::settings_state;
 
     const MENU_START: &str = "start";
@@ -19,6 +20,9 @@ mod imp {
 
     thread_local! {
         static TRAY: RefCell<Option<TrayIcon>> = const { RefCell::new(None) };
+        /// Tracks the taskbar variant currently painted so a light/dark switch
+        /// swaps the glyph without rebuilding the tray.
+        static TRAY_LIGHT: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     }
 
     pub fn install(cx: &mut App) -> bool {
@@ -27,14 +31,15 @@ mod imp {
         }
 
         let Some(menu) = build_menu() else {
-            eprintln!("capin: failed to build tray menu");
+            log_error!("tray", "failed to build tray menu");
             return false;
         };
 
         let Some(icon) = load_icon() else {
-            eprintln!("capin: failed to load tray icon");
+            log_error!("tray", "failed to load tray icon");
             return false;
         };
+        TRAY_LIGHT.with(|slot| slot.set(taskbar_is_light()));
 
         let builder = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
@@ -47,12 +52,13 @@ mod imp {
         let tray = match builder.build() {
             Ok(tray) => tray,
             Err(error) => {
-                eprintln!("capin: failed to create tray icon: {error}");
+                log_error!("tray", "failed to create tray icon: {error}");
                 return false;
             }
         };
 
         TRAY.with(|slot| *slot.borrow_mut() = Some(tray));
+        log_info!("tray", "tray icon installed");
         start_events(cx);
         true
     }
@@ -115,10 +121,12 @@ mod imp {
         let bytes: &[u8] = include_bytes!("../../../assets/icon/tray/capin_tray_template.png");
         #[cfg(target_os = "windows")]
         let bytes: &[u8] = {
-            if platform_window::system_uses_light_theme() == Some(true) {
-                include_bytes!("../../../assets/icon/tray/capin_tray_dark.png")
-            } else {
+            // The glyph sits on the taskbar, not inside the app chrome: a
+            // light taskbar needs the dark glyph and vice versa.
+            if taskbar_is_light() {
                 include_bytes!("../../../assets/icon/tray/capin_tray_light.png")
+            } else {
+                include_bytes!("../../../assets/icon/tray/capin_tray_dark.png")
             }
         };
 
@@ -127,12 +135,54 @@ mod imp {
         Icon::from_rgba(image.into_raw(), width, height).ok()
     }
 
+    #[cfg(target_os = "windows")]
+    fn taskbar_is_light() -> bool {
+        platform_window::system_taskbar_uses_light_theme().unwrap_or(false)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn taskbar_is_light() -> bool {
+        false
+    }
+
+    /// Re-picks the tray glyph when the taskbar flips between light and dark.
+    /// The tray window is owned by `tray-icon`, so no GPUI appearance callback
+    /// reaches us; a low-frequency poll is the portable signal.
+    #[cfg(target_os = "windows")]
+    fn refresh_icon_for_theme() {
+        let light = taskbar_is_light();
+        if TRAY_LIGHT.with(|slot| slot.get()) == Some(light) {
+            return;
+        }
+        let Some(icon) = load_icon() else {
+            return;
+        };
+        TRAY.with(|slot| {
+            if let Some(tray) = slot.borrow().as_ref()
+                && let Err(error) = tray.set_icon(Some(icon))
+            {
+                log_warn!("tray", "failed to swap tray icon: {error}");
+                return;
+            }
+            TRAY_LIGHT.with(|slot| slot.set(Some(light)));
+        });
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn refresh_icon_for_theme() {}
+
     fn start_events(cx: &mut App) {
         cx.spawn(async move |cx| {
+            let mut ticks = 0u32;
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(50))
                     .await;
+
+                ticks = ticks.wrapping_add(1);
+                if ticks % 20 == 0 {
+                    refresh_icon_for_theme();
+                }
 
                 let mut actions = Vec::new();
                 while let Ok(event) = MenuEvent::receiver().try_recv() {
@@ -144,6 +194,7 @@ mod imp {
 
                 cx.update(|cx| {
                     for action in actions {
+                        log_info!("tray", "menu action: {action}");
                         handle_action(&action, cx);
                     }
                 });
@@ -173,7 +224,7 @@ mod imp {
     }
 
     pub fn replace_windows(cx: &mut App, open: impl FnOnce(&mut App) + 'static) {
-        let handles = cx.window_stack().unwrap_or_default();
+        let handles = cx.windows();
         if handles.is_empty() {
             open(cx);
             return;
@@ -196,8 +247,11 @@ mod imp {
 
     pub fn restart(cx: &mut App) {
         match relaunch() {
-            Ok(()) => cx.quit(),
-            Err(error) => eprintln!("capin: failed to restart: {error}"),
+            Ok(()) => {
+                log_info!("tray", "restarting");
+                cx.quit();
+            }
+            Err(error) => log_error!("tray", "failed to restart: {error}"),
         }
     }
 

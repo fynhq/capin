@@ -101,3 +101,20 @@ pub fn system_uses_light_theme() -> Option<bool> {
 pub fn system_uses_light_theme() -> Option<bool> {
     None
 }
+
+/// Whether the taskbar (not the app chrome) is light. The tray glyph sits on
+/// the taskbar, so this follows `SystemUsesLightTheme` and falls back to the
+/// app theme when the value is missing.
+#[cfg(windows)]
+pub fn system_taskbar_uses_light_theme() -> Option<bool> {
+    const PERSONALIZE_KEY: &str =
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
+    hkcu_dword(PERSONALIZE_KEY, "SystemUsesLightTheme")
+        .or_else(|| hkcu_dword(PERSONALIZE_KEY, "AppsUseLightTheme"))
+        .map(|value| value != 0)
+}
+
+#[cfg(not(windows))]
+pub fn system_taskbar_uses_light_theme() -> Option<bool> {
+    None
+}

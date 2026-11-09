@@ -15,6 +15,7 @@ use platform_window::system_accent_hex;
 
 use crate::chrome_theme::ChromeTheme;
 use crate::effects::RegionEffects;
+use crate::logging::{log_error, log_info};
 use crate::settings_state::AnnotationColorTool;
 use crate::{i18n::t, icons, image_util, settings_state};
 
@@ -218,6 +219,15 @@ enum ResizeHandle {
     CurveStart,
     CurveControl,
     CurveEnd,
+}
+
+/// What the pointer is currently over inside the image, used to swap the
+/// painted selection handles from the drawing crosshair to resize arrows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectionHover {
+    None,
+    Body,
+    Handle(ResizeHandle),
 }
 
 struct ResizeDraft {
@@ -498,6 +508,7 @@ pub(crate) struct EditorView {
     draft: Option<Draft>,
     move_draft: Option<MoveDraft>,
     resize_draft: Option<ResizeDraft>,
+    selection_hover: SelectionHover,
     pan_draft: Option<PanDraft>,
     view_zoom: f32,
     view_pan: Point<Pixels>,
@@ -583,6 +594,7 @@ impl EditorView {
             draft: None,
             move_draft: None,
             resize_draft: None,
+            selection_hover: SelectionHover::None,
             pan_draft: None,
             view_zoom: 1.0,
             view_pan: point(px(0.0), px(0.0)),
@@ -684,6 +696,33 @@ impl EditorView {
     fn image_scale(&self, window: &Window) -> f32 {
         (f32::from(self.image_view_rect(window).size.width) / self.image_size.width.max(1) as f32)
             .max(0.01)
+    }
+
+    /// Recomputes the painted-handle hover state. Returns true when the cursor
+    /// style has to be repainted.
+    fn update_selection_hover(&mut self, point: PhysicalPoint, window: &Window) -> bool {
+        let scale = self.image_scale(window);
+        let hover = match self
+            .document
+            .selected()
+            .and_then(|id| self.document.object(id))
+        {
+            Some(annotation) => {
+                if let Some(handle) = hit_resize_handle(&annotation.shape, point, 9.0 / scale) {
+                    SelectionHover::Handle(handle)
+                } else if self.document.hit_test(point) == Some(annotation.id) {
+                    SelectionHover::Body
+                } else {
+                    SelectionHover::None
+                }
+            }
+            None => SelectionHover::None,
+        };
+        if hover == self.selection_hover {
+            return false;
+        }
+        self.selection_hover = hover;
+        true
     }
 
     fn fit_scale(&self, window: &Window) -> f32 {
@@ -1213,8 +1252,25 @@ impl EditorView {
 
     fn apply_color(&mut self, color: u32) {
         let tool = self.palette_color_tool();
-        let applied = (color & 0xFFFFFF00) | (self.style.color & 0xFF);
-        self.style.color = applied;
+        // Keep the alpha the selected object already renders with. Reading
+        // `self.style` here was wrong right after drawing: the draft uses
+        // `effective_style` (highlighter alpha 0x80) but `self.style` still
+        // holds the opaque palette color, so the first color switch turned a
+        // highlighter box fully opaque.
+        let alpha = self
+            .document
+            .selected()
+            .and_then(|id| self.document.object(id))
+            .map(|annotation| annotation.style.color & 0xFF)
+            .unwrap_or_else(|| {
+                if tool == AnnotationColorTool::Highlighter {
+                    0x80
+                } else {
+                    self.style.color & 0xFF
+                }
+            });
+        let applied = (color & 0xFFFFFF00) | alpha;
+        self.style.color = (self.style.color & 0xFFFFFF00) | alpha;
 
         if let Some(mut style) = self
             .document
@@ -1531,6 +1587,7 @@ impl EditorView {
                 .justify_center()
                 .when(selected, |button| button.bg(accent_selected))
                 .hover(move |style| style.bg(hover))
+                .active(|style| style.opacity(0.85))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.commit_text(cx);
                     this.document.select(None);
@@ -1658,6 +1715,7 @@ impl EditorView {
                     .justify_center()
                     .when(selected, |button| button.bg(accent_selected))
                     .hover(move |style| style.bg(hover))
+                    .active(|style| style.opacity(0.85))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.commit_text(cx);
                         this.apply_fill(filled);
@@ -1698,6 +1756,7 @@ impl EditorView {
                     .justify_center()
                     .when(selected, |button| button.bg(accent_selected))
                     .hover(move |style| style.bg(hover))
+                    .active(|style| style.opacity(0.85))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.commit_text(cx);
                         this.apply_stroke_width(width);
@@ -1741,6 +1800,7 @@ impl EditorView {
                     .justify_center()
                     .when(selected, |button| button.bg(accent_selected))
                     .hover(move |style| style.bg(hover))
+                    .active(|style| style.opacity(0.85))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.commit_text(cx);
                         this.apply_font_size(size);
@@ -1790,6 +1850,7 @@ impl EditorView {
                 .justify_center()
                 .when(background_enabled, |button| button.bg(accent_selected))
                 .hover(move |style| style.bg(hover))
+                .active(|style| style.opacity(0.85))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.commit_text(cx);
                     this.apply_text_background(!this.text_background);
@@ -1813,6 +1874,7 @@ impl EditorView {
                 .justify_center()
                 .when(outline_enabled, |button| button.bg(accent_selected))
                 .hover(move |style| style.bg(hover))
+                .active(|style| style.opacity(0.85))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.commit_text(cx);
                     this.apply_text_outline(!this.text_outline);
@@ -1840,6 +1902,7 @@ impl EditorView {
                 .items_center()
                 .justify_center()
                 .hover(move |style| style.bg(hover))
+                .active(|style| style.opacity(0.85))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.commit_text(cx);
                     this.apply_text_alignment(next_alignment);
@@ -1901,6 +1964,7 @@ impl EditorView {
                     .justify_center()
                     .when(selected, |button| button.bg(accent_selected))
                     .hover(move |style| style.bg(hover))
+                    .active(|style| style.opacity(0.85))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.commit_text(cx);
                         this.apply_number_style(style);
@@ -1956,6 +2020,7 @@ impl EditorView {
                     .justify_center()
                     .when(enabled, |button| button.bg(accent_selected))
                     .hover(move |style| style.bg(hover))
+                    .active(|style| style.opacity(0.85))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let start = if is_start {
                             !enabled
@@ -2007,6 +2072,7 @@ impl EditorView {
                     .justify_center()
                     .when(selected, |button| button.bg(accent_selected))
                     .hover(move |style| style.bg(hover))
+                    .active(|style| style.opacity(0.85))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.commit_text(cx);
                         this.apply_corner_radius(radius);
@@ -2050,6 +2116,7 @@ impl EditorView {
                     .justify_center()
                     .when(selected, |button| button.bg(accent_selected))
                     .hover(move |style| style.bg(hover))
+                    .active(|style| style.opacity(0.85))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.commit_text(cx);
                         this.apply_blur_radius(radius);
@@ -2093,6 +2160,7 @@ impl EditorView {
                     .justify_center()
                     .when(selected, |button| button.bg(accent_selected))
                     .hover(move |style| style.bg(hover))
+                    .active(|style| style.opacity(0.85))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.commit_text(cx);
                         this.apply_spotlight_intensity(intensity);
@@ -2139,6 +2207,7 @@ impl EditorView {
                 .items_center()
                 .justify_center()
                 .hover(move |style| style.bg(hover))
+                .active(|style| style.opacity(0.85))
                 .on_click(cx.listener(|this, _, _, cx| {
                     if !this.document.undo() {
                         this.undo_canvas(cx);
@@ -2172,6 +2241,7 @@ impl EditorView {
                 .items_center()
                 .justify_center()
                 .hover(move |style| style.bg(hover))
+                .active(|style| style.opacity(0.85))
                 .on_click(cx.listener(|this, _, _, cx| {
                     if !this.document.redo() {
                         this.redo_canvas(cx);
@@ -2205,6 +2275,7 @@ impl EditorView {
                 .items_center()
                 .justify_center()
                 .hover(move |style| style.bg(hover))
+                .active(|style| style.opacity(0.85))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.commit_text(cx);
                     this.delete_selected_annotation(cx);
@@ -2234,6 +2305,7 @@ impl EditorView {
             .items_center()
             .justify_center()
             .hover(move |style| style.bg(hover))
+            .active(|style| style.opacity(0.85))
             .on_click(cx.listener(|this, _, _, cx| this.pin(cx)))
             .child(icons::icon(icons::PIN, 18.0, text))
             .into_any_element();
@@ -2265,6 +2337,7 @@ impl EditorView {
             .items_center()
             .justify_center()
             .hover(move |style| style.bg(hover))
+            .active(|style| style.opacity(0.85))
             .on_click(cx.listener(|this, _, _, cx| this.export(false, cx)))
             .child(icons::icon(icons::SAVE, 18.0, text))
             .into_any_element();
@@ -2283,6 +2356,7 @@ impl EditorView {
             .justify_center()
             .when(self.more_open, |button| button.bg(chrome.selected))
             .hover(move |style| style.bg(hover))
+            .active(|style| style.opacity(0.85))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.more_open = !this.more_open;
                 this.effects_open = false;
@@ -2302,9 +2376,10 @@ impl EditorView {
             .items_center()
             .justify_center()
             .hover(move |style| style.bg(hover))
+            .active(|style| style.opacity(0.85))
             .on_click(cx.listener(|this, _, window, cx| {
                 if this.inline.is_some() {
-                    let handles = cx.window_stack().unwrap_or_default();
+                    let handles = cx.windows();
                     cx.defer(move |cx| crate::windows::close_auxiliary(cx, handles));
                 } else {
                     window.remove_window();
@@ -2940,7 +3015,7 @@ impl EditorView {
         self.commit_text(cx);
         let first_frame =
             rasterize(&self.document, &self.frame).unwrap_or_else(|_| self.frame.clone());
-        let handles = cx.window_stack().unwrap_or_default();
+        let handles = cx.windows();
         cx.defer(move |cx| {
             crate::windows::close_auxiliary(cx, handles);
             crate::scroll::open_session(capture.region, first_frame, cx);
@@ -2953,7 +3028,7 @@ impl EditorView {
         }
         self.commit_text(cx);
         let frame = rasterize(&self.document, &self.frame).unwrap_or_else(|_| self.frame.clone());
-        let handles = cx.window_stack().unwrap_or_default();
+        let handles = cx.windows();
         cx.defer(move |cx| {
             crate::windows::close_auxiliary(cx, handles);
             crate::ocr::start(frame, cx);
@@ -2965,7 +3040,7 @@ impl EditorView {
             return;
         };
         self.commit_text(cx);
-        let handles = cx.window_stack().unwrap_or_default();
+        let handles = cx.windows();
         cx.defer(move |cx| {
             crate::windows::close_auxiliary(cx, handles);
             crate::record::start(capture.target, cx);
@@ -2992,9 +3067,10 @@ impl EditorView {
             }
         }
         if self.inline.is_some() {
-            let handles = cx.window_stack().unwrap_or_default();
+            let handles = cx.windows();
             cx.defer(move |cx| crate::windows::close_auxiliary(cx, handles));
         }
+        log_info!("editor", "pin requested");
         cx.notify();
     }
 
@@ -3067,8 +3143,12 @@ impl EditorView {
         } else {
             save_ok
         };
+        log_info!(
+            "editor",
+            "export finished: copy_only={copy_only} copy_ok={copy_ok} save_ok={save_ok} close={close}"
+        );
         if close && self.inline.is_some() {
-            let handles = cx.window_stack().unwrap_or_default();
+            let handles = cx.windows();
             cx.defer(move |cx| crate::windows::close_auxiliary(cx, handles));
         } else {
             cx.notify();
@@ -3490,11 +3570,37 @@ impl Render for EditorView {
 
         let effects_active = self.region_effects_active();
         let effects_scale = self.region_effects_scale();
-        let image_cursor = if self.tool == Tool::Select {
-            CursorStyle::Arrow
+        let inline = self.inline.is_some();
+        let image_cursor = if self.move_draft.is_some() {
+            CursorStyle::ClosedHand
         } else {
-            CursorStyle::Crosshair
+            match self.selection_hover {
+                SelectionHover::Handle(handle) => handle_cursor(handle),
+                SelectionHover::Body if self.tool == Tool::Select => CursorStyle::OpenHand,
+                SelectionHover::Body => CursorStyle::Crosshair,
+                SelectionHover::None if self.tool == Tool::Select => CursorStyle::Arrow,
+                SelectionHover::None => CursorStyle::Crosshair,
+            }
         };
+        let outside_backdrop = inline.then(|| {
+            div().absolute().inset_0().on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                    if this.document.selected().is_some()
+                        || this.more_open
+                        || this.effects_open
+                        || this.hints_visible
+                    {
+                        this.select_annotation(None);
+                        this.more_open = false;
+                        this.effects_open = false;
+                        this.hints_visible = false;
+                        this.selection_hover = SelectionHover::None;
+                        cx.notify();
+                    }
+                }),
+            )
+        });
         let image_layer = div()
             .absolute()
             .left(image_rect.origin.x)
@@ -3561,6 +3667,37 @@ impl Render for EditorView {
                     let Some(point) = this.to_image_point(event.position, window) else {
                         return;
                     };
+                    // Selection handles stay live regardless of the active
+                    // drawing tool: after drawing a shape the tool does not
+                    // switch to Select, and dragging a painted handle should
+                    // still resize instead of starting another draft.
+                    let scale = this.image_scale(window);
+                    if let Some(annotation) = this
+                        .document
+                        .selected()
+                        .and_then(|id| this.document.object(id))
+                        .cloned()
+                        && let Some(handle) =
+                            hit_resize_handle(&annotation.shape, point, 9.0 / scale)
+                    {
+                        this.resize_draft = Some(ResizeDraft {
+                            id: annotation.id,
+                            handle,
+                            start: point,
+                            current: point,
+                            original: annotation.shape,
+                        });
+                        this.move_draft = None;
+                        this.status = None;
+                        cx.notify();
+                        return;
+                    }
+                    // Starting another annotation with a drawing tool drops
+                    // the previous selection before the new draft begins.
+                    if this.tool != Tool::Select && this.document.selected().is_some() {
+                        this.document.select(None);
+                        this.selection_hover = SelectionHover::None;
+                    }
                     if this.crop_mode {
                         this.crop_draft = Some(CropDraft {
                             start: point,
@@ -3609,27 +3746,6 @@ impl Render for EditorView {
                         this.commit_text(cx);
                     }
                     if this.tool == Tool::Select {
-                        let scale = this.image_scale(window);
-                        if let Some(annotation) = this
-                            .document
-                            .selected()
-                            .and_then(|id| this.document.object(id))
-                            .cloned()
-                            && let Some(handle) =
-                                hit_resize_handle(&annotation.shape, point, 9.0 / scale)
-                        {
-                            this.resize_draft = Some(ResizeDraft {
-                                id: annotation.id,
-                                handle,
-                                start: point,
-                                current: point,
-                                original: annotation.shape,
-                            });
-                            this.move_draft = None;
-                            this.status = None;
-                            cx.notify();
-                            return;
-                        }
                         if event.click_count >= 2 && this.edit_text_at(point, cx) {
                             let focus = this.focus_handle.clone();
                             window.focus(&focus, cx);
@@ -3698,6 +3814,9 @@ impl Render for EditorView {
                 let Some(point) = this.to_image_point(event.position, window) else {
                     return;
                 };
+                if this.update_selection_hover(point, window) {
+                    cx.notify();
+                }
                 if this.crop_mode {
                     if let Some(crop_draft) = &mut this.crop_draft {
                         crop_draft.current = point;
@@ -3786,7 +3905,10 @@ impl Render for EditorView {
                 }),
             )
             .on_mouse_exit(cx.listener(|this, _, _, cx| {
-                if this.draft.take().is_some()
+                let hover_reset = this.selection_hover != SelectionHover::None;
+                this.selection_hover = SelectionHover::None;
+                if hover_reset
+                    || this.draft.take().is_some()
                     || this.move_draft.take().is_some()
                     || this.resize_draft.take().is_some()
                     || this.pan_draft.take().is_some()
@@ -3795,7 +3917,6 @@ impl Render for EditorView {
                 }
             }));
 
-        let inline = self.inline.is_some();
         let toolbar_rect = self.toolbar_rect(window);
         let (toolbar, options_panel, more_panel) = self.toolbar(window, cx);
         let info_bar = if inline {
@@ -3832,15 +3953,45 @@ impl Render for EditorView {
             .when(!inline, |root| root.bg(self.chrome.canvas))
             .text_color(self.chrome.text)
             .track_focus(&self.focus_handle)
-            .when(inline, |root| {
-                root.on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(|_, _: &MouseDownEvent, _, cx| {
-                        let handles = cx.window_stack().unwrap_or_default();
-                        crate::windows::close_auxiliary(cx, handles);
-                    }),
-                )
-            })
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    // Right click is the staged escape hatch: cancel the
+                    // in-flight text/crop/polyline, then drop a selection, and
+                    // only close the capture when nothing is left to cancel.
+                    if this.text_edit.is_some() {
+                        this.cancel_text(cx);
+                        return;
+                    }
+                    if this.crop_mode {
+                        this.cancel_crop(cx);
+                        return;
+                    }
+                    if this.polyline_draft.is_some() {
+                        this.cancel_polyline(cx);
+                        return;
+                    }
+                    if this.document.selected().is_some()
+                        || this.more_open
+                        || this.effects_open
+                        || this.hints_visible
+                    {
+                        this.select_annotation(None);
+                        this.more_open = false;
+                        this.effects_open = false;
+                        this.hints_visible = false;
+                        this.selection_hover = SelectionHover::None;
+                        cx.notify();
+                        return;
+                    }
+                    if this.inline.is_some() {
+                        let handles = cx.windows();
+                        cx.defer(move |cx| crate::windows::close_auxiliary(cx, handles));
+                    } else {
+                        window.remove_window();
+                    }
+                }),
+            )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
                 let command =
@@ -3988,8 +4139,8 @@ impl Render for EditorView {
                 }
                 if key == "escape" || (command && matches!(key, "w" | "q")) {
                     if this.inline.is_some() {
-                        let handles = cx.window_stack().unwrap_or_default();
-                        crate::windows::close_auxiliary(cx, handles);
+                        let handles = cx.windows();
+                        cx.defer(move |cx| crate::windows::close_auxiliary(cx, handles));
                     } else {
                         window.remove_window();
                     }
@@ -4045,6 +4196,7 @@ impl Render for EditorView {
                     cx.notify();
                 }
             }))
+            .children(outside_backdrop)
             .child(image_layer)
             .children(info_bar)
             .child(toolbar)
@@ -4126,7 +4278,7 @@ fn open_editor_with_pin(frame: RgbaFrame, pin_target: Option<u64>, cx: &mut App)
             let _ = handle.update(cx, |_, window, _| window.activate_window());
             cx.activate(true);
         }
-        Err(error) => eprintln!("capin: failed to open editor: {error}"),
+        Err(error) => log_error!("editor", "failed to open editor: {error}"),
     }
 }
 
@@ -4197,6 +4349,20 @@ fn distance(a: PhysicalPoint, b: PhysicalPoint) -> f32 {
     let dx = (a.x - b.x) as f32;
     let dy = (a.y - b.y) as f32;
     (dx * dx + dy * dy).sqrt()
+}
+
+fn handle_cursor(handle: ResizeHandle) -> CursorStyle {
+    match handle {
+        ResizeHandle::Nw | ResizeHandle::Se => CursorStyle::ResizeUpLeftDownRight,
+        ResizeHandle::Ne | ResizeHandle::Sw => CursorStyle::ResizeUpRightDownLeft,
+        ResizeHandle::N | ResizeHandle::S => CursorStyle::ResizeUpDown,
+        ResizeHandle::E | ResizeHandle::W => CursorStyle::ResizeLeftRight,
+        ResizeHandle::ArrowStart
+        | ResizeHandle::ArrowEnd
+        | ResizeHandle::CurveStart
+        | ResizeHandle::CurveControl
+        | ResizeHandle::CurveEnd => CursorStyle::Crosshair,
+    }
 }
 
 fn handle_points(shape: &Shape) -> Vec<(ResizeHandle, PhysicalPoint)> {
@@ -4631,9 +4797,12 @@ fn paint_shape(
         } => {
             let mut builder = PathBuilder::stroke(stroke);
             builder.move_to(to_point(start.x as f32, start.y as f32));
+            // GPUI names the arguments (to, control); an earlier call passed
+            // control as the endpoint, so the preview curved to the wrong point
+            // while the exported raster used the correct quadratic.
             builder.curve_to(
-                to_point(control.x as f32, control.y as f32),
                 to_point(end.x as f32, end.y as f32),
+                to_point(control.x as f32, control.y as f32),
             );
             let head = (style.stroke_width * 3.5).max(10.0);
             let spread = 0.55;

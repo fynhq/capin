@@ -10,6 +10,7 @@ use platform_record::Recorder;
 use platform_window::{WindowStyle, apply as apply_window_style, system_accent_hex};
 
 use crate::i18n::{Language, t};
+use crate::logging::{log_error, log_info, log_warn};
 use crate::record_session::Session;
 use crate::settings_state;
 
@@ -20,6 +21,7 @@ const COUNTDOWN: Duration = Duration::from_secs(3);
 const SEGMENT_DURATION: Duration = Duration::from_secs(10);
 
 pub fn start(target: CaptureTarget, cx: &mut App) {
+    log_info!("record", "recording requested for {:?}", target);
     let settings = settings_state::get();
     let format = settings.record_format;
     let segment_mode = settings.record_segments;
@@ -27,7 +29,7 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
         let session = match Session::create(format) {
             Ok(session) => session,
             Err(error) => {
-                eprintln!("capin: failed to create the recording session: {error}");
+                log_error!("record", "failed to create the recording session: {error}");
                 return;
             }
         };
@@ -38,7 +40,7 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
         let output = match crate::storage::recording_path(format) {
             Ok(path) => path,
             Err(error) => {
-                eprintln!("capin: failed to prepare the recording output: {error}");
+                log_error!("record", "failed to prepare the recording output: {error}");
                 return;
             }
         };
@@ -77,7 +79,7 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
         let exclusion_ok = match apply_window_style(&*window, WindowStyle::CAPTURE_BAR) {
             Ok(()) => true,
             Err(error) => {
-                eprintln!("capin: failed to style recording bar: {error}");
+                log_error!("record", "failed to style recording bar: {error}");
                 false
             }
         };
@@ -101,7 +103,7 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
         })
     }) {
         Ok(_) => {}
-        Err(error) => eprintln!("capin: failed to open recording bar: {error}"),
+        Err(error) => log_error!("record", "failed to open recording bar: {error}"),
     }
 }
 
@@ -343,6 +345,7 @@ impl RecordBar {
             return;
         }
         let Some(recorder) = self.recorder.as_ref() else {
+            log_warn!("record", "stop requested without an active recorder");
             if let Some(session) = self.session.take() {
                 session.discard();
             }
@@ -358,7 +361,7 @@ impl RecordBar {
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
-        let handles = cx.window_stack().unwrap_or_default();
+        let handles = cx.windows();
         cx.defer(move |cx| {
             crate::windows::close_auxiliary(cx, handles);
         });

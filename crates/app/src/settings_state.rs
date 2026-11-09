@@ -7,9 +7,23 @@ use core_types::RecordFormat;
 use platform_window::{AutostartState, set_autostart};
 
 use crate::i18n::Language;
+use crate::logging::{log_error, log_info, log_warn};
 
+// Windows reserves Win+Shift+S for Snipping Tool, so the default has to move
+// to a combination RegisterHotKey can actually claim.
+#[cfg(target_os = "windows")]
+pub const DEFAULT_CAPTURE_HOTKEY: &str = "ctrl+alt+KeyS";
+#[cfg(not(target_os = "windows"))]
 pub const DEFAULT_CAPTURE_HOTKEY: &str = "shift+meta+KeyS";
+#[cfg(target_os = "windows")]
+pub const DEFAULT_PIN_HOTKEY: &str = "ctrl+alt+KeyD";
+#[cfg(not(target_os = "windows"))]
 pub const DEFAULT_PIN_HOTKEY: &str = "shift+meta+KeyD";
+
+#[cfg(target_os = "windows")]
+const LEGACY_CAPTURE_HOTKEY: &str = "shift+meta+KeyS";
+#[cfg(target_os = "windows")]
+const LEGACY_PIN_HOTKEY: &str = "shift+meta+KeyD";
 pub const DEFAULT_ANNOTATION_COLOR: u32 = 0xFF3B30FF;
 pub const DEFAULT_ANNOTATION_FONT_SIZE: f32 = 20.0;
 pub const DEFAULT_FILENAME_TEMPLATE: &str = "Capin_{date}_{time}";
@@ -256,10 +270,10 @@ pub fn apply_startup_autostart() {
     }
     match set_autostart(settings.auto_start) {
         Ok(AutostartState::RequiresApproval) => {
-            eprintln!("capin: launch at login requires approval in system settings");
+            log_warn!("settings", "launch at login requires approval");
         }
-        Ok(_) => {}
-        Err(error) => eprintln!("capin: failed to apply launch at login: {error}"),
+        Ok(_) => log_info!("settings", "launch at login applied"),
+        Err(error) => log_error!("settings", "failed to apply launch at login: {error}"),
     }
 }
 
@@ -402,6 +416,17 @@ fn parse(text: &str) -> AppSettings {
     if settings.record_format == RecordFormat::WebP {
         settings.record_frame_rate = FrameRate::Fps30;
     }
+    #[cfg(target_os = "windows")]
+    {
+        // Older Windows builds persisted the Win+Shift combinations, which
+        // RegisterHotKey can never claim while Snipping Tool owns them.
+        if settings.capture_hotkey == LEGACY_CAPTURE_HOTKEY {
+            settings.capture_hotkey = DEFAULT_CAPTURE_HOTKEY.to_owned();
+        }
+        if settings.pin_hotkey == LEGACY_PIN_HOTKEY {
+            settings.pin_hotkey = DEFAULT_PIN_HOTKEY.to_owned();
+        }
+    }
     settings
 }
 
@@ -462,12 +487,12 @@ fn persist(settings: &AppSettings) {
     if let Some(parent) = path.parent()
         && let Err(error) = std::fs::create_dir_all(parent)
     {
-        eprintln!("capin: failed to create settings directory: {error}");
+        log_error!("settings", "failed to create settings directory: {error}");
         return;
     }
     let text = serialize(settings);
     if let Err(error) = std::fs::write(&path, text) {
-        eprintln!("capin: failed to save settings: {error}");
+        log_error!("settings", "failed to save settings: {error}");
     }
 }
 
@@ -732,5 +757,17 @@ mod tests {
             settings.annotation_colors[AnnotationColorTool::Number.index()],
             0x34C759FF
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn migrates_the_legacy_windows_hotkeys_independently() {
+        let untouched = parse("capture_hotkey=shift+meta+KeyS\npin_hotkey=shift+meta+KeyD\n");
+        assert_eq!(untouched.capture_hotkey, DEFAULT_CAPTURE_HOTKEY);
+        assert_eq!(untouched.pin_hotkey, DEFAULT_PIN_HOTKEY);
+
+        let mixed = parse("capture_hotkey=control+alt+KeyQ\npin_hotkey=shift+meta+KeyD\n");
+        assert_eq!(mixed.capture_hotkey, "control+alt+KeyQ");
+        assert_eq!(mixed.pin_hotkey, DEFAULT_PIN_HOTKEY);
     }
 }

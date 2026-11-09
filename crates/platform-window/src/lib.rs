@@ -11,7 +11,7 @@ mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
-pub use accent::{system_accent_hex, system_uses_light_theme};
+pub use accent::{system_accent_hex, system_taskbar_uses_light_theme, system_uses_light_theme};
 pub use autostart::{AutostartState, set_autostart};
 pub use error::PlatformWindowError;
 pub use style::WindowStyle;

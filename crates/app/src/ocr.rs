@@ -4,6 +4,7 @@ use gpui_kit::*;
 use platform_window::system_accent_hex;
 
 use crate::i18n::{Language, t};
+use crate::logging::{log_error, log_info};
 use crate::settings_state;
 
 const BACKGROUND: u32 = 0x141414;
@@ -46,10 +47,11 @@ pub fn start(frame: RgbaFrame, cx: &mut App) {
         view
     }) {
         Ok((handle, _)) => {
+            log_info!("ocr", "OCR result window opened");
             let _ = handle.update(cx, |_, window, _| window.activate_window());
             cx.activate(true);
         }
-        Err(error) => eprintln!("capin: failed to open OCR result: {error}"),
+        Err(error) => log_error!("ocr", "failed to open OCR result: {error}"),
     }
 }
 
@@ -114,7 +116,7 @@ impl OcrView {
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
-        let handles = cx.window_stack().unwrap_or_default();
+        let handles = cx.windows();
         cx.defer(move |cx| {
             crate::windows::close_auxiliary(cx, handles);
         });

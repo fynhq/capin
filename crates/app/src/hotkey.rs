@@ -8,6 +8,7 @@ mod imp {
     use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
     use gpui_kit::*;
 
+    use crate::logging::{log_error, log_info, log_warn};
     use crate::settings_state;
 
     thread_local! {
@@ -15,18 +16,67 @@ mod imp {
         static REGISTERED: RefCell<Vec<HotKey>> = const { RefCell::new(Vec::new()) };
         static CAPTURE_ID: Cell<u32> = const { Cell::new(0) };
         static PIN_ID: Cell<u32> = const { Cell::new(0) };
+        static CAPTURE_KEY: RefCell<Option<HotKey>> = const { RefCell::new(None) };
+        static PIN_KEY: RefCell<Option<HotKey>> = const { RefCell::new(None) };
+        static CAPTURE_ENABLED: Cell<bool> = const { Cell::new(false) };
+        static PIN_ENABLED: Cell<bool> = const { Cell::new(false) };
+        static REGISTRATION_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+    }
+
+    fn fallback_modifiers() -> Modifiers {
+        #[cfg(target_os = "windows")]
+        {
+            Modifiers::CONTROL | Modifiers::ALT
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Modifiers::META | Modifiers::SHIFT
+        }
     }
 
     fn default_capture() -> HotKey {
-        HotKey::new(Some(Modifiers::META | Modifiers::SHIFT), Code::KeyS)
+        settings_state::DEFAULT_CAPTURE_HOTKEY
+            .parse()
+            .unwrap_or_else(|_| HotKey::new(Some(fallback_modifiers()), Code::KeyS))
     }
 
     fn default_pin() -> HotKey {
-        HotKey::new(Some(Modifiers::META | Modifiers::SHIFT), Code::KeyD)
+        settings_state::DEFAULT_PIN_HOTKEY
+            .parse()
+            .unwrap_or_else(|_| HotKey::new(Some(fallback_modifiers()), Code::KeyD))
     }
 
     fn parse_or_default(value: &str, default: HotKey) -> HotKey {
         value.parse().unwrap_or(default)
+    }
+
+    /// Registers each shortcut independently: a system-owned combination such
+    /// as Win+Shift+S must not take the other shortcut down with it.
+    fn register_pair(
+        manager: &GlobalHotKeyManager,
+        capture: HotKey,
+        pin: HotKey,
+    ) -> (Vec<HotKey>, Option<String>) {
+        let mut registered = Vec::new();
+        let mut errors = Vec::new();
+        for (label, hotkey) in [("capture", capture), ("pin", pin)] {
+            match manager.register(hotkey) {
+                Ok(()) => {
+                    log_info!("hotkey", "registered {label}: {}", hotkey.into_string());
+                    registered.push(hotkey);
+                }
+                Err(error) => {
+                    log_error!(
+                        "hotkey",
+                        "failed to register {label} {}: {error}",
+                        hotkey.into_string()
+                    );
+                    errors.push(format!("{label}: {error}"));
+                }
+            }
+        }
+        let error = (!errors.is_empty()).then(|| errors.join("; "));
+        (registered, error)
     }
 
     pub fn install(cx: &mut App) {
@@ -40,17 +90,25 @@ mod imp {
         let manager = match GlobalHotKeyManager::new() {
             Ok(manager) => manager,
             Err(error) => {
-                eprintln!("capin: failed to create global hotkey manager: {error}");
+                let message = error.to_string();
+                REGISTRATION_ERROR.with(|slot| *slot.borrow_mut() = Some(message.clone()));
+                log_error!(
+                    "hotkey",
+                    "failed to create global hotkey manager: {message}"
+                );
                 return;
             }
         };
-        if let Err(error) = manager.register_all(&[capture, pin]) {
-            eprintln!("capin: failed to register global hotkeys: {error}");
-        }
-        MANAGER.with(|slot| *slot.borrow_mut() = Some(manager));
-        REGISTERED.with(|registered| *registered.borrow_mut() = vec![capture, pin]);
+        let (registered, error) = register_pair(&manager, capture, pin);
+        REGISTRATION_ERROR.with(|slot| *slot.borrow_mut() = error);
+        CAPTURE_KEY.with(|slot| *slot.borrow_mut() = Some(capture));
+        PIN_KEY.with(|slot| *slot.borrow_mut() = Some(pin));
+        CAPTURE_ENABLED.with(|enabled| enabled.set(registered.contains(&capture)));
+        PIN_ENABLED.with(|enabled| enabled.set(registered.contains(&pin)));
         CAPTURE_ID.with(|id| id.set(capture.id()));
         PIN_ID.with(|id| id.set(pin.id()));
+        MANAGER.with(|slot| *slot.borrow_mut() = Some(manager));
+        REGISTERED.with(|slot| *slot.borrow_mut() = registered);
 
         cx.spawn(async move |cx| {
             loop {
@@ -69,14 +127,18 @@ mod imp {
                 cx.update(|cx| {
                     let capture_id = CAPTURE_ID.with(|id| id.get());
                     let pin_id = PIN_ID.with(|id| id.get());
+                    let capture_enabled = CAPTURE_ENABLED.with(|enabled| enabled.get());
+                    let pin_enabled = PIN_ENABLED.with(|enabled| enabled.get());
                     for id in actions {
-                        if id == capture_id {
+                        if capture_enabled && id == capture_id {
+                            log_info!("hotkey", "capture shortcut pressed");
                             if crate::overlay::has_open_overlays() {
                                 crate::overlay::close_open_overlays(cx);
                             } else {
                                 crate::tray::replace_windows(cx, crate::overlay::open_overlays);
                             }
-                        } else if id == pin_id {
+                        } else if pin_enabled && id == pin_id {
+                            log_info!("hotkey", "pin shortcut pressed");
                             crate::pin::pin_last(cx);
                         }
                     }
@@ -84,6 +146,12 @@ mod imp {
             }
         })
         .detach();
+    }
+
+    /// The latest registration failure, surfaced in the shortcuts page and
+    /// logs. `None` means every configured shortcut is active.
+    pub fn registration_error() -> Option<String> {
+        REGISTRATION_ERROR.with(|slot| slot.borrow().clone())
     }
 
     /// Re-registers the global hotkeys after a settings change.
@@ -101,15 +169,57 @@ mod imp {
                 return Err("hotkey manager is unavailable".to_owned());
             };
             let previous = REGISTERED.with(|registered| registered.borrow().clone());
-            manager
-                .unregister_all(&previous)
-                .map_err(|error| error.to_string())?;
-            manager
-                .register_all(&[capture, pin])
-                .map_err(|error| error.to_string())?;
-            REGISTERED.with(|registered| *registered.borrow_mut() = vec![capture, pin]);
+            let previous_capture = CAPTURE_KEY
+                .with(|slot| slot.borrow().clone())
+                .unwrap_or_else(default_capture);
+            let previous_pin = PIN_KEY
+                .with(|slot| slot.borrow().clone())
+                .unwrap_or_else(default_pin);
+            if let Err(error) = manager.unregister_all(&previous) {
+                log_warn!("hotkey", "failed to unregister previous shortcuts: {error}");
+            }
+            let (registered, error) = register_pair(manager, capture, pin);
+            if let Some(error) = error {
+                // Roll back to the last working pair so a rejected combination
+                // leaves the app usable and the settings page unchanged.
+                for hotkey in &registered {
+                    let _ = manager.unregister(*hotkey);
+                }
+                let (restored, restore_error) =
+                    register_pair(manager, previous_capture, previous_pin);
+                if let Some(restore_error) = restore_error.as_ref() {
+                    log_error!(
+                        "hotkey",
+                        "failed to restore previous shortcuts: {restore_error}"
+                    );
+                }
+                let restored_capture = restored.contains(&previous_capture);
+                let restored_pin = restored.contains(&previous_pin);
+                REGISTERED.with(|slot| *slot.borrow_mut() = restored);
+                CAPTURE_ENABLED.with(|enabled| enabled.set(restored_capture));
+                PIN_ENABLED.with(|enabled| enabled.set(restored_pin));
+                CAPTURE_ID.with(|id| id.set(previous_capture.id()));
+                PIN_ID.with(|id| id.set(previous_pin.id()));
+                // The failed combination is reverted, so the page warning must
+                // describe the shortcuts that are actually active now.
+                REGISTRATION_ERROR.with(|slot| *slot.borrow_mut() = restore_error);
+                log_error!("hotkey", "failed to apply new shortcuts: {error}");
+                return Err(error);
+            }
+            REGISTERED.with(|slot| *slot.borrow_mut() = registered);
+            CAPTURE_KEY.with(|slot| *slot.borrow_mut() = Some(capture));
+            PIN_KEY.with(|slot| *slot.borrow_mut() = Some(pin));
+            CAPTURE_ENABLED.with(|enabled| enabled.set(true));
+            PIN_ENABLED.with(|enabled| enabled.set(true));
             CAPTURE_ID.with(|id| id.set(capture.id()));
             PIN_ID.with(|id| id.set(pin.id()));
+            REGISTRATION_ERROR.with(|slot| *slot.borrow_mut() = None);
+            log_info!(
+                "hotkey",
+                "shortcuts updated: capture={} pin={}",
+                capture.into_string(),
+                pin.into_string()
+            );
             Ok(())
         })
     }
@@ -200,7 +310,7 @@ mod imp {
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-pub use imp::{display_hotkey, install, refresh, shortcut_from_key};
+pub use imp::{display_hotkey, install, refresh, registration_error, shortcut_from_key};
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn install(_cx: &mut gpui_kit::App) {}
@@ -208,6 +318,11 @@ pub fn install(_cx: &mut gpui_kit::App) {}
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn refresh() -> Result<(), String> {
     Ok(())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn registration_error() -> Option<String> {
+    None
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]

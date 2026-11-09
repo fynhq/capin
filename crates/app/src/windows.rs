@@ -2,6 +2,10 @@
 
 use gpui_kit::*;
 
+// Callers pass `cx.windows()` rather than `cx.window_stack()`: the Windows
+// backend does not implement the stack query and returns `None`, which used to
+// turn every close path (Esc, right-click, save-and-exit) into a no-op.
+
 /// Removes every window in `handles` except pinned images. Pins are the only
 /// windows that deliberately survive a new capture or a mode switch.
 pub fn close_auxiliary(cx: &mut App, handles: Vec<AnyWindowHandle>) {

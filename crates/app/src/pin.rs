@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::i18n::{Language, t};
 use crate::image_util;
+use crate::logging::{log_error, log_info, log_warn};
 use crate::settings_state;
 use crate::storage;
 use crate::ui::centered_bounds;
@@ -249,7 +250,7 @@ pub fn pin_last(cx: &mut App) {
     if let Some(frame) = LAST_CAPTURE.with(|slot| slot.borrow().clone()) {
         pin_image(frame, cx);
     } else {
-        eprintln!("capin: no clipboard content or recent capture to pin");
+        log_warn!("pin", "no clipboard content or recent capture to pin");
     }
 }
 
@@ -283,6 +284,7 @@ fn open_image_pin(frame: RgbaFrame, cx: &mut App) {
 fn open_pin_content(content: PinContent, cx: &mut App) {
     let zoom = content.preferred_zoom();
     let (width, height) = content.size(zoom);
+    log_info!("pin", "opening pin {}x{}", width.round(), height.round());
     let bounds = default_bounds(cx, width, height);
     let _ = open_pin_inner(content, None, bounds, zoom, 1.0, false, None, true, cx);
 }
@@ -339,7 +341,7 @@ fn open_pin_inner(
     let content_for_view = content.clone();
     match gpui_kit::open_window(options, cx, move |window, cx| {
         if let Err(error) = apply_window_style(&*window, WindowStyle::PIN) {
-            eprintln!("capin: failed to style pin window: {error}");
+            log_error!("pin", "failed to style pin window: {error}");
         }
         if click_through {
             let _ = set_click_through(&*window, true);
@@ -366,7 +368,7 @@ fn open_pin_inner(
             Some(id)
         }
         Err(error) => {
-            eprintln!("capin: failed to open pin window: {error}");
+            log_error!("pin", "failed to open pin window: {error}");
             if !had_existing_image && let Some(path) = image_path {
                 let _ = std::fs::remove_file(path);
             }
@@ -1668,7 +1670,7 @@ fn open_pin_menu(
         Ok((handle, _)) => {
             PIN_MENU.with(|slot| *slot.borrow_mut() = Some(handle));
         }
-        Err(error) => eprintln!("capin: failed to open pin menu: {error}"),
+        Err(error) => log_error!("pin", "failed to open pin menu: {error}"),
     }
 }
 

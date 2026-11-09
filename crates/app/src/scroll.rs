@@ -8,6 +8,7 @@ use gpui_kit::*;
 use platform_window::{WindowStyle, apply as apply_window_style, system_accent_hex};
 
 use crate::i18n::{Language, t};
+use crate::logging::{log_error, log_info};
 use crate::settings_state;
 
 const BAR_WIDTH: f32 = 500.0;
@@ -28,14 +29,15 @@ pub fn open_session(region: CaptureRegion, first_frame: RgbaFrame, cx: &mut App)
     let mut stitcher = match Stitcher::new(first_frame.width(), config) {
         Ok(stitcher) => stitcher,
         Err(error) => {
-            eprintln!("capin: failed to start scroll capture: {error}");
+            log_error!("scroll", "failed to start scroll capture: {error}");
             return;
         }
     };
     if let Err(error) = stitcher.push(&first_frame) {
-        eprintln!("capin: failed to start scroll capture: {error}");
+        log_error!("scroll", "failed to start scroll capture: {error}");
         return;
     }
+    log_info!("scroll", "scroll capture started");
 
     let bounds = bar_bounds(region);
     let scroll_point = region_center(region);
@@ -58,12 +60,12 @@ pub fn open_session(region: CaptureRegion, first_frame: RgbaFrame, cx: &mut App)
 
     match gpui_kit::open_window(options, cx, move |window, cx| {
         if let Err(error) = apply_window_style(&*window, WindowStyle::CAPTURE_BAR) {
-            eprintln!("capin: failed to style scroll bar: {error}");
+            log_error!("scroll", "failed to style scroll bar: {error}");
         }
         cx.new(|cx| ScrollView::new(region, scroll_point, notches, stitcher, cx))
     }) {
         Ok(_) => {}
-        Err(error) => eprintln!("capin: failed to open scroll bar: {error}"),
+        Err(error) => log_error!("scroll", "failed to open scroll bar: {error}"),
     }
 }
 
@@ -216,7 +218,7 @@ impl ScrollView {
         self.auto = false;
         match self.stitcher.finish() {
             Ok(frame) => {
-                let handles = cx.window_stack().unwrap_or_default();
+                let handles = cx.windows();
                 cx.defer(move |cx| {
                     crate::windows::close_auxiliary(cx, handles);
                     crate::editor::open_editor(frame, cx);
@@ -230,7 +232,7 @@ impl ScrollView {
     }
 
     fn cancel(&mut self, cx: &mut Context<Self>) {
-        let handles = cx.window_stack().unwrap_or_default();
+        let handles = cx.windows();
         cx.defer(move |cx| {
             crate::windows::close_auxiliary(cx, handles);
         });

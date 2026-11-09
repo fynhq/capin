@@ -17,7 +17,9 @@ use crate::{
     editor::{EditorView, InlineCapture, Tool, tooltip_view},
     effects::RegionEffects,
     i18n::{Language, t},
-    icons, image_util, settings_state,
+    icons, image_util,
+    logging::{log_error, log_info},
+    settings_state,
 };
 
 const DIM: u32 = 0x0000004d;
@@ -44,7 +46,8 @@ pub fn has_open_overlays() -> bool {
 }
 
 pub fn close_open_overlays(cx: &mut App) {
-    let handles = cx.window_stack().unwrap_or_default();
+    let handles = cx.windows();
+    log_info!("overlay", "closing overlays ({} windows)", handles.len());
     crate::windows::close_auxiliary(cx, handles);
     OPEN_OVERLAYS.store(0, Ordering::Relaxed);
 }
@@ -214,14 +217,14 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
     let monitors = match backend.monitors() {
         Ok(monitors) => monitors,
         Err(error) => {
-            eprintln!("capin: failed to enumerate monitors: {error}");
+            log_error!("overlay", "failed to enumerate monitors: {error}");
             return;
         }
     };
     let windows = match backend.windows() {
         Ok(windows) => windows,
         Err(error) => {
-            eprintln!("capin: failed to enumerate windows: {error}");
+            log_error!("overlay", "failed to enumerate windows: {error}");
             return;
         }
     };
@@ -233,7 +236,11 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
         let frame = match backend.capture(CaptureTarget::Monitor(monitor.id)) {
             Ok(frame) => frame,
             Err(error) => {
-                eprintln!("capin: failed to capture monitor {:?}: {error}", monitor.id);
+                log_error!(
+                    "overlay",
+                    "failed to capture monitor {:?}: {error}",
+                    monitor.id
+                );
                 // On macOS a denied screen recording grant makes the menu and
                 // shortcut look dead: the overlays never open and stderr is
                 // invisible for a bundled app. Route that case to settings,
@@ -262,7 +269,7 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
         cx.activate(true);
         match gpui_kit::open_window(options, cx, move |window, cx| {
             if let Err(error) = apply_window_style(&*window, WindowStyle::OVERLAY) {
-                eprintln!("capin: failed to style overlay: {error}");
+                log_error!("overlay", "failed to style overlay: {error}");
             }
             let view = cx.new(|cx| {
                 OverlayView::new(
@@ -290,12 +297,18 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
                 OPEN_OVERLAYS.fetch_add(1, Ordering::Relaxed);
                 opened += 1;
             }
-            Err(error) => eprintln!("capin: failed to open overlay: {error}"),
+            Err(error) => log_error!("overlay", "failed to open overlay: {error}"),
         }
     }
 
     if opened == 0 {
-        eprintln!("capin: no overlay windows could be opened");
+        log_error!("overlay", "no overlay windows could be opened");
+    } else {
+        log_info!(
+            "overlay",
+            "opened {opened} overlay window(s) for mode {:?}",
+            mode
+        );
     }
 }
 
@@ -924,7 +937,7 @@ impl OverlayView {
         if matches!(self.mode, OverlayMode::Scroll | OverlayMode::Ocr) && region.is_none() {
             return;
         }
-        let handles = cx.window_stack().unwrap_or_default();
+        let handles = cx.windows();
         let target = match outcome {
             SelectionOutcome::Monitor(id) => CaptureTarget::Monitor(id),
             SelectionOutcome::Window(id) => CaptureTarget::Window(id),
@@ -948,7 +961,7 @@ impl OverlayView {
                         crate::scroll::open_session(region, frame, cx);
                     }
                     Ok(frame) => crate::ocr::start(frame, cx),
-                    Err(error) => eprintln!("capin: capture failed: {error}"),
+                    Err(error) => log_error!("overlay", "capture failed: {error}"),
                 }
             }
         });
@@ -991,6 +1004,13 @@ impl OverlayView {
             ),
         };
         self.session.cancel();
+        log_info!(
+            "overlay",
+            "selection started: {}x{} (mode {:?})",
+            rect.size.width,
+            rect.size.height,
+            self.mode
+        );
         self.selected = Some(Selected {
             target,
             rect,
@@ -1083,6 +1103,12 @@ impl OverlayView {
             }
         };
         let region = self.selection_region(&selected);
+        log_info!(
+            "overlay",
+            "opening inline editor for {}x{} region",
+            frame.width(),
+            frame.height()
+        );
         let scale = selected.scale;
         let center_x = (region.rect.origin.x as f32 + region.rect.size.width as f32 / 2.0) / scale;
         let center_y = (region.rect.origin.y as f32 + region.rect.size.height as f32 / 2.0) / scale;
@@ -1107,7 +1133,7 @@ impl OverlayView {
         self.selected = None;
         self.session.cancel();
 
-        let handles = cx.window_stack().unwrap_or_default();
+        let handles = cx.windows();
         let current = window.window_handle();
         let view = cx.entity();
         cx.defer(move |cx| {
@@ -1140,6 +1166,7 @@ impl OverlayView {
         };
         match image_util::copy_png(&output, cx) {
             Ok(()) => {
+                log_info!("overlay", "selection copied to clipboard");
                 crate::pin::remember(&output);
                 crate::capture_history::record(&output);
                 self.close_overlays(cx);
@@ -1159,6 +1186,7 @@ impl OverlayView {
         };
         match image_util::save_png(&output) {
             Ok(_) => {
+                log_info!("overlay", "selection saved");
                 crate::pin::remember(&output);
                 crate::capture_history::record(&output);
                 self.close_overlays(cx);
@@ -1176,6 +1204,7 @@ impl OverlayView {
                 return;
             }
         };
+        log_info!("overlay", "selection pinned");
         crate::capture_history::record(&output);
         crate::pin::open_frame(output, cx);
         self.close_overlays(cx);
@@ -1619,6 +1648,7 @@ impl OverlayView {
                     .rounded(px(5.0))
                     .when(editing, |chip| chip.bg(self.chrome.selected))
                     .hover(|style| style.bg(self.chrome.hover))
+                    .active(|style| style.opacity(0.85))
                     .cursor_text()
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1643,6 +1673,7 @@ impl OverlayView {
                     .rounded(px(5.0))
                     .text_color(self.chrome.muted)
                     .hover(|style| style.bg(self.chrome.hover))
+                    .active(|style| style.opacity(0.85))
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, _, cx| {
                         if let Some(selected) = this.selected.as_mut() {
@@ -1662,6 +1693,7 @@ impl OverlayView {
                     .rounded(px(5.0))
                     .text_color(self.chrome.text)
                     .hover(|style| style.bg(self.chrome.hover))
+                    .active(|style| style.opacity(0.85))
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, _, cx| this.cycle_ratio(cx)))
                     .child(ratio_label),
@@ -1681,6 +1713,7 @@ impl OverlayView {
                     .gap(px(4.0))
                     .when(selected.effects_open, |chip| chip.bg(self.chrome.selected))
                     .hover(|style| style.bg(self.chrome.hover))
+                    .active(|style| style.opacity(0.85))
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, _, cx| {
                         if let Some(selected) = this.selected.as_mut() {
@@ -1717,6 +1750,7 @@ impl OverlayView {
                 .items_center()
                 .justify_center()
                 .hover(|style| style.bg(self.chrome.hover))
+                .active(|style| style.opacity(0.85))
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| this.refresh_frame(cx)))
                 .child(icons::icon(icons::REFRESH, 14.0, self.chrome.icon)),
@@ -1760,6 +1794,7 @@ impl OverlayView {
                     .rounded(px(5.0))
                     .when(selected_radius, |chip| chip.bg(self.chrome.accent))
                     .hover(|style| style.bg(self.chrome.hover))
+                    .active(|style| style.opacity(0.85))
                     .text_size(px(10.5))
                     .text_color(if selected_radius {
                         self.chrome.accent_text
@@ -1817,6 +1852,7 @@ impl OverlayView {
                             .rounded(px(5.0))
                             .when(shadow, |chip| chip.bg(self.chrome.accent))
                             .hover(|style| style.bg(self.chrome.hover))
+                            .active(|style| style.opacity(0.85))
                             .text_size(px(10.5))
                             .text_color(if shadow {
                                 self.chrome.accent_text
@@ -1838,6 +1874,7 @@ impl OverlayView {
                             .rounded(px(5.0))
                             .when(border, |chip| chip.bg(self.chrome.accent))
                             .hover(|style| style.bg(self.chrome.hover))
+                            .active(|style| style.opacity(0.85))
                             .text_size(px(10.5))
                             .text_color(if border {
                                 self.chrome.accent_text
@@ -1895,6 +1932,7 @@ impl OverlayView {
                     .items_center()
                     .justify_center()
                     .hover(|style| style.bg(self.chrome.hover))
+                    .active(|style| style.opacity(0.85))
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_editor_for_selected(tool, window, cx);
@@ -1916,6 +1954,7 @@ impl OverlayView {
                 .items_center()
                 .justify_center()
                 .hover(|style| style.bg(self.chrome.hover))
+                .active(|style| style.opacity(0.85))
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| this.pin_selected(cx)))
                 .child(icons::icon(icons::PIN, 17.0, self.chrome.icon)),
@@ -1949,6 +1988,7 @@ impl OverlayView {
                 .items_center()
                 .justify_center()
                 .hover(|style| style.bg(self.chrome.hover))
+                .active(|style| style.opacity(0.85))
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| this.save_selected(cx)))
                 .child(icons::icon(icons::SAVE, 17.0, self.chrome.icon)),
@@ -1966,6 +2006,7 @@ impl OverlayView {
                 .justify_center()
                 .when(selected.more_open, |button| button.bg(self.chrome.selected))
                 .hover(|style| style.bg(self.chrome.hover))
+                .active(|style| style.opacity(0.85))
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| {
                     if let Some(selected) = this.selected.as_mut() {
@@ -1990,6 +2031,7 @@ impl OverlayView {
                 .items_center()
                 .justify_center()
                 .hover(|style| style.bg(self.chrome.hover))
+                .active(|style| style.opacity(0.85))
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| this.close_overlays(cx)))
                 .child(icons::icon(icons::CLOSE, 17.0, self.chrome.muted)),
@@ -2096,6 +2138,7 @@ impl OverlayView {
                     .py(px(6.0))
                     .rounded(px(5.0))
                     .hover(|style| style.bg(self.chrome.hover))
+                    .active(|style| style.opacity(0.85))
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(selected) = this.selected.as_mut() {
@@ -2320,7 +2363,7 @@ impl OverlayView {
     }
 
     fn close_overlays(&self, cx: &mut Context<Self>) {
-        let handles = cx.window_stack().unwrap_or_default();
+        let handles = cx.windows();
         cx.defer(move |cx| {
             crate::windows::close_auxiliary(cx, handles);
         });
