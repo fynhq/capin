@@ -290,7 +290,7 @@ mod imp {
 #[cfg(target_os = "macos")]
 pub use imp::restart;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-pub use imp::{install, refresh_menu, replace_windows};
+pub use imp::{install, refresh_menu};
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn install(_cx: &mut gpui_kit::App) -> bool {
