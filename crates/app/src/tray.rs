@@ -15,7 +15,6 @@ mod imp {
 
     const MENU_START: &str = "start";
     const MENU_SETTINGS: &str = "settings";
-    const MENU_RECOVER: &str = "recover-recording";
     const MENU_RELEASE_PINS: &str = "release-pins";
     const MENU_RESTART: &str = "restart";
     const MENU_QUIT: &str = "quit";
@@ -75,20 +74,8 @@ mod imp {
         let quit = MenuItem::with_id(MENU_QUIT, t(language, "menu.quit"), true, None);
         let mut items: Vec<&dyn IsMenuItem> = vec![&start, &settings];
 
-        // Recovery entries only appear when they can do something, so the
-        // normal menu stays at Start / Settings / Restart / Quit while a
-        // click-through pin or an interrupted recording is still reachable.
-        let recover = (!crate::record_session::pending_sessions().is_empty()).then(|| {
-            MenuItem::with_id(
-                MENU_RECOVER,
-                t(language, "menu.recover_recording"),
-                true,
-                None,
-            )
-        });
-        if let Some(item) = recover.as_ref() {
-            items.push(item);
-        }
+        // Click-through pins add a release entry, while the normal menu stays
+        // at Start / Settings / Restart / Quit.
         let release_pins = (crate::pin::click_through_count() > 0).then(|| {
             MenuItem::with_id(
                 MENU_RELEASE_PINS,
@@ -217,13 +204,6 @@ mod imp {
                 }
             }
             MENU_SETTINGS => replace_windows(cx, crate::settings::open_settings),
-            MENU_RECOVER => {
-                if let Some(directory) = crate::record_session::pending_sessions().last() {
-                    cx.open_with_system(directory);
-                    crate::record_session::mark_recovered(directory);
-                    refresh_menu();
-                }
-            }
             MENU_RELEASE_PINS => {
                 crate::pin::release_click_through(cx);
             }

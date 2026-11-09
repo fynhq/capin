@@ -1,5 +1,4 @@
 use std::cell::{Cell, RefCell};
-use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -7,7 +6,7 @@ use std::time::Duration;
 
 use core_record::FrameRate;
 use core_types::RecordFormat;
-use gpui_kit::base::input::InputBase;
+use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use platform_window::{AutostartState, set_autostart, system_accent_hex};
@@ -102,6 +101,7 @@ mod layout {
     pub const ROW_PAD_X: f32 = 16.0;
     pub const ROW_PAD_Y: f32 = 14.0;
     pub const BUTTON_HEIGHT: f32 = 32.0;
+    pub const SEGMENT_HEIGHT: f32 = 24.0;
     pub const BUTTON_RADIUS: f32 = 4.0;
     pub const CONTROL_TEXT: f32 = 14.0;
 }
@@ -137,6 +137,7 @@ mod layout {
     pub const ROW_PAD_X: f32 = 14.0;
     pub const ROW_PAD_Y: f32 = 12.0;
     pub const BUTTON_HEIGHT: f32 = 28.0;
+    pub const SEGMENT_HEIGHT: f32 = 24.0;
     pub const BUTTON_RADIUS: f32 = 6.0;
     pub const CONTROL_TEXT: f32 = 13.0;
 }
@@ -172,6 +173,7 @@ mod layout {
     pub const ROW_PAD_X: f32 = 14.0;
     pub const ROW_PAD_Y: f32 = 12.0;
     pub const BUTTON_HEIGHT: f32 = 28.0;
+    pub const SEGMENT_HEIGHT: f32 = 24.0;
     pub const BUTTON_RADIUS: f32 = 6.0;
     pub const CONTROL_TEXT: f32 = 13.0;
 }
@@ -213,18 +215,6 @@ impl SettingsSection {
                 Self::Capture => "nav.capture",
                 Self::Recording => "nav.recording",
                 Self::Shortcuts => "nav.shortcuts",
-            },
-        )
-    }
-
-    fn description(self, language: Language) -> &'static str {
-        t(
-            language,
-            match self {
-                Self::General => "section.general.desc",
-                Self::Capture => "section.capture.desc",
-                Self::Recording => "section.recording.desc",
-                Self::Shortcuts => "section.shortcuts.desc",
             },
         )
     }
@@ -607,128 +597,6 @@ fn card_border(_dark: bool) -> Rgba {
     rgba(0x00000000)
 }
 
-#[derive(Clone, Debug)]
-struct TemplateEdit {
-    content: String,
-    cursor: usize,
-    anchor: usize,
-    marked: Option<Range<usize>>,
-}
-
-impl TemplateEdit {
-    fn new(content: String) -> Self {
-        let end = content.len();
-        Self {
-            content,
-            cursor: end,
-            anchor: end,
-            marked: None,
-        }
-    }
-
-    fn cursor_utf8(&self) -> usize {
-        self.cursor.min(self.content.len())
-    }
-
-    fn selection(&self) -> Range<usize> {
-        let cursor = self.cursor_utf8();
-        let anchor = self.anchor.min(self.content.len());
-        if anchor <= cursor {
-            anchor..cursor
-        } else {
-            cursor..anchor
-        }
-    }
-
-    fn move_cursor(&mut self, cursor: usize, extend_selection: bool) {
-        let cursor = cursor.min(self.content.len());
-        let cursor = if self.content.is_char_boundary(cursor) {
-            cursor
-        } else {
-            previous_char_boundary(&self.content, cursor)
-        };
-        self.cursor = cursor;
-        if !extend_selection {
-            self.anchor = cursor;
-        }
-    }
-
-    fn previous_boundary(&self) -> usize {
-        previous_char_boundary(&self.content, self.cursor_utf8())
-    }
-
-    fn next_boundary(&self) -> usize {
-        next_char_boundary(&self.content, self.cursor_utf8())
-    }
-
-    fn offset_from_utf16(&self, offset: usize) -> usize {
-        let mut utf8_offset = 0;
-        let mut utf16_count = 0;
-        for ch in self.content.chars() {
-            if utf16_count >= offset {
-                break;
-            }
-            utf16_count += ch.len_utf16();
-            utf8_offset += ch.len_utf8();
-        }
-        utf8_offset
-    }
-
-    fn offset_to_utf16(&self, offset: usize) -> usize {
-        let offset = offset.min(self.content.len());
-        self.content[..offset]
-            .chars()
-            .map(|ch| ch.len_utf16())
-            .sum()
-    }
-
-    fn range_from_utf16(&self, range: &Range<usize>) -> Range<usize> {
-        let start = self.offset_from_utf16(range.start);
-        let end = self.offset_from_utf16(range.end).max(start);
-        start..end
-    }
-
-    fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
-        let start = self.offset_to_utf16(range.start);
-        let end = self.offset_to_utf16(range.end).max(start);
-        start..end
-    }
-
-    fn replace(&mut self, range: Option<Range<usize>>, text: &str) {
-        let selection = self.selection();
-        let range = range
-            .or_else(|| self.marked.take())
-            .or_else(|| (!selection.is_empty()).then_some(selection))
-            .unwrap_or(self.cursor_utf8()..self.cursor_utf8());
-        let text: String = text
-            .chars()
-            .filter(|ch| *ch != '\n' && *ch != '\r')
-            .collect();
-        self.content.replace_range(range.clone(), &text);
-        self.cursor = range.start + text.len();
-        self.anchor = self.cursor;
-        self.marked = (!text.is_empty()).then_some(range.start..range.start + text.len());
-    }
-}
-
-fn previous_char_boundary(content: &str, cursor: usize) -> usize {
-    let cursor = cursor.min(content.len());
-    content[..cursor]
-        .char_indices()
-        .next_back()
-        .map(|(index, _)| index)
-        .unwrap_or(0)
-}
-
-fn next_char_boundary(content: &str, cursor: usize) -> usize {
-    let cursor = cursor.min(content.len());
-    content[cursor..]
-        .chars()
-        .next()
-        .map(|ch| cursor + ch.len_utf8())
-        .unwrap_or(cursor)
-}
-
 struct SettingsView {
     section: SettingsSection,
     settings: AppSettings,
@@ -737,8 +605,8 @@ struct SettingsView {
     status: Option<String>,
     status_serial: u64,
     recording_shortcut: Option<ShortcutSlot>,
-    filename_edit: Option<TemplateEdit>,
-    filename_focus: FocusHandle,
+    filename_input: Entity<InputState>,
+    filename_subscription: Option<Subscription>,
     focus_handle: FocusHandle,
     #[cfg(target_os = "macos")]
     titlebar_drag: bool,
@@ -751,29 +619,69 @@ struct SettingsView {
 }
 
 impl SettingsView {
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let settings = settings_state::get();
+        let theme = Theme::for_window(window, None);
+        let filename_input =
+            cx.new(|cx| InputState::new(window, cx).default_value(&settings.filename_template));
+        filename_input.update(cx, |state, cx| {
+            state.set_placeholder(settings_state::DEFAULT_FILENAME_TEMPLATE, window, cx);
+            state.set_editor_style(input_editor_style(&theme));
+        });
         let mut view = Self {
             section: SettingsSection::General,
-            settings: settings_state::get(),
+            settings,
             accent: system_accent_hex(),
             last_accent: None,
             status: PENDING_STATUS.with(|slot| slot.borrow_mut().take()),
             status_serial: 0,
             recording_shortcut: None,
-            filename_edit: None,
-            filename_focus: cx.focus_handle(),
+            filename_input,
+            filename_subscription: None,
             focus_handle: cx.focus_handle(),
             #[cfg(target_os = "macos")]
             titlebar_drag: false,
             select_menu: None,
             logo: crate::image_util::render_png(include_bytes!(
-                "../../../assets/icon/capin_icon_1024.png"
+                "../../../assets/icon/capin_icon_128.png"
             )),
             #[cfg(target_os = "macos")]
             permission_screen: platform_window::screen_capture_trusted(),
             #[cfg(target_os = "macos")]
             permission_accessibility: platform_window::accessibility_trusted(),
         };
+        let input = view.filename_input.clone();
+        view.filename_subscription = Some(cx.subscribe_in(
+            &input,
+            window,
+            |this: &mut SettingsView, input, event: &InputEvent, window, cx| match event {
+                InputEvent::Change | InputEvent::Focus => cx.notify(),
+                InputEvent::Blur => {
+                    this.commit_filename_template(input, window, cx);
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => {
+                    this.commit_filename_template(input, window, cx);
+                }
+            },
+        ));
+        cx.on_release(|this, cx| {
+            let template: String = this
+                .filename_input
+                .read(cx)
+                .value()
+                .trim()
+                .chars()
+                .take(120)
+                .collect();
+            if !template.is_empty() && template != settings_state::get().filename_template {
+                settings_state::update(|settings| settings.filename_template = template);
+            }
+            if let Some(logo) = this.logo.take() {
+                cx.drop_image(logo, None);
+            }
+        })
+        .detach();
         view.start_accent_watch(cx);
         #[cfg(target_os = "macos")]
         view.start_permission_watch(cx);
@@ -1104,7 +1012,7 @@ impl SettingsView {
             ))
     }
 
-    fn content(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn content(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         // macOS draws the settings title in the sidebar, so the page reaches
         // the top edge; Windows keeps the caption strip clear of scrolling
         // content so rows never slide under the caption buttons.
@@ -1152,7 +1060,7 @@ impl SettingsView {
                             .flex_col()
                             .gap(px(layout::CONTENT_GAP))
                             .child(match self.section {
-                                SettingsSection::General => self.general(theme, cx),
+                                SettingsSection::General => self.general(theme, window, cx),
                                 SettingsSection::Capture => self.capture_settings(theme, cx),
                                 SettingsSection::Recording => self.recording(theme, cx),
                                 SettingsSection::Shortcuts => self.shortcuts(theme, cx),
@@ -1162,25 +1070,15 @@ impl SettingsView {
     }
 
     fn section_header(&self, theme: &Theme) -> Div {
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .child(
-                div()
-                    .text_size(px(layout::PAGE_TITLE))
-                    .text_color(theme.text)
-                    .child(self.section.title(self.settings.language)),
-            )
-            .child(
-                div()
-                    .text_size(px(layout::BODY))
-                    .text_color(theme.muted)
-                    .child(self.section.description(self.settings.language)),
-            )
+        div().flex().flex_col().child(
+            div()
+                .text_size(px(layout::PAGE_TITLE))
+                .text_color(theme.text)
+                .child(self.section.title(self.settings.language)),
+        )
     }
 
-    fn general(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    fn general(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> Div {
         #[cfg(target_os = "macos")]
         let language = self.settings.language;
         let content = card(
@@ -1189,6 +1087,7 @@ impl SettingsView {
                 div().child(self.language_row(theme, cx)),
                 div().child(self.auto_start_row(theme, cx)),
                 div().child(self.logs_row(theme, cx)),
+                div().child(self.filename_template_row(theme, window, cx)),
             ],
         );
         let page = div()
@@ -1464,6 +1363,9 @@ impl SettingsView {
         )];
         if self.settings.window_composition {
             window_rows.push(self.window_background_row(theme, cx));
+            if self.settings.window_background == WindowBackground::Wallpaper {
+                window_rows.push(self.window_wallpaper_row(theme, cx));
+            }
             window_rows.push(self.window_padding_row(theme, cx));
             window_rows.push(self.toggle_row(
                 theme,
@@ -1478,9 +1380,6 @@ impl SettingsView {
                     refresh_pin: false,
                 },
             ));
-            if self.settings.window_background == WindowBackground::Wallpaper {
-                window_rows.push(self.window_wallpaper_row(theme, cx));
-            }
         }
 
         div()
@@ -1521,7 +1420,6 @@ impl SettingsView {
                             },
                         ),
                         self.save_location_row(SaveTarget::Screenshots, theme, cx),
-                        self.filename_template_row(theme, cx),
                     ],
                 ),
             ))
@@ -1885,36 +1783,29 @@ impl SettingsView {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(10.0))
-                    .child(
-                        div()
-                            .w(px(18.0))
-                            .h(px(18.0))
-                            .flex_shrink_0()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icons::icon(icons::WALLPAPER, 16.0, theme.muted)),
-                    )
-                    .child(label_block(
+                    .justify_between()
+                    .gap(px(24.0))
+                    .child(row_label_with_icon(
                         theme,
+                        icons::WALLPAPER,
                         t(language, "settings.window_wallpaper"),
                         t(language, "settings.window_wallpaper_desc"),
-                    )),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_shrink_0()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(choose)
-                    .children(clear),
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_shrink_0()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(choose)
+                            .children(clear),
+                    ),
             )
             .child(
                 div()
                     .w_full()
+                    .pl(px(28.0))
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis_start()
@@ -2041,96 +1932,44 @@ impl SettingsView {
             )
     }
 
-    fn filename_template_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    fn filename_template_row(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
-        let editing = self.filename_edit.is_some();
-        let shown = self
-            .filename_edit
-            .as_ref()
-            .map(|edit| {
-                let cursor = edit.cursor_utf8();
-                format!("{}|{}", &edit.content[..cursor], &edit.content[cursor..])
-            })
-            .unwrap_or_else(|| self.settings.filename_template.clone());
-        let template = self
-            .filename_edit
-            .as_ref()
-            .map(|edit| edit.content.as_str())
-            .unwrap_or(self.settings.filename_template.as_str());
-        let preview = crate::storage::render_filename(template, 1920, 1080);
-        let action_label = t(
-            language,
-            if editing {
-                "settings.done"
-            } else {
-                "settings.edit"
-            },
-        );
-        let action = action_button(theme, action_label.to_owned())
-            .id("settings-filename-template-action")
-            .active(|style| style.opacity(0.88))
-            .on_click(cx.listener(|this, _, window, cx| {
-                if this.filename_edit.is_some() {
-                    this.finish_filename_edit(window, cx);
-                } else {
-                    this.begin_filename_edit(window, cx);
-                }
-            }));
-
-        let focus = self.filename_focus.clone();
-        let entity = cx.entity();
-        let input = editing.then(|| {
-            canvas(
-                |_, _, _| (),
-                move |bounds, _, window, cx| {
-                    window.handle_input(
-                        &focus,
-                        ElementInputHandler::new(bounds, entity.clone()),
-                        cx,
-                    );
-                },
-            )
-            .absolute()
-            .inset_0()
-            .into_any_element()
+        self.filename_input.update(cx, |state, _| {
+            state.set_editor_style(input_editor_style(theme));
         });
-
-        // gpui-kit exposes gpui-base's InputBase even with the component
-        // feature disabled. It supplies the text-input role, focus semantics,
-        // and semantic focus styling while the template editor below keeps
-        // its compact inline look.
-        let field_bg = if editing { theme.card } else { theme.control };
-        let field_border = if editing { theme.accent } else { theme.border };
-        let field = InputBase::new("settings-filename-template-field")
-            .track_focus(&self.filename_focus)
-            .focused(editing)
-            .styles(move |styles| {
-                styles.focused(move |style| style.border_color(theme.accent).bg(theme.card))
-            })
-            .relative()
-            .w(px(230.0))
+        let template = self.filename_input.read(cx).value().to_string();
+        let preview = crate::storage::render_filename(&template, 1920, 1080);
+        let focused = self
+            .filename_input
+            .read(cx)
+            .presentation()
+            .focus_handle()
+            .is_focused(window);
+        let field = div()
+            .id("settings-filename-field")
+            .w(px(260.0))
             .h(px(layout::BUTTON_HEIGHT))
             .flex_shrink_0()
             .px(px(9.0))
             .rounded(px(layout::BUTTON_RADIUS))
-            .bg(field_bg)
+            .bg(theme.control)
             .border_1()
-            .border_color(field_border)
+            .border_color(if focused { theme.accent } else { theme.border })
             .flex()
             .items_center()
             .overflow_hidden()
-            .whitespace_nowrap()
             .text_size(px(layout::CONTROL_TEXT))
-            .text_color(theme.text)
             .cursor_text()
-            .child(shown)
-            .children(input)
+            .child(Input::new(&self.filename_input))
+            .on_mouse_down_out(cx.listener(|_, _: &MouseDownEvent, window, cx| window.blur(cx)))
             .on_click(cx.listener(|this, _, window, cx| {
-                if this.filename_edit.is_some() {
-                    window.focus(&this.filename_focus, cx);
-                } else {
-                    this.begin_filename_edit(window, cx);
-                }
+                let focus = this
+                    .filename_input
+                    .read(cx)
+                    .presentation()
+                    .focus_handle()
+                    .clone();
+                window.focus(&focus, cx);
             }));
 
         div()
@@ -2154,19 +1993,11 @@ impl SettingsView {
                         t(language, "settings.filename_template"),
                         t(language, "settings.filename_template_desc"),
                     ))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_shrink_0()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(field)
-                            .child(action),
-                    ),
+                    .child(field),
             )
             .child(
                 div()
+                    .pl(px(28.0))
                     .text_size(px(layout::CAPTION))
                     .text_color(theme.muted)
                     .child(format!(
@@ -2177,206 +2008,35 @@ impl SettingsView {
             )
     }
 
-    fn begin_filename_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.filename_edit.is_none() {
-            self.filename_edit = Some(TemplateEdit::new(self.settings.filename_template.clone()));
-        }
-        window.focus(&self.filename_focus, cx);
-        self.status = None;
-        cx.notify();
-    }
-
-    fn finish_filename_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(edit) = self.filename_edit.as_ref() else {
-            return;
-        };
-        let template = edit.content.trim().to_owned();
+    fn commit_filename_template(
+        &mut self,
+        input: &Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let raw = input.read(cx).value().to_string();
+        let template: String = raw.trim().chars().take(120).collect();
         if template.is_empty() {
             let message =
                 t(self.settings.language, "settings.filename_template_invalid").to_owned();
             self.show_status(message, cx);
-            window.focus(&self.filename_focus, cx);
+            input.update(cx, |state, cx| {
+                state.set_value(self.settings.filename_template.clone(), window, cx);
+            });
+            return;
+        }
+        if template != raw {
+            input.update(cx, |state, cx| {
+                state.set_value(template.clone(), window, cx);
+            });
+        }
+        if template == self.settings.filename_template {
             return;
         }
         self.settings.filename_template = template.clone();
         settings_state::update(|settings| settings.filename_template = template);
-        self.filename_edit = None;
         let message = t(self.settings.language, "settings.filename_template_saved").to_owned();
         self.show_status(message, cx);
-        window.focus(&self.focus_handle, cx);
-    }
-
-    fn cancel_filename_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.filename_edit = None;
-        window.focus(&self.focus_handle, cx);
-        self.status = None;
-        cx.notify();
-    }
-
-    fn persist_filename_edit(&mut self, cx: &mut Context<Self>) {
-        let Some(edit) = self.filename_edit.as_ref() else {
-            return;
-        };
-        let template = edit.content.trim();
-        if template.is_empty() || template == self.settings.filename_template {
-            return;
-        }
-        self.settings.filename_template = template.to_owned();
-        settings_state::update(|settings| settings.filename_template = template.to_owned());
-        cx.notify();
-    }
-
-    fn handle_filename_key(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if self.filename_edit.is_none() {
-            return false;
-        }
-        let key = event.keystroke.key.as_str();
-        let command = event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
-        let extend = event.keystroke.modifiers.shift;
-        match key {
-            "escape" => {
-                self.cancel_filename_edit(window, cx);
-                return true;
-            }
-            "enter" => {
-                self.finish_filename_edit(window, cx);
-                return true;
-            }
-            "backspace" => {
-                self.backspace_filename(cx);
-                return true;
-            }
-            "delete" => {
-                self.delete_filename(cx);
-                return true;
-            }
-            "left" => {
-                let position = self
-                    .filename_edit
-                    .as_ref()
-                    .map(TemplateEdit::previous_boundary);
-                if let Some(position) = position {
-                    self.move_filename_cursor(position, extend, cx);
-                }
-                return true;
-            }
-            "right" => {
-                let position = self.filename_edit.as_ref().map(TemplateEdit::next_boundary);
-                if let Some(position) = position {
-                    self.move_filename_cursor(position, extend, cx);
-                }
-                return true;
-            }
-            "home" => {
-                self.move_filename_cursor(0, extend, cx);
-                return true;
-            }
-            "end" => {
-                let end = self.filename_edit.as_ref().map(|edit| edit.content.len());
-                if let Some(end) = end {
-                    self.move_filename_cursor(end, extend, cx);
-                }
-                return true;
-            }
-            _ => {}
-        }
-        if command && key == "a" {
-            if let Some(edit) = &mut self.filename_edit {
-                edit.anchor = 0;
-                edit.cursor = edit.content.len();
-                cx.notify();
-            }
-            return true;
-        }
-        if command && key == "c" {
-            self.copy_filename_selection(cx);
-            return true;
-        }
-        if command && key == "v" {
-            self.paste_filename(cx);
-            return true;
-        }
-        true
-    }
-
-    fn backspace_filename(&mut self, cx: &mut Context<Self>) {
-        if let Some(edit) = &mut self.filename_edit {
-            let selection = edit.selection();
-            let range = edit.marked.take().or_else(|| {
-                if !selection.is_empty() {
-                    Some(selection)
-                } else {
-                    let cursor = edit.cursor_utf8();
-                    (cursor > 0).then(|| edit.previous_boundary()..cursor)
-                }
-            });
-            if let Some(range) = range {
-                edit.content.replace_range(range.clone(), "");
-                edit.cursor = range.start;
-                edit.anchor = range.start;
-            }
-        }
-        self.persist_filename_edit(cx);
-    }
-
-    fn delete_filename(&mut self, cx: &mut Context<Self>) {
-        if let Some(edit) = &mut self.filename_edit {
-            let selection = edit.selection();
-            let range = if !selection.is_empty() {
-                Some(selection)
-            } else {
-                let cursor = edit.cursor_utf8();
-                (cursor < edit.content.len()).then(|| cursor..edit.next_boundary())
-            };
-            if let Some(range) = range {
-                edit.content.replace_range(range.clone(), "");
-                edit.cursor = range.start;
-                edit.anchor = range.start;
-            }
-        }
-        self.persist_filename_edit(cx);
-    }
-
-    fn move_filename_cursor(&mut self, cursor: usize, extend: bool, cx: &mut Context<Self>) {
-        if let Some(edit) = &mut self.filename_edit {
-            edit.move_cursor(cursor, extend);
-            cx.notify();
-        }
-    }
-
-    fn copy_filename_selection(&mut self, cx: &mut Context<Self>) {
-        let Some(edit) = self.filename_edit.as_ref() else {
-            return;
-        };
-        let selection = edit.selection();
-        if selection.is_empty() {
-            return;
-        }
-        let text = edit.content[selection].to_owned();
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
-    }
-
-    fn paste_filename(&mut self, cx: &mut Context<Self>) {
-        let mut text = None;
-        if let Some(item) = cx.read_from_clipboard() {
-            for entry in item.entries() {
-                if let ClipboardEntry::String(value) = entry {
-                    text = Some(value.text.clone());
-                    break;
-                }
-            }
-        }
-        if let Some(text) = text {
-            if let Some(edit) = &mut self.filename_edit {
-                edit.replace(None, &text);
-            }
-            self.persist_filename_edit(cx);
-        }
     }
 
     fn choose_directory(&mut self, target: SaveTarget, cx: &mut Context<Self>) {
@@ -2468,19 +2128,6 @@ impl SettingsView {
                     self.recording_format_row(theme, cx),
                     self.recording_frame_rate_row(theme, cx),
                     self.recording_quality_row(theme, cx),
-                    self.toggle_row(
-                        theme,
-                        cx,
-                        ToggleRow {
-                            id: "settings-record-segments",
-                            icon: icons::SEGMENTS,
-                            title_key: "settings.record_segments",
-                            description_key: "settings.record_segments_desc",
-                            value: self.settings.record_segments,
-                            set: |settings, value| settings.record_segments = value,
-                            refresh_pin: false,
-                        },
-                    ),
                     self.toggle_row(
                         theme,
                         cx,
@@ -2615,6 +2262,7 @@ impl SettingsView {
 
     fn shortcuts(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
+        let pin_hotkey = crate::hotkey::display_hotkey(&self.settings.pin_hotkey);
         let page = div()
             .flex()
             .flex_col()
@@ -2663,6 +2311,20 @@ impl SettingsView {
                         ),
                         info_row(
                             theme,
+                            t(language, "shortcuts.toggle_target"),
+                            t(language, "shortcuts.toggle_target_desc"),
+                            "Tab",
+                            Some(icons::WINDOW),
+                        ),
+                        info_row(
+                            theme,
+                            t(language, "shortcuts.nudge_selection"),
+                            t(language, "shortcuts.nudge_selection_desc"),
+                            t(language, "shortcuts.value.arrow_keys"),
+                            Some(icons::SELECT),
+                        ),
+                        info_row(
+                            theme,
                             t(language, "shortcuts.toggle_ratio"),
                             t(language, "shortcuts.toggle_ratio_desc"),
                             "R",
@@ -2684,10 +2346,118 @@ impl SettingsView {
                         ),
                         info_row(
                             theme,
+                            t(language, "shortcuts.copy_selection"),
+                            t(language, "shortcuts.copy_selection_desc"),
+                            t(language, "shortcuts.value.enter_or_double_click"),
+                            Some(icons::COPY),
+                        ),
+                        info_row(
+                            theme,
+                            t(language, "shortcuts.save_capture"),
+                            t(language, "shortcuts.save_capture_desc"),
+                            t(language, "shortcuts.value.cmd_ctrl_s"),
+                            Some(icons::SAVE),
+                        ),
+                        info_row(
+                            theme,
+                            t(language, "shortcuts.pin_current"),
+                            t(language, "shortcuts.pin_current_desc"),
+                            &pin_hotkey,
+                            Some(icons::PIN),
+                        ),
+                        info_row(
+                            theme,
+                            t(language, "shortcuts.toggle_toolbar"),
+                            t(language, "shortcuts.toggle_toolbar_desc"),
+                            "Space",
+                            Some(icons::MORE),
+                        ),
+                        info_row(
+                            theme,
+                            t(language, "shortcuts.hints"),
+                            t(language, "shortcuts.hints_desc"),
+                            "F1",
+                            Some(icons::SHORTCUTS),
+                        ),
+                        info_row(
+                            theme,
+                            t(language, "shortcuts.refresh"),
+                            t(language, "shortcuts.refresh_desc"),
+                            "F5",
+                            Some(icons::REFRESH),
+                        ),
+                        info_row(
+                            theme,
                             t(language, "shortcuts.cancel"),
                             t(language, "shortcuts.cancel_desc"),
                             "Esc",
                             Some(icons::CLOSE),
+                        ),
+                    ],
+                ),
+            ))
+            .child(group(
+                theme,
+                t(language, "settings.group.pin_keys"),
+                t(language, "settings.group.pin_keys_desc"),
+                card(
+                    theme,
+                    vec![
+                        info_row(
+                            theme,
+                            t(language, "shortcuts.pin_move"),
+                            t(language, "shortcuts.pin_move_desc"),
+                            t(language, "shortcuts.value.drag"),
+                            Some(icons::PIN),
+                        ),
+                        info_row(
+                            theme,
+                            t(language, "shortcuts.pin_select_text"),
+                            t(language, "shortcuts.pin_select_text_desc"),
+                            t(language, "shortcuts.value.shift_drag"),
+                            Some(icons::TEXT),
+                        ),
+                        info_row(
+                            theme,
+                            t(language, "shortcuts.pin_word"),
+                            t(language, "shortcuts.pin_word_desc"),
+                            t(language, "shortcuts.value.double_click"),
+                            Some(icons::TEXT),
+                        ),
+                        info_row(
+                            theme,
+                            t(language, "shortcuts.pin_copy_text"),
+                            t(language, "shortcuts.pin_copy_text_desc"),
+                            t(language, "shortcuts.value.cmd_ctrl_c"),
+                            Some(icons::COPY),
+                        ),
+                        info_row(
+                            theme,
+                            t(language, "shortcuts.pin_select_all"),
+                            t(language, "shortcuts.pin_select_all_desc"),
+                            t(language, "shortcuts.value.cmd_ctrl_a"),
+                            Some(icons::SELECT),
+                        ),
+                        info_row(
+                            theme,
+                            t(language, "shortcuts.pin_zoom"),
+                            t(language, "shortcuts.pin_zoom_desc"),
+                            t(language, "shortcuts.value.wheel"),
+                            Some(icons::IMAGE),
+                        ),
+                        info_row(
+                            theme,
+                            t(language, "shortcuts.pin_opacity"),
+                            t(language, "shortcuts.pin_opacity_desc"),
+                            t(language, "shortcuts.value.shift_wheel"),
+                            Some(icons::PALETTE),
+                        ),
+                        info_row(
+                            theme,
+                            t(language, "shortcuts.pin_menu"),
+                            t(language, "shortcuts.pin_menu_desc"),
+                            t(language, "shortcuts.value.right_click"),
+                            Some(icons::MORE),
                         ),
                     ],
                 ),
@@ -2838,118 +2608,6 @@ impl SettingsView {
     }
 }
 
-impl EntityInputHandler for SettingsView {
-    fn text_for_range(
-        &mut self,
-        range_utf16: Range<usize>,
-        actual_range: &mut Option<Range<usize>>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<String> {
-        let edit = self.filename_edit.as_ref()?;
-        let range = edit.range_from_utf16(&range_utf16);
-        actual_range.replace(edit.range_to_utf16(&range));
-        Some(edit.content[range].to_string())
-    }
-
-    fn selected_text_range(
-        &mut self,
-        _ignore_disabled_input: bool,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<UTF16Selection> {
-        let edit = self.filename_edit.as_ref()?;
-        let selection = edit.selection();
-        Some(UTF16Selection {
-            range: edit.range_to_utf16(&selection),
-            reversed: edit.anchor > edit.cursor,
-        })
-    }
-
-    fn marked_text_range(
-        &self,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<Range<usize>> {
-        let edit = self.filename_edit.as_ref()?;
-        edit.marked.as_ref().map(|range| edit.range_to_utf16(range))
-    }
-
-    fn unmark_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(edit) = &mut self.filename_edit {
-            edit.marked = None;
-            window.notify_text_input_changed(&self.filename_focus);
-            cx.notify();
-        }
-    }
-
-    fn replace_text_in_range(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        new_text: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(edit) = &mut self.filename_edit {
-            let range = range_utf16
-                .as_ref()
-                .map(|range| edit.range_from_utf16(range));
-            edit.marked = None;
-            edit.replace(range, new_text);
-            window.notify_text_input_changed(&self.filename_focus);
-        }
-        self.persist_filename_edit(cx);
-    }
-
-    fn replace_and_mark_text_in_range(
-        &mut self,
-        range_utf16: Option<Range<usize>>,
-        new_text: &str,
-        _new_selected_range: Option<Range<usize>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(edit) = &mut self.filename_edit {
-            let range = range_utf16
-                .as_ref()
-                .map(|range| edit.range_from_utf16(range));
-            edit.replace(range, new_text);
-            window.notify_text_input_changed(&self.filename_focus);
-        }
-        self.persist_filename_edit(cx);
-    }
-
-    fn bounds_for_range(
-        &mut self,
-        _range_utf16: Range<usize>,
-        element_bounds: Bounds<Pixels>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<Bounds<Pixels>> {
-        self.filename_edit.as_ref()?;
-        Some(element_bounds)
-    }
-
-    fn character_index_for_point(
-        &mut self,
-        _point: Point<Pixels>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<usize> {
-        let edit = self.filename_edit.as_ref()?;
-        Some(edit.offset_to_utf16(edit.content.len()))
-    }
-
-    fn text_length_utf16(
-        &mut self,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<usize> {
-        let edit = self.filename_edit.as_ref()?;
-        Some(edit.offset_to_utf16(edit.content.len()))
-    }
-}
-
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::for_window(window, self.accent);
@@ -2992,16 +2650,15 @@ impl Render for SettingsView {
                 // quitting the menu-bar app stays on the tray menu.
                 if command && matches!(event.keystroke.key.as_str(), "w" | "q") {
                     platform_window::set_macos_accessory_activation_policy();
+                    let input = this.filename_input.clone();
+                    this.commit_filename_template(&input, window, cx);
                     window.remove_window();
-                    return;
-                }
-                if this.handle_filename_key(event, window, cx) {
                     return;
                 }
                 this.handle_shortcut_key(event, window, cx);
             }))
             .child(self.sidebar(&theme, cx))
-            .child(self.content(&theme, cx))
+            .child(self.content(&theme, window, cx))
             .children(titlebar)
             .children(select_backdrop)
             .children(select_popup)
@@ -3052,7 +2709,13 @@ pub fn open_settings(cx: &mut App) {
     };
 
     match gpui_kit::open_window(options, cx, |window, cx| {
-        window.on_window_should_close(cx, |window, cx| {
+        let view = cx.new(|cx| SettingsView::new(window, cx));
+        let close_view = view.clone();
+        window.on_window_should_close(cx, move |window, cx| {
+            close_view.update(cx, |this, cx| {
+                let input = this.filename_input.clone();
+                this.commit_filename_template(&input, window, cx);
+            });
             let handle = window.window_handle();
             SETTINGS_WINDOWS.with(|handles| {
                 handles
@@ -3066,7 +2729,6 @@ pub fn open_settings(cx: &mut App) {
             }
             true
         });
-        let view = cx.new(SettingsView::new);
         let focus = view.read(cx).focus_handle.clone();
         window.defer(cx, move |window, cx| window.focus(&focus, cx));
         view
@@ -3309,9 +2971,9 @@ fn info_row(
 }
 
 fn toggle(theme: &Theme, value: bool, id: &'static str) -> impl IntoElement {
-    // Native-style 36x20 switch: a 16px white thumb travels 16px inside a
-    // 1px border. The thumb and the accent wash are driven by one spring, so
-    // an interrupted click reverses from where the thumb actually is.
+    // Native-style 36x20 switch: a 16px white thumb travels 16px with a 2px
+    // inset. The thumb and the accent wash are driven by one spring, so an
+    // interrupted click reverses from where the thumb actually is.
     let accent = theme.accent;
     let off = theme.toggle_off;
     let knob = theme.knob;
@@ -3326,8 +2988,6 @@ fn toggle(theme: &Theme, value: bool, id: &'static str) -> impl IntoElement {
         .h(px(20.0))
         .flex_shrink_0()
         .rounded(px(10.0))
-        .border_1()
-        .border_color(rgba(0x00000000))
         .bg(off)
         .with_spring(
             SharedString::from(format!("settings-toggle-{id}")),
@@ -3345,8 +3005,8 @@ fn toggle(theme: &Theme, value: bool, id: &'static str) -> impl IntoElement {
                     .child(
                         div()
                             .absolute()
-                            .left(px(1.0 + progress.clamp(0.0, 1.0) * 18.0))
-                            .top(px(1.0))
+                            .left(px(2.0 + progress.clamp(0.0, 1.0) * 16.0))
+                            .top(px(2.0))
                             .w(px(16.0))
                             .h(px(16.0))
                             .rounded(px(8.0))
@@ -3354,6 +3014,16 @@ fn toggle(theme: &Theme, value: bool, id: &'static str) -> impl IntoElement {
                     )
             },
         )
+}
+
+fn input_editor_style(theme: &Theme) -> InputEditorStyle {
+    InputEditorStyle {
+        foreground: theme.text.into(),
+        muted_foreground: theme.muted.into(),
+        selection: Hsla::from(theme.accent).opacity(0.35),
+        caret: theme.accent.into(),
+        ..Default::default()
+    }
 }
 
 fn background_label_key(background: WindowBackground) -> &'static str {
@@ -3403,8 +3073,8 @@ fn segmented() -> Div {
 fn segment(theme: &Theme, label: &str, selected: bool) -> Div {
     let hover = theme.control_hover;
     div()
-        .h(px(layout::BUTTON_HEIGHT))
-        .px(px(12.0))
+        .h(px(layout::SEGMENT_HEIGHT))
+        .px(px(8.0))
         .rounded(px(layout::BUTTON_RADIUS))
         .flex()
         .flex_shrink_0()

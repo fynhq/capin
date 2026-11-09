@@ -190,6 +190,8 @@ struct Draft {
     tool: Tool,
     start: PhysicalPoint,
     current: PhysicalPoint,
+    /// Constrain rectangle-like tools to a square/circle while Shift is held.
+    shift: bool,
 }
 
 struct MoveDraft {
@@ -843,11 +845,8 @@ impl EditorView {
         let width = 250.0_f32.min((window_width - 16.0).max(120.0));
         let height = 84.0;
         let left = f32::from(info.origin.x).clamp(8.0, (window_width - width - 8.0).max(8.0));
-        let mut top = f32::from(info.origin.y) - height - 6.0;
-        if top < 8.0 {
-            top = (f32::from(info.origin.y) + f32::from(info.size.height) + 6.0)
-                .min((window_height - height - 8.0).max(8.0));
-        }
+        let top =
+            crate::ui::popover_top(info, height, window_height, Some(self.toolbar_rect(window)));
         Some(Bounds {
             origin: point(px(left), px(top)),
             size: size(px(width), px(height)),
@@ -919,6 +918,16 @@ impl EditorView {
         cx.drop_image(old_image, None);
         for image in old_blur_images {
             cx.drop_image(image, None);
+        }
+    }
+
+    /// Releases the editor's atlas entries before the window is removed.
+    /// `on_release` runs after the window has left `App::windows`, so dropping
+    /// only there cannot reach the retained Windows renderer.
+    pub(crate) fn release_images(&mut self, cx: &mut Context<Self>) {
+        cx.drop_image(self.image.clone(), None);
+        for image in &self.blur_images {
+            cx.drop_image(image.clone(), None);
         }
     }
 
@@ -2337,10 +2346,10 @@ impl EditorView {
             .flex()
             .items_center()
             .justify_center()
-            .bg(accent)
-            .hover(move |style| style.opacity(0.86))
+            .hover(move |style| style.bg(hover))
+            .active(|style| style.opacity(0.85))
             .on_click(cx.listener(|this, _, _, cx| this.export(true, cx)))
-            .child(icons::icon(icons::COPY, 18.0, chrome.accent_text))
+            .child(icons::icon(icons::COPY, 18.0, text))
             .into_any_element();
 
         let save_label = t(language, "editor.save").to_owned();
@@ -2437,6 +2446,7 @@ impl EditorView {
                     let handles = cx.windows();
                     cx.defer(move |cx| crate::windows::close_capture_auxiliary(cx, handles));
                 } else {
+                    this.release_images(cx);
                     window.remove_window();
                 }
             }))
@@ -3785,6 +3795,9 @@ impl Render for EditorView {
                         cx.notify();
                         return;
                     }
+                    if this.text_edit.is_some() {
+                        this.commit_text(cx);
+                    }
                     let hit = this.document.hit_test(point);
                     // Text edits are a double-click affordance on the object
                     // itself, not on the Select tool, so a just-created text
@@ -3795,14 +3808,18 @@ impl Render for EditorView {
                         cx.stop_propagation();
                         return;
                     }
-                    // The selected object stays draggable with the drawing tool
-                    // still active. Without this, clicking the shape just drawn
-                    // started another draft and the object could never be moved.
+                    // Clicking any existing object selects it and starts a
+                    // move, even while a drawing tool is still active. Without
+                    // this, only the shape that had just been drawn could be
+                    // moved; older annotations could never be selected again.
                     if this.polyline_draft.is_none()
-                        && let Some(id) = this.document.selected()
-                        && hit == Some(id)
+                        && let Some(id) = hit
                     {
                         this.draft = None;
+                        this.resize_draft = None;
+                        if this.document.selected() != Some(id) {
+                            this.select_annotation(Some(id));
+                        }
                         this.move_draft = Some(MoveDraft {
                             id,
                             start: point,
@@ -3854,9 +3871,6 @@ impl Render for EditorView {
                         cx.notify();
                         return;
                     }
-                    if this.text_edit.is_some() {
-                        this.commit_text(cx);
-                    }
                     if this.tool == Tool::Select {
                         let selected = hit;
                         this.resize_draft = None;
@@ -3905,6 +3919,7 @@ impl Render for EditorView {
                         tool: this.tool,
                         start: point,
                         current: point,
+                        shift: event.modifiers.shift,
                     });
                     cx.notify();
                 }),
@@ -3950,6 +3965,7 @@ impl Render for EditorView {
                     return;
                 };
                 draft.current = point;
+                draft.shift = event.modifiers.shift;
                 cx.notify();
             }))
             .on_mouse_up(
@@ -3998,12 +4014,14 @@ impl Render for EditorView {
                         return;
                     }
 
-                    let Some(draft) = this.draft.take() else {
+                    let Some(mut draft) = this.draft.take() else {
                         return;
                     };
                     let point = this
                         .to_image_point(event.position, window)
                         .unwrap_or(draft.current);
+                    draft.current = point;
+                    draft.shift = event.modifiers.shift;
                     if let Some(shape) = finalize_shape(&draft, point) {
                         this.document.add(shape, this.effective_style());
                         this.status = None;
@@ -4060,6 +4078,12 @@ impl Render for EditorView {
             .when(!inline, |root| root.bg(self.chrome.canvas))
             .text_color(self.chrome.text)
             .track_focus(&self.focus_handle)
+            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
+                if let Some(draft) = &mut this.draft {
+                    draft.shift = event.modifiers.shift;
+                    cx.notify();
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, _: &MouseDownEvent, _window, cx| {
@@ -4243,6 +4267,7 @@ impl Render for EditorView {
                         let handles = cx.windows();
                         cx.defer(move |cx| crate::windows::close_capture_auxiliary(cx, handles));
                     } else {
+                        this.release_images(cx);
                         window.remove_window();
                     }
                     return;
@@ -4320,6 +4345,38 @@ impl Render for EditorView {
                         self.image_scale(window) * 100.0
                     ))
             }))
+            .children((inline && self.toolbar_hidden).then(|| {
+                let language = settings_state::get().language;
+                div()
+                    .id("editor-toolbar-recall")
+                    .absolute()
+                    .left(px(0.0))
+                    .right(px(0.0))
+                    .bottom(px(12.0))
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .id("editor-toolbar-recall-chip")
+                            .occlude()
+                            .px(px(10.0))
+                            .py(px(6.0))
+                            .rounded(px(6.0))
+                            .bg(self.chrome.surface_strong)
+                            .border_1()
+                            .border_color(self.chrome.border)
+                            .shadow(self.chrome.shadow())
+                            .text_size(px(11.0))
+                            .text_color(self.chrome.text)
+                            .cursor_pointer()
+                            .hover(|style| style.bg(self.chrome.hover))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.toolbar_hidden = false;
+                                cx.notify();
+                            }))
+                            .child(format!("{} · Space", t(language, "editor.show_toolbar"))),
+                    )
+            }))
     }
 }
 
@@ -4385,11 +4442,11 @@ fn open_editor_with_pin(frame: RgbaFrame, pin_target: Option<u64>, cx: &mut App)
 fn finalize_shape(draft: &Draft, end: PhysicalPoint) -> Option<Shape> {
     match draft.tool {
         Tool::Rect => {
-            let rect = normalized_rect(draft.start, end);
+            let rect = constrained_rect(draft.start, end, draft.shift);
             (rect.size.width >= 2 && rect.size.height >= 2).then_some(Shape::Rect(rect))
         }
         Tool::Ellipse => {
-            let rect = normalized_rect(draft.start, end);
+            let rect = constrained_rect(draft.start, end, draft.shift);
             (rect.size.width >= 2 && rect.size.height >= 2).then_some(Shape::Ellipse(rect))
         }
         Tool::Blur => {
@@ -4437,6 +4494,21 @@ fn normalized_rect(start: PhysicalPoint, end: PhysicalPoint) -> PhysicalRect {
     let right = start.x.max(end.x);
     let bottom = start.y.max(end.y);
     PhysicalRect::new(left, top, (right - left) as u32, (bottom - top) as u32)
+}
+
+/// Shift keeps the drag direction but forces equal width and height, which
+/// turns rectangles into squares and ellipses into circles.
+fn constrained_rect(start: PhysicalPoint, end: PhysicalPoint, square: bool) -> PhysicalRect {
+    if !square {
+        return normalized_rect(start, end);
+    }
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    let side = dx.abs().max(dy.abs());
+    let sign_x = if dx == 0 { 1 } else { dx.signum() };
+    let sign_y = if dy == 0 { 1 } else { dy.signum() };
+    let corner = PhysicalPoint::new(start.x + side * sign_x, start.y + side * sign_y);
+    normalized_rect(start, corner)
 }
 
 fn distance(a: PhysicalPoint, b: PhysicalPoint) -> f32 {

@@ -3,21 +3,21 @@ use std::mem::size_of;
 use std::path::PathBuf;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use windows::Win32::Foundation::{COLORREF, HWND, POINT};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
+    INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT, ReleaseCapture, SendInput,
 };
 use windows::Win32::UI::Shell::{
     FOLDERID_Pictures, FOLDERID_Videos, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetWindowLongPtrW, HWND_TOPMOST, LWA_ALPHA, SPI_GETDESKWALLPAPER, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetForegroundWindow, SetLayeredWindowAttributes,
-    SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, SystemParametersInfoW,
-    WDA_EXCLUDEFROMCAPTURE, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
-    WindowFromPoint,
+    GWL_EXSTYLE, GetWindowLongPtrW, HTCAPTION, HWND_TOPMOST, LWA_ALPHA, SPI_GETDESKWALLPAPER,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow,
+    SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos,
+    SystemParametersInfoW, WDA_EXCLUDEFROMCAPTURE, WM_NCLBUTTONDOWN, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WindowFromPoint,
 };
 use windows::core::GUID;
 
@@ -150,6 +150,27 @@ fn platform_error(operation: &'static str, error: impl std::fmt::Display) -> Pla
         operation,
         message: error.to_string(),
     }
+}
+
+pub(super) fn begin_window_drag(window: &impl HasWindowHandle) -> Result<(), PlatformWindowError> {
+    let handle = window.window_handle()?;
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return Err(PlatformWindowError::NotWin32);
+    };
+    let hwnd = HWND(win32.hwnd.get() as *mut c_void);
+    // SAFETY: hwnd belongs to a live window created by the caller. The
+    // message is processed synchronously and returns once the OS move loop
+    // ends on left-button release.
+    unsafe {
+        let _ = ReleaseCapture();
+        SendMessageW(
+            hwnd,
+            WM_NCLBUTTONDOWN,
+            Some(WPARAM(HTCAPTION as usize)),
+            Some(LPARAM(0)),
+        );
+    }
+    Ok(())
 }
 
 pub(super) fn native_window_id(window: &impl HasWindowHandle) -> Option<u64> {

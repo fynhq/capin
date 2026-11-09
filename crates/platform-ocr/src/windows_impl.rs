@@ -4,7 +4,7 @@ use windows::Media::Ocr::OcrEngine;
 use windows::Security::Cryptography::CryptographicBuffer;
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
 
-use crate::{OcrError, OcrLine, build_line};
+use crate::{OcrError, OcrLine, build_line, build_line_from_words};
 
 pub(super) fn recognize_text(frame: &RgbaFrame) -> Result<Vec<OcrLine>, OcrError> {
     let frame = frame.clone();
@@ -52,6 +52,7 @@ fn recognize_on_thread(frame: &RgbaFrame) -> Result<Vec<OcrLine>, OcrError> {
             .to_string();
         let words = line.Words().map_err(platform_error("OcrLine.Words"))?;
         let word_count = words.Size().map_err(platform_error("Words.Size"))?;
+        let mut word_items: Vec<(String, PhysicalRect)> = Vec::new();
         let mut bounds: Option<(f32, f32, f32, f32)> = None;
         for word_index in 0..word_count {
             let word = words
@@ -60,6 +61,10 @@ fn recognize_on_thread(frame: &RgbaFrame) -> Result<Vec<OcrLine>, OcrError> {
             let rect = word
                 .BoundingRect()
                 .map_err(platform_error("OcrWord.BoundingRect"))?;
+            let text = word
+                .Text()
+                .map_err(platform_error("OcrWord.Text"))?
+                .to_string();
             let (left, top) = (rect.X, rect.Y);
             let (right, bottom) = (rect.X + rect.Width, rect.Y + rect.Height);
             bounds = Some(match bounds {
@@ -68,8 +73,19 @@ fn recognize_on_thread(frame: &RgbaFrame) -> Result<Vec<OcrLine>, OcrError> {
                 }
                 None => (left, top, right, bottom),
             });
+            word_items.push((
+                text,
+                PhysicalRect::new(
+                    left.max(0.0).round() as i32,
+                    top.max(0.0).round() as i32,
+                    (right - left).max(1.0).round() as u32,
+                    (bottom - top).max(1.0).round() as u32,
+                ),
+            ));
         }
-        if let Some((left, top, right, bottom)) = bounds {
+        if let Some(line) = build_line_from_words(&word_items) {
+            result.push(line);
+        } else if let Some((left, top, right, bottom)) = bounds {
             let rect = PhysicalRect::new(
                 left.max(0.0).round() as i32,
                 top.max(0.0).round() as i32,

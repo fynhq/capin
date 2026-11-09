@@ -122,6 +122,84 @@ pub(crate) fn build_line(text: String, rect: PhysicalRect) -> OcrLine {
     OcrLine { text, rect, chars }
 }
 
+/// Builds a line from word-level OCR hits. Windows returns every CJK glyph as
+/// its own "word", so joining word text with spaces inserted a gap between
+/// each Chinese character both on screen and when copied. Character boxes now
+/// follow the real word rectangles instead of being spread evenly across the
+/// whole line, which also makes text selection land on the right glyph.
+#[allow(dead_code)] // Windows backend only
+pub(crate) fn build_line_from_words(words: &[(String, PhysicalRect)]) -> Option<OcrLine> {
+    let words: Vec<(&str, PhysicalRect)> = words
+        .iter()
+        .filter_map(|(text, rect)| {
+            let text = text.trim();
+            (!text.is_empty() && rect.size.width > 0).then_some((text, *rect))
+        })
+        .collect();
+    if words.is_empty() {
+        return None;
+    }
+
+    let mut text = String::new();
+    let mut chars: Vec<OcrChar> = Vec::new();
+    let mut line: Option<PhysicalRect> = None;
+    let mut previous: Option<PhysicalRect> = None;
+    let mut previous_char: Option<char> = None;
+    for (word, rect) in &words {
+        if let (Some(prev_char), Some(prev_rect), Some(first)) =
+            (previous_char, previous, word.chars().next())
+            && needs_space(prev_char, first)
+        {
+            let left = prev_rect.origin.x + prev_rect.size.width as i32;
+            let width = (rect.origin.x - left).max(1) as u32;
+            chars.push(OcrChar {
+                ch: ' ',
+                rect: PhysicalRect::new(left, rect.origin.y, width, rect.size.height),
+            });
+            text.push(' ');
+        }
+        let mut word_chars = layout_chars(word, *rect);
+        text.push_str(word);
+        chars.append(&mut word_chars);
+        line = Some(match line {
+            Some(current) => union_rect(current, *rect),
+            None => *rect,
+        });
+        previous = Some(*rect);
+        previous_char = word.chars().last();
+    }
+
+    Some(OcrLine {
+        text: text.trim_end().to_owned(),
+        rect: line?,
+        chars,
+    })
+}
+
+#[allow(dead_code)] // Windows backend only
+fn needs_space(previous: char, next: char) -> bool {
+    let latin = |ch: char| ch.is_ascii_alphanumeric() || ch.is_ascii_punctuation();
+    if !latin(previous) || !latin(next) {
+        return false;
+    }
+    if matches!(previous, '(' | '[' | '{' | '"' | '\'') {
+        return false;
+    }
+    !matches!(
+        next,
+        ')' | ']' | '}' | ',' | '.' | ';' | ':' | '?' | '!' | '%' | '"' | '\''
+    )
+}
+
+#[allow(dead_code)] // Windows backend only
+fn union_rect(a: PhysicalRect, b: PhysicalRect) -> PhysicalRect {
+    let left = a.origin.x.min(b.origin.x);
+    let top = a.origin.y.min(b.origin.y);
+    let right = (a.origin.x + a.size.width as i32).max(b.origin.x + b.size.width as i32);
+    let bottom = (a.origin.y + a.size.height as i32).max(b.origin.y + b.size.height as i32);
+    PhysicalRect::new(left, top, (right - left) as u32, (bottom - top) as u32)
+}
+
 #[allow(dead_code)]
 fn layout_chars(text: &str, rect: PhysicalRect) -> Vec<OcrChar> {
     if text.is_empty() || rect.size.width == 0 {
@@ -206,6 +284,33 @@ mod tests {
         let last = line.chars.last().unwrap().rect;
         assert!(last.right() <= 130);
         assert!(line.chars.iter().all(|ch| ch.rect.size.height == 24));
+    }
+
+    #[test]
+    fn word_layout_keeps_cjk_words_tight() {
+        let line = build_line_from_words(&[
+            ("\u{4f60}".to_owned(), PhysicalRect::new(10, 0, 20, 20)),
+            ("\u{597d}".to_owned(), PhysicalRect::new(32, 0, 20, 20)),
+            (
+                "\u{4e16}\u{754c}".to_owned(),
+                PhysicalRect::new(54, 0, 40, 20),
+            ),
+        ])
+        .unwrap();
+        assert_eq!(line.text, "\u{4f60}\u{597d}\u{4e16}\u{754c}");
+        assert!(!line.chars.iter().any(|ch| ch.ch == ' '));
+        assert_eq!(line.chars[1].rect.origin.x, 32);
+    }
+
+    #[test]
+    fn word_layout_keeps_spaces_between_latin_words() {
+        let line = build_line_from_words(&[
+            ("Hello,".to_owned(), PhysicalRect::new(0, 0, 50, 20)),
+            ("world".to_owned(), PhysicalRect::new(58, 0, 50, 20)),
+        ])
+        .unwrap();
+        assert_eq!(line.text, "Hello, world");
+        assert_eq!(line.chars.iter().filter(|ch| ch.ch == ' ').count(), 1);
     }
 
     #[test]

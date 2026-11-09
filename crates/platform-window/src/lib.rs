@@ -201,6 +201,24 @@ pub fn set_click_through(
     }
 }
 
+/// Starts a native window-move drag from a left-button press.
+///
+/// GPUI's Windows backend does not implement `Window::start_window_move`, so
+/// pin windows otherwise never follow the cursor. This sends the same
+/// `WM_NCLBUTTONDOWN`/`HTCAPTION` pair a native title bar uses, which keeps
+/// the move loop and cursor capture in the OS.
+pub fn begin_window_drag(window: &impl HasWindowHandle) -> Result<(), PlatformWindowError> {
+    #[cfg(target_os = "windows")]
+    {
+        windows::begin_window_drag(window)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+        Err(PlatformWindowError::UnsupportedPlatform)
+    }
+}
+
 /// Whether the platform's window capture already includes the native window
 /// shadow. macOS 13's ScreenCaptureKit path does; macOS 14+ can ignore it.
 pub fn window_capture_includes_native_shadow() -> bool {

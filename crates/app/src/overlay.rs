@@ -60,6 +60,44 @@ pub fn close_open_overlays(cx: &mut App) {
     OVERLAY_VIEWS.with(|views| views.borrow_mut().clear());
 }
 
+/// Drops the full-monitor display textures held by live overlays. Closing a
+/// Windows window does not immediately free its sprite atlas, so doing this
+/// before the window list is torn down keeps one capture from leaving a
+/// screen-sized GPU allocation behind.
+pub(crate) fn release_textures(cx: &mut App) {
+    release_texture_views(cx, None);
+}
+
+/// Same as [`release_textures`], but keeps the overlay that is turning into
+/// the inline editor: it still paints the frozen desktop behind the editor.
+pub(crate) fn release_textures_except(cx: &mut App, keep: u64) {
+    release_texture_views(cx, Some(keep));
+}
+
+fn release_texture_views(cx: &mut App, keep: Option<u64>) {
+    let views: Vec<Entity<OverlayView>> = OVERLAY_VIEWS.with(|views| {
+        views
+            .borrow()
+            .iter()
+            .filter_map(WeakEntity::upgrade)
+            .collect()
+    });
+    for view in views {
+        if keep == Some(view.entity_id().as_u64()) {
+            continue;
+        }
+        view.update(cx, |this, cx| {
+            cx.drop_image(this.image.clone(), None);
+            if let Some(magnifier) = this.magnifier.take() {
+                cx.drop_image(magnifier.image, None);
+            }
+            if let Some(editor) = this.editor.clone() {
+                editor.update(cx, |editor, cx| editor.release_images(cx));
+            }
+        });
+    }
+}
+
 /// Pins whatever the open overlay or its inline editor currently shows. The
 /// global pin shortcut is handled outside the window event loop, so it has to
 /// route back to the same action as the toolbar pin button.
@@ -452,6 +490,16 @@ impl OverlayView {
         // Windows and elements are recognized by hovering; dragging is still
         // reserved for a free region.
         session.set_window_targeting(true);
+        cx.on_release(|this, cx| {
+            // The Windows backend can keep a closed window's renderer alive
+            // briefly; drop the display-list textures explicitly so each
+            // capture does not leave a full-screen image in GPU memory.
+            cx.drop_image(this.image.clone(), None);
+            if let Some(magnifier) = this.magnifier.take() {
+                cx.drop_image(magnifier.image, None);
+            }
+        })
+        .detach();
         Self {
             session,
             image,
@@ -1178,7 +1226,9 @@ impl OverlayView {
         let handles = cx.windows();
         let current = window.window_handle();
         let view = cx.entity();
+        let keep = view.entity_id().as_u64();
         cx.defer(move |cx| {
+            crate::overlay::release_textures_except(cx, keep);
             crate::windows::close_capture_auxiliary_except(cx, handles, current);
             let _ = current.update(cx, |_, window, cx| {
                 let editor = view.update(cx, |this, cx| {
@@ -1815,11 +1865,12 @@ impl OverlayView {
             8.0,
             (f32::from(self.window_size.width) - width - 8.0).max(8.0),
         );
-        let mut top = f32::from(info.origin.y) - height - 6.0;
-        if top < 8.0 {
-            top = (f32::from(info.origin.y) + f32::from(info.size.height) + 6.0)
-                .min((f32::from(self.window_size.height) - height - 8.0).max(8.0));
-        }
+        let top = crate::ui::popover_top(
+            info,
+            height,
+            f32::from(self.window_size.height),
+            self.toolbar_rect(),
+        );
 
         let mut corner_row = div().flex().flex_row().items_center().gap(px(3.0));
         for radius in [0u32, 8, 16, 24] {
@@ -2013,11 +2064,11 @@ impl OverlayView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(self.chrome.accent)
-                .hover(|style| style.opacity(0.86))
+                .hover(|style| style.bg(self.chrome.hover))
+                .active(|style| style.opacity(0.85))
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| this.copy_selected(cx)))
-                .child(icons::icon(icons::COPY, 17.0, self.chrome.accent_text)),
+                .child(icons::icon(icons::COPY, 17.0, self.chrome.icon)),
         );
         let save_label = t(language, "editor.save").to_owned();
         actions = actions.child(
@@ -2312,7 +2363,6 @@ impl OverlayView {
 
     fn close_overlays(&self, cx: &mut Context<Self>) {
         let handles = cx.windows();
-        OVERLAY_VIEWS.with(|views| views.borrow_mut().clear());
         cx.defer(move |cx| {
             crate::windows::close_capture_auxiliary(cx, handles);
         });

@@ -3,6 +3,9 @@
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+use crate::chrome_theme::ChromeTheme;
+use crate::icons;
+
 /// Centers a window on the primary display, or falls back to a stable origin
 /// when no display information is available.
 pub fn centered_bounds(cx: &App, width: f32, height: f32) -> Bounds<Pixels> {
@@ -21,24 +24,93 @@ pub fn centered_bounds(cx: &App, width: f32, height: f32) -> Bounds<Pixels> {
     }
 }
 
-/// Compact text button used by the recording and scrolling bars.
-pub fn flat_button<View: 'static>(
+/// Places a popover beside its anchor without covering the anchor or another
+/// chrome bar. Preferring the space below keeps a card from clamping back over
+/// the info bar when the selection sits near the bottom of the screen.
+pub fn popover_top(
+    anchor: Bounds<Pixels>,
+    height: f32,
+    window_height: f32,
+    avoid: Option<Bounds<Pixels>>,
+) -> f32 {
+    const GAP: f32 = 6.0;
+    let above = f32::from(anchor.origin.y) - height - GAP;
+    let below = f32::from(anchor.origin.y) + f32::from(anchor.size.height) + GAP;
+    let fits_above = above >= 8.0;
+    let fits_below = below + height <= window_height - 8.0;
+    let overlaps = |top: f32| {
+        avoid.is_some_and(|bar| {
+            top < f32::from(bar.origin.y) + f32::from(bar.size.height)
+                && top + height > f32::from(bar.origin.y)
+        })
+    };
+    if fits_below && !overlaps(below) {
+        return below;
+    }
+    if fits_above && !overlaps(above) {
+        return above;
+    }
+    if fits_below {
+        return below;
+    }
+    if fits_above {
+        return above;
+    }
+    8.0
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BarButtonTone {
+    Neutral,
+    Accent,
+    Danger,
+}
+
+/// Compact action button used by the long-capture and recording bars. The
+/// native flyout surface and one leading glyph keep both bars consistent with
+/// the screenshot chrome instead of the old dark text-only pills.
+pub fn bar_button<View: 'static>(
     id: &'static str,
     label: String,
-    color: Rgba,
+    icon: Option<&'static [u8]>,
+    tone: BarButtonTone,
+    theme: &ChromeTheme,
     cx: &mut Context<View>,
     action: fn(&mut View, &mut Context<View>),
-) -> impl IntoElement + use<View> {
-    let hover = rgba(0xFFFFFF1A);
+) -> AnyElement {
+    let theme = *theme;
+    let (background, foreground) = match tone {
+        BarButtonTone::Neutral => (rgba(0x00000000), theme.text),
+        BarButtonTone::Accent => (theme.accent, theme.accent_text),
+        BarButtonTone::Danger => (rgb(0xFF453A), rgb(0xFFFFFF)),
+    };
+    let hover = match tone {
+        BarButtonTone::Neutral => theme.hover,
+        BarButtonTone::Accent => opacity_color(theme.accent, 0.88),
+        BarButtonTone::Danger => opacity_color(rgb(0xFF453A), 0.88),
+    };
     div()
         .id(id)
+        .h(px(28.0))
         .px(px(10.0))
-        .py(px(5.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(5.0))
+        .flex_shrink_0()
         .rounded(px(6.0))
-        .bg(rgba(0xFFFFFF14))
-        .text_size(px(12.0))
-        .text_color(color)
+        .bg(background)
+        .text_size(px(11.5))
+        .text_color(foreground)
+        .cursor_pointer()
         .hover(move |style| style.bg(hover))
+        .active(|style| style.opacity(0.85))
         .on_click(cx.listener(move |this, _, _, cx| action(this, cx)))
+        .children(icon.map(|data| icons::icon(data, 14.0, foreground)))
         .child(label)
+        .into_any_element()
+}
+
+fn opacity_color(color: Rgba, opacity: f32) -> Rgba {
+    rgba((u32::from(color) & 0x00FF_FFFF) << 8 | ((opacity * 255.0) as u32))
 }

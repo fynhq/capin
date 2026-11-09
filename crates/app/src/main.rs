@@ -15,7 +15,6 @@ mod logging;
 mod overlay;
 mod pin;
 mod record;
-mod record_session;
 mod scroll;
 mod settings;
 mod settings_state;

@@ -972,6 +972,9 @@ struct PinView {
     ocr: Option<platform_ocr::OcrOutput>,
     selection: Option<(usize, usize)>,
     selecting: bool,
+    /// Window-local press position while a text click may still turn into a
+    /// window drag.
+    press: Option<Point<Pixels>>,
     content_generation: u64,
     focus_handle: FocusHandle,
 }
@@ -996,9 +999,16 @@ impl PinView {
             ocr: None,
             selection: None,
             selecting: false,
+            press: None,
             content_generation: 1,
             focus_handle: cx.focus_handle(),
         };
+        cx.on_release(|this, cx| {
+            if let PinContent::Image { image, .. } = &this.content {
+                cx.drop_image(image.clone(), None);
+            }
+        })
+        .detach();
         view.start_ocr(cx);
         view
     }
@@ -1110,6 +1120,12 @@ impl PinView {
             let length = line.chars.len();
             if index < base + length {
                 let local = index - base;
+                // CJK runs no longer carry the OCR word separator, so treat
+                // one glyph as the double-click unit instead of selecting the
+                // entire line.
+                if !line.chars[local].ch.is_ascii() {
+                    return Some((base + local, base + local));
+                }
                 let mut start = local;
                 while start > 0 && !line.chars[start - 1].ch.is_whitespace() {
                     start -= 1;
@@ -1291,6 +1307,26 @@ impl PinView {
         update_meta(self.id, self.zoom, self.opacity);
         schedule_manifest_save(cx);
         cx.notify();
+    }
+
+    fn begin_window_drag(&mut self, window: &mut Window) {
+        #[cfg(target_os = "windows")]
+        {
+            // GPUI's Windows backend leaves `start_window_move` as a no-op, so
+            // ask the native title-bar move loop directly.
+            let _ = platform_window::begin_window_drag(&*window);
+            update_bounds(self.id, window.bounds());
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            window.start_window_move();
+        }
+    }
+
+    fn release_image(&mut self, cx: &mut Context<Self>) {
+        if let PinContent::Image { image, .. } = &self.content {
+            cx.drop_image(image.clone(), None);
+        }
     }
 
     fn replace_image(&mut self, frame: RgbaFrame, cx: &mut Context<Self>) {
@@ -1604,7 +1640,10 @@ impl Render for PinView {
                     {
                         this.selection = None;
                         this.selecting = false;
-                        window.start_window_move();
+                        this.press = None;
+                        this.begin_window_drag(window);
+                    } else {
+                        this.press = Some(event.position);
                     }
                     cx.notify();
                 }),
@@ -1622,8 +1661,23 @@ impl Render for PinView {
                     cx.stop_propagation();
                 }),
             )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 if this.selecting {
+                    let moved = this.press.is_some_and(|press| {
+                        let dx = f32::from(event.position.x) - f32::from(press.x);
+                        let dy = f32::from(event.position.y) - f32::from(press.y);
+                        dx * dx + dy * dy > 25.0
+                    });
+                    if moved && !event.modifiers.shift {
+                        // Plain drag moves the pin even when it starts on a
+                        // text run; Shift keeps the drag as text selection.
+                        this.selection = None;
+                        this.selecting = false;
+                        this.press = None;
+                        this.begin_window_drag(window);
+                        cx.notify();
+                        return;
+                    }
                     this.update_text_selection(event.position);
                     cx.notify();
                 }
@@ -1631,6 +1685,7 @@ impl Render for PinView {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
+                    this.press = None;
                     if this.selecting {
                         this.finish_text_selection(cx);
                     } else {
@@ -1892,6 +1947,7 @@ fn perform_pin_action(id: u64, action: PinMenuAction, cx: &mut App) {
             entity.update(cx, |view, cx| view.open_file(cx));
         }
         PinMenuAction::Close => {
+            entity.update(cx, |view, cx| view.release_image(cx));
             close_pin(id);
             let _ = window_handle.update(cx, |_, window, _| window.remove_window());
         }

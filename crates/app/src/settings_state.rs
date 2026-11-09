@@ -140,7 +140,6 @@ pub struct AppSettings {
     pub record_format: RecordFormat,
     pub record_frame_rate: FrameRate,
     pub record_quality: RecordQuality,
-    pub record_segments: bool,
     pub record_cursor: bool,
     pub capture_hotkey: String,
     pub pin_hotkey: String,
@@ -207,7 +206,6 @@ impl Default for AppSettings {
             record_format: RecordFormat::Mp4,
             record_frame_rate: FrameRate::Fps30,
             record_quality: RecordQuality::Standard,
-            record_segments: false,
             record_cursor: true,
             capture_hotkey: DEFAULT_CAPTURE_HOTKEY.to_owned(),
             pin_hotkey: DEFAULT_PIN_HOTKEY.to_owned(),
@@ -318,7 +316,6 @@ fn parse(text: &str) -> AppSettings {
                     settings.record_quality = quality;
                 }
             }
-            "record_segments" => settings.record_segments = value != "false",
             "record_cursor" => settings.record_cursor = value != "false",
             "capture_hotkey" => settings.capture_hotkey = value.to_owned(),
             "pin_hotkey" => settings.pin_hotkey = value.to_owned(),
@@ -521,7 +518,7 @@ fn serialize(settings: &AppSettings) -> String {
         .map(|path| path.display().to_string())
         .unwrap_or_default();
     let mut text = format!(
-        "language={}\nauto_start={}\nauto_start_explicit={}\ncopy_to_clipboard={}\nrecord_format={}\nrecord_frame_rate={}\nrecord_quality={}\nrecord_segments={}\nrecord_cursor={}\ncapture_hotkey={}\npin_hotkey={}\nscreenshot_dir={}\nrecording_dir={}\nfilename_template={}\nwindow_composition={}\nwindow_background={}\nwindow_padding={}\nwindow_shadow={}\nwindow_wallpaper={}\ncapture_cursor={}\nannotation_color={:08x}\npin_text_ocr={}\npin_qr={}\n",
+        "language={}\nauto_start={}\nauto_start_explicit={}\ncopy_to_clipboard={}\nrecord_format={}\nrecord_frame_rate={}\nrecord_quality={}\nrecord_cursor={}\ncapture_hotkey={}\npin_hotkey={}\nscreenshot_dir={}\nrecording_dir={}\nfilename_template={}\nwindow_composition={}\nwindow_background={}\nwindow_padding={}\nwindow_shadow={}\nwindow_wallpaper={}\ncapture_cursor={}\nannotation_color={:08x}\npin_text_ocr={}\npin_qr={}\n",
         settings.language.code(),
         settings.auto_start,
         settings.auto_start_explicit,
@@ -529,7 +526,6 @@ fn serialize(settings: &AppSettings) -> String {
         format,
         frame_rate,
         settings.record_quality.code(),
-        settings.record_segments,
         settings.record_cursor,
         settings.capture_hotkey,
         settings.pin_hotkey,
