@@ -18,6 +18,21 @@ pub use style::WindowStyle;
 
 use raw_window_handle::HasWindowHandle;
 
+/// Raises a native dropdown menu at the pointer and returns the chosen index.
+/// macOS uses this for settings popups so the menu owns its vibrant surface
+/// and keyboard/dismiss behavior; other platforms keep their in-window popover.
+pub fn show_native_menu(items: &[String], selected: usize) -> Option<usize> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::show_native_menu(items, selected)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (items, selected);
+        None
+    }
+}
+
 /// Whether the process currently has macOS Accessibility permission.
 pub fn accessibility_trusted() -> bool {
     #[cfg(target_os = "macos")]

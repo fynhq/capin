@@ -11,12 +11,13 @@ use core_graphics::event::{
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 use foreign_types_shared::ForeignType;
-use objc2::MainThreadMarker;
+use objc2::rc::Retained;
+use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSColor, NSScreenSaverWindowLevel, NSView,
     NSWindowCollectionBehavior, NSWindowSharingType, NSWindowStyleMask, NSWorkspace,
 };
-use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSURL};
+use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::{PlatformWindowError, PrivacyPane, WindowStyle};
@@ -329,4 +330,113 @@ unsafe extern "C" {
     fn AXIsProcessTrustedWithOptions(options: core_foundation::dictionary::CFDictionaryRef)
     -> bool;
     fn CGEventSetLocation(event: core_graphics::sys::CGEventRef, location: CGPoint);
+}
+
+// ---------------------------------------------------------------------------
+// Native dropdown menus
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    static MENU_SELECTION: std::cell::Cell<Option<isize>> = const { std::cell::Cell::new(None) };
+    static MENU_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Keeps a second popup from nesting inside an already tracking menu.
+struct MenuGuard;
+
+impl MenuGuard {
+    fn acquire() -> Option<Self> {
+        MENU_OPEN.with(|open| (!open.replace(true)).then_some(Self))
+    }
+}
+
+impl Drop for MenuGuard {
+    fn drop(&mut self) {
+        MENU_OPEN.with(|open| open.set(false));
+    }
+}
+
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements; no Drop impl.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "CapinSettingsMenuTarget"]
+    struct MenuTarget;
+
+    impl MenuTarget {
+        #[unsafe(method(selectItem:))]
+        fn select_item(&self, sender: Option<&objc2_app_kit::NSMenuItem>) {
+            if let Some(item) = sender {
+                MENU_SELECTION.with(|slot| slot.set(Some(item.tag())));
+            }
+        }
+    }
+
+    unsafe impl NSObjectProtocol for MenuTarget {}
+);
+
+impl MenuTarget {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm);
+        // SAFETY: MenuTarget does not override init; this dispatches to
+        // NSObject's init.
+        unsafe { msg_send![this, init] }
+    }
+}
+
+/// Shows a native menu at the pointer and returns the chosen index. The
+/// current item carries the system checkmark. `None` means the menu was
+/// dismissed, another menu is already open, or no window was available.
+pub(super) fn show_native_menu(items: &[String], selected: usize) -> Option<usize> {
+    use objc2_app_kit::{
+        NSAppearanceCustomization, NSControlStateValueOn, NSEvent, NSMenu, NSMenuItem,
+    };
+
+    if items.is_empty() {
+        return None;
+    }
+    let _guard = MenuGuard::acquire()?;
+    let mtm = MainThreadMarker::new()?;
+    let app = NSApplication::sharedApplication(mtm);
+    let window = app.keyWindow().or_else(|| app.mainWindow())?;
+    let view = window.contentView()?;
+
+    let menu = NSMenu::new(mtm);
+    // Every item has an explicit target/action below; automatic enabling
+    // would otherwise walk the responder chain and gray them out.
+    menu.setAutoenablesItems(false);
+    // A menu raised from a vibrant window can inherit the button's
+    // appearance and render dark in light mode. Follow the app's effective
+    // appearance, like the app's other native menus.
+    let appearance = app.effectiveAppearance();
+    menu.setAppearance(Some(&appearance));
+
+    let target = MenuTarget::new(mtm);
+    let target_ref: &MenuTarget = &target;
+    for (index, label) in items.iter().enumerate() {
+        let item = NSMenuItem::new(mtm);
+        item.setTitle(&NSString::from_str(label));
+        // SAFETY: the selector is implemented by MenuTarget above.
+        unsafe { item.setAction(Some(sel!(selectItem:))) };
+        // SAFETY: target_ref stays alive through the nested tracking loop.
+        unsafe { item.setTarget(Some(target_ref)) };
+        item.setTag(index as isize);
+        if index == selected {
+            item.setState(NSControlStateValueOn);
+        }
+        menu.addItem(&item);
+    }
+
+    // `mouseLocation` is in screen coordinates; convert through the window
+    // into its content view, the space `popUpMenuPositioningItem` expects.
+    let screen_point = NSEvent::mouseLocation();
+    let window_point = window.convertPointFromScreen(screen_point);
+    let view_point = view.convertPoint_fromView(window_point, None);
+    let view_ref: &NSView = &view;
+
+    MENU_SELECTION.with(|slot| slot.set(None));
+    let _ = menu.popUpMenuPositioningItem_atLocation_inView(None, view_point, Some(view_ref));
+    MENU_SELECTION
+        .with(|slot| slot.take())
+        .and_then(|tag| usize::try_from(tag).ok())
 }

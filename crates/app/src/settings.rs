@@ -1,7 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState};
@@ -72,9 +71,9 @@ mod layout {
     pub const WINDOW_HEIGHT: f32 = 700.0;
     pub const MIN_WIDTH: f32 = 760.0;
     pub const MIN_HEIGHT: f32 = 560.0;
-    pub const TITLEBAR_HEIGHT: f32 = 48.0;
-    pub const CAPTION_BUTTON_WIDTH: f32 = 46.0;
-    pub const CAPTION_BUTTON_HEIGHT: f32 = 32.0;
+    pub const TITLEBAR_HEIGHT: f32 = 34.0;
+    pub const CAPTION_BUTTON_WIDTH: f32 = 34.0;
+    pub const CAPTION_BUTTON_HEIGHT: f32 = 34.0;
     pub const SIDEBAR_WIDTH: f32 = 180.0;
     pub const SIDEBAR_PAD: f32 = 12.0;
     pub const SIDEBAR_DIVIDER: bool = false;
@@ -86,9 +85,10 @@ mod layout {
     pub const NAV_FONT: f32 = 14.0;
     pub const CONTENT_MAX_WIDTH: f32 = 720.0;
     pub const CONTENT_PAD_X: f32 = 32.0;
-    pub const CONTENT_PAD_TOP: f32 = 10.0;
+    pub const CONTENT_PAD_TOP: f32 = 6.0;
     pub const CONTENT_PAD_BOTTOM: f32 = 32.0;
     pub const CONTENT_GAP: f32 = 24.0;
+    pub const HEADER_GAP: f32 = 16.0;
     pub const GROUP_GAP: f32 = 28.0;
     pub const GROUP_HEADER_GAP: f32 = 8.0;
     pub const PAGE_TITLE: f32 = 28.0;
@@ -110,7 +110,7 @@ mod layout {
     pub const WINDOW_HEIGHT: f32 = 640.0;
     pub const MIN_WIDTH: f32 = 710.0;
     pub const MIN_HEIGHT: f32 = 520.0;
-    pub const TITLEBAR_HEIGHT: f32 = 52.0;
+    pub const TITLEBAR_HEIGHT: f32 = 34.0;
     pub const SIDEBAR_WIDTH: f32 = 150.0;
     pub const SIDEBAR_PAD: f32 = 10.0;
     pub const SIDEBAR_DIVIDER: bool = true;
@@ -122,9 +122,10 @@ mod layout {
     pub const NAV_FONT: f32 = 13.0;
     pub const CONTENT_MAX_WIDTH: f32 = 680.0;
     pub const CONTENT_PAD_X: f32 = 28.0;
-    pub const CONTENT_PAD_TOP: f32 = 12.0;
+    pub const CONTENT_PAD_TOP: f32 = 6.0;
     pub const CONTENT_PAD_BOTTOM: f32 = 24.0;
     pub const CONTENT_GAP: f32 = 20.0;
+    pub const HEADER_GAP: f32 = 14.0;
     pub const GROUP_GAP: f32 = 22.0;
     pub const GROUP_HEADER_GAP: f32 = 6.0;
     pub const PAGE_TITLE: f32 = 22.0;
@@ -158,9 +159,10 @@ mod layout {
     pub const NAV_FONT: f32 = 13.0;
     pub const CONTENT_MAX_WIDTH: f32 = 680.0;
     pub const CONTENT_PAD_X: f32 = 28.0;
-    pub const CONTENT_PAD_TOP: f32 = 10.0;
+    pub const CONTENT_PAD_TOP: f32 = 6.0;
     pub const CONTENT_PAD_BOTTOM: f32 = 24.0;
     pub const CONTENT_GAP: f32 = 20.0;
+    pub const HEADER_GAP: f32 = 14.0;
     pub const GROUP_GAP: f32 = 22.0;
     pub const GROUP_HEADER_GAP: f32 = 6.0;
     pub const PAGE_TITLE: f32 = 22.0;
@@ -344,14 +346,16 @@ struct ToggleRow {
     refresh_pin: bool,
 }
 
-/// Popup menus replace segmented controls once a choice set grows past three
-/// options. The anchor is the trigger's window-space bounds captured during
-/// paint; the menu itself renders at the window root so it is not clipped by
-/// the card or the scrolling page.
+/// Popup menus for settings whose options the user asked to present as a
+/// dropdown (window background, padding, repeat-pin behavior). The anchor is
+/// the trigger's window-space bounds captured during paint; the menu itself
+/// renders at the window root so it is not clipped by the card or the
+/// scrolling page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SelectKind {
     Background,
     Padding,
+    RepeatPin,
 }
 
 #[derive(Clone, Copy)]
@@ -376,6 +380,7 @@ struct Theme {
     control_hover: Rgba,
     toggle_off: Rgba,
     knob: Rgba,
+    popover: Rgba,
     #[cfg(target_os = "windows")]
     close_hover: Rgba,
     hairline: f32,
@@ -390,6 +395,7 @@ struct Palette {
     hover: Rgba,
     selected: Rgba,
     toggle_off: Rgba,
+    popover: Rgba,
     page: Option<Rgba>,
 }
 
@@ -424,6 +430,7 @@ impl Theme {
             control_hover: palette.control_hover,
             toggle_off: palette.toggle_off,
             knob: rgb(0xFFFFFF),
+            popover: palette.popover,
             #[cfg(target_os = "windows")]
             close_hover: rgb(0xC42B1C),
             hairline: 1.0 / scale_factor.max(1.0),
@@ -481,6 +488,7 @@ fn native_palette(dark: bool) -> Palette {
             hover: rgba(0xFFFFFF10),
             selected: rgba(0xFFFFFF14),
             toggle_off: rgba(0xFFFFFF1F),
+            popover: rgb(0x2B2B2B),
             page: None,
         }
     } else {
@@ -493,6 +501,7 @@ fn native_palette(dark: bool) -> Palette {
             hover: rgba(0x00000008),
             selected: rgba(0x0000000A),
             toggle_off: rgba(0x0000001A),
+            popover: rgb(0xF9F9F9),
             page: None,
         }
     }
@@ -510,6 +519,7 @@ fn native_palette(dark: bool) -> Palette {
             hover: rgba(0xFFFFFF14),
             selected: rgba(0xFFFFFF1F),
             toggle_off: rgba(0xFFFFFF1F),
+            popover: rgb(0x2C2C2E),
             // Native settings tint: 0.72 dark / 0.82 light over the live
             // window blur, using the same neutral-950 / white base palette as
             // the system popovers instead of a lighter custom grey.
@@ -525,6 +535,7 @@ fn native_palette(dark: bool) -> Palette {
             hover: rgba(0x0000000A),
             selected: rgba(0x0000000F),
             toggle_off: rgba(0x0000001A),
+            popover: rgb(0xFFFFFF),
             page: Some(rgba(0xFFFFFFD1)),
         }
     }
@@ -542,6 +553,7 @@ fn native_palette(dark: bool) -> Palette {
             hover: rgba(0xFFFFFF14),
             selected: rgba(0xFFFFFF1F),
             toggle_off: rgba(0xFFFFFF4D),
+            popover: rgb(0x2C2C2E),
             page: Some(rgb(0x1E1E1E)),
         }
     } else {
@@ -554,6 +566,7 @@ fn native_palette(dark: bool) -> Palette {
             hover: rgba(0x0000000A),
             selected: rgba(0x0000000F),
             toggle_off: rgba(0x00000026),
+            popover: rgb(0xFFFFFF),
             page: Some(rgb(0xF2F2F2)),
         }
     }
@@ -609,7 +622,6 @@ struct SettingsView {
     #[cfg(target_os = "macos")]
     titlebar_drag: bool,
     select_menu: Option<SelectMenu>,
-    logo: Option<Arc<RenderImage>>,
     #[cfg(target_os = "macos")]
     permission_screen: bool,
     #[cfg(target_os = "macos")]
@@ -640,9 +652,6 @@ impl SettingsView {
             #[cfg(target_os = "macos")]
             titlebar_drag: false,
             select_menu: None,
-            logo: crate::image_util::render_png(include_bytes!(
-                "../../../assets/icon/capin_icon_128.png"
-            )),
             #[cfg(target_os = "macos")]
             permission_screen: platform_window::screen_capture_trusted(),
             #[cfg(target_os = "macos")]
@@ -674,9 +683,6 @@ impl SettingsView {
                 .collect();
             if !template.is_empty() && template != settings_state::get().filename_template {
                 settings_state::update(|settings| settings.filename_template = template);
-            }
-            if let Some(logo) = this.logo.take() {
-                cx.drop_image(logo, None);
             }
         })
         .detach();
@@ -852,10 +858,10 @@ impl SettingsView {
                     self.sidebar_title(theme),
                     cx,
                 ))
-                .child(div().w_full().mt(px(18.0)).child(nav));
+                .child(div().w_full().mt(px(12.0)).child(nav));
         }
         // Windows keeps the system caption buttons and drag strip, so the
-        // navigation starts below the 48pt caption as before.
+        // navigation starts below the 34pt caption.
         #[cfg(not(target_os = "macos"))]
         {
             sidebar = sidebar.pt(px(layout::TITLEBAR_HEIGHT + 8.0)).child(nav);
@@ -871,23 +877,20 @@ impl SettingsView {
 
     #[cfg(target_os = "macos")]
     fn sidebar_title(&self, theme: &Theme) -> Div {
-        let mut title = div()
+        div()
             .w_full()
             .h(px(24.0))
             .px(px(layout::NAV_ITEM_PAD_X))
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(8.0));
-        if let Some(logo) = self.logo.clone() {
-            title = title.child(img(logo).w(px(18.0)).h(px(18.0)));
-        }
-        title.child(
-            div()
-                .text_size(px(15.0))
-                .text_color(theme.text)
-                .child(t(self.settings.language, "settings.title")),
-        )
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .child(t(self.settings.language, "settings.title")),
+            )
     }
 
     #[cfg(target_os = "macos")]
@@ -950,16 +953,6 @@ impl SettingsView {
     /// its drag surface lives in the sidebar.
     #[cfg(target_os = "windows")]
     fn titlebar(&self, theme: &Theme, window: &mut Window, _cx: &mut Context<Self>) -> Div {
-        let mut brand = div().flex().flex_row().items_center().gap(px(8.0));
-        if let Some(logo) = self.logo.clone() {
-            brand = brand.child(img(logo).w(px(18.0)).h(px(18.0)));
-        }
-        brand = brand.child(
-            div()
-                .text_size(px(13.0))
-                .text_color(theme.text)
-                .child(t(self.settings.language, "settings.title")),
-        );
         let leading = div()
             .id("settings-titlebar-drag")
             .flex_1()
@@ -969,7 +962,13 @@ impl SettingsView {
             .flex_row()
             .items_center()
             .window_control_area(WindowControlArea::Drag)
-            .child(brand);
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .child(t(self.settings.language, "settings.title")),
+            );
 
         div()
             .absolute()
@@ -979,7 +978,7 @@ impl SettingsView {
             .h(px(layout::TITLEBAR_HEIGHT))
             .flex()
             .flex_row()
-            .items_start()
+            .items_center()
             .child(leading)
             .child(window_control_button(
                 theme,
@@ -1029,7 +1028,7 @@ impl SettingsView {
                     .justify_center()
                     .px(px(layout::CONTENT_PAD_X))
                     .pt(px(layout::CONTENT_PAD_TOP))
-                    .pb(px(layout::CONTENT_GAP))
+                    .pb(px(layout::HEADER_GAP))
                     .child(
                         div()
                             .w_full()
@@ -1538,29 +1537,7 @@ impl SettingsView {
     }
     fn repeat_pin_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
-        let mut control = segmented();
-        for behavior in RepeatPinBehavior::ALL {
-            let selected = self.settings.repeat_pin == behavior;
-            let label = t(
-                language,
-                match behavior {
-                    RepeatPinBehavior::RestoreHistory => "settings.repeat_pin_history",
-                    RepeatPinBehavior::FlashCurrent => "settings.repeat_pin_flash",
-                },
-            );
-            control = control.child(
-                segment(theme, label, selected)
-                    .id(behavior.code())
-                    .active(|style| style.opacity(0.9))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.settings.repeat_pin = behavior;
-                        settings_state::update(|settings| settings.repeat_pin = behavior);
-                        this.status = None;
-                        cx.notify();
-                    })),
-            );
-        }
-
+        let current = t(language, repeat_pin_key(self.settings.repeat_pin));
         row_shell()
             .child(row_label_with_icon(
                 theme,
@@ -1568,7 +1545,13 @@ impl SettingsView {
                 t(language, "settings.repeat_pin"),
                 t(language, "settings.repeat_pin_desc"),
             ))
-            .child(control)
+            .child(self.select_trigger(
+                theme,
+                current,
+                "settings-repeat-pin",
+                SelectKind::RepeatPin,
+                cx,
+            ))
     }
 
     fn window_padding_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
@@ -1590,9 +1573,65 @@ impl SettingsView {
             ))
     }
 
+    fn select_entries(&self, kind: SelectKind) -> Vec<(String, u32, bool)> {
+        let language = self.settings.language;
+        let mut entries: Vec<(String, u32, bool)> = Vec::new();
+        match kind {
+            SelectKind::Background => {
+                for (index, background) in WindowBackground::ALL.into_iter().enumerate() {
+                    entries.push((
+                        t(language, background_label_key(background)).to_owned(),
+                        index as u32,
+                        self.settings.window_background == background,
+                    ));
+                }
+            }
+            SelectKind::Padding => {
+                for padding in [0u32, 24, 48, 96] {
+                    entries.push((
+                        t(language, padding_key(padding)).to_owned(),
+                        padding,
+                        self.settings.window_padding == padding,
+                    ));
+                }
+            }
+            SelectKind::RepeatPin => {
+                for (index, behavior) in RepeatPinBehavior::ALL.into_iter().enumerate() {
+                    entries.push((
+                        t(language, repeat_pin_key(behavior)).to_owned(),
+                        index as u32,
+                        self.settings.repeat_pin == behavior,
+                    ));
+                }
+            }
+        }
+        entries
+    }
+
+    fn apply_select(&mut self, kind: SelectKind, value: u32, cx: &mut Context<Self>) {
+        match kind {
+            SelectKind::Background => {
+                let background = WindowBackground::ALL[value as usize];
+                self.settings.window_background = background;
+                settings_state::update(|settings| settings.window_background = background);
+            }
+            SelectKind::Padding => {
+                self.settings.window_padding = value;
+                settings_state::update(|settings| settings.window_padding = value);
+            }
+            SelectKind::RepeatPin => {
+                let behavior = RepeatPinBehavior::ALL[value as usize];
+                self.settings.repeat_pin = behavior;
+                settings_state::update(|settings| settings.repeat_pin = behavior);
+            }
+        }
+        self.status = None;
+        cx.notify();
+    }
+
     /// A macOS-style popup button: the current value on the left, a chevron
-    /// on the right. The trigger records its window-space bounds while it
-    /// paints so the popup can be placed below it at the window root.
+    /// on the right. Windows opens an in-window popover anchored to the
+    /// trigger; macOS raises the native menu at the pointer.
     fn select_trigger(
         &self,
         theme: &Theme,
@@ -1634,18 +1673,49 @@ impl SettingsView {
             .hover(move |style| style.bg(hover))
             .active(move |style| style.opacity(0.9))
             .on_click(cx.listener(move |this, _, _, cx| {
-                if let Some(anchor) = anchor.get() {
-                    this.select_menu = Some(SelectMenu { kind, anchor });
+                #[cfg(target_os = "macos")]
+                {
+                    // The native menu runs its own tracking loop; showing it
+                    // inside the click dispatch would hold the App borrow and
+                    // abort on a re-entrant timer. Defer one main-queue turn.
+                    let entries = this.select_entries(kind);
+                    let selected = entries.iter().position(|(_, _, active)| *active);
+                    let items: Vec<String> =
+                        entries.iter().map(|(label, _, _)| label.clone()).collect();
+                    let values: Vec<u32> = entries.iter().map(|(_, value, _)| *value).collect();
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(1))
+                            .await;
+                        let Some(index) =
+                            platform_window::show_native_menu(&items, selected.unwrap_or(0))
+                        else {
+                            return;
+                        };
+                        let Some(value) = values.get(index).copied() else {
+                            return;
+                        };
+                        this.update(cx, |this, cx| this.apply_select(kind, value, cx))
+                            .ok();
+                    })
+                    .detach();
                 }
-                cx.notify();
+                #[cfg(not(target_os = "macos"))]
+                {
+                    if let Some(anchor) = anchor.get() {
+                        this.select_menu = Some(SelectMenu { kind, anchor });
+                    }
+                    cx.notify();
+                }
             }))
             .child(label.to_owned())
             .child(icons::icon(icons::CHEVRON_DOWN, 10.0, chevron))
             .child(probe)
     }
 
-    /// The popup layer for the two long option lists. Rendering it at the
-    /// window root keeps it above the card and outside the scrolling page.
+    /// The popup layer for the long option lists (window background, padding,
+    /// repeat-pin behavior). Rendering it at the window root keeps it above the
+    /// card and outside the scrolling page.
     fn select_popup(
         &self,
         theme: &Theme,
@@ -1653,28 +1723,7 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let menu = self.select_menu?;
-        let language = self.settings.language;
-        let mut entries: Vec<(String, u32, bool)> = Vec::new();
-        match menu.kind {
-            SelectKind::Background => {
-                for (index, background) in WindowBackground::ALL.into_iter().enumerate() {
-                    entries.push((
-                        t(language, background_label_key(background)).to_owned(),
-                        index as u32,
-                        self.settings.window_background == background,
-                    ));
-                }
-            }
-            SelectKind::Padding => {
-                for padding in [0u32, 24, 48, 96] {
-                    entries.push((
-                        t(language, padding_key(padding)).to_owned(),
-                        padding,
-                        self.settings.window_padding == padding,
-                    ));
-                }
-            }
-        }
+        let entries = self.select_entries(menu.kind);
 
         let width = 160.0;
         let item_height = 26.0;
@@ -1702,9 +1751,16 @@ impl SettingsView {
             .w(px(width))
             .p(px(padding))
             .rounded(px(6.0))
-            .bg(theme.control)
-            .border_1()
-            .border_color(theme.border)
+            .bg(theme.popover)
+            .shadow(vec![
+                BoxShadow::new(px(0.0), px(0.0), Hsla::from(theme.border)).spread_radius(px(1.0)),
+                BoxShadow::new(px(0.0), px(4.0), Hsla::from(rgba(0x0000001F)))
+                    .blur_radius(px(3.0))
+                    .spread_radius(px(-1.0)),
+                BoxShadow::new(px(0.0), px(2.0), Hsla::from(rgba(0x00000014)))
+                    .blur_radius(px(2.0))
+                    .spread_radius(px(-2.0)),
+            ])
             .flex()
             .flex_col()
             .gap(px(1.0))
@@ -1719,7 +1775,7 @@ impl SettingsView {
                     .id(("settings-select-item", index))
                     .h(px(item_height))
                     .px(px(8.0))
-                    .rounded(px(4.0))
+                    .rounded(px(6.0))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -1730,29 +1786,13 @@ impl SettingsView {
                         item.text_color(text).hover(move |style| style.bg(hover))
                     })
                     .on_click(cx.listener(move |this, _, _window, cx| {
-                        match menu.kind {
-                            SelectKind::Background => {
-                                let background = WindowBackground::ALL[value as usize];
-                                this.settings.window_background = background;
-                                settings_state::update(|settings| {
-                                    settings.window_background = background
-                                });
-                            }
-                            SelectKind::Padding => {
-                                this.settings.window_padding = value;
-                                settings_state::update(|settings| settings.window_padding = value);
-                            }
-                        }
                         this.select_menu = None;
-                        this.status = None;
-                        cx.notify();
+                        this.apply_select(menu.kind, value, cx);
                     }))
-                    .child(div().w(px(12.0)).flex_shrink_0().child(if selected {
-                        "✓"
-                    } else {
-                        ""
-                    }))
-                    .child(label),
+                    .child(div().flex_1().min_w(px(0.0)).child(label))
+                    .child(div().w(px(12.0)).flex_shrink_0().when(selected, |slot| {
+                        slot.child(icons::icon(icons::CHECK, 12.0, accent_text))
+                    })),
             );
         }
         let spring = SpringAnimation::new(SpringConfig::new(900.0, 52.0, 1.0))
@@ -2548,7 +2588,7 @@ pub fn open_settings(cx: &mut App) {
     let titlebar = custom_titlebar().then(|| TitlebarOptions {
         title: Some(t(language, "settings.title").into()),
         appears_transparent: true,
-        traffic_light_position: Some(point(px(18.0), px(20.0))),
+        traffic_light_position: Some(point(px(18.0), px(10.0))),
     });
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -2654,13 +2694,13 @@ fn window_control_button(
                 .hover(move |style| style.bg(theme.close_hover))
         })
         .when(!close, |button| {
-            button.hover(move |style| style.bg(theme.hover))
+            button.hover(move |style| style.bg(theme.control_hover))
         })
         .child(
             svg()
                 .data(icon)
-                .w(px(10.0))
-                .h(px(10.0))
+                .w(px(14.0))
+                .h(px(14.0))
                 .text_color(theme.text)
                 .when(close, |glyph| {
                     glyph.group_hover("settings-window-close", |style| {
@@ -2882,6 +2922,13 @@ fn input_editor_style(theme: &Theme) -> InputEditorStyle {
         selection: Hsla::from(theme.accent).opacity(0.35),
         caret: theme.accent.into(),
         ..Default::default()
+    }
+}
+
+fn repeat_pin_key(behavior: RepeatPinBehavior) -> &'static str {
+    match behavior {
+        RepeatPinBehavior::RestoreHistory => "settings.repeat_pin_history",
+        RepeatPinBehavior::FlashCurrent => "settings.repeat_pin_flash",
     }
 }
 
