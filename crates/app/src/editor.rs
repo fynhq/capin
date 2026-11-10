@@ -1224,10 +1224,18 @@ impl EditorView {
         let old_blur_images =
             std::mem::replace(&mut self.blur_images, std::array::from_fn(|_| None));
         self.images_released = false;
-        cx.drop_image(old_image, None);
-        for image in old_blur_images.into_iter().flatten() {
-            cx.drop_image(image, None);
-        }
+        // The update runs with the window removed from `App.windows`, so an
+        // immediate `App::drop_image` cannot reach the editor's atlas. Defer
+        // the drop until the update finished; otherwise every F5 refresh or
+        // canvas replacement leaks the previous full image.
+        let mut dropped = Vec::with_capacity(1 + old_blur_images.len());
+        dropped.push(old_image);
+        dropped.extend(old_blur_images.into_iter().flatten());
+        cx.defer(move |cx| {
+            for image in dropped {
+                cx.drop_image(image, None);
+            }
+        });
     }
 
     /// Returns the cached blurred preview for `radius`, creating it on first

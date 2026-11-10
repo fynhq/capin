@@ -1745,7 +1745,7 @@ impl OverlayView {
         cx.defer(move |cx| crate::record::start(selected.target, cx));
     }
 
-    fn refresh_frame(&mut self, cx: &mut Context<Self>) {
+    fn refresh_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut backend = platform_backend();
         let monitor = self.session.monitor();
         let frame = match backend.capture(CaptureTarget::Monitor(monitor)) {
@@ -1757,9 +1757,13 @@ impl OverlayView {
         };
         let image = image_util::render_image(&frame);
         let old_image = std::mem::replace(&mut self.image, image);
-        cx.drop_image(old_image, None);
+        // During an entity update the window has left `App::windows`, so
+        // `App::drop_image` cannot reach the only atlas holding the previous
+        // frame. Drop through the window directly or every F5 leaks a
+        // full-screen texture until the overlay quits.
+        let _ = window.drop_image(old_image);
         if let Some(magnifier) = self.magnifier.take() {
-            cx.drop_image(magnifier.image, None);
+            let _ = window.drop_image(magnifier.image);
         }
         self.frame = Some(Arc::new(frame));
         self.element_cache.clear();
@@ -2277,7 +2281,7 @@ impl OverlayView {
                 .hover(|style| style.bg(self.chrome.hover))
                 .active(|style| style.opacity(0.85))
                 .cursor_pointer()
-                .on_click(cx.listener(|this, _, _, cx| this.refresh_frame(cx)))
+                .on_click(cx.listener(|this, _, window, cx| this.refresh_frame(window, cx)))
                 .child(icons::icon(icons::REFRESH, 14.0, self.chrome.icon)),
         );
 
@@ -3192,7 +3196,7 @@ impl OverlayView {
                         return;
                     }
                     if key == "f5" {
-                        this.refresh_frame(cx);
+                        this.refresh_frame(window, cx);
                         return;
                     }
                     if key == "f1" {
@@ -3252,7 +3256,7 @@ impl OverlayView {
                         this.session.set_hovered_element(None);
                         cx.notify();
                     } else if key == "f5" {
-                        this.refresh_frame(cx);
+                        this.refresh_frame(window, cx);
                     }
                 }
                 let _ = window;
