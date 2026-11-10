@@ -9,7 +9,8 @@ use core_types::{PhysicalRect, PhysicalSize, RgbaFrame};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use platform_window::{
-    WindowStyle, apply as apply_window_style, set_click_through, system_accent_hex,
+    WindowStyle, apply as apply_window_style, hide_native_border, set_click_through,
+    system_accent_hex,
 };
 use serde::{Deserialize, Serialize};
 
@@ -40,43 +41,6 @@ const PIN_MENU_WIDTH: f32 = 190.0;
 const PIN_MENU_ITEM_HEIGHT: f32 = 30.0;
 const PIN_MENU_PADDING: f32 = 5.0;
 const PIN_MENU_SEPARATOR: f32 = 9.0;
-/// Transparent room around the pinned image for its drop shadow. The pin's
-/// public bounds stay the image rectangle; the native window is this much
-/// larger on every side.
-const SHADOW_MARGIN: f32 = 16.0;
-
-fn pin_window_bounds(content: Bounds<Pixels>) -> Bounds<Pixels> {
-    Bounds {
-        origin: point(
-            content.origin.x - px(SHADOW_MARGIN),
-            content.origin.y - px(SHADOW_MARGIN),
-        ),
-        size: size(
-            content.size.width + px(SHADOW_MARGIN * 2.0),
-            content.size.height + px(SHADOW_MARGIN * 2.0),
-        ),
-    }
-}
-
-fn pin_content_bounds(window: Bounds<Pixels>) -> Bounds<Pixels> {
-    Bounds {
-        origin: point(
-            window.origin.x + px(SHADOW_MARGIN),
-            window.origin.y + px(SHADOW_MARGIN),
-        ),
-        size: size(
-            px((f32::from(window.size.width) - SHADOW_MARGIN * 2.0).max(1.0)),
-            px((f32::from(window.size.height) - SHADOW_MARGIN * 2.0).max(1.0)),
-        ),
-    }
-}
-
-fn pin_window_size(width: f32, height: f32) -> Size<Pixels> {
-    size(
-        px(width + SHADOW_MARGIN * 2.0),
-        px(height + SHADOW_MARGIN * 2.0),
-    )
-}
 
 thread_local! {
     static PIN_CASCADE: Cell<u32> = const { Cell::new(0) };
@@ -546,7 +510,7 @@ fn open_pin_inner(
     };
     let display_id = display_id.or_else(|| display_for_bounds(cx, bounds));
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(pin_window_bounds(bounds))),
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: None,
         focus: false,
         show: true,
@@ -565,6 +529,7 @@ fn open_pin_inner(
         if let Err(error) = apply_window_style(&*window, WindowStyle::PIN) {
             log_error!("pin", "failed to style pin window: {error}");
         }
+        hide_native_border(&*window);
         if click_through {
             let _ = set_click_through(&*window, true);
         }
@@ -775,7 +740,7 @@ fn replace_image_inner(
         view.replace_image(Arc::new(frame), hash, cx);
     });
     let _ = window_handle.update(cx, |_, window, _| {
-        window.resize(pin_window_size(width, height));
+        window.resize(size(px(width), px(height)));
     });
     PINS.with(|pins| {
         if let Some(state) = pins.borrow_mut().get_mut(&id) {
@@ -793,13 +758,16 @@ fn replace_image_inner(
     true
 }
 
-pub fn close_pin(id: u64) {
-    let image_path = PINS.with(|pins| {
-        pins.borrow_mut()
-            .remove(&id)
-            .and_then(|state| state.image_path)
-    });
-    if let Some(path) = image_path {
+pub fn close_pin(id: u64, cx: &mut App) {
+    let state = PINS.with(|pins| pins.borrow_mut().remove(&id));
+    let Some(state) = state else {
+        return;
+    };
+    state.entity.update(cx, |view, cx| view.release_image(cx));
+    let _ = state
+        .window
+        .update(cx, |_, window, _| window.remove_window());
+    if let Some(path) = state.image_path {
         let _ = std::fs::remove_file(path);
     }
     save_manifest();
@@ -1053,8 +1021,6 @@ struct PinTheme {
     menu_border: Rgba,
     accent: Rgba,
     selection: Rgba,
-    shadow_near: Hsla,
-    shadow_far: Hsla,
 }
 
 impl PinTheme {
@@ -1080,10 +1046,6 @@ impl PinTheme {
                 menu_border: rgba(0xFFFFFF22),
                 accent,
                 selection,
-                // Dark desktops swallow a light shadow, so the pinned image
-                // keeps a deeper ink than the light theme.
-                shadow_near: Hsla::from(rgba(0x00000073)),
-                shadow_far: Hsla::from(rgba(0x00000045)),
             }
         } else {
             Self {
@@ -1095,21 +1057,8 @@ impl PinTheme {
                 menu_border: rgba(0x0000001A),
                 accent,
                 selection,
-                shadow_near: Hsla::from(rgba(0x00000026)),
-                shadow_far: Hsla::from(rgba(0x00000017)),
             }
         }
-    }
-
-    /// The pinned image's neutral window shadow. It stays appearance-aware in
-    /// both themes; focus and click-through no longer tint it with the system
-    /// accent, because the accent ring read as an extra blue border around the
-    /// captured pixels.
-    fn pin_shadow(&self) -> Vec<BoxShadow> {
-        vec![
-            BoxShadow::new(px(0.0), px(2.0), self.shadow_near).blur_radius(px(4.0)),
-            BoxShadow::new(px(0.0), px(5.0), self.shadow_far).blur_radius(px(10.0)),
-        ]
     }
 }
 
@@ -1323,8 +1272,8 @@ impl PinView {
     fn text_index_at(&self, position: Point<Pixels>) -> Option<usize> {
         let lines = self.text_lines()?;
         let zoom = self.zoom.max(0.1);
-        let x = (f32::from(position.x) - SHADOW_MARGIN) / zoom;
-        let y = (f32::from(position.y) - SHADOW_MARGIN) / zoom;
+        let x = f32::from(position.x) / zoom;
+        let y = f32::from(position.y) / zoom;
         let mut base = 0usize;
         let mut best: Option<(f32, usize)> = None;
         for line in lines {
@@ -1546,8 +1495,8 @@ impl PinView {
         }
         self.zoom = zoom.clamp(0.15, 4.0);
         let (width, height) = self.content.size(self.zoom);
-        window.resize(pin_window_size(width, height));
-        let origin = pin_content_bounds(window.bounds()).origin;
+        window.resize(size(px(width), px(height)));
+        let origin = window.bounds().origin;
         update_bounds_state(
             self.id,
             Bounds {
@@ -1827,9 +1776,6 @@ impl Render for PinView {
         let hud = self.hud.clone();
         let body = self.body(&theme, language).opacity(self.opacity);
         let zoom = self.zoom.max(0.1);
-        let window_size = window.bounds().size;
-        let content_width = (f32::from(window_size.width) - SHADOW_MARGIN * 2.0).max(1.0);
-        let content_height = (f32::from(window_size.height) - SHADOW_MARGIN * 2.0).max(1.0);
         let text_layers: Vec<Div> = self
             .selection_rects()
             .into_iter()
@@ -1851,17 +1797,9 @@ impl Render for PinView {
                 .border_color(theme.accent)
                 .opacity(self.flash_alpha)
         });
-        // The pinned image keeps the same neutral, appearance-aware window
-        // shadow in every state; the accent tint made it read as a blue border.
-        let shadow = theme.pin_shadow();
         let content = div()
             .absolute()
-            .left(px(SHADOW_MARGIN))
-            .top(px(SHADOW_MARGIN))
-            .w(px(content_width))
-            .h(px(content_height))
-            .relative()
-            .shadow(shadow)
+            .inset_0()
             .child(body)
             .children(text_layers)
             .children(flash);
@@ -1890,14 +1828,16 @@ impl Render for PinView {
                     return;
                 }
                 if key == "escape" {
-                    crate::pin::close_pin(this.id);
+                    let id = this.id;
+                    cx.defer(move |cx| crate::pin::close_pin(id, cx));
                     cx.stop_propagation();
                 }
             }))
             .on_mouse_down(
                 MouseButton::Middle,
                 cx.listener(|this, _, _, cx| {
-                    crate::pin::close_pin(this.id);
+                    let id = this.id;
+                    cx.defer(move |cx| crate::pin::close_pin(id, cx));
                     cx.stop_propagation();
                 }),
             )
@@ -1913,10 +1853,10 @@ impl Render for PinView {
                         return;
                     }
                     let bounds = window.bounds().size;
-                    let x = f32::from(event.position.x) - SHADOW_MARGIN;
-                    let y = f32::from(event.position.y) - SHADOW_MARGIN;
-                    let width = (f32::from(bounds.width) - SHADOW_MARGIN * 2.0).max(1.0);
-                    let height = (f32::from(bounds.height) - SHADOW_MARGIN * 2.0).max(1.0);
+                    let x = f32::from(event.position.x);
+                    let y = f32::from(event.position.y);
+                    let width = f32::from(bounds.width);
+                    let height = f32::from(bounds.height);
                     let margin = 6.0;
                     let near_edge =
                         x < margin || y < margin || x > width - margin || y > height - margin;
@@ -1969,7 +1909,7 @@ impl Render for PinView {
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
                     if this.drag.take().is_some() {
-                        update_bounds(this.id, pin_content_bounds(window.bounds()));
+                        update_bounds(this.id, window.bounds());
                         schedule_manifest_save(cx);
                         cx.notify();
                         return;
@@ -1977,7 +1917,7 @@ impl Render for PinView {
                     if this.selecting {
                         this.finish_text_selection(cx);
                     } else {
-                        update_bounds(this.id, pin_content_bounds(window.bounds()));
+                        update_bounds(this.id, window.bounds());
                     }
                 }),
             )
@@ -1986,7 +1926,7 @@ impl Render for PinView {
                 // drag state would survive a mouse-up delivered outside and
                 // the pin would keep following the cursor afterwards.
                 if this.drag.take().is_some() {
-                    update_bounds(this.id, pin_content_bounds(window.bounds()));
+                    update_bounds(this.id, window.bounds());
                     schedule_manifest_save(cx);
                     cx.notify();
                 }
@@ -2014,9 +1954,9 @@ impl Render for PinView {
         root.children(hud.map(|message| {
             div()
                 .absolute()
-                .top(px(SHADOW_MARGIN + 6.0))
-                .left(px(SHADOW_MARGIN))
-                .right(px(SHADOW_MARGIN))
+                .top(px(6.0))
+                .left(px(0.0))
+                .right(px(0.0))
                 .flex()
                 .justify_center()
                 .child(
@@ -2035,9 +1975,9 @@ impl Render for PinView {
         .children(notice.map(|notice| {
             div()
                 .absolute()
-                .bottom(px(SHADOW_MARGIN + 8.0))
-                .left(px(SHADOW_MARGIN))
-                .right(px(SHADOW_MARGIN))
+                .bottom(px(8.0))
+                .left(px(0.0))
+                .right(px(0.0))
                 .flex()
                 .justify_center()
                 .child(
@@ -2271,9 +2211,7 @@ fn perform_pin_action(id: u64, action: PinMenuAction, cx: &mut App) {
             enable_click_through(id, &entity, window_handle, cx);
         }
         PinMenuAction::Close => {
-            entity.update(cx, |view, cx| view.release_image(cx));
-            close_pin(id);
-            let _ = window_handle.update(cx, |_, window, _| window.remove_window());
+            close_pin(id, cx);
         }
     }
 }
@@ -2290,9 +2228,7 @@ fn rotate_pin(id: u64, entity: &Entity<PinView>, window_handle: AnyWindowHandle,
     let hash = crate::capture_history::hash_frame(&rotated);
     let width = rotated.width() as f32 * zoom;
     let height = rotated.height() as f32 * zoom;
-    let Ok(origin) = window_handle.update(cx, |_, window, _| {
-        pin_content_bounds(window.bounds()).origin
-    }) else {
+    let Ok(origin) = window_handle.update(cx, |_, window, _| window.bounds().origin) else {
         return;
     };
     let bounds = Bounds {
@@ -2307,7 +2243,7 @@ fn rotate_pin(id: u64, entity: &Entity<PinView>, window_handle: AnyWindowHandle,
         return;
     }
     let _ = window_handle.update(cx, |_, window, _| {
-        window.resize(pin_window_size(width, height))
+        window.resize(size(px(width), px(height)))
     });
     entity.update(cx, |view, cx| {
         view.replace_image(Arc::new(rotated), hash, cx)

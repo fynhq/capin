@@ -242,6 +242,21 @@ pub fn set_cursor_hidden(hidden: bool) {
     }
 }
 
+/// Removes the platform-drawn outline around a borderless surface. Windows 11
+/// still paints a 1px frame and rounded corners around top-level windows; a
+/// pin is sized to its image and must not show anything outside it. No-op on
+/// other platforms.
+pub fn hide_native_border(window: &impl HasWindowHandle) {
+    #[cfg(target_os = "windows")]
+    {
+        windows::hide_native_border(window);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+    }
+}
+
 /// Whether the platform's window capture already includes the native window
 /// shadow. macOS 13's ScreenCaptureKit path does; macOS 14+ can ignore it.
 pub fn window_capture_includes_native_shadow() -> bool {

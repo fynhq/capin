@@ -5,6 +5,10 @@ use std::path::PathBuf;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::POINT as ScreenPoint;
 use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT};
+use windows::Win32::Graphics::Dwm::{
+    DWM_WINDOW_CORNER_PREFERENCE, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmSetWindowAttribute,
+};
 use windows::Win32::Graphics::Gdi::{
     ClientToScreen, GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     MonitorFromWindow,
@@ -306,6 +310,35 @@ pub(super) fn set_cursor_hidden(hidden: bool) {
     // SAFETY: the cursor belongs to this thread's window; None hides it.
     unsafe {
         SetCursor(cursor);
+    }
+}
+
+pub(super) fn hide_native_border(window: &impl HasWindowHandle) {
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = HWND(win32.hwnd.get() as *mut c_void);
+    // Windows 10 rejects these attributes; Windows 11 paints the frame unless
+    // it is told not to.
+    let border = DWMWA_COLOR_NONE;
+    let corners = DWMWCP_DONOTROUND;
+    // SAFETY: hwnd is live and the attribute pointers outlive each call.
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            &border as *const _ as *const c_void,
+            size_of::<u32>() as u32,
+        );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &corners as *const _ as *const c_void,
+            size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+        );
     }
 }
 
