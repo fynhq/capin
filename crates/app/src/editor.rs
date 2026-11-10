@@ -2324,17 +2324,23 @@ impl EditorView {
         let mut groups: Vec<AnyElement> = Vec::new();
         if show_color {
             let palette_color = self.palette_color();
+            let highlighter_palette = self.palette_color_tool() == AnnotationColorTool::Highlighter;
             let mut swatches = Vec::new();
             for (color, name, label_key) in settings_state::ANNOTATION_COLORS {
                 let selected = (palette_color & 0xFFFFFF00) == (color & 0xFFFFFF00);
                 let label = t(language, label_key).to_owned();
+                let preview = if highlighter_palette {
+                    core_annotate::highlighter_color(color)
+                } else {
+                    color
+                };
                 let swatch = div()
                     .id(name)
                     .tooltip(move |_, cx| tooltip_view(label.clone(), cx))
                     .w(px(18.0))
                     .h(px(18.0))
                     .rounded(px(9.0))
-                    .bg(rgb((color >> 8) & 0x00FF_FFFF))
+                    .bg(rgb((preview >> 8) & 0x00FF_FFFF))
                     .border_2()
                     .border_color(if selected { text } else { rgba(0x00000000) })
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -5862,7 +5868,11 @@ fn paint_shape(
     shape: &Shape,
     style: AnnotationStyle,
 ) {
-    let color = rgba(style.color);
+    let color = if matches!(shape, Shape::HighlighterBox(_)) {
+        rgba(core_annotate::highlighter_color(style.color))
+    } else {
+        rgba(style.color)
+    };
     let stroke = px((style.stroke_width * scale).max(1.0));
     let to_point = |x: f32, y: f32| {
         point(

@@ -11,9 +11,7 @@ mod imp {
     };
 
     use crate::i18n::t;
-    #[cfg(target_os = "windows")]
-    use crate::logging::log_warn;
-    use crate::logging::{log_error, log_info};
+    use crate::logging::{log_error, log_info, log_warn};
     use crate::settings_state;
 
     const MENU_START: &str = "start";
@@ -24,8 +22,9 @@ mod imp {
 
     thread_local! {
         static TRAY: RefCell<Option<TrayIcon>> = const { RefCell::new(None) };
-        /// Tracks the taskbar variant currently painted so a light/dark switch
-        /// swaps the glyph without rebuilding the tray.
+        /// Tracks the surface variant currently painted so a light/dark switch
+        /// swaps the glyph without rebuilding the tray. On macOS the menu bar
+        /// follows the system appearance; Windows tracks the taskbar.
         static TRAY_LIGHT: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     }
 
@@ -43,17 +42,14 @@ mod imp {
             log_error!("tray", "failed to load tray icon");
             return false;
         };
-        TRAY_LIGHT.with(|slot| slot.set(Some(taskbar_is_light())));
+        TRAY_LIGHT.with(|slot| slot.set(Some(surface_is_light())));
 
         let builder = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
             .with_menu_on_right_click(true)
-            .with_tooltip("Capin");
-        #[cfg(target_os = "macos")]
-        let builder = builder.with_icon_templated(icon);
-        #[cfg(target_os = "windows")]
-        let builder = builder.with_icon(icon);
+            .with_tooltip("Capin")
+            .with_icon(icon);
 
         let tray = match builder.build() {
             Ok(tray) => tray,
@@ -111,17 +107,13 @@ mod imp {
     }
 
     fn load_icon() -> Option<Icon> {
-        #[cfg(target_os = "macos")]
-        let bytes: &[u8] = include_bytes!("../../../assets/icon/tray/capin_tray_template.png");
-        #[cfg(target_os = "windows")]
-        let bytes: &[u8] = {
-            // The glyph sits on the taskbar, not inside the app chrome: a
-            // light taskbar needs the dark glyph and vice versa.
-            if taskbar_is_light() {
-                include_bytes!("../../../assets/icon/tray/capin_tray_light.png")
-            } else {
-                include_bytes!("../../../assets/icon/tray/capin_tray_dark.png")
-            }
+        // Both platforms use the same two-ring glyph. The glyph sits on the
+        // taskbar on Windows and the menu bar on macOS: a light surface needs
+        // the dark glyph and vice versa.
+        let bytes: &[u8] = if surface_is_light() {
+            include_bytes!("../../../assets/icon/tray/capin_tray_light.png")
+        } else {
+            include_bytes!("../../../assets/icon/tray/capin_tray_dark.png")
         };
 
         let image = image::load_from_memory(bytes).ok()?.into_rgba8();
@@ -130,21 +122,26 @@ mod imp {
     }
 
     #[cfg(target_os = "windows")]
-    fn taskbar_is_light() -> bool {
+    fn surface_is_light() -> bool {
         platform_window::system_taskbar_uses_light_theme().unwrap_or(false)
     }
 
-    #[cfg(not(target_os = "windows"))]
-    fn taskbar_is_light() -> bool {
+    #[cfg(target_os = "macos")]
+    fn surface_is_light() -> bool {
+        platform_window::system_uses_light_theme().unwrap_or(false)
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    fn surface_is_light() -> bool {
         false
     }
 
-    /// Re-picks the tray glyph when the taskbar flips between light and dark.
-    /// The tray window is owned by `tray-icon`, so no GPUI appearance callback
-    /// reaches us; a low-frequency poll is the portable signal.
-    #[cfg(target_os = "windows")]
+    /// Re-picks the tray glyph when the taskbar or menu bar flips between
+    /// light and dark. The tray surface is owned by the platform, so no GPUI
+    /// appearance callback reaches us; a low-frequency poll is the portable
+    /// signal.
     fn refresh_icon_for_theme() {
-        let light = taskbar_is_light();
+        let light = surface_is_light();
         if TRAY_LIGHT.with(|slot| slot.get()) == Some(light) {
             return;
         }
@@ -161,9 +158,6 @@ mod imp {
             TRAY_LIGHT.with(|slot| slot.set(Some(light)));
         });
     }
-
-    #[cfg(not(target_os = "windows"))]
-    fn refresh_icon_for_theme() {}
 
     fn start_events(cx: &mut App) {
         cx.spawn(async move |cx| {

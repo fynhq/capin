@@ -61,6 +61,6 @@ pub fn window_corner_radius(id: core_types::WindowId, scale: f32) -> u32 {
 }
 
 #[cfg(target_os = "macos")]
-pub use macos::MacosCapture;
+pub use macos::{MacosCapture, display_backing_scale};
 #[cfg(target_os = "windows")]
 pub use windows::{WindowsCapture, init_process_dpi_awareness};

@@ -39,6 +39,25 @@ pub struct AnnotationStyle {
     pub spotlight_intensity: u8,
 }
 
+/// Turns an annotation color into the pale wash used by the highlighter.
+///
+/// The highlighter shares the palette with the outline tools, so the stored
+/// color stays the saturated preset; rendering mixes it toward white and uses
+/// a translucent alpha. That keeps palette selection and custom colors
+/// unchanged while the highlight itself reads as a light marker stroke.
+pub fn highlighter_color(color: u32) -> u32 {
+    const WHITE_MIX_NUMERATOR: u32 = 3;
+    const WHITE_MIX_DENOMINATOR: u32 = 5;
+    const ALPHA: u32 = 0x99;
+    let mix = |channel: u32| {
+        channel + ((255 - channel) * WHITE_MIX_NUMERATOR).div_ceil(WHITE_MIX_DENOMINATOR)
+    };
+    let red = mix((color >> 24) & 0xFF);
+    let green = mix((color >> 16) & 0xFF);
+    let blue = mix((color >> 8) & 0xFF);
+    (red << 24) | (green << 16) | (blue << 8) | ALPHA
+}
+
 impl Default for AnnotationStyle {
     fn default() -> Self {
         Self {
@@ -549,6 +568,16 @@ mod tests {
             doc.object(id).unwrap().bounds().origin,
             PhysicalPoint::new(15, 15)
         );
+    }
+
+    #[test]
+    fn highlighter_color_mixes_toward_white_and_stays_translucent() {
+        assert_eq!(super::highlighter_color(0xFF0000FF), 0xFF999999);
+        assert_eq!(super::highlighter_color(0x000000FF), 0x99999999);
+        assert_eq!(super::highlighter_color(0xFFFFFFFF), 0xFFFFFF99);
+        let tinted = super::highlighter_color(0x0A84FFFF);
+        assert!(tinted >> 24 > 0x0A && tinted >> 24 < 0xFF);
+        assert!(tinted & 0xFF == 0x99);
     }
 
     #[test]

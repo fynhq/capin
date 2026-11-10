@@ -8,19 +8,25 @@ use crate::i18n::Language;
 use crate::logging::{log_error, log_info, log_warn};
 
 // Windows reserves Win+Shift+S for Snipping Tool, so the default has to move
-// to a combination RegisterHotKey can actually claim.
+// to a combination RegisterHotKey can actually claim. macOS keeps the
+// Command-based family but pairs it with Control so it does not collide with
+// browser "Save As" style shortcuts.
 #[cfg(target_os = "windows")]
 pub const DEFAULT_CAPTURE_HOTKEY: &str = "ctrl+alt+KeyS";
 #[cfg(not(target_os = "windows"))]
-pub const DEFAULT_CAPTURE_HOTKEY: &str = "shift+meta+KeyS";
+pub const DEFAULT_CAPTURE_HOTKEY: &str = "ctrl+meta+KeyS";
 #[cfg(target_os = "windows")]
 pub const DEFAULT_PIN_HOTKEY: &str = "ctrl+alt+KeyD";
 #[cfg(not(target_os = "windows"))]
-pub const DEFAULT_PIN_HOTKEY: &str = "shift+meta+KeyD";
+pub const DEFAULT_PIN_HOTKEY: &str = "ctrl+meta+KeyD";
 
 #[cfg(target_os = "windows")]
 const LEGACY_CAPTURE_HOTKEY: &str = "shift+meta+KeyS";
 #[cfg(target_os = "windows")]
+const LEGACY_PIN_HOTKEY: &str = "shift+meta+KeyD";
+#[cfg(target_os = "macos")]
+const LEGACY_CAPTURE_HOTKEY: &str = "shift+meta+KeyS";
+#[cfg(target_os = "macos")]
 const LEGACY_PIN_HOTKEY: &str = "shift+meta+KeyD";
 pub const DEFAULT_ANNOTATION_COLOR: u32 = 0xFF3B30FF;
 pub const DEFAULT_ANNOTATION_FONT_SIZE: f32 = 20.0;
@@ -449,6 +455,17 @@ fn parse(text: &str) -> AppSettings {
             settings.pin_hotkey = DEFAULT_PIN_HOTKEY.to_owned();
         }
     }
+    #[cfg(target_os = "macos")]
+    {
+        // The first macOS default was Cmd+Shift; the default moved to
+        // Control+Command so it no longer overlaps common app shortcuts.
+        if settings.capture_hotkey == LEGACY_CAPTURE_HOTKEY {
+            settings.capture_hotkey = DEFAULT_CAPTURE_HOTKEY.to_owned();
+        }
+        if settings.pin_hotkey == LEGACY_PIN_HOTKEY {
+            settings.pin_hotkey = DEFAULT_PIN_HOTKEY.to_owned();
+        }
+    }
     settings
 }
 
@@ -798,6 +815,18 @@ mod tests {
 
         let mixed = parse("capture_hotkey=control+alt+KeyQ\npin_hotkey=shift+meta+KeyD\n");
         assert_eq!(mixed.capture_hotkey, "control+alt+KeyQ");
+        assert_eq!(mixed.pin_hotkey, DEFAULT_PIN_HOTKEY);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn migrates_the_legacy_macos_hotkeys_independently() {
+        let untouched = parse("capture_hotkey=shift+meta+KeyS\npin_hotkey=shift+meta+KeyD\n");
+        assert_eq!(untouched.capture_hotkey, DEFAULT_CAPTURE_HOTKEY);
+        assert_eq!(untouched.pin_hotkey, DEFAULT_PIN_HOTKEY);
+
+        let mixed = parse("capture_hotkey=control+meta+KeyQ\npin_hotkey=shift+meta+KeyD\n");
+        assert_eq!(mixed.capture_hotkey, "control+meta+KeyQ");
         assert_eq!(mixed.pin_hotkey, DEFAULT_PIN_HOTKEY);
     }
 }

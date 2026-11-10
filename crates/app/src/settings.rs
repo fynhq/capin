@@ -1020,8 +1020,10 @@ impl SettingsView {
 
     fn content(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         // macOS draws the settings title in the sidebar, so the page reaches
-        // the top edge; Windows keeps the caption strip clear of scrolling
-        // content so rows never slide under the caption buttons.
+        // the top edge; System Settings keeps the same-width strip above the
+        // content pane draggable, so this window adds one here. Windows keeps
+        // the caption strip clear of scrolling content so rows never slide
+        // under the caption buttons.
         #[cfg(target_os = "macos")]
         let top = 0.0;
         #[cfg(not(target_os = "macos"))]
@@ -1033,22 +1035,38 @@ impl SettingsView {
             - layout::SIDEBAR_WIDTH
             - layout::CONTENT_PAD_X * 2.0)
             .clamp(240.0, layout::CONTENT_MAX_WIDTH);
+        let header = div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .px(px(layout::CONTENT_PAD_X))
+            .pt(px(layout::CONTENT_PAD_TOP))
+            .pb(px(layout::HEADER_GAP))
+            .child(div().w(px(content_width)).child(self.section_header(theme)));
+        // macOS extends the draggable titlebar band across the content pane,
+        // like System Settings; the title row itself stays draggable too.
+        #[cfg(target_os = "macos")]
+        let top_block = self
+            .macos_drag_area(
+                "settings-content-drag-strip",
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .child(div().w_full().h(px(layout::TITLEBAR_HEIGHT)))
+                    .child(header),
+                cx,
+            )
+            .into_any_element();
+        #[cfg(not(target_os = "macos"))]
+        let top_block = header.into_any_element();
         div()
             .flex_1()
             .h_full()
             .flex()
             .flex_col()
             .pt(px(top))
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .justify_center()
-                    .px(px(layout::CONTENT_PAD_X))
-                    .pt(px(layout::CONTENT_PAD_TOP))
-                    .pb(px(layout::HEADER_GAP))
-                    .child(div().w(px(content_width)).child(self.section_header(theme))),
-            )
+            .child(top_block)
             .child(
                 div()
                     .flex_1()

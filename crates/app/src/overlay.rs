@@ -775,6 +775,15 @@ impl OverlayView {
         )
     }
 
+    /// Capture pixels per logical window point. On scaled HiDPI modes the
+    /// panel resolution and the window-server backing scale differ, so every
+    /// physical-to-logical conversion must follow the frozen frame rather than
+    /// the window's nominal scale; otherwise selections, the inline editor and
+    /// pins drift or shrink relative to the image.
+    fn effective_scale(&self) -> f32 {
+        self.frame_ratio().0.max(0.1)
+    }
+
     fn to_physical(&self, position: Point<Pixels>) -> PhysicalPoint {
         let origin = self.session.monitor_bounds().origin;
         let (scale_x, scale_y) = self.frame_ratio();
@@ -1474,7 +1483,7 @@ impl OverlayView {
             SelectionOutcome::Region(region) => (
                 CaptureTarget::Region(region),
                 region.rect,
-                self.scale,
+                self.effective_scale(),
                 self.aspect,
             ),
             SelectionOutcome::Window(id) => {
@@ -1492,14 +1501,14 @@ impl OverlayView {
                         clipped.size.width,
                         clipped.size.height,
                     ),
-                    window.scale.get(),
+                    self.effective_scale(),
                     AspectPreset::Free,
                 )
             }
             SelectionOutcome::Monitor(id) => (
                 CaptureTarget::Monitor(id),
                 PhysicalRect::new(0, 0, monitor.size.width, monitor.size.height),
-                self.scale,
+                self.effective_scale(),
                 AspectPreset::Free,
             ),
         };
@@ -1596,7 +1605,7 @@ impl OverlayView {
         if matches!(selected.target, CaptureTarget::Window(_)) {
             Ok(frame)
         } else {
-            Ok(self.effects.apply(frame, selected.scale))
+            Ok(self.effects.apply(frame, self.effective_scale()))
         }
     }
 
@@ -1626,7 +1635,7 @@ impl OverlayView {
             frame.width(),
             frame.height()
         );
-        let scale = selected.scale;
+        let scale = self.effective_scale();
         let center_x = (region.rect.origin.x as f32 + region.rect.size.width as f32 / 2.0) / scale;
         let center_y = (region.rect.origin.y as f32 + region.rect.size.height as f32 / 2.0) / scale;
         let image_width = frame.width() as f32 / scale;
@@ -1756,7 +1765,7 @@ impl OverlayView {
             }
         };
         let monitor = self.session.monitor_bounds();
-        let scale = selected.scale.max(0.1);
+        let scale = self.effective_scale();
         let center_x = (monitor.origin.x + selected.rect.origin.x) as f32 / scale
             + selected.rect.size.width as f32 / scale / 2.0;
         let center_y = (monitor.origin.y + selected.rect.origin.y) as f32 / scale
@@ -1849,8 +1858,12 @@ impl OverlayView {
             excluded.push(WindowId::from_raw(id));
         }
         if let Ok(windows) = backend.windows_excluding(&excluded) {
-            self.session =
-                SelectionSession::with_scale(monitor, monitor_bounds, windows, self.scale);
+            self.session = SelectionSession::with_scale(
+                monitor,
+                monitor_bounds,
+                windows,
+                self.effective_scale(),
+            );
             self.session.set_window_targeting(true);
             self.session.set_aspect_ratio(self.aspect.ratio());
         }
@@ -3421,7 +3434,7 @@ impl OverlayView {
                             point.x - monitor.origin.x,
                             point.y - monitor.origin.y,
                         );
-                        let edge_tolerance = 6.0 * this.scale.max(0.1);
+                        let edge_tolerance = 6.0 * this.effective_scale();
                         if let Some(handle) =
                             edge_resize_handle(selected.rect, local, edge_tolerance)
                         {

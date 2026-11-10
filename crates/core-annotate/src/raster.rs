@@ -13,7 +13,7 @@ use tiny_skia::{
 
 use crate::{
     Annotation, AnnotationDocument, AnnotationId, AnnotationStyle, OutlinePoint, Shape,
-    TextAlignment, stroke_outline,
+    TextAlignment, highlighter_color, stroke_outline,
 };
 
 /// Label color for a sequence badge. Badges read as solid chips, so the
@@ -71,7 +71,12 @@ pub fn rasterize(
             continue;
         }
 
-        let (red, green, blue, alpha) = unpack(annotation.style.color);
+        let color = if matches!(annotation.shape, Shape::HighlighterBox(_)) {
+            highlighter_color(annotation.style.color)
+        } else {
+            annotation.style.color
+        };
+        let (red, green, blue, alpha) = unpack(color);
         let mut paint = Paint::default();
         paint.set_color_rgba8(red, green, blue, alpha);
         if let Some(polygons) = stroke_outline(&annotation.shape, &annotation.style) {

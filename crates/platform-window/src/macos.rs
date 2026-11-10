@@ -314,7 +314,18 @@ fn display_point(monitor: u64, x: i32, y: i32) -> Option<CGPoint> {
     if bounds.size.width <= 0.0 || bounds.size.height <= 0.0 {
         return None;
     }
-    let scale = display.pixels_wide() as f64 / bounds.size.width;
+    // Points come from the window-server backing store (for example 2x the
+    // reported menu-bar points). AppKit is the source of truth for the scale;
+    // the display mode is only a fallback because its width can be reported in
+    // either points or pixels depending on the OS and display.
+    let scale = screen_backing_scale(display_id)
+        .or_else(|| {
+            display.display_mode().and_then(|mode| {
+                let width = mode.width();
+                (width > 0).then(|| mode.pixel_width() as f64 / width as f64)
+            })
+        })
+        .unwrap_or_else(|| display.pixels_wide() as f64 / bounds.size.width);
     if scale <= 0.0 {
         return None;
     }
@@ -322,6 +333,30 @@ fn display_point(monitor: u64, x: i32, y: i32) -> Option<CGPoint> {
         bounds.origin.x + f64::from(x) / scale,
         bounds.origin.y + f64::from(y) / scale,
     ))
+}
+
+/// Backing scale of the NSScreen that hosts a CGDirectDisplayID.
+fn screen_backing_scale(id: u32) -> Option<f64> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSScreen;
+
+    let marker = MainThreadMarker::new()?;
+    let main_height = CGDisplay::main().bounds().size.height;
+    let point_bounds = CGDisplay::new(id).bounds();
+    for screen in NSScreen::screens(marker).iter() {
+        let frame = screen.frame();
+        // NSScreen frames use a bottom-left origin; CGDisplay bounds are
+        // top-left relative to the primary display.
+        let top = main_height - (frame.origin.y + frame.size.height);
+        if (frame.origin.x - point_bounds.origin.x).abs() <= 1.0
+            && (top - point_bounds.origin.y).abs() <= 1.0
+            && (frame.size.width - point_bounds.size.width).abs() <= 1.0
+            && (frame.size.height - point_bounds.size.height).abs() <= 1.0
+        {
+            return Some(screen.backingScaleFactor());
+        }
+    }
+    None
 }
 
 #[link(name = "ApplicationServices", kind = "framework")]

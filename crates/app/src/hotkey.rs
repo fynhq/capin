@@ -34,7 +34,7 @@ mod imp {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            Modifiers::META | Modifiers::SHIFT
+            Modifiers::META | Modifiers::CONTROL
         }
     }
 

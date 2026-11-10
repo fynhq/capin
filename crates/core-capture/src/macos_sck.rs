@@ -285,11 +285,13 @@ fn build_config(
     let (width, height, window) = match target {
         CaptureTarget::Monitor(id) => {
             let display = find_display(content, id.raw())?;
-            (display_width(&display), display_height(&display), false)
+            let (width, height) = super::display_pixel_size(unsafe { display.displayID() })
+                .unwrap_or_else(|| (display_width(&display), display_height(&display)));
+            (width, height, false)
         }
         CaptureTarget::Region(region) => {
             let display = find_display(content, region.monitor.raw())?;
-            let scale = display_scale(&display);
+            let scale = backing_scale(&display);
             let rect = CGRect::new(
                 CGPoint::new(
                     region.rect.origin.x as f64 / scale,
@@ -385,6 +387,15 @@ fn display_height(display: &SCDisplay) -> usize {
     unsafe { display.height() }.max(1) as usize
 }
 
+/// Backing-store pixels per point. SCDisplay reports pixel dimensions that can
+/// come from the panel rather than the window server's scaled backing store,
+/// so prefer the display mode's pixel size for capture geometry.
+fn backing_scale(display: &SCDisplay) -> f64 {
+    super::display_backing_scale(u64::from(unsafe { display.displayID() }))
+        .map(f64::from)
+        .unwrap_or_else(|| display_scale(display))
+}
+
 fn display_scale(display: &SCDisplay) -> f64 {
     let frame = unsafe { display.frame() };
     if frame.size.width > 0.0 {
@@ -408,7 +419,7 @@ fn window_scale(window: &SCWindow, content: &SCShareableContent) -> Option<f64> 
                 && center_x <= bounds.origin.x + bounds.size.width
                 && center_y <= bounds.origin.y + bounds.size.height
         })
-        .map(|display| display_scale(&display))
+        .map(|display| backing_scale(&display))
 }
 
 fn shareable_content() -> Result<Retained<SCShareableContent>> {

@@ -18,6 +18,10 @@ core-graphics = "0.24.0"
 dispatch2 = "0.3.1"
 foreign-types = "0.5.0"
 objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSScreen",
+] }
 objc2-application-services = "0.3.2"
 objc2-core-foundation = "0.3.2"
 objc2-core-graphics = "0.3.2"

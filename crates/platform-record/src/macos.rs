@@ -169,7 +169,6 @@ fn build_plan(
         CaptureTarget::Monitor(id) => {
             let display = find_display(content, id.raw())?;
             let frame = unsafe { display.frame() };
-            let scale = display_scale(&display);
             let excluded = own_windows(content, extra_exclusions);
             let windows = NSArray::from_retained_slice(&excluded);
             let filter = unsafe {
@@ -179,10 +178,17 @@ fn build_plan(
                     &windows,
                 )
             };
+            // Full-display recording keeps the platform's stream resolution;
+            // region and window targets use the backing-store space the app
+            // now shares with screenshots. Cursor scaling follows the actual
+            // stream-to-point ratio so the disc stays the same screen size.
+            let output_width = display_width(&display);
+            let output_height = display_height(&display);
+            let output_scale = output_width as f64 / frame.size.width.max(1.0);
             Ok(SessionPlan {
                 filter,
-                width: even(display_width(&display)),
-                height: even(display_height(&display)),
+                width: even(output_width),
+                height: even(output_height),
                 source_rect: None,
                 single_window: false,
                 cursor_space: CursorSpace::Screen {
@@ -192,7 +198,7 @@ fn build_plan(
                     source_y: 0.0,
                     source_width: frame.size.width,
                     source_height: frame.size.height,
-                    scale,
+                    scale: output_scale,
                 },
             })
         }
@@ -310,6 +316,11 @@ fn display_height(display: &SCDisplay) -> usize {
 }
 
 fn display_scale(display: &SCDisplay) -> f64 {
+    if let Some(scale) =
+        core_capture::display_backing_scale(u64::from(unsafe { display.displayID() }))
+    {
+        return f64::from(scale);
+    }
     let frame = unsafe { display.frame() };
     if frame.size.width > 0.0 {
         display_width(display) as f64 / frame.size.width

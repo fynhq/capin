@@ -334,23 +334,22 @@ fn displays() -> Result<Vec<DisplayGeometry>> {
         }
         let display = CGDisplay::new(id);
         let point_bounds = display.bounds();
-        let pixels_wide = u32::try_from(display.pixels_wide()).unwrap_or(0);
-        let pixels_high = u32::try_from(display.pixels_high()).unwrap_or(0);
-        let width = if pixels_wide > 0 {
-            pixels_wide
-        } else {
-            point_bounds.size.width.max(1.0).round() as u32
-        };
-        let height = if pixels_high > 0 {
-            pixels_high
-        } else {
-            point_bounds.size.height.max(1.0).round() as u32
-        };
-        let raw_scale = if point_bounds.size.width > 0.0 {
-            width as f32 / point_bounds.size.width as f32
-        } else {
-            1.0
-        };
+        // GPUI renders every window at the screen's backing scale, and macOS
+        // screenshots use the same backing-store pixels. Deriving the pixel
+        // space from NSScreen keeps capture, the frozen overlay and window
+        // placement in one coordinate system; CGDisplayPixelsWide only
+        // describes the panel and can differ on scaled HiDPI modes.
+        let scale = screen_backing_scale(id).unwrap_or_else(|| {
+            let pixels_wide = u32::try_from(display.pixels_wide()).unwrap_or(0);
+            if point_bounds.size.width > 0.0 && pixels_wide > 0 {
+                f64::from(pixels_wide) / point_bounds.size.width
+            } else {
+                1.0
+            }
+        });
+        let width = (point_bounds.size.width * scale).round().max(1.0) as u32;
+        let height = (point_bounds.size.height * scale).round().max(1.0) as u32;
+        let raw_scale = scale as f32;
         let scale = DpiScale::new(raw_scale).unwrap_or(DpiScale::ONE);
         let physical = PhysicalRect::new(
             (point_bounds.origin.x * f64::from(scale.get())).round() as i32,
@@ -367,6 +366,53 @@ fn displays() -> Result<Vec<DisplayGeometry>> {
         });
     }
     Ok(displays)
+}
+
+/// Backing scale of the NSScreen that hosts a CGDirectDisplayID.
+///
+/// AppKit is the source of truth for the scale GPUI uses; the display-mode
+/// width can be reported in either points or pixels depending on the OS and
+/// display, so it is only used as a fallback elsewhere.
+fn screen_backing_scale(id: u32) -> Option<f64> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSScreen;
+
+    let marker = MainThreadMarker::new()?;
+    let main_height = CGDisplay::main().bounds().size.height;
+    let point_bounds = CGDisplay::new(id).bounds();
+    for screen in NSScreen::screens(marker).iter() {
+        let frame = screen.frame();
+        // NSScreen frames use a bottom-left origin; CGDisplay bounds are
+        // top-left relative to the primary display.
+        let top = main_height - (frame.origin.y + frame.size.height);
+        if (frame.origin.x - point_bounds.origin.x).abs() <= 1.0
+            && (top - point_bounds.origin.y).abs() <= 1.0
+            && (frame.size.width - point_bounds.size.width).abs() <= 1.0
+            && (frame.size.height - point_bounds.size.height).abs() <= 1.0
+        {
+            return Some(screen.backingScaleFactor());
+        }
+    }
+    None
+}
+
+/// Returns the backing-store pixel scale of a display.
+///
+/// On HiDPI scaled modes this is the window server's render scale (usually
+/// 2.0), not the panel's native pixel ratio. Capture targets must use it so
+/// the frozen frame lines up one-to-one with GPUI's surface.
+pub fn display_backing_scale(raw: u64) -> Option<f32> {
+    let id = u32::try_from(raw).ok()?;
+    screen_backing_scale(id).map(|scale| scale as f32)
+}
+
+/// Backing-store pixel size of a display, used as the capture output size.
+pub(super) fn display_pixel_size(id: u32) -> Option<(usize, usize)> {
+    let scale = screen_backing_scale(id)?;
+    let point_bounds = CGDisplay::new(id).bounds();
+    let width = (point_bounds.size.width * scale).round().max(1.0) as usize;
+    let height = (point_bounds.size.height * scale).round().max(1.0) as usize;
+    (width > 0 && height > 0).then_some((width, height))
 }
 
 fn capture_display(id: MonitorId) -> Result<RgbaFrame> {
@@ -640,7 +686,14 @@ fn image_to_frame(image: &CGImage) -> Result<RgbaFrame> {
             message: "captured image is empty".to_owned(),
         });
     }
-    let color_space = core_graphics::color_space::CGColorSpace::create_device_rgb();
+    // Convert into explicit sRGB instead of the device-dependent RGB space.
+    // ScreenCaptureKit can hand back Display P3 frames; device RGB resolves to
+    // the display profile, and leaving the pixels in a wide-gamut space makes
+    // the pinned preview and exported PNG look washed out next to the source.
+    let color_space = core_graphics::color_space::CGColorSpace::create_with_name(unsafe {
+        core_graphics::color_space::kCGColorSpaceSRGB
+    })
+    .unwrap_or_else(core_graphics::color_space::CGColorSpace::create_device_rgb);
     let mut context = CGContext::create_bitmap_context(
         None,
         width,
