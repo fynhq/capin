@@ -23,7 +23,9 @@ use crate::{
     settings_state,
 };
 
-const DIM: u32 = 0x0000004d;
+/// Backdrop shade outside the live selection. Forty percent black keeps the
+/// frozen frame readable while making the selected region stand out.
+const DIM: u32 = 0x00000066;
 const FALLBACK_HOVER_ACCENT: u32 = 0x4c9aff;
 /// Element hover uses a warm second accent so it reads differently from the
 /// window hover that shares the system accent.
