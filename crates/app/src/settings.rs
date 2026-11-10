@@ -255,10 +255,10 @@ impl ShortcutSlot {
         }
     }
 
-    fn description_key(self) -> &'static str {
+    fn description_key(self) -> Option<&'static str> {
         match self {
-            Self::Capture => "settings.capture_hotkey_desc",
-            Self::Pin => "settings.pin_hotkey_desc",
+            Self::Capture => None,
+            Self::Pin => Some("settings.pin_hotkey_desc"),
         }
     }
 
@@ -281,13 +281,6 @@ impl SaveTarget {
         match self {
             Self::Screenshots => "settings.save_location",
             Self::Recordings => "settings.recording_location",
-        }
-    }
-
-    fn description_key(self) -> &'static str {
-        match self {
-            Self::Screenshots => "settings.save_location_desc",
-            Self::Recordings => "settings.recording_location_desc",
         }
     }
 
@@ -345,7 +338,7 @@ struct ToggleRow {
     id: &'static str,
     icon: &'static [u8],
     title_key: &'static str,
-    description_key: &'static str,
+    description_key: Option<&'static str>,
     value: bool,
     set: fn(&mut AppSettings, bool),
     refresh_pin: bool,
@@ -1112,7 +1105,7 @@ impl SettingsView {
         let page = page.child(group(
             theme,
             t(language, "settings.group.permissions"),
-            t(language, "settings.group.permissions_desc"),
+            "",
             div()
                 .flex()
                 .flex_col()
@@ -1267,7 +1260,7 @@ impl SettingsView {
                 theme,
                 icons::LANGUAGE,
                 t(language, "settings.language"),
-                t(language, "settings.language_desc"),
+                "",
             ))
             .child(control)
     }
@@ -1281,7 +1274,7 @@ impl SettingsView {
                 theme,
                 icons::STARTUP,
                 t(language, "settings.auto_start"),
-                t(language, "settings.auto_start_desc"),
+                "",
             ))
             .child(
                 div()
@@ -1369,7 +1362,7 @@ impl SettingsView {
             .child(group(
                 theme,
                 t(language, "settings.group.selection"),
-                t(language, "settings.group.selection_desc"),
+                "",
                 card(
                     theme,
                     vec![
@@ -1380,7 +1373,7 @@ impl SettingsView {
                                 id: "settings-copy-to-clipboard",
                                 icon: icons::CLIPBOARD,
                                 title_key: "settings.copy_clipboard",
-                                description_key: "settings.copy_clipboard_desc",
+                                description_key: None,
                                 value: self.settings.copy_to_clipboard,
                                 set: |settings, value| settings.copy_to_clipboard = value,
                                 refresh_pin: false,
@@ -1393,7 +1386,7 @@ impl SettingsView {
                                 id: "settings-capture-cursor",
                                 icon: icons::CURSOR,
                                 title_key: "settings.capture_cursor",
-                                description_key: "settings.capture_cursor_desc",
+                                description_key: None,
                                 value: self.settings.capture_cursor,
                                 set: |settings, value| settings.capture_cursor = value,
                                 refresh_pin: false,
@@ -1406,7 +1399,7 @@ impl SettingsView {
             .child(group(
                 theme,
                 t(language, "settings.group.window"),
-                t(language, "settings.group.window_desc"),
+                "",
                 card(
                     theme,
                     vec![
@@ -1418,7 +1411,7 @@ impl SettingsView {
             .child(group(
                 theme,
                 t(language, "settings.group.annotation"),
-                t(language, "settings.group.annotation_desc"),
+                "",
                 card(
                     theme,
                     vec![self.toggle_row(
@@ -1428,7 +1421,7 @@ impl SettingsView {
                             id: "settings-annotation-uniform-color",
                             icon: icons::PALETTE,
                             title_key: "settings.annotation_uniform_color",
-                            description_key: "settings.annotation_uniform_color_desc",
+                            description_key: Some("settings.annotation_uniform_color_desc"),
                             value: self.settings.annotation_uniform_color,
                             set: |settings, value| settings.annotation_uniform_color = value,
                             refresh_pin: false,
@@ -1439,7 +1432,7 @@ impl SettingsView {
             .child(group(
                 theme,
                 t(language, "settings.group.pin"),
-                t(language, "settings.group.pin_desc"),
+                "",
                 card(
                     theme,
                     vec![
@@ -1450,7 +1443,7 @@ impl SettingsView {
                                 id: "settings-pin-text-ocr",
                                 icon: icons::TEXT,
                                 title_key: "settings.pin_text_ocr",
-                                description_key: "settings.pin_text_ocr_desc",
+                                description_key: Some("settings.pin_text_ocr_desc"),
                                 value: self.settings.pin_text_ocr,
                                 set: |settings, value| settings.pin_text_ocr = value,
                                 refresh_pin: true,
@@ -1463,7 +1456,7 @@ impl SettingsView {
                                 id: "settings-pin-qr",
                                 icon: icons::QR,
                                 title_key: "settings.pin_qr",
-                                description_key: "settings.pin_qr_desc",
+                                description_key: None,
                                 value: self.settings.pin_qr,
                                 set: |settings, value| settings.pin_qr = value,
                                 refresh_pin: true,
@@ -1486,7 +1479,9 @@ impl SettingsView {
                     theme,
                     row.icon,
                     t(language, row.title_key),
-                    t(language, row.description_key),
+                    row.description_key
+                        .map(|key| t(language, key))
+                        .unwrap_or_default(),
                 ))
                 .child(
                     div()
@@ -1538,7 +1533,7 @@ impl SettingsView {
                 theme,
                 icons::PADDING,
                 t(language, "settings.window_padding"),
-                t(language, "settings.window_padding_desc"),
+                "",
             ))
             .child(self.select_trigger(
                 theme,
@@ -1834,7 +1829,7 @@ impl SettingsView {
                 theme,
                 icons::FOLDER,
                 t(language, target.title_key()),
-                t(language, target.description_key()),
+                "",
             ))
             .child(
                 div()
@@ -2062,7 +2057,7 @@ impl SettingsView {
                     id: "settings-record-cursor",
                     icon: icons::CURSOR,
                     title_key: "settings.record_cursor",
-                    description_key: "settings.record_cursor_desc",
+                    description_key: None,
                     value: self.settings.record_cursor,
                     set: |settings, value| settings.record_cursor = value,
                     refresh_pin: false,
@@ -2075,7 +2070,7 @@ impl SettingsView {
                     id: "settings-record-cursor-highlight",
                     icon: icons::CURSOR,
                     title_key: "settings.record_cursor_highlight",
-                    description_key: "settings.record_cursor_highlight_desc",
+                    description_key: Some("settings.record_cursor_highlight_desc"),
                     value: self.settings.record_cursor_highlight,
                     set: |settings, value| settings.record_cursor_highlight = value,
                     refresh_pin: false,
@@ -2451,14 +2446,14 @@ impl SettingsView {
                         info_row(
                             theme,
                             t(language, "shortcuts.capture_region"),
-                            t(language, "shortcuts.capture_region_desc"),
+                            "",
                             t(language, "shortcuts.value.drag"),
                             Some(icons::SELECT),
                         ),
                         info_row(
                             theme,
                             t(language, "shortcuts.window_capture"),
-                            t(language, "shortcuts.window_capture_desc"),
+                            "",
                             t(language, "shortcuts.value.auto"),
                             Some(icons::WINDOW),
                         ),
@@ -2479,7 +2474,7 @@ impl SettingsView {
                         info_row(
                             theme,
                             t(language, "shortcuts.toggle_target"),
-                            t(language, "shortcuts.toggle_target_desc"),
+                            "",
                             "Tab",
                             Some(icons::WINDOW),
                         ),
@@ -2507,56 +2502,56 @@ impl SettingsView {
                         info_row(
                             theme,
                             t(language, "shortcuts.copy_color"),
-                            t(language, "shortcuts.copy_color_desc"),
+                            "",
                             "C",
                             Some(icons::CLIPBOARD),
                         ),
                         info_row(
                             theme,
                             t(language, "shortcuts.copy_selection"),
-                            t(language, "shortcuts.copy_selection_desc"),
+                            "",
                             t(language, "shortcuts.value.enter_or_double_click"),
                             Some(icons::COPY),
                         ),
                         info_row(
                             theme,
                             t(language, "shortcuts.save_capture"),
-                            t(language, "shortcuts.save_capture_desc"),
+                            "",
                             t(language, "shortcuts.value.cmd_ctrl_s"),
                             Some(icons::SAVE),
                         ),
                         info_row(
                             theme,
                             t(language, "shortcuts.pin_current"),
-                            t(language, "shortcuts.pin_current_desc"),
+                            "",
                             &pin_hotkey,
                             Some(icons::PIN),
                         ),
                         info_row(
                             theme,
                             t(language, "shortcuts.toggle_toolbar"),
-                            t(language, "shortcuts.toggle_toolbar_desc"),
+                            "",
                             "Space",
                             Some(icons::MORE),
                         ),
                         info_row(
                             theme,
                             t(language, "shortcuts.hints"),
-                            t(language, "shortcuts.hints_desc"),
+                            "",
                             "F1",
                             Some(icons::SHORTCUTS),
                         ),
                         info_row(
                             theme,
                             t(language, "shortcuts.refresh"),
-                            t(language, "shortcuts.refresh_desc"),
+                            "",
                             "F5",
                             Some(icons::REFRESH),
                         ),
                         info_row(
                             theme,
                             t(language, "shortcuts.cancel"),
-                            t(language, "shortcuts.cancel_desc"),
+                            "",
                             "Esc",
                             Some(icons::CLOSE),
                         ),
@@ -2580,56 +2575,56 @@ impl SettingsView {
                         info_row(
                             theme,
                             t(language, "shortcuts.pin_select_text"),
-                            t(language, "shortcuts.pin_select_text_desc"),
+                            "",
                             t(language, "shortcuts.value.drag"),
                             Some(icons::TEXT),
                         ),
                         info_row(
                             theme,
                             t(language, "shortcuts.pin_word"),
-                            t(language, "shortcuts.pin_word_desc"),
+                            "",
                             t(language, "shortcuts.value.double_click"),
                             Some(icons::TEXT),
                         ),
                         info_row(
                             theme,
                             t(language, "shortcuts.pin_copy_text"),
-                            t(language, "shortcuts.pin_copy_text_desc"),
+                            "",
                             t(language, "shortcuts.value.cmd_ctrl_c"),
                             Some(icons::COPY),
                         ),
                         info_row(
                             theme,
                             t(language, "shortcuts.pin_select_all"),
-                            t(language, "shortcuts.pin_select_all_desc"),
+                            "",
                             t(language, "shortcuts.value.cmd_ctrl_a"),
                             Some(icons::SELECT),
                         ),
                         info_row(
                             theme,
                             t(language, "shortcuts.pin_zoom"),
-                            t(language, "shortcuts.pin_zoom_desc"),
+                            "",
                             t(language, "shortcuts.value.wheel"),
                             Some(icons::IMAGE),
                         ),
                         info_row(
                             theme,
                             t(language, "shortcuts.pin_opacity"),
-                            t(language, "shortcuts.pin_opacity_desc"),
+                            "",
                             t(language, "shortcuts.value.shift_wheel"),
                             Some(icons::PALETTE),
                         ),
                         info_row(
                             theme,
                             t(language, "shortcuts.pin_menu"),
-                            t(language, "shortcuts.pin_menu_desc"),
+                            "",
                             t(language, "shortcuts.value.right_click"),
                             Some(icons::MORE),
                         ),
                         info_row(
                             theme,
                             t(language, "shortcuts.pin_close"),
-                            t(language, "shortcuts.pin_close_desc"),
+                            "",
                             t(language, "shortcuts.value.esc_middle"),
                             Some(icons::CLOSE),
                         ),
@@ -2665,7 +2660,9 @@ impl SettingsView {
                     theme,
                     icons::SHORTCUTS,
                     t(language, slot.title_key()),
-                    t(language, slot.description_key()),
+                    slot.description_key()
+                        .map(|key| t(language, key))
+                        .unwrap_or_default(),
                 ))
                 .child(
                     div()
@@ -3048,12 +3045,14 @@ fn group_header(theme: &Theme, title: &str, description: &str) -> Div {
                 .text_color(theme.text)
                 .child(title.to_owned()),
         )
-        .child(
-            div()
-                .text_size(px(layout::CAPTION))
-                .text_color(theme.muted)
-                .child(description.to_owned()),
-        )
+        .when(!description.is_empty(), |header| {
+            header.child(
+                div()
+                    .text_size(px(layout::CAPTION))
+                    .text_color(theme.muted)
+                    .child(description.to_owned()),
+            )
+        })
 }
 
 /// A group header and its card at the tight native label gap.
@@ -3131,12 +3130,14 @@ fn label_block(theme: &Theme, title: &str, subtitle: &str) -> Div {
                 .text_color(theme.text)
                 .child(title.to_owned()),
         )
-        .child(
-            div()
-                .text_size(px(layout::CAPTION))
-                .text_color(theme.muted)
-                .child(subtitle.to_owned()),
-        )
+        .when(!subtitle.is_empty(), |block| {
+            block.child(
+                div()
+                    .text_size(px(layout::CAPTION))
+                    .text_color(theme.muted)
+                    .child(subtitle.to_owned()),
+            )
+        })
 }
 
 fn info_row(
