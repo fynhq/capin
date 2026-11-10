@@ -39,7 +39,15 @@ pub fn open_session(region: CaptureRegion, first_frame: RgbaFrame, cx: &mut App)
     }
     log_info!("scroll", "scroll capture started");
 
-    let bounds = bar_bounds(region);
+    let desktop_bounds = bar_bounds(region);
+    let monitor = platform_backend().monitors().ok().and_then(|monitors| {
+        monitors
+            .into_iter()
+            .find(|monitor| monitor.id == region.monitor)
+    });
+    let bounds = monitor.as_ref().map_or(desktop_bounds, |monitor| {
+        crate::display::window_bounds_on_monitor(monitor, desktop_bounds)
+    });
     let display_id = Some(DisplayId::new(region.monitor.raw()));
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),

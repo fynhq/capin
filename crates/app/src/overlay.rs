@@ -19,7 +19,7 @@ use crate::{
     effects::RegionEffects,
     i18n::{Language, t},
     icons, image_util,
-    logging::{log_error, log_info},
+    logging::{log_error, log_info, log_warn},
     settings_state,
 };
 
@@ -293,13 +293,14 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
     core_capture::init_process_dpi_awareness();
 
     let mut backend = platform_backend();
-    let monitors = match backend.monitors() {
+    let mut monitors = match backend.monitors() {
         Ok(monitors) => monitors,
         Err(error) => {
             log_error!("overlay", "failed to enumerate monitors: {error}");
             return;
         }
     };
+    monitors.sort_by_key(|monitor| !monitor.is_primary);
     let windows = match backend.windows() {
         Ok(windows) => windows,
         Err(error) => {
@@ -310,9 +311,40 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
 
     let accent_hex = system_accent_hex().unwrap_or(FALLBACK_HOVER_ACCENT);
     let accent = rgb(accent_hex);
-    let mut opened = 0usize;
+
+    // Freeze every monitor before opening any overlay. An overlay window that
+    // is already on screen can end up inside the next monitor's frozen frame
+    // when mixed-DPI placement lets it spill across the display boundary; that
+    // made the second display look like a copy of the first one. Capturing all
+    // frames up front keeps each overlay bound to its own monitor.
+    let mut captures: Vec<(MonitorInfo, RgbaFrame)> = Vec::with_capacity(monitors.len());
     for monitor in monitors {
-        let frame = match backend.capture(CaptureTarget::Monitor(monitor.id)) {
+        if let Some((kept, _)) = captures
+            .iter()
+            .find(|(kept, _)| kept.bounds == monitor.bounds)
+        {
+            // Clone mode exposes both physical displays at identical desktop
+            // coordinates. One overlay already covers the whole desktop area,
+            // and the OS mirrors it to the other panel.
+            log_warn!(
+                "overlay",
+                "monitor {} shares bounds {:?} with {}; treating it as a clone",
+                monitor.id.raw(),
+                monitor.bounds,
+                kept.id.raw()
+            );
+            continue;
+        }
+
+        log_info!(
+            "overlay",
+            "monitor {}: {:?} scale {:.2} primary {}",
+            monitor.id.raw(),
+            monitor.bounds,
+            monitor.scale.get(),
+            monitor.is_primary
+        );
+        let mut frame = match backend.capture(CaptureTarget::Monitor(monitor.id)) {
             Ok(frame) => frame,
             Err(error) => {
                 log_error!(
@@ -332,15 +364,62 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
                 continue;
             }
         };
+        if !frame_matches_monitor(&frame, &monitor) {
+            log_error!(
+                "overlay",
+                "monitor {} frame {}x{} does not match {:?}; retrying",
+                monitor.id.raw(),
+                frame.width(),
+                frame.height(),
+                monitor.bounds
+            );
+            frame = match backend.capture(CaptureTarget::Monitor(monitor.id)) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    log_error!(
+                        "overlay",
+                        "retry failed for monitor {:?}: {error}",
+                        monitor.id
+                    );
+                    continue;
+                }
+            };
+        }
+        if !frame_matches_monitor(&frame, &monitor) {
+            log_error!(
+                "overlay",
+                "monitor {} kept returning {}x{} instead of {:?}; skipping",
+                monitor.id.raw(),
+                frame.width(),
+                frame.height(),
+                monitor.bounds
+            );
+            continue;
+        }
+        log_info!(
+            "overlay",
+            "captured monitor {}: {}x{}",
+            monitor.id.raw(),
+            frame.width(),
+            frame.height()
+        );
+        captures.push((monitor, frame));
+    }
 
+    let mut opened = 0usize;
+    for (monitor, frame) in captures {
         let window_bounds = logical_bounds(&monitor);
-        let window_size = window_bounds.size;
+        let expected_size = window_bounds.size;
+        let expected_scale = monitor.scale.get();
         let frame = Arc::new(frame);
         let image = image_util::render_image(&frame);
-        let scale = monitor.scale.get();
-        let session =
-            SelectionSession::with_scale(monitor.id, monitor.bounds, windows.clone(), scale);
         let options = overlay_options(monitor.id, window_bounds);
+        let placement = monitor.bounds;
+        let placement_scale = monitor.scale;
+        let session_monitor = monitor.id;
+        let session_bounds = monitor.bounds;
+        let session_windows = windows.clone();
+        let monitor_id = monitor.id.raw();
 
         // Accessories are not brought forward by ordering a window front:
         // AppKit only gives key status to an active app. Without this the
@@ -350,6 +429,63 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
             if let Err(error) = apply_window_style(&*window, WindowStyle::OVERLAY) {
                 log_error!("overlay", "failed to style overlay: {error}");
             }
+            // GPUI creates windows on the primary display and then moves them
+            // with the target display's scale factor. Windows can still apply
+            // a WM_DPICHANGED suggested rectangle during that move, so pin the
+            // native frame to the monitor's physical rectangle afterwards.
+            if let Err(error) =
+                platform_window::place_on_monitor(&*window, placement, placement_scale)
+            {
+                log_error!(
+                    "overlay",
+                    "failed to place monitor {monitor_id} overlay: {error}"
+                );
+            }
+            // Use the scale and size GPUI actually ended up with after the
+            // native placement. If a platform still applied a DPI suggestion,
+            // hit-testing and UI layout stay consistent with the frozen frame
+            // instead of assuming the monitor's nominal scale.
+            let scale = window.scale_factor();
+            let actual_size = window.bounds().size;
+            let window_size =
+                if f32::from(actual_size.width) > 0.0 && f32::from(actual_size.height) > 0.0 {
+                    actual_size
+                } else {
+                    expected_size
+                };
+            let actual_monitor = platform_window::monitor_for_window(&*window);
+            log_info!(
+                "overlay",
+                "monitor {monitor_id} overlay window: display {:?} size {:?} scale {:.2} (expected {:?} @ {:.2})",
+                actual_monitor,
+                window_size,
+                scale,
+                expected_size,
+                expected_scale
+            );
+            if let Some(actual) = actual_monitor
+                && actual != monitor_id
+            {
+                log_error!(
+                    "overlay",
+                    "monitor {monitor_id} overlay landed on display {actual}"
+                );
+            }
+            if (scale - expected_scale).abs() > 0.01
+                || (f32::from(window_size.width) - f32::from(expected_size.width)).abs() > 1.0
+                || (f32::from(window_size.height) - f32::from(expected_size.height)).abs() > 1.0
+            {
+                log_warn!(
+                    "overlay",
+                    "monitor {monitor_id} overlay geometry differs from the monitor; selections may be clipped"
+                );
+            }
+            let session = SelectionSession::with_scale(
+                session_monitor,
+                session_bounds,
+                session_windows,
+                scale,
+            );
             let view = cx.new(|cx| {
                 OverlayView::new(
                     session,
@@ -366,7 +502,25 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
             let focus = view.read(cx).focus_handle.clone();
             view.update(cx, |this, cx| this.observe_appearance(window, cx));
             OVERLAY_VIEWS.with(|views| views.borrow_mut().push(view.downgrade()));
+            let geometry = view.clone();
             window.defer(cx, move |window, cx| {
+                // Re-apply after any WM_DPICHANGED suggestion the first
+                // placement triggered. The second pass runs with the window
+                // already on the target monitor, so its DPI is stable.
+                if let Err(error) =
+                    platform_window::place_on_monitor(&*window, placement, placement_scale)
+                {
+                    log_error!("overlay", "failed to re-place overlay: {error}");
+                }
+                if let Some(actual) = platform_window::monitor_for_window(&*window)
+                    && actual != monitor_id
+                {
+                    log_error!(
+                        "overlay",
+                        "monitor {monitor_id} overlay still on display {actual} after re-placement"
+                    );
+                }
+                geometry.update(cx, |this, cx| this.refresh_geometry(window, cx));
                 window.focus(&focus, cx);
                 window.activate_window();
                 cx.activate(true);
@@ -425,7 +579,7 @@ fn overlay_window_kind() -> WindowKind {
 
 fn logical_bounds(monitor: &MonitorInfo) -> Bounds<Pixels> {
     let scale = monitor.scale.get();
-    Bounds {
+    let bounds = Bounds {
         origin: point(
             px(monitor.bounds.origin.x as f32 / scale),
             px(monitor.bounds.origin.y as f32 / scale),
@@ -434,7 +588,19 @@ fn logical_bounds(monitor: &MonitorInfo) -> Bounds<Pixels> {
             px(monitor.bounds.size.width as f32 / scale),
             px(monitor.bounds.size.height as f32 / scale),
         ),
-    }
+    };
+    crate::display::window_bounds_on_monitor(monitor, bounds)
+}
+
+/// A monitor capture must have exactly the monitor's physical size. A stale or
+/// wrong-monitor frame is worse than a missing overlay because it silently
+/// captures content the user never saw under the selection.
+fn frame_matches_monitor(frame: &RgbaFrame, monitor: &MonitorInfo) -> bool {
+    // A one-pixel difference can come from mode/rounding changes; larger
+    // differences mean the backend returned another monitor's frame or the
+    // process lost DPI awareness, and showing it would silently mis-crop.
+    frame.width().abs_diff(monitor.bounds.size.width) <= 1
+        && frame.height().abs_diff(monitor.bounds.size.height) <= 1
 }
 
 struct Magnifier {
@@ -546,11 +712,33 @@ impl OverlayView {
             }));
     }
 
+    /// Physical frame pixels per logical window pixel on each axis.
+    ///
+    /// Normally this equals `scale`, but the ratio keeps pointer mapping and
+    /// selection overlays aligned with the image if a platform clamps the
+    /// window or applies a different DPI than the monitor reports.
+    fn frame_ratio(&self) -> (f32, f32) {
+        let monitor = self.session.monitor_bounds();
+        let (frame_width, frame_height) = self
+            .frame
+            .as_ref()
+            .map_or((monitor.size.width, monitor.size.height), |frame| {
+                (frame.width(), frame.height())
+            });
+        let window_width = f32::from(self.window_size.width).max(1.0);
+        let window_height = f32::from(self.window_size.height).max(1.0);
+        (
+            frame_width as f32 / window_width,
+            frame_height as f32 / window_height,
+        )
+    }
+
     fn to_physical(&self, position: Point<Pixels>) -> PhysicalPoint {
         let origin = self.session.monitor_bounds().origin;
+        let (scale_x, scale_y) = self.frame_ratio();
         PhysicalPoint::new(
-            origin.x + (f32::from(position.x) * self.scale).round() as i32,
-            origin.y + (f32::from(position.y) * self.scale).round() as i32,
+            origin.x + (f32::from(position.x) * scale_x).round() as i32,
+            origin.y + (f32::from(position.y) * scale_y).round() as i32,
         )
     }
 
@@ -561,14 +749,15 @@ impl OverlayView {
         let monitor = self.session.monitor_bounds();
         let local = PhysicalRect::new(0, 0, monitor.size.width, monitor.size.height);
         let clipped = rect.intersection(local)?;
+        let (scale_x, scale_y) = self.frame_ratio();
         Some(Bounds {
             origin: point(
-                px(clipped.origin.x as f32 / self.scale),
-                px(clipped.origin.y as f32 / self.scale),
+                px(clipped.origin.x as f32 / scale_x),
+                px(clipped.origin.y as f32 / scale_y),
             ),
             size: size(
-                px(clipped.size.width as f32 / self.scale),
-                px(clipped.size.height as f32 / self.scale),
+                px(clipped.size.width as f32 / scale_x),
+                px(clipped.size.height as f32 / scale_y),
             ),
         })
     }
@@ -576,14 +765,15 @@ impl OverlayView {
     fn local_bounds(&self, bounds: PhysicalRect) -> Option<Bounds<Pixels>> {
         let monitor = self.session.monitor_bounds();
         let clipped = bounds.intersection(monitor)?;
+        let (scale_x, scale_y) = self.frame_ratio();
         Some(Bounds {
             origin: point(
-                px((clipped.origin.x - monitor.origin.x) as f32 / self.scale),
-                px((clipped.origin.y - monitor.origin.y) as f32 / self.scale),
+                px((clipped.origin.x - monitor.origin.x) as f32 / scale_x),
+                px((clipped.origin.y - monitor.origin.y) as f32 / scale_y),
             ),
             size: size(
-                px(clipped.size.width as f32 / self.scale),
-                px(clipped.size.height as f32 / self.scale),
+                px(clipped.size.width as f32 / scale_x),
+                px(clipped.size.height as f32 / scale_y),
             ),
         })
     }
@@ -752,11 +942,12 @@ impl OverlayView {
             return;
         };
         let monitor = self.session.monitor_bounds();
+        let (scale_x, _) = self.frame_ratio();
         let image = image_util::magnifier_image(
             frame,
             point.x - monitor.origin.x,
             point.y - monitor.origin.y,
-            (MAGNIFIER_SOURCE as f32 * self.scale).round().max(1.0) as u32,
+            (MAGNIFIER_SOURCE as f32 * scale_x).round().max(1.0) as u32,
             MAGNIFIER_SIZE,
         );
         // GPUI keeps direct `img(RenderImage)` uploads in the window atlas
@@ -771,6 +962,26 @@ impl OverlayView {
         if let Some(magnifier) = self.magnifier.take() {
             let _ = window.drop_image(magnifier.image);
         }
+    }
+
+    /// Picks up the window geometry after the deferred native placement. A
+    /// platform may deliver a DPI suggestion between window creation and the
+    /// first event-loop pass; the frozen frame and the pointer mapping must
+    /// follow whatever the window actually became.
+    fn refresh_geometry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let scale = window.scale_factor();
+        let size = window.bounds().size;
+        if f32::from(size.width) <= 0.0 || f32::from(size.height) <= 0.0 {
+            return;
+        }
+        if (self.scale - scale).abs() <= f32::EPSILON && self.window_size == size {
+            return;
+        }
+        self.scale = scale;
+        self.window_size = size;
+        self.session.set_scale(scale);
+        self.clear_magnifier(window);
+        cx.notify();
     }
 
     fn copy_color(&mut self, cx: &mut Context<Self>) {
@@ -877,8 +1088,9 @@ impl OverlayView {
         let magnifier = self.magnifier.as_ref()?;
         let point = self.cursor?;
         let monitor = self.session.monitor_bounds();
-        let local_x = (point.x - monitor.origin.x) as f32 / self.scale;
-        let local_y = (point.y - monitor.origin.y) as f32 / self.scale;
+        let (scale_x, scale_y) = self.frame_ratio();
+        let local_x = (point.x - monitor.origin.x) as f32 / scale_x;
+        let local_y = (point.y - monitor.origin.y) as f32 / scale_y;
         let window_width = f32::from(self.window_size.width);
         let window_height = f32::from(self.window_size.height);
         let mut left = local_x + 18.0;
@@ -969,8 +1181,9 @@ impl OverlayView {
         });
 
         let size_row = selection.map(|selection| {
-            let width = (f32::from(selection.size.width) * self.scale).round() as u32;
-            let height = (f32::from(selection.size.height) * self.scale).round() as u32;
+            let (scale_x, scale_y) = self.frame_ratio();
+            let width = (f32::from(selection.size.width) * scale_x).round() as u32;
+            let height = (f32::from(selection.size.height) * scale_y).round() as u32;
             div()
                 .text_size(px(10.0))
                 .text_color(self.chrome.muted)
@@ -1369,7 +1582,14 @@ impl OverlayView {
         };
         log_info!("overlay", "selection pinned");
         let hash = crate::capture_history::hash_frame(&output);
-        crate::pin::open_frame_at_with_hash(output, bounds, 1.0 / scale, hash, cx);
+        crate::pin::open_frame_at_with_hash(
+            output,
+            bounds,
+            1.0 / scale,
+            hash,
+            Some(self.session.monitor()),
+            cx,
+        );
         self.close_overlays(cx);
     }
 
@@ -2394,8 +2614,9 @@ impl OverlayView {
             .session
             .selection_rect()
             .and_then(|rect| self.local_rect(rect))?;
-        let width = (f32::from(rect.size.width) * self.scale).round() as u32;
-        let height = (f32::from(rect.size.height) * self.scale).round() as u32;
+        let (scale_x, scale_y) = self.frame_ratio();
+        let width = (f32::from(rect.size.width) * scale_x).round() as u32;
+        let height = (f32::from(rect.size.height) * scale_y).round() as u32;
         let ratio = self.aspect.ratio().map(|_| self.aspect.label(language));
         let text = match ratio {
             Some(ratio) => format!("{width} x {height}  {ratio}"),
@@ -2597,8 +2818,9 @@ impl OverlayView {
             && let Some(cursor) = self.cursor
         {
             let monitor = self.session.monitor_bounds();
-            let x = (cursor.x - monitor.origin.x) as f32 / self.scale;
-            let y = (cursor.y - monitor.origin.y) as f32 / self.scale;
+            let (scale_x, scale_y) = self.frame_ratio();
+            let x = (cursor.x - monitor.origin.x) as f32 / scale_x;
+            let y = (cursor.y - monitor.origin.y) as f32 / scale_y;
             let width = f32::from(self.window_size.width);
             let height = f32::from(self.window_size.height);
             if x >= 0.0 && y >= 0.0 && x <= width && y <= height {
@@ -3226,4 +3448,33 @@ fn border(rect: Bounds<Pixels>, color: Rgba) -> Div {
         .h(rect.size.height)
         .border_4()
         .border_color(color)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::frame_matches_monitor;
+    use core_capture::MonitorInfo;
+    use core_types::{DpiScale, MonitorId, PhysicalRect, RgbaFrame};
+
+    fn monitor(width: u32, height: u32) -> MonitorInfo {
+        MonitorInfo {
+            id: MonitorId::from_raw(1),
+            bounds: PhysicalRect::new(0, 0, width, height),
+            scale: DpiScale::new(1.0).unwrap(),
+            is_primary: true,
+        }
+    }
+
+    fn frame(width: u32, height: u32) -> RgbaFrame {
+        RgbaFrame::from_pixels(width, height, vec![0; (width * height * 4) as usize]).unwrap()
+    }
+
+    #[test]
+    fn frame_size_must_match_the_monitor() {
+        let target = monitor(1920, 1080);
+        assert!(frame_matches_monitor(&frame(1920, 1080), &target));
+        assert!(frame_matches_monitor(&frame(1921, 1079), &target));
+        assert!(!frame_matches_monitor(&frame(1920, 1200), &target));
+        assert!(!frame_matches_monitor(&frame(2560, 1440), &target));
+    }
 }

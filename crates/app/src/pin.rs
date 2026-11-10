@@ -371,7 +371,7 @@ pub fn open_frame_with_hash(frame: RgbaFrame, hash: u64, cx: &mut App) {
     let zoom = content.preferred_zoom();
     let (width, height) = content.size(zoom);
     let bounds = default_bounds(cx, width, height);
-    let _ = open_pin_content_at(content, bounds, zoom, true, cx);
+    let _ = open_pin_content_at(content, bounds, zoom, true, None, cx);
 }
 
 /// Pins a capture at a screen rectangle using a hash already computed by the
@@ -384,14 +384,29 @@ pub fn open_frame_at_with_hash(
     bounds: Bounds<Pixels>,
     zoom: f32,
     hash: u64,
+    monitor: Option<core_types::MonitorId>,
     cx: &mut App,
 ) -> Option<u64> {
     LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
+    let source = monitor.and_then(|id| {
+        core_capture::platform_backend()
+            .monitors()
+            .ok()?
+            .into_iter()
+            .find(|monitor| monitor.id == id)
+    });
+    let bounds = source.as_ref().map_or(bounds, |monitor| {
+        crate::display::window_bounds_on_monitor(monitor, bounds)
+    });
+    let display_id = source
+        .as_ref()
+        .map(|monitor| DisplayId::new(monitor.id.raw()));
     open_pin_content_at(
         PinContent::from_frame_with_hash(frame, hash),
         bounds,
         zoom,
         true,
+        display_id,
         cx,
     )
 }
@@ -407,7 +422,7 @@ fn open_pin_content(content: PinContent, cx: &mut App) {
     log_info!("pin", "opening pin {}x{}", width.round(), height.round());
     let bounds = default_bounds(cx, width, height);
     open_pin_inner(
-        content, None, bounds, zoom, 1.0, false, None, true, false, cx,
+        content, None, bounds, zoom, 1.0, false, None, true, false, None, cx,
     );
 }
 
@@ -416,6 +431,7 @@ fn open_pin_content_at(
     bounds: Bounds<Pixels>,
     zoom: f32,
     record_history: bool,
+    display_id: Option<DisplayId>,
     cx: &mut App,
 ) -> Option<u64> {
     let zoom = zoom.clamp(0.1, 4.0);
@@ -436,6 +452,7 @@ fn open_pin_content_at(
         None,
         true,
         record_history,
+        display_id,
         cx,
     )
 }
@@ -462,6 +479,7 @@ fn open_pin_inner(
     existing_image: Option<PathBuf>,
     persist: bool,
     record_history: bool,
+    display_id: Option<DisplayId>,
     cx: &mut App,
 ) -> Option<u64> {
     let id = id.unwrap_or_else(next_pin_id);
@@ -476,7 +494,7 @@ fn open_pin_inner(
     } else {
         None
     };
-    let display_id = display_for_bounds(cx, bounds);
+    let display_id = display_id.or_else(|| display_for_bounds(cx, bounds));
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: None,
@@ -632,6 +650,7 @@ pub fn restore(cx: &mut App) {
             existing_image,
             false,
             false,
+            None,
             cx,
         );
     }

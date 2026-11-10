@@ -38,9 +38,20 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
         }),
     };
 
-    let bounds = bar_bounds(target);
-    let bar_overlaps = bar_overlaps_target(target, bounds);
-    let display_id = target_monitor(target).map(|monitor| DisplayId::new(monitor.raw()));
+    let monitor_id = target_monitor(target);
+    let monitor = monitor_id.and_then(|id| {
+        platform_backend()
+            .monitors()
+            .ok()?
+            .into_iter()
+            .find(|monitor| monitor.id == id)
+    });
+    let desktop_bounds = bar_bounds(target);
+    let bar_overlaps = bar_overlaps_target(target, desktop_bounds);
+    let bounds = monitor.as_ref().map_or(desktop_bounds, |monitor| {
+        crate::display::window_bounds_on_monitor(monitor, desktop_bounds)
+    });
+    let display_id = monitor_id.map(|id| DisplayId::new(id.raw()));
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: None,

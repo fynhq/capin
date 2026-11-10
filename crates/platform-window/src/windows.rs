@@ -4,7 +4,9 @@ use std::path::PathBuf;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, POINT, WPARAM};
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT, ReleaseCapture, SendInput,
@@ -13,15 +15,58 @@ use windows::Win32::UI::Shell::{
     FOLDERID_Pictures, FOLDERID_Videos, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetWindowLongPtrW, HTCAPTION, HWND_TOPMOST, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
-    SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, WDA_EXCLUDEFROMCAPTURE,
-    WM_NCLBUTTONDOWN, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
-    WindowFromPoint,
+    GWL_EXSTYLE, GetWindowLongPtrW, HTCAPTION, HWND_TOPMOST, LWA_ALPHA, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SendMessageW,
+    SetForegroundWindow, SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowLongPtrW,
+    SetWindowPos, WDA_EXCLUDEFROMCAPTURE, WM_NCLBUTTONDOWN, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WindowFromPoint,
 };
 use windows::core::GUID;
 
 use crate::{PlatformWindowError, WindowStyle};
+
+pub(super) fn monitor_for_window(window: &impl HasWindowHandle) -> Option<u64> {
+    let handle = window.window_handle().ok()?;
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return None;
+    };
+    let hwnd = HWND(win32.hwnd.get() as *mut c_void);
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    (!monitor.0.is_null()).then(|| monitor.0 as usize as u64)
+}
+
+pub(super) fn place_on_monitor(
+    window: &impl HasWindowHandle,
+    bounds: core_types::PhysicalRect,
+) -> Result<(), PlatformWindowError> {
+    let handle = window.window_handle()?;
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return Err(PlatformWindowError::NotWin32);
+    };
+    let hwnd = HWND(win32.hwnd.get() as *mut c_void);
+    let width = i32::try_from(bounds.size.width).map_err(|_| PlatformWindowError::Platform {
+        operation: "SetWindowPos",
+        message: "window width exceeds i32".to_owned(),
+    })?;
+    let height = i32::try_from(bounds.size.height).map_err(|_| PlatformWindowError::Platform {
+        operation: "SetWindowPos",
+        message: "window height exceeds i32".to_owned(),
+    })?;
+    // SAFETY: hwnd belongs to a live window created by the caller. The
+    // rectangle is in physical pixels because the process is PerMonitorV2.
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            bounds.origin.x,
+            bounds.origin.y,
+            width,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        )
+    }
+    .map_err(|error| platform_error("SetWindowPos", error))
+}
 
 pub(super) fn apply(
     window: &impl HasWindowHandle,

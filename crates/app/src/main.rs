@@ -5,6 +5,7 @@
 
 mod capture_history;
 mod chrome_theme;
+mod display;
 mod editor;
 mod effects;
 mod hotkey;

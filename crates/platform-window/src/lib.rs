@@ -221,6 +221,51 @@ pub fn native_window_id(window: &impl HasWindowHandle) -> Option<u64> {
     }
 }
 
+/// Places an existing window on a monitor using that monitor's physical
+/// rectangle.
+///
+/// Full-screen capture overlays must cover exactly one monitor even on
+/// mixed-DPI desktops. GPUI converts logical window bounds with the target
+/// display's scale factor, but Windows may still resize the window through
+/// `WM_DPICHANGED` while it moves from the monitor it was created on. Applying
+/// the physical rectangle after creation removes that ambiguity. On macOS the
+/// rectangle is converted back to AppKit points, so callers always pass
+/// physical pixels.
+pub fn place_on_monitor(
+    window: &impl HasWindowHandle,
+    bounds: core_types::PhysicalRect,
+    scale: core_types::DpiScale,
+) -> Result<(), PlatformWindowError> {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = scale;
+        windows::place_on_monitor(window, bounds)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::place_on_monitor(window, bounds, scale)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = (window, bounds, scale);
+        Err(PlatformWindowError::UnsupportedPlatform)
+    }
+}
+
+/// Returns the platform monitor that currently contains the window, as the
+/// same raw identifier used by `MonitorInfo`.
+pub fn monitor_for_window(window: &impl HasWindowHandle) -> Option<u64> {
+    #[cfg(target_os = "windows")]
+    {
+        windows::monitor_for_window(window)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+        None
+    }
+}
+
 /// Applies the requested native window behavior to an existing window.
 ///
 /// Call this after GPUI creates the window. Settings that the platform cannot

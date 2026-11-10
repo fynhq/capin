@@ -3140,7 +3140,11 @@ impl EditorView {
                     )
                 });
                 if let Some((bounds, zoom)) = placement {
-                    crate::pin::open_frame_at_with_hash(output, bounds, zoom, hash, cx);
+                    let monitor = self
+                        .inline
+                        .and_then(|inline| inline.capture)
+                        .map(|capture| capture.region.monitor);
+                    crate::pin::open_frame_at_with_hash(output, bounds, zoom, hash, monitor, cx);
                 } else {
                     crate::pin::open_frame_with_hash(output, hash, cx);
                 }

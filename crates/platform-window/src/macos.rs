@@ -16,7 +16,7 @@ use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSColor, NSScreenSaverWindowLevel, NSView,
     NSWindowCollectionBehavior, NSWindowSharingType, NSWindowStyleMask, NSWorkspace,
 };
-use objc2_foundation::{NSString, NSURL};
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSURL};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::{PlatformWindowError, PrivacyPane, WindowStyle};
@@ -31,6 +31,41 @@ pub(super) fn videos_dir() -> Option<PathBuf> {
 
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// Moves and resizes a window to a monitor's physical rectangle.
+///
+/// `NSWindow` frames use AppKit global points with a bottom-left origin, while
+/// the caller's rectangle is in the monitor's physical pixel space with a
+/// top-left origin. Dividing by the monitor scale and flipping around the main
+/// display height keeps mixed-DPI desktops unambiguous.
+pub(super) fn place_on_monitor(
+    window: &impl HasWindowHandle,
+    bounds: core_types::PhysicalRect,
+    scale: core_types::DpiScale,
+) -> Result<(), PlatformWindowError> {
+    let handle = window.window_handle()?;
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return Err(PlatformWindowError::NotAppKit);
+    };
+    // SAFETY: the handle points to the NSView owned by the live GPUI window.
+    let view = unsafe { &*(appkit.ns_view.as_ptr() as *const NSView) };
+    let Some(window) = view.window() else {
+        return Err(PlatformWindowError::NotAppKit);
+    };
+
+    let scale = f64::from(scale.get().max(0.1));
+    let x = f64::from(bounds.origin.x) / scale;
+    let top = f64::from(bounds.origin.y) / scale;
+    let width = f64::from(bounds.size.width) / scale;
+    let height = f64::from(bounds.size.height) / scale;
+    let main_height = CGDisplay::main().bounds().size.height;
+    let frame = NSRect::new(
+        NSPoint::new(x, main_height - (top + height)),
+        NSSize::new(width, height),
+    );
+    window.setFrame_display(frame, true);
+    Ok(())
 }
 
 pub(super) fn set_click_through(

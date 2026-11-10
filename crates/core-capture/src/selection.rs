@@ -89,6 +89,12 @@ impl SelectionSession {
         self.monitor_bounds
     }
 
+    /// Updates the logical-to-physical scale used for pointer thresholds when
+    /// the overlay window ends up on a different DPI than the monitor claimed.
+    pub fn set_scale(&mut self, scale: f32) {
+        self.drag_threshold = ((DRAG_THRESHOLD_PX as f32 * scale.max(0.1)).round() as i32).max(1);
+    }
+
     pub fn windows(&self) -> &[WindowInfo] {
         &self.windows
     }
@@ -652,6 +658,22 @@ mod tests {
             Vec::new(),
             2.0,
         );
+        session.pointer_pressed(PhysicalPoint::new(100, 100));
+        session.pointer_moved(PhysicalPoint::new(105, 100));
+        assert!(!session.is_dragging());
+        session.pointer_moved(PhysicalPoint::new(110, 100));
+        assert!(session.is_dragging());
+    }
+
+    #[test]
+    fn set_scale_updates_the_drag_threshold() {
+        let mut session = SelectionSession::with_scale(
+            MonitorId::from_raw(1),
+            PhysicalRect::new(0, 0, 1000, 800),
+            Vec::new(),
+            1.0,
+        );
+        session.set_scale(2.0);
         session.pointer_pressed(PhysicalPoint::new(100, 100));
         session.pointer_moved(PhysicalPoint::new(105, 100));
         assert!(!session.is_dragging());
