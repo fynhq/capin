@@ -191,7 +191,11 @@ pub struct AppSettings {
     /// Per-tool colors used when `annotation_uniform_color` is disabled.
     pub annotation_colors: [u32; ANNOTATION_COLOR_TOOL_COUNT],
     pub annotation_uniform_color: bool,
-    pub annotation_stroke_width: f32,
+    /// Line width for the rectangle/ellipse tool family.
+    pub annotation_rect_stroke_width: f32,
+    /// Line width for the arrow/polyline tool family. Kept separate from the
+    /// rectangle width so changing one never changes the other.
+    pub annotation_arrow_stroke_width: f32,
     pub annotation_font_size: f32,
     pub annotation_arrow_start: bool,
     pub annotation_arrow_end: bool,
@@ -255,7 +259,8 @@ impl Default for AppSettings {
             annotation_color: DEFAULT_ANNOTATION_COLOR,
             annotation_colors: [DEFAULT_ANNOTATION_COLOR; ANNOTATION_COLOR_TOOL_COUNT],
             annotation_uniform_color: true,
-            annotation_stroke_width: 4.0,
+            annotation_rect_stroke_width: 4.0,
+            annotation_arrow_stroke_width: 4.0,
             annotation_font_size: DEFAULT_ANNOTATION_FONT_SIZE,
             annotation_arrow_start: false,
             annotation_arrow_end: true,
@@ -321,6 +326,11 @@ fn load() -> Option<AppSettings> {
 
 fn parse(text: &str) -> AppSettings {
     let mut settings = AppSettings::default();
+    // The pre-0.1.0-14 file stored one width for every tool. Read it as the
+    // fallback for both families; per-tool keys below take precedence.
+    let mut legacy_stroke_width = None;
+    let mut rect_stroke_width = None;
+    let mut arrow_stroke_width = None;
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -391,7 +401,21 @@ fn parse(text: &str) -> AppSettings {
                 if let Ok(width) = value.parse::<f32>()
                     && width.is_finite()
                 {
-                    settings.annotation_stroke_width = width.clamp(1.0, 32.0);
+                    legacy_stroke_width = Some(width.clamp(1.0, 32.0));
+                }
+            }
+            "annotation_rect_stroke_width" => {
+                if let Ok(width) = value.parse::<f32>()
+                    && width.is_finite()
+                {
+                    rect_stroke_width = Some(width.clamp(1.0, 32.0));
+                }
+            }
+            "annotation_arrow_stroke_width" => {
+                if let Ok(width) = value.parse::<f32>()
+                    && width.is_finite()
+                {
+                    arrow_stroke_width = Some(width.clamp(1.0, 32.0));
                 }
             }
             "annotation_font_size" => {
@@ -444,6 +468,10 @@ fn parse(text: &str) -> AppSettings {
             _ => {}
         }
     }
+    settings.annotation_rect_stroke_width =
+        rect_stroke_width.or(legacy_stroke_width).unwrap_or(4.0);
+    settings.annotation_arrow_stroke_width =
+        arrow_stroke_width.or(legacy_stroke_width).unwrap_or(4.0);
     #[cfg(target_os = "windows")]
     {
         // Older Windows builds persisted the Win+Shift combinations, which
@@ -555,9 +583,10 @@ fn serialize(settings: &AppSettings) -> String {
         settings.repeat_pin.code(),
     ));
     text.push_str(&format!(
-        "annotation_uniform_color={}\nannotation_stroke_width={}\nannotation_font_size={}\nannotation_arrow_start={}\nannotation_arrow_end={}\nannotation_arrow_polyline={}\nannotation_text_background={}\nannotation_text_outline={}\nannotation_text_alignment={}\nannotation_corner_radius={}\nannotation_blur_radius={}\nannotation_rect_filled={}\nannotation_ellipse_filled={}\nannotation_rect_ellipse={}\nannotation_spotlight_intensity={}\n",
+        "annotation_uniform_color={}\nannotation_rect_stroke_width={}\nannotation_arrow_stroke_width={}\nannotation_font_size={}\nannotation_arrow_start={}\nannotation_arrow_end={}\nannotation_arrow_polyline={}\nannotation_text_background={}\nannotation_text_outline={}\nannotation_text_alignment={}\nannotation_corner_radius={}\nannotation_blur_radius={}\nannotation_rect_filled={}\nannotation_ellipse_filled={}\nannotation_rect_ellipse={}\nannotation_spotlight_intensity={}\n",
         settings.annotation_uniform_color,
-        settings.annotation_stroke_width,
+        settings.annotation_rect_stroke_width,
+        settings.annotation_arrow_stroke_width,
         settings.annotation_font_size,
         settings.annotation_arrow_start,
         settings.annotation_arrow_end,
@@ -665,7 +694,8 @@ mod tests {
     #[test]
     fn annotation_options_default_and_parse() {
         let defaults = AppSettings::default();
-        assert_eq!(defaults.annotation_stroke_width, 4.0);
+        assert_eq!(defaults.annotation_rect_stroke_width, 4.0);
+        assert_eq!(defaults.annotation_arrow_stroke_width, 4.0);
         assert_eq!(defaults.annotation_font_size, DEFAULT_ANNOTATION_FONT_SIZE);
         assert!(!defaults.annotation_arrow_start);
         assert!(defaults.annotation_arrow_end);
@@ -683,7 +713,8 @@ mod tests {
         let settings = parse(
             "annotation_stroke_width=8\nannotation_font_size=32\nannotation_arrow_start=true\nannotation_arrow_end=false\nannotation_arrow_polyline=true\nannotation_text_background=true\nannotation_text_outline=true\nannotation_text_alignment=center\nannotation_corner_radius=16\nannotation_blur_radius=32\nannotation_rect_filled=true\nannotation_ellipse_filled=true\nannotation_rect_ellipse=true\nannotation_spotlight_intensity=80\n",
         );
-        assert_eq!(settings.annotation_stroke_width, 8.0);
+        assert_eq!(settings.annotation_rect_stroke_width, 8.0);
+        assert_eq!(settings.annotation_arrow_stroke_width, 8.0);
         assert_eq!(settings.annotation_font_size, 32.0);
         assert!(settings.annotation_arrow_start);
         assert!(!settings.annotation_arrow_end);
@@ -697,13 +728,20 @@ mod tests {
         assert!(settings.annotation_ellipse_filled);
         assert!(settings.annotation_rect_ellipse);
         assert_eq!(settings.annotation_spotlight_intensity, 80);
+
+        let per_tool = parse(
+            "annotation_stroke_width=8\nannotation_rect_stroke_width=2\nannotation_arrow_stroke_width=12\n",
+        );
+        assert_eq!(per_tool.annotation_rect_stroke_width, 2.0);
+        assert_eq!(per_tool.annotation_arrow_stroke_width, 12.0);
     }
 
     #[test]
     fn serialized_annotation_options_round_trip() {
         let mut settings = AppSettings {
             annotation_uniform_color: false,
-            annotation_stroke_width: 8.0,
+            annotation_rect_stroke_width: 2.0,
+            annotation_arrow_stroke_width: 8.0,
             annotation_font_size: 32.0,
             annotation_arrow_start: true,
             annotation_arrow_end: false,

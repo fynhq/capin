@@ -5,7 +5,7 @@
 use core_capture::{CaptureTarget, platform_backend};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use platform_window::{WindowStyle, apply as apply_window_style};
+use platform_window::{WindowStyle, apply as apply_window_style, hide_native_border};
 
 const BORDER_WIDTH: f32 = 3.0;
 const BORDER_COLOR: u32 = 0xFF3B30;
@@ -55,13 +55,14 @@ pub fn open(target: CaptureTarget, cx: &mut App) {
         ..Default::default()
     };
     match gpui_kit::open_window(options, cx, move |window, cx| {
-        let visible = match apply_window_style(&*window, WindowStyle::CAPTURE_BAR) {
+        let visible = match apply_window_style(&*window, WindowStyle::CAPTURE_OUTLINE) {
             Ok(()) => true,
             Err(error) => {
                 crate::logging::log_error!("outline", "failed to style region outline: {error}");
                 false
             }
         };
+        hide_native_border(&*window);
         let _ = platform_window::set_click_through(&*window, true);
         cx.new(|_| RegionOutline { visible })
     }) {

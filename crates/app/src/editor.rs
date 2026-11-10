@@ -181,6 +181,10 @@ struct MoveDraft {
     id: core_annotate::AnnotationId,
     start: PhysicalPoint,
     current: PhysicalPoint,
+    original: Shape,
+    /// The document records one undo snapshot for the whole drag. Until the
+    /// first actual movement, no history entry is created.
+    recorded: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -212,6 +216,7 @@ struct ResizeDraft {
     start: PhysicalPoint,
     current: PhysicalPoint,
     original: Shape,
+    recorded: bool,
 }
 
 struct PanDraft {
@@ -550,6 +555,10 @@ pub(crate) struct EditorView {
     text_outline: bool,
     text_alignment: TextAlignment,
     corner_radius: f32,
+    /// Independent defaults for the two width-bearing tool families. The
+    /// selected object's own width is shown and edited through `style`.
+    rect_stroke_width: f32,
+    arrow_stroke_width: f32,
     blur_radius: u32,
     rect_filled: bool,
     ellipse_filled: bool,
@@ -608,6 +617,8 @@ impl EditorView {
         let text_outline = settings.annotation_text_outline;
         let text_alignment = settings.annotation_text_alignment;
         let corner_radius = settings.annotation_corner_radius;
+        let rect_stroke_width = settings.annotation_rect_stroke_width;
+        let arrow_stroke_width = settings.annotation_arrow_stroke_width;
         let blur_radius = settings.annotation_blur_radius;
         let rect_filled = settings.annotation_rect_filled;
         let ellipse_filled = settings.annotation_ellipse_filled;
@@ -637,7 +648,7 @@ impl EditorView {
             tool: Tool::Select,
             style: AnnotationStyle {
                 color: style_color,
-                stroke_width: settings.annotation_stroke_width,
+                stroke_width: rect_stroke_width,
                 font_size,
                 corner_radius,
                 blur_radius,
@@ -657,6 +668,8 @@ impl EditorView {
             text_outline,
             text_alignment,
             corner_radius,
+            rect_stroke_width,
+            arrow_stroke_width,
             blur_radius,
             rect_filled,
             ellipse_filled,
@@ -738,12 +751,14 @@ impl EditorView {
         match initial_tool {
             Tool::Rect => {
                 view.style.corner_radius = view.corner_radius;
+                view.style.stroke_width = view.rect_stroke_width;
                 view.style.filled = if view.shape_ellipse {
                     view.ellipse_filled
                 } else {
                     view.rect_filled
                 };
             }
+            Tool::Arrow => view.style.stroke_width = view.arrow_stroke_width,
             Tool::Blur => view.style.blur_radius = view.blur_radius,
             Tool::Spotlight => view.style.spotlight_intensity = view.spotlight_intensity,
             _ => {}
@@ -1658,6 +1673,11 @@ impl EditorView {
         if let Some(tool) = self.tool.color_tool() {
             style.color = (self.tool_color(tool) & 0xFFFFFF00) | (style.color & 0xFF);
         }
+        match self.tool {
+            Tool::Rect => style.stroke_width = self.rect_stroke_width,
+            Tool::Arrow => style.stroke_width = self.arrow_stroke_width,
+            _ => {}
+        }
         if self.tool == Tool::Highlighter {
             style.color = (style.color & 0xFFFFFF00) | 0x80;
             style.stroke_width = 12.0;
@@ -1788,7 +1808,17 @@ impl EditorView {
 
     fn apply_stroke_width(&mut self, width: f32) {
         self.update_style(|style| style.stroke_width = width);
-        settings_state::update(|settings| settings.annotation_stroke_width = width);
+        match self.config_tool() {
+            Some(Tool::Rect) => {
+                self.rect_stroke_width = width;
+                settings_state::update(|settings| settings.annotation_rect_stroke_width = width);
+            }
+            Some(Tool::Arrow) => {
+                self.arrow_stroke_width = width;
+                settings_state::update(|settings| settings.annotation_arrow_stroke_width = width);
+            }
+            _ => {}
+        }
     }
 
     fn apply_font_size(&mut self, size: f32) {
@@ -1962,23 +1992,54 @@ impl EditorView {
         cx.notify();
     }
 
-    fn finish_resize(&mut self, point: PhysicalPoint, cx: &mut Context<Self>) {
-        let Some(draft) = self.resize_draft.take() else {
-            return;
+    /// Applies a move gesture up to `point`. The shape is always rebuilt from
+    /// the geometry captured on mouse-down, so a dropped mouse-up cannot make
+    /// the object snap back to its pre-drag position: every move already
+    /// updates the document. The first actual movement records one undo step.
+    fn update_move(&mut self, point: PhysicalPoint) -> bool {
+        let Some(draft) = self.move_draft.as_mut() else {
+            return false;
         };
-        if point == draft.start {
-            cx.notify();
+        if point == draft.current {
+            return false;
+        }
+        draft.current = point;
+        let dx = point.x - draft.start.x;
+        let dy = point.y - draft.start.y;
+        if dx == 0 && dy == 0 && !draft.recorded {
+            return false;
+        }
+        let shape = draft.original.clone().translated(dx, dy);
+        let record = !draft.recorded;
+        draft.recorded = true;
+        let id = draft.id;
+        self.document.update_shape_live(id, shape, record)
+    }
+
+    fn update_resize(&mut self, point: PhysicalPoint) -> bool {
+        let Some(draft) = self.resize_draft.as_mut() else {
+            return false;
+        };
+        if point == draft.current {
+            return false;
+        }
+        draft.current = point;
+        if point == draft.start && !draft.recorded {
+            return false;
+        }
+        let shape = resize_shape(&draft.original, draft.handle, draft.start, point, 4);
+        let record = !draft.recorded;
+        draft.recorded = true;
+        let id = draft.id;
+        self.document.update_shape_live(id, shape, record)
+    }
+
+    fn finish_resize(&mut self, point: PhysicalPoint, cx: &mut Context<Self>) {
+        if self.resize_draft.is_none() {
             return;
         }
-        let Some(style) = self
-            .document
-            .object(draft.id)
-            .map(|annotation| annotation.style)
-        else {
-            return;
-        };
-        let shape = resize_shape(&draft.original, draft.handle, draft.start, point, 4);
-        self.document.update_shape(draft.id, shape, style);
+        self.update_resize(point);
+        self.resize_draft = None;
         self.status = None;
         cx.notify();
     }
@@ -2021,6 +2082,14 @@ impl EditorView {
                     _ => {}
                 }
             }
+        } else {
+            // Deselecting returns the toolbar to the drawing tool's own
+            // independent defaults instead of keeping the object's width.
+            self.style.stroke_width = match self.tool {
+                Tool::Rect => self.rect_stroke_width,
+                Tool::Arrow => self.arrow_stroke_width,
+                _ => self.style.stroke_width,
+            };
         }
     }
 
@@ -2258,6 +2327,7 @@ impl EditorView {
                     }
                     match tool {
                         Tool::Rect => {
+                            this.style.stroke_width = this.rect_stroke_width;
                             this.style.corner_radius = this.corner_radius;
                             this.style.filled = if this.shape_ellipse {
                                 this.ellipse_filled
@@ -2265,6 +2335,7 @@ impl EditorView {
                                 this.rect_filled
                             };
                         }
+                        Tool::Arrow => this.style.stroke_width = this.arrow_stroke_width,
                         Tool::Blur => this.style.blur_radius = this.blur_radius,
                         Tool::Spotlight => {
                             this.style.spotlight_intensity = this.spotlight_intensity
@@ -4123,31 +4194,7 @@ impl Render for EditorView {
                 px((edit.bounds.size.height as f32 * scale).max(12.0)),
             ),
         });
-        let mut objects = self.document.objects().to_vec();
-        if let Some(move_draft) = &self.move_draft {
-            let dx = move_draft.current.x - move_draft.start.x;
-            let dy = move_draft.current.y - move_draft.start.y;
-            if (dx != 0 || dy != 0)
-                && let Some(annotation) = objects
-                    .iter_mut()
-                    .find(|annotation| annotation.id == move_draft.id)
-            {
-                *annotation = annotation.clone().translated(dx, dy);
-            }
-        }
-        if let Some(resize_draft) = &self.resize_draft
-            && let Some(annotation) = objects
-                .iter_mut()
-                .find(|annotation| annotation.id == resize_draft.id)
-        {
-            annotation.shape = resize_shape(
-                &resize_draft.original,
-                resize_draft.handle,
-                resize_draft.start,
-                resize_draft.current,
-                4,
-            );
-        }
+        let objects = self.document.objects().to_vec();
         let selected_shape = self
             .document
             .selected()
@@ -4524,6 +4571,11 @@ impl Render for EditorView {
                     let Some(point) = this.to_image_point(event.position, window) else {
                         return;
                     };
+                    // A previous gesture can outlive its mouse-up when the
+                    // pointer leaves the window or the platform consumes the
+                    // release. Every new press starts from a clean transform.
+                    this.move_draft = None;
+                    this.resize_draft = None;
                     // Selection handles stay live regardless of the active
                     // drawing tool: after drawing a shape the tool does not
                     // switch to Select, and dragging a painted handle should
@@ -4542,6 +4594,7 @@ impl Render for EditorView {
                             start: point,
                             current: point,
                             original: annotation.shape,
+                            recorded: false,
                         });
                         this.move_draft = None;
                         this.status = None;
@@ -4603,11 +4656,17 @@ impl Render for EditorView {
                         if this.document.selected() != Some(id) {
                             this.select_annotation(Some(id));
                         }
-                        this.move_draft = Some(MoveDraft {
-                            id,
-                            start: point,
-                            current: point,
-                        });
+                        if let Some(original) =
+                            this.document.object(id).map(|item| item.shape.clone())
+                        {
+                            this.move_draft = Some(MoveDraft {
+                                id,
+                                start: point,
+                                current: point,
+                                original,
+                                recorded: false,
+                            });
+                        }
                         this.status = None;
                         cx.notify();
                         return;
@@ -4658,10 +4717,15 @@ impl Render for EditorView {
                         let selected = hit;
                         this.resize_draft = None;
                         this.select_annotation(selected);
-                        this.move_draft = selected.map(|id| MoveDraft {
-                            id,
-                            start: point,
-                            current: point,
+                        this.move_draft = selected.and_then(|id| {
+                            let original = this.document.object(id)?.shape.clone();
+                            Some(MoveDraft {
+                                id,
+                                start: point,
+                                current: point,
+                                original,
+                                recorded: false,
+                            })
                         });
                         this.status = None;
                         cx.notify();
@@ -4720,6 +4784,27 @@ impl Render for EditorView {
                 let Some(point) = this.to_image_point(event.position, window) else {
                     return;
                 };
+                // Transforms commit on every move. A platform may swallow the
+                // mouse-up (toolbar overlap, native drag, window boundary);
+                // waiting for it left annotations looking like they snapped
+                // back on release.
+                if this.move_draft.is_some() || this.resize_draft.is_some() {
+                    if event.pressed_button.is_none() {
+                        this.move_draft = None;
+                        this.resize_draft = None;
+                        cx.notify();
+                        return;
+                    }
+                    let changed = if this.resize_draft.is_some() {
+                        this.update_resize(point)
+                    } else {
+                        this.update_move(point)
+                    };
+                    if changed {
+                        cx.notify();
+                    }
+                    return;
+                }
                 if this.update_selection_hover(point, window) {
                     cx.notify();
                 }
@@ -4732,16 +4817,6 @@ impl Render for EditorView {
                 }
                 if let Some(polyline) = &mut this.polyline_draft {
                     polyline.current = point;
-                    cx.notify();
-                    return;
-                }
-                if let Some(resize_draft) = &mut this.resize_draft {
-                    resize_draft.current = point;
-                    cx.notify();
-                    return;
-                }
-                if let Some(move_draft) = &mut this.move_draft {
-                    move_draft.current = point;
                     cx.notify();
                     return;
                 }
@@ -4773,9 +4848,7 @@ impl Render for EditorView {
                         return;
                     }
                     if this.resize_draft.is_some() {
-                        let point = this
-                            .to_image_point(event.position, window)
-                            .or_else(|| this.resize_draft.as_ref().map(|draft| draft.current));
+                        let point = this.resize_draft.as_ref().map(|draft| draft.current);
                         if let Some(point) = point {
                             this.finish_resize(point, cx);
                         } else {
@@ -4784,16 +4857,12 @@ impl Render for EditorView {
                         }
                         return;
                     }
-                    if let Some(move_draft) = this.move_draft.take() {
-                        let point = this
-                            .to_image_point(event.position, window)
-                            .unwrap_or(move_draft.current);
-                        let dx = point.x - move_draft.start.x;
-                        let dy = point.y - move_draft.start.y;
-                        if dx != 0 || dy != 0 {
-                            this.document.move_selected(dx, dy);
-                            this.status = None;
-                        }
+                    if this.move_draft.take().is_some() {
+                        // The move is already committed by the last pointer
+                        // move. Never reapply the mouse-up position: some
+                        // platforms report it late or not at all, and using a
+                        // stale value would send the object back or jump it.
+                        this.status = None;
                         cx.notify();
                         return;
                     }
@@ -4816,20 +4885,19 @@ impl Render for EditorView {
             .on_mouse_exit(cx.listener(|this, _, _, cx| {
                 let hover_reset = this.selection_hover != SelectionHover::None;
                 this.selection_hover = SelectionHover::None;
-                // A drag that ends outside the image would otherwise be lost;
-                // commit the last known move/resize before clearing it.
+                // A drag that ends outside the image keeps the geometry it
+                // already committed on the last move; only the gesture state
+                // has to be cleared.
                 let mut changed = hover_reset;
-                if let Some(move_draft) = this.move_draft.take() {
-                    let dx = move_draft.current.x - move_draft.start.x;
-                    let dy = move_draft.current.y - move_draft.start.y;
-                    if dx != 0 || dy != 0 {
-                        this.document.move_selected(dx, dy);
-                        changed = true;
-                    }
+                if this.move_draft.take().is_some() {
+                    changed = true;
                 }
-                if let Some(resize) = &this.resize_draft {
-                    let point = resize.current;
-                    this.finish_resize(point, cx);
+                if this.resize_draft.is_some() {
+                    let point = this.resize_draft.as_ref().map(|resize| resize.current);
+                    if let Some(point) = point {
+                        this.update_resize(point);
+                    }
+                    this.resize_draft = None;
                     changed = true;
                 }
                 if this.draft.take().is_some() || this.pan_draft.take().is_some() {
@@ -4897,24 +4965,14 @@ impl Render for EditorView {
                     }
                     // Toolbars and panels overlap the image on small captures
                     // and consume the mouse-up before the image layer sees it.
-                    // Finish any in-flight drag here so the object does not
-                    // snap back to its pre-drag position on the next click.
+                    // Finish any in-flight drag here; the geometry itself was
+                    // already committed by the last move.
                     let mut changed = false;
-                    if let Some(move_draft) = this.move_draft.take() {
-                        let point = this
-                            .to_image_point(event.position, window)
-                            .unwrap_or(move_draft.current);
-                        let dx = point.x - move_draft.start.x;
-                        let dy = point.y - move_draft.start.y;
-                        if dx != 0 || dy != 0 {
-                            this.document.move_selected(dx, dy);
-                        }
+                    if this.move_draft.take().is_some() {
                         changed = true;
                     }
                     if this.resize_draft.is_some() {
-                        let point = this
-                            .to_image_point(event.position, window)
-                            .or_else(|| this.resize_draft.as_ref().map(|draft| draft.current));
+                        let point = this.resize_draft.as_ref().map(|draft| draft.current);
                         if let Some(point) = point {
                             this.finish_resize(point, cx);
                         } else {

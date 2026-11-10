@@ -1329,6 +1329,10 @@ impl OverlayView {
 
         let color_row = color.map(|(red, green, blue)| {
             let text = self.color_text(red, green, blue);
+            let format_label = match self.color_format {
+                ColorFormat::Hex => "HEX",
+                ColorFormat::Rgb => "RGB",
+            };
             div()
                 .id("overlay-magnifier-color")
                 .occlude()
@@ -1358,6 +1362,31 @@ impl OverlayView {
                         .text_size(px(11.5))
                         .text_color(self.chrome.text)
                         .child(text),
+                )
+                // Formats are also switchable without the keyboard: the
+                // tiny HEX/RGB chip is easier to hit than a modifier edge,
+                // especially on macOS where modifier events can be delayed.
+                .child(
+                    div()
+                        .id("overlay-magnifier-format")
+                        .px(px(4.0))
+                        .py(px(1.0))
+                        .rounded(px(4.0))
+                        .bg(self.chrome.surface)
+                        .border_1()
+                        .border_color(self.chrome.border)
+                        .text_size(px(9.0))
+                        .text_color(self.chrome.muted)
+                        .cursor_pointer()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.toggle_color_format(cx);
+                            cx.stop_propagation();
+                        }))
+                        .child(format_label),
                 )
         });
 
@@ -3294,7 +3323,6 @@ impl OverlayView {
                     let shift = event.modifiers.shift;
                     if shift
                         && !this.shift_held
-                        && this.cursor.is_some()
                         && this.mode == OverlayMode::Capture
                         && this.selected.is_none()
                     {
@@ -3310,6 +3338,22 @@ impl OverlayView {
                 let key = event.keystroke.key.as_str();
                 let command =
                     event.keystroke.modifiers.platform || event.keystroke.modifiers.control;
+
+                // Modifier-only changes normally arrive through
+                // `on_modifiers_changed`, but some platforms also report the
+                // Shift key itself. Treat either edge as one toggle so holding
+                // or rapidly tapping Shift always flips the magnifier format
+                // once.
+                if key == "shift"
+                    && !this.shift_held
+                    && this.mode == OverlayMode::Capture
+                    && this.selected.is_none()
+                {
+                    this.toggle_color_format(cx);
+                }
+                if key == "shift" {
+                    this.shift_held = true;
+                }
 
                 if let Some(selected) = this.selected.as_mut() {
                     if selected.edit.is_some() {
@@ -3447,6 +3491,10 @@ impl OverlayView {
                 let _ = window;
             }))
             .on_key_up(cx.listener(|this, event: &KeyUpEvent, _window, cx| {
+                if event.keystroke.key == "shift" {
+                    this.shift_held = false;
+                    cx.notify();
+                }
                 if event.keystroke.key == "space"
                     && let Some(selected) = this.selected.as_mut()
                 {
@@ -3465,15 +3513,6 @@ impl OverlayView {
                     // hidden so only the painted camera cursor is visible.
                     platform_window::set_cursor_hidden(true);
                 }
-                let shift = event.modifiers.shift;
-                if shift
-                    && !this.shift_held
-                    && this.mode == OverlayMode::Capture
-                    && this.selected.is_none()
-                {
-                    this.toggle_color_format(cx);
-                }
-                this.shift_held = shift;
                 if this
                     .selected
                     .as_ref()

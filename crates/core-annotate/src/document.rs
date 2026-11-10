@@ -147,6 +147,14 @@ impl Shape {
         }
     }
 
+    /// Returns a copy shifted by `dx`/`dy` image pixels. Interactive edits use
+    /// this against the shape captured at drag start so live updates never
+    /// accumulate rounding drift.
+    pub fn translated(mut self, dx: i32, dy: i32) -> Self {
+        self.translate(dx, dy);
+        self
+    }
+
     fn hit_test(&self, point: PhysicalPoint, tolerance: f32) -> bool {
         match self {
             Self::Rect(rect)
@@ -313,6 +321,26 @@ impl AnnotationDocument {
         };
         self.record_before_edit();
         self.objects[index].style = style;
+        true
+    }
+
+    /// Replaces the geometry of an existing object without duplicating the
+    /// text/style arguments used by [`Self::update_shape`].
+    ///
+    /// Interactive drags call this for every pointer move. `record` is true
+    /// only on the first move of a gesture so the whole drag is one undo step.
+    pub fn update_shape_live(&mut self, id: AnnotationId, shape: Shape, record: bool) -> bool {
+        let Some(index) = self
+            .objects
+            .iter()
+            .position(|annotation| annotation.id == id)
+        else {
+            return false;
+        };
+        if record {
+            self.record_before_edit();
+        }
+        self.objects[index].shape = shape;
         true
     }
 
@@ -622,6 +650,30 @@ mod tests {
             doc.object(id).unwrap().bounds().origin,
             PhysicalPoint::new(10, 10)
         );
+    }
+
+    #[test]
+    fn live_shape_updates_commit_one_undo_step_per_gesture() {
+        let mut doc = document();
+        let id = doc.add(
+            Shape::Rect(PhysicalRect::new(10, 10, 50, 50)),
+            AnnotationStyle::default(),
+        );
+        let original = doc.object(id).unwrap().shape.clone();
+        for step in 1..=4 {
+            let shape = original.clone().translated(step, step * 2);
+            assert!(doc.update_shape_live(id, shape, step == 1));
+        }
+        assert_eq!(
+            doc.object(id).unwrap().bounds().origin,
+            PhysicalPoint::new(14, 18)
+        );
+        assert!(doc.undo());
+        assert_eq!(
+            doc.object(id).unwrap().bounds().origin,
+            PhysicalPoint::new(10, 10)
+        );
+        assert!(doc.can_undo(), "the initial add remains undoable");
     }
 
     #[test]

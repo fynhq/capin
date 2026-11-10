@@ -1,4 +1,4 @@
-use core_compose::{Background, Shadow, WindowCanvas, compose_window};
+use core_compose::{Background, Border, Shadow, WindowCanvas, compose_window};
 use core_types::{RgbaFrame, WindowId};
 
 use crate::logging::log_error;
@@ -28,7 +28,7 @@ pub fn compose_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> Rgb
             opacity: SHADOW_OPACITY,
         }),
         background: background(&settings),
-        border: None,
+        border: system_border(scale),
     };
 
     match compose_window(&frame, &canvas) {
@@ -38,6 +38,30 @@ pub fn compose_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> Rgb
             frame
         }
     }
+}
+
+/// macOS window screenshots carry a one-point hairline around the window.
+/// ScreenCaptureKit's desktop-independent window image exposes only the
+/// window's content, so the system outline has to be painted back on the
+/// composed frame. Windows keeps its own DWM frame out of the capture and has
+/// no equivalent hairline.
+#[cfg(target_os = "macos")]
+fn system_border(scale: f32) -> Option<Border> {
+    let width = (scale.max(0.1)).round().max(1.0) as u32;
+    let light = platform_window::system_uses_light_theme().unwrap_or(true);
+    Some(Border {
+        width,
+        color: if light {
+            [0x00, 0x00, 0x00, 0x28]
+        } else {
+            [0xFF, 0xFF, 0xFF, 0x34]
+        },
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_border(_scale: f32) -> Option<Border> {
+    None
 }
 
 fn background(settings: &AppSettings) -> Background {

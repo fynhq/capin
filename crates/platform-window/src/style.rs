@@ -46,7 +46,10 @@ impl WindowStyle {
         // Pins are valid screenshot targets. Excluding them would hide them
         // from the frozen frame and make a selected pin capture black.
         exclude_from_capture: false,
-        borderless: false,
+        // A titled window is clipped to the system corner radius and draws a
+        // native outline; a pin is sized exactly to its image and must show
+        // only the pixels it owns.
+        borderless: true,
         opaque: false,
     };
 
@@ -56,6 +59,19 @@ impl WindowStyle {
         no_activate: true,
         exclude_from_capture: true,
         borderless: false,
+        opaque: false,
+    };
+
+    /// Transparent, click-through frame drawn around a scroll or recording
+    /// selection. The window itself must stay square: the system would clip a
+    /// titled window's corners, leaving the red selection frame rounded while
+    /// the selected area is rectangular.
+    pub const CAPTURE_OUTLINE: Self = Self {
+        always_on_top: true,
+        skip_taskbar: true,
+        no_activate: true,
+        exclude_from_capture: true,
+        borderless: true,
         opaque: false,
     };
 

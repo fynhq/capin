@@ -86,6 +86,11 @@ pub(crate) fn start(
     };
     if outcome.is_err() {
         let _ = std::fs::remove_file(&temp);
+    } else {
+        // The UI polls `finished` to leave the "saving" state. Windows marks
+        // it in its encoder; the macOS path must do the same once the file is
+        // published, otherwise F10 leaves the bar on "saving" forever.
+        flags.finish();
     }
     outcome
 }
