@@ -88,38 +88,6 @@ impl AnnotationColorTool {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum WindowBackground {
-    #[default]
-    Transparent,
-    System,
-    Light,
-    Dark,
-}
-
-impl WindowBackground {
-    pub const ALL: [Self; 4] = [Self::Transparent, Self::System, Self::Light, Self::Dark];
-
-    pub const fn code(self) -> &'static str {
-        match self {
-            Self::Transparent => "transparent",
-            Self::System => "system",
-            Self::Light => "light",
-            Self::Dark => "dark",
-        }
-    }
-
-    pub fn from_code(code: &str) -> Option<Self> {
-        match code {
-            "transparent" => Some(Self::Transparent),
-            "system" => Some(Self::System),
-            "light" => Some(Self::Light),
-            "dark" => Some(Self::Dark),
-            _ => None,
-        }
-    }
-}
-
 /// What the pin shortcut does when it is triggered again for an image that is
 /// already on screen.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -168,10 +136,6 @@ pub struct AppSettings {
     pub screenshot_dir: Option<PathBuf>,
     pub recording_dir: Option<PathBuf>,
     pub filename_template: String,
-    pub window_composition: bool,
-    pub window_background: WindowBackground,
-    pub window_padding: u32,
-    pub window_shadow: bool,
     pub capture_cursor: bool,
     /// Shared color used when `annotation_uniform_color` is enabled.
     pub annotation_color: u32,
@@ -232,10 +196,6 @@ impl Default for AppSettings {
             screenshot_dir: None,
             recording_dir: None,
             filename_template: DEFAULT_FILENAME_TEMPLATE.to_owned(),
-            window_composition: true,
-            window_background: WindowBackground::Transparent,
-            window_padding: 48,
-            window_shadow: true,
             capture_cursor: false,
             annotation_color: DEFAULT_ANNOTATION_COLOR,
             annotation_colors: [DEFAULT_ANNOTATION_COLOR; ANNOTATION_COLOR_TOOL_COUNT],
@@ -343,18 +303,6 @@ fn parse(text: &str) -> AppSettings {
                     settings.filename_template = value.chars().take(120).collect();
                 }
             }
-            "window_composition" => settings.window_composition = value != "false",
-            "window_background" => {
-                if let Some(background) = WindowBackground::from_code(value) {
-                    settings.window_background = background;
-                }
-            }
-            "window_padding" => {
-                if let Ok(padding) = value.parse::<u32>() {
-                    settings.window_padding = padding.min(256);
-                }
-            }
-            "window_shadow" => settings.window_shadow = value != "false",
             "capture_cursor" => settings.capture_cursor = value != "false",
             "annotation_color" => {
                 if let Some(color) = parse_rgba(value) {
@@ -496,7 +444,7 @@ fn serialize(settings: &AppSettings) -> String {
         .map(|path| path.display().to_string())
         .unwrap_or_default();
     let mut text = format!(
-        "language={}\nauto_start={}\nauto_start_explicit={}\ncopy_to_clipboard={}\nrecord_cursor={}\ncapture_hotkey={}\npin_hotkey={}\nscreenshot_dir={}\nrecording_dir={}\nfilename_template={}\nwindow_composition={}\nwindow_background={}\nwindow_padding={}\nwindow_shadow={}\ncapture_cursor={}\nannotation_color={:08x}\npin_text_ocr={}\npin_qr={}\n",
+        "language={}\nauto_start={}\nauto_start_explicit={}\ncopy_to_clipboard={}\nrecord_cursor={}\ncapture_hotkey={}\npin_hotkey={}\nscreenshot_dir={}\nrecording_dir={}\nfilename_template={}\ncapture_cursor={}\nannotation_color={:08x}\npin_text_ocr={}\npin_qr={}\n",
         settings.language.code(),
         settings.auto_start,
         settings.auto_start_explicit,
@@ -507,10 +455,6 @@ fn serialize(settings: &AppSettings) -> String {
         screenshot_dir,
         recording_dir,
         settings.filename_template.replace(['\n', '\r'], " "),
-        settings.window_composition,
-        settings.window_background.code(),
-        settings.window_padding,
-        settings.window_shadow,
         settings.capture_cursor,
         settings.annotation_color,
         settings.pin_text_ocr,
@@ -686,31 +630,21 @@ mod tests {
     }
 
     #[test]
-    fn serialized_recording_and_background_options_round_trip() {
+    fn serialized_recording_options_round_trip() {
         let settings = AppSettings {
             record_cursor_highlight: true,
             record_cursor_highlight_color: 0x34C759,
             repeat_pin: RepeatPinBehavior::FlashCurrent,
-            window_background: WindowBackground::Dark,
             ..Default::default()
         };
         assert_eq!(parse(&serialize(&settings)), settings);
     }
 
     #[test]
-    fn parses_the_follow_system_background_and_defaults_to_it() {
+    fn default_recording_options() {
         let defaults = AppSettings::default();
         assert_eq!(defaults.record_cursor_highlight_color, 0xFFCC00);
         assert_eq!(defaults.repeat_pin, RepeatPinBehavior::RestoreHistory);
-        assert_eq!(defaults.window_background, WindowBackground::Transparent);
-        assert_eq!(
-            parse("window_background=system\n").window_background,
-            WindowBackground::System
-        );
-        assert_eq!(
-            parse("window_background=gradient\n").window_background,
-            WindowBackground::Transparent
-        );
     }
 
     #[test]

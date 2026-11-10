@@ -724,12 +724,17 @@ impl EditorView {
         capture: Option<InlineCapture>,
         pin_target: Option<u64>,
         zoomable: bool,
+        document: Option<AnnotationDocument>,
+        effects: RegionEffects,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut view = Self::new(frame, pin_target, cx);
-        if let Some(capture) = capture {
-            view.effects = capture.effects;
+        if let Some(document) = document
+            && document.image_size() == view.image_size
+        {
+            view.document = document;
         }
+        view.effects = effects;
         view.tool = initial_tool;
         if let Some(color_tool) = initial_tool.color_tool() {
             view.active_color_tool = color_tool;
@@ -988,7 +993,7 @@ impl EditorView {
         let window_width = f32::from(window.viewport_size().width);
         let window_height = f32::from(window.viewport_size().height);
         let width = 250.0_f32.min((window_width - 16.0).max(120.0));
-        let height = 84.0;
+        let height = 52.0;
         let left = f32::from(info.origin.x).clamp(8.0, (window_width - width - 8.0).max(8.0));
         let top =
             crate::ui::popover_top(info, height, window_height, Some(self.toolbar_rect(window)));
@@ -1993,7 +1998,9 @@ impl EditorView {
                 .items_center()
                 .justify_center()
                 .when(selected, |button| button.bg(accent_selected))
-                .hover(move |style| style.bg(hover))
+                .when(!selected, |button| {
+                    button.hover(move |style| style.bg(hover))
+                })
                 .active(|style| style.opacity(0.85))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.commit_text(cx);
@@ -2106,7 +2113,9 @@ impl EditorView {
                     })
                     .border_2()
                     .border_color(if custom_active { text } else { border })
-                    .hover(move |style| style.bg(hover))
+                    .when(!custom_active, |button| {
+                        button.hover(move |style| style.bg(hover))
+                    })
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.commit_text(cx);
@@ -2162,7 +2171,9 @@ impl EditorView {
                     .items_center()
                     .justify_center()
                     .when(selected, |button| button.bg(accent_selected))
-                    .hover(move |style| style.bg(hover))
+                    .when(!selected, |button| {
+                        button.hover(move |style| style.bg(hover))
+                    })
                     .active(|style| style.opacity(0.85))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.commit_text(cx);
@@ -2203,7 +2214,9 @@ impl EditorView {
                     .items_center()
                     .justify_center()
                     .when(selected, |button| button.bg(accent_selected))
-                    .hover(move |style| style.bg(hover))
+                    .when(!selected, |button| {
+                        button.hover(move |style| style.bg(hover))
+                    })
                     .active(|style| style.opacity(0.85))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.commit_text(cx);
@@ -2247,7 +2260,9 @@ impl EditorView {
                     .items_center()
                     .justify_center()
                     .when(selected, |button| button.bg(accent_selected))
-                    .hover(move |style| style.bg(hover))
+                    .when(!selected, |button| {
+                        button.hover(move |style| style.bg(hover))
+                    })
                     .active(|style| style.opacity(0.85))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.commit_text(cx);
@@ -2297,7 +2312,9 @@ impl EditorView {
                 .items_center()
                 .justify_center()
                 .when(background_enabled, |button| button.bg(accent_selected))
-                .hover(move |style| style.bg(hover))
+                .when(!background_enabled, |button| {
+                    button.hover(move |style| style.bg(hover))
+                })
                 .active(|style| style.opacity(0.85))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.commit_text(cx);
@@ -2321,7 +2338,9 @@ impl EditorView {
                 .items_center()
                 .justify_center()
                 .when(outline_enabled, |button| button.bg(accent_selected))
-                .hover(move |style| style.bg(hover))
+                .when(!outline_enabled, |button| {
+                    button.hover(move |style| style.bg(hover))
+                })
                 .active(|style| style.opacity(0.85))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.commit_text(cx);
@@ -2406,7 +2425,9 @@ impl EditorView {
                     .items_center()
                     .justify_center()
                     .when(enabled, |button| button.bg(accent_selected))
-                    .hover(move |style| style.bg(hover))
+                    .when(!enabled, |button| {
+                        button.hover(move |style| style.bg(hover))
+                    })
                     .active(|style| style.opacity(0.85))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let start = if is_start {
@@ -2458,7 +2479,9 @@ impl EditorView {
                     .items_center()
                     .justify_center()
                     .when(selected, |button| button.bg(accent_selected))
-                    .hover(move |style| style.bg(hover))
+                    .when(!selected, |button| {
+                        button.hover(move |style| style.bg(hover))
+                    })
                     .active(|style| style.opacity(0.85))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.commit_text(cx);
@@ -2502,7 +2525,9 @@ impl EditorView {
                     .items_center()
                     .justify_center()
                     .when(selected, |button| button.bg(accent_selected))
-                    .hover(move |style| style.bg(hover))
+                    .when(!selected, |button| {
+                        button.hover(move |style| style.bg(hover))
+                    })
                     .active(|style| style.opacity(0.85))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.commit_text(cx);
@@ -2546,7 +2571,9 @@ impl EditorView {
                     .items_center()
                     .justify_center()
                     .when(selected, |button| button.bg(accent_selected))
-                    .hover(move |style| style.bg(hover))
+                    .when(!selected, |button| {
+                        button.hover(move |style| style.bg(hover))
+                    })
                     .active(|style| style.opacity(0.85))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.commit_text(cx);
@@ -3017,11 +3044,25 @@ impl EditorView {
     }
 
     fn region_effects_active(&self) -> bool {
-        self.inline
-            .and_then(|inline| inline.capture)
-            .is_some_and(|capture| {
-                !matches!(capture.target, CaptureTarget::Window(_)) && self.effects.active()
-            })
+        if !self.effects.active() {
+            return false;
+        }
+        match self.inline.and_then(|inline| inline.capture) {
+            Some(capture) => !matches!(capture.target, CaptureTarget::Window(_)),
+            // Pin editors keep the capture effects without an inline capture
+            // descriptor; long-capture editors never have region effects.
+            None => self.pin_target.is_some(),
+        }
+    }
+
+    /// Effects worth carrying into a pin document. Window captures already
+    /// have their system frame and must not inherit a stale region radius.
+    fn stored_region_effects(&self) -> RegionEffects {
+        if self.region_effects_active() {
+            self.effects
+        } else {
+            RegionEffects::default()
+        }
     }
 
     fn region_effects_scale(&self) -> f32 {
@@ -3152,7 +3193,9 @@ impl EditorView {
                     .py(px(3.0))
                     .rounded(px(5.0))
                     .when(selected_radius, |chip| chip.bg(self.chrome.accent))
-                    .hover(|style| style.bg(self.chrome.hover))
+                    .when(!selected_radius, |chip| {
+                        chip.hover(|style| style.bg(self.chrome.hover))
+                    })
                     .text_size(px(10.5))
                     .text_color(if selected_radius {
                         self.chrome.accent_text
@@ -3167,8 +3210,6 @@ impl EditorView {
                     .child(label),
             );
         }
-        let shadow = self.effects.shadow;
-        let border = self.effects.border;
         let panel = div()
             .id("editor-effects-panel")
             .absolute()
@@ -3195,55 +3236,7 @@ impl EditorView {
                     .text_color(self.chrome.muted)
                     .child(t(language, "overlay.effects_corner")),
             )
-            .child(corner_row)
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(4.0))
-                    .child(
-                        div()
-                            .id("editor-effects-shadow")
-                            .px(px(8.0))
-                            .py(px(4.0))
-                            .rounded(px(5.0))
-                            .when(shadow, |chip| chip.bg(self.chrome.accent))
-                            .hover(|style| style.bg(self.chrome.hover))
-                            .text_size(px(10.5))
-                            .text_color(if shadow {
-                                self.chrome.accent_text
-                            } else {
-                                self.chrome.muted
-                            })
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.effects.shadow = !this.effects.shadow;
-                                cx.notify();
-                            }))
-                            .child(t(language, "overlay.effects_shadow")),
-                    )
-                    .child(
-                        div()
-                            .id("editor-effects-border")
-                            .px(px(8.0))
-                            .py(px(4.0))
-                            .rounded(px(5.0))
-                            .when(border, |chip| chip.bg(self.chrome.accent))
-                            .hover(|style| style.bg(self.chrome.hover))
-                            .text_size(px(10.5))
-                            .text_color(if border {
-                                self.chrome.accent_text
-                            } else {
-                                self.chrome.muted
-                            })
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.effects.border = !this.effects.border;
-                                cx.notify();
-                            }))
-                            .child(t(language, "overlay.effects_border")),
-                    ),
-            );
+            .child(corner_row);
 
         Some(
             div()
@@ -3374,7 +3367,7 @@ impl EditorView {
         let frame = match captured {
             Ok(frame) => match capture.target {
                 CaptureTarget::Window(id) => {
-                    crate::window_style::compose_window_capture(id, frame, capture.scale)
+                    crate::window_frame::round_window_capture(id, frame, capture.scale)
                 }
                 _ => frame,
             },
@@ -3458,7 +3451,11 @@ impl EditorView {
         let inline_host = self.inline;
         match rasterize(&self.document, &self.frame) {
             Ok(output) => {
-                let output = self.effects.apply(output, self.region_effects_scale());
+                let output = if self.region_effects_active() {
+                    self.effects.apply(output, self.region_effects_scale())
+                } else {
+                    output
+                };
                 let hash = crate::capture_history::hash_frame(&output);
                 let placement = inline_host.map(|inline| {
                     // The editor image may already be zoomed; use its displayed
@@ -3494,18 +3491,24 @@ impl EditorView {
                     self.release_images(cx);
                 }
                 let handles = cx.windows();
+                let edit_state = crate::pin::PinEditState {
+                    base: self.frame.clone(),
+                    document: self.document.clone(),
+                    effects: self.stored_region_effects(),
+                };
                 // Pin windows must not be created inside the toolbar's input
                 // callback; close the editor first and open the pin next turn.
                 cx.defer(move |cx| {
                     if inline_host.is_some() {
                         crate::windows::close_capture_auxiliary(cx, handles);
                     }
-                    if let Some((bounds, zoom)) = placement {
-                        crate::pin::open_frame_at_with_hash(
-                            output, bounds, zoom, hash, monitor, cx,
-                        );
+                    let id = if let Some((bounds, zoom)) = placement {
+                        crate::pin::open_frame_at_with_hash(output, bounds, zoom, hash, monitor, cx)
                     } else {
-                        crate::pin::open_frame_with_hash(output, hash, cx);
+                        crate::pin::open_frame_with_hash(output, hash, cx)
+                    };
+                    if let Some(id) = id {
+                        crate::pin::set_edit_state(id, edit_state);
                     }
                 });
             }
@@ -3527,7 +3530,11 @@ impl EditorView {
         let mut pin_ok = false;
         match rasterize(&self.document, &self.frame) {
             Ok(output) => {
-                let output = self.effects.apply(output, self.region_effects_scale());
+                let output = if self.region_effects_active() {
+                    self.effects.apply(output, self.region_effects_scale())
+                } else {
+                    output
+                };
                 let hash = crate::capture_history::hash_frame(&output);
                 let record_history = self.pin_target.is_none();
                 if copy_only || settings_state::get().copy_to_clipboard {
@@ -3563,7 +3570,12 @@ impl EditorView {
                     }
                 }
                 if !copy_only && let Some(pin_id) = self.pin_target {
-                    if crate::pin::replace_image(pin_id, output, cx) {
+                    let edit_state = crate::pin::PinEditState {
+                        base: self.frame.clone(),
+                        document: self.document.clone(),
+                        effects: self.stored_region_effects(),
+                    };
+                    if crate::pin::replace_image_with_edit_state(pin_id, output, edit_state, cx) {
                         pin_ok = true;
                         messages.push(t(language, "editor.pin_updated").to_owned());
                     } else {
@@ -4037,7 +4049,6 @@ impl Render for EditorView {
         });
 
         let effects_active = self.region_effects_active();
-        let effects_scale = self.region_effects_scale();
         let inline = self.inline.is_some();
         let image_cursor = if self.move_draft.is_some() {
             CursorStyle::ClosedHand
@@ -4077,19 +4088,10 @@ impl Render for EditorView {
             .h(image_rect.size.height)
             .cursor(image_cursor)
             .rounded(px(if effects_active {
-                self.effects.corner_radius as f32 * effects_scale
+                self.effects.corner_radius as f32
             } else {
                 0.0
             }))
-            .when(effects_active && self.effects.border, |layer| {
-                layer.border_1().border_color(rgba(0xFFFFFFCC))
-            })
-            .when(effects_active && self.effects.shadow, |layer| {
-                layer.shadow(vec![
-                    BoxShadow::new(px(0.0), px(8.0 * effects_scale), hsla(0.0, 0.0, 0.0, 0.35))
-                        .blur_radius(px(20.0 * effects_scale)),
-                ])
-            })
             .overflow_hidden()
             .child(
                 img(self.image.clone())
@@ -4872,8 +4874,13 @@ pub fn open_pin_editor_overlay(
     pin_id: u64,
     frame: Arc<RgbaFrame>,
     pin_bounds: Bounds<Pixels>,
+    edit_state: Option<crate::pin::PinEditState>,
     cx: &mut App,
 ) -> bool {
+    let (frame, document, effects) = match edit_state {
+        Some(state) => (state.base, Some(state.document), state.effects),
+        None => (frame, None, RegionEffects::default()),
+    };
     let center_x = f32::from(pin_bounds.origin.x) + f32::from(pin_bounds.size.width) / 2.0;
     let center_y = f32::from(pin_bounds.origin.y) + f32::from(pin_bounds.size.height) / 2.0;
     let display = cx
@@ -4908,6 +4915,8 @@ pub fn open_pin_editor_overlay(
         Some(pin_id),
         false,
         Tool::Select,
+        document,
+        effects,
         cx,
     )
 }
@@ -4954,6 +4963,8 @@ pub fn open_long_capture_inline(frame: RgbaFrame, monitor_id: MonitorId, cx: &mu
         None,
         true,
         Tool::Select,
+        None,
+        RegionEffects::default(),
         cx,
     )
 }
@@ -4988,6 +4999,8 @@ fn open_inline_editor_window(
     pin_target: Option<u64>,
     zoomable: bool,
     initial_tool: Tool,
+    document: Option<AnnotationDocument>,
+    effects: RegionEffects,
     cx: &mut App,
 ) -> bool {
     let options = WindowOptions {
@@ -5021,6 +5034,8 @@ fn open_inline_editor_window(
                 None,
                 pin_target,
                 zoomable,
+                document,
+                effects,
                 cx,
             )
         });

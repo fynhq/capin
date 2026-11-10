@@ -68,10 +68,18 @@ pub fn close_open_overlays(cx: &mut App) {
 /// valid capture targets, so only these helper surfaces are filtered from
 /// hover hit-testing.
 fn live_overlay_window_ids(cx: &App) -> Vec<WindowId> {
+    live_overlay_window_ids_excluding(cx, None)
+}
+
+/// Collects the helper window ids without reading an overlay that is already
+/// inside its own update. F5 refresh runs from an `OverlayView` listener and
+/// used to read itself here, which GPUI rejects as a re-entrant entity read.
+fn live_overlay_window_ids_excluding(cx: &App, exclude: Option<EntityId>) -> Vec<WindowId> {
     OVERLAY_VIEWS.with(|views| {
         views
             .borrow()
             .iter()
+            .filter(|view| exclude != Some(view.entity_id()))
             .filter_map(WeakEntity::upgrade)
             .filter_map(|view| view.read(cx).native_id)
             .map(WindowId::from_raw)
@@ -849,6 +857,59 @@ impl OverlayView {
         layers
     }
 
+    fn selection_effects_radius(&self) -> f32 {
+        let Some(selected) = &self.selected else {
+            return 0.0;
+        };
+        if matches!(selected.target, CaptureTarget::Window(_)) {
+            return 0.0;
+        }
+        self.effects.corner_radius as f32
+    }
+
+    /// Dims everything outside the hole. A rounded hole is one even-odd path
+    /// so the dimmed corners follow the selected capture radius instead of
+    /// leaving four bright square corners outside the rounded border.
+    fn dim_layers_rounded(&self, hole: Option<Bounds<Pixels>>, radius: f32) -> Vec<AnyElement> {
+        if radius <= 0.5 {
+            return self
+                .dim_layers(hole)
+                .into_iter()
+                .map(|layer| layer.into_any_element())
+                .collect();
+        }
+        let Some(hole) = hole else {
+            return self
+                .dim_layers(None)
+                .into_iter()
+                .map(|layer| layer.into_any_element())
+                .collect();
+        };
+        let width = f32::from(self.window_size.width);
+        let height = f32::from(self.window_size.height);
+        let layer = canvas(
+            |_, _, _| (),
+            move |_bounds, _, window, _| {
+                let mut builder = PathBuilder::fill().with_style(PathStyle::Fill(
+                    FillOptions::default().with_fill_rule(FillRule::EvenOdd),
+                ));
+                builder.move_to(point(px(0.0), px(0.0)));
+                builder.line_to(point(px(width), px(0.0)));
+                builder.line_to(point(px(width), px(height)));
+                builder.line_to(point(px(0.0), px(height)));
+                builder.close();
+                push_rounded_rect(&mut builder, hole, radius);
+                if let Ok(path) = builder.build() {
+                    window.paint_path(path, rgba(DIM));
+                }
+            },
+        )
+        .absolute()
+        .inset_0()
+        .size_full();
+        vec![layer.into_any_element()]
+    }
+
     fn sample_color(&self, point: PhysicalPoint) -> Option<(u8, u8, u8)> {
         let monitor = self.session.monitor_bounds();
         let local_x = point.x - monitor.origin.x;
@@ -1492,7 +1553,7 @@ impl OverlayView {
                 };
                 match captured {
                     Ok(frame) => {
-                        crate::window_style::compose_window_capture(id, frame, selected.scale)
+                        crate::window_frame::round_window_capture(id, frame, selected.scale)
                     }
                     Err(error) => {
                         // Shell surfaces such as the taskbar reject some
@@ -1616,6 +1677,8 @@ impl OverlayView {
                             Some(inline_capture),
                             None,
                             false,
+                            None,
+                            inline_capture.effects,
                             cx,
                         )
                     });
@@ -1745,7 +1808,7 @@ impl OverlayView {
         cx.defer(move |cx| crate::record::start(selected.target, cx));
     }
 
-    fn refresh_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn refresh_frame(&mut self, cx: &mut Context<Self>) {
         let mut backend = platform_backend();
         let monitor = self.session.monitor();
         let frame = match backend.capture(CaptureTarget::Monitor(monitor)) {
@@ -1757,14 +1820,18 @@ impl OverlayView {
         };
         let image = image_util::render_image(&frame);
         let old_image = std::mem::replace(&mut self.image, image);
-        // During an entity update the window has left `App::windows`, so
-        // `App::drop_image` cannot reach the only atlas holding the previous
-        // frame. Drop through the window directly or every F5 leaks a
-        // full-screen texture until the overlay quits.
-        let _ = window.drop_image(old_image);
+        // The update runs while the window is out of `App.windows`; defer the
+        // atlas drops until it is back, otherwise F5 leaks or races the
+        // renderer that still references the previous full-screen texture.
+        let mut dropped = vec![old_image];
         if let Some(magnifier) = self.magnifier.take() {
-            let _ = window.drop_image(magnifier.image);
+            dropped.push(magnifier.image);
         }
+        cx.defer(move |cx| {
+            for image in dropped {
+                cx.drop_image(image, None);
+            }
+        });
         self.frame = Some(Arc::new(frame));
         self.element_cache.clear();
         self.element_window = None;
@@ -1772,7 +1839,10 @@ impl OverlayView {
         self.element_candidates.clear();
         self.element_level = 0;
         let monitor_bounds = self.session.monitor_bounds();
-        let excluded = live_overlay_window_ids(cx);
+        let mut excluded = live_overlay_window_ids_excluding(cx, Some(cx.entity().entity_id()));
+        if let Some(id) = self.native_id {
+            excluded.push(WindowId::from_raw(id));
+        }
         if let Ok(windows) = backend.windows_excluding(&excluded) {
             self.session =
                 SelectionSession::with_scale(monitor, monitor_bounds, windows, self.scale);
@@ -2177,7 +2247,9 @@ impl OverlayView {
                     .py(px(3.0))
                     .rounded(px(5.0))
                     .when(editing, |chip| chip.bg(self.chrome.selected))
-                    .hover(|style| style.bg(self.chrome.hover))
+                    .when(!editing, |chip| {
+                        chip.hover(|style| style.bg(self.chrome.hover))
+                    })
                     .active(|style| style.opacity(0.85))
                     .cursor_text()
                     .on_mouse_down(
@@ -2242,7 +2314,9 @@ impl OverlayView {
                     .items_center()
                     .gap(px(4.0))
                     .when(selected.effects_open, |chip| chip.bg(self.chrome.selected))
-                    .hover(|style| style.bg(self.chrome.hover))
+                    .when(!selected.effects_open, |chip| {
+                        chip.hover(|style| style.bg(self.chrome.hover))
+                    })
                     .active(|style| style.opacity(0.85))
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -2281,7 +2355,7 @@ impl OverlayView {
                 .hover(|style| style.bg(self.chrome.hover))
                 .active(|style| style.opacity(0.85))
                 .cursor_pointer()
-                .on_click(cx.listener(|this, _, window, cx| this.refresh_frame(window, cx)))
+                .on_click(cx.listener(|this, _, _, cx| this.refresh_frame(cx)))
                 .child(icons::icon(icons::REFRESH, 14.0, self.chrome.icon)),
         );
 
@@ -2296,7 +2370,7 @@ impl OverlayView {
         let info = self.info_rect()?;
         let language = settings_state::get().language;
         let width = 246.0_f32.min(f32::from(self.window_size.width) - 16.0);
-        let height = 84.0;
+        let height = 52.0;
         let left = f32::from(info.origin.x).clamp(
             8.0,
             (f32::from(self.window_size.width) - width - 8.0).max(8.0),
@@ -2323,7 +2397,9 @@ impl OverlayView {
                     .py(px(3.0))
                     .rounded(px(5.0))
                     .when(selected_radius, |chip| chip.bg(self.chrome.accent))
-                    .hover(|style| style.bg(self.chrome.hover))
+                    .when(!selected_radius, |chip| {
+                        chip.hover(|style| style.bg(self.chrome.hover))
+                    })
                     .active(|style| style.opacity(0.85))
                     .text_size(px(10.5))
                     .text_color(if selected_radius {
@@ -2340,8 +2416,6 @@ impl OverlayView {
             );
         }
 
-        let shadow = self.effects.shadow;
-        let border = self.effects.border;
         let panel = div()
             .id("overlay-effects-panel")
             .absolute()
@@ -2368,57 +2442,7 @@ impl OverlayView {
                     .text_color(self.chrome.muted)
                     .child(t(language, "overlay.effects_corner")),
             )
-            .child(corner_row)
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(4.0))
-                    .child(
-                        div()
-                            .id("overlay-effects-shadow")
-                            .px(px(8.0))
-                            .py(px(4.0))
-                            .rounded(px(5.0))
-                            .when(shadow, |chip| chip.bg(self.chrome.accent))
-                            .hover(|style| style.bg(self.chrome.hover))
-                            .active(|style| style.opacity(0.85))
-                            .text_size(px(10.5))
-                            .text_color(if shadow {
-                                self.chrome.accent_text
-                            } else {
-                                self.chrome.muted
-                            })
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.effects.shadow = !this.effects.shadow;
-                                cx.notify();
-                            }))
-                            .child(t(language, "overlay.effects_shadow")),
-                    )
-                    .child(
-                        div()
-                            .id("overlay-effects-border")
-                            .px(px(8.0))
-                            .py(px(4.0))
-                            .rounded(px(5.0))
-                            .when(border, |chip| chip.bg(self.chrome.accent))
-                            .hover(|style| style.bg(self.chrome.hover))
-                            .active(|style| style.opacity(0.85))
-                            .text_size(px(10.5))
-                            .text_color(if border {
-                                self.chrome.accent_text
-                            } else {
-                                self.chrome.muted
-                            })
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.effects.border = !this.effects.border;
-                                cx.notify();
-                            }))
-                            .child(t(language, "overlay.effects_border")),
-                    ),
-            );
+            .child(corner_row);
 
         Some(
             div()
@@ -3008,17 +3032,19 @@ impl OverlayView {
                 )
         });
 
-        let mut layers = self.dim_layers(hole);
+        let mut layers = self.dim_layers_rounded(hole, self.selection_effects_radius());
         if let Some(rect) = selected_bounds {
-            layers.push(border(rect, self.accent));
+            layers.push(
+                border(rect, self.accent, self.selection_effects_radius()).into_any_element(),
+            );
         } else if let Some(rect) = drag_selection {
-            layers.push(border(rect, self.chrome.accent));
+            layers.push(border(rect, self.chrome.accent, 0.0).into_any_element());
         } else if let Some(rect) = hovered_element {
-            layers.push(element_border(rect));
+            layers.push(element_border(rect).into_any_element());
         } else if let Some(rect) = hovered_window {
-            layers.push(border(rect, self.accent));
+            layers.push(border(rect, self.accent, 0.0).into_any_element());
         } else if let Some(rect) = screen_bounds {
-            layers.push(screen_border(rect, self.chrome.accent));
+            layers.push(screen_border(rect, self.chrome.accent).into_any_element());
         }
 
         if self.mode == OverlayMode::Capture
@@ -3033,7 +3059,7 @@ impl OverlayView {
             let height = f32::from(self.window_size.height);
             if x >= 0.0 && y >= 0.0 && x <= width && y <= height {
                 if self.window_only {
-                    layers.push(camera_cursor(x, y));
+                    layers.push(camera_cursor(x, y, self.chrome.dark).into_any_element());
                 } else {
                     layers.push(
                         div()
@@ -3042,7 +3068,8 @@ impl OverlayView {
                             .top(px(0.0))
                             .w(px(1.0))
                             .h(px(height))
-                            .bg(rgba(0x00000055)),
+                            .bg(rgba(0x00000055))
+                            .into_any_element(),
                     );
                     layers.push(
                         div()
@@ -3051,7 +3078,8 @@ impl OverlayView {
                             .top(px(0.0))
                             .w(px(1.0))
                             .h(px(height))
-                            .bg(rgba(0xFFFFFFE0)),
+                            .bg(rgba(0xFFFFFFE0))
+                            .into_any_element(),
                     );
                     layers.push(
                         div()
@@ -3060,7 +3088,8 @@ impl OverlayView {
                             .top(px(y))
                             .w(px(width))
                             .h(px(1.0))
-                            .bg(rgba(0x00000055)),
+                            .bg(rgba(0x00000055))
+                            .into_any_element(),
                     );
                     layers.push(
                         div()
@@ -3069,7 +3098,8 @@ impl OverlayView {
                             .top(px(y + 1.0))
                             .w(px(width))
                             .h(px(1.0))
-                            .bg(rgba(0xFFFFFFE0)),
+                            .bg(rgba(0xFFFFFFE0))
+                            .into_any_element(),
                     );
                 }
             }
@@ -3079,14 +3109,17 @@ impl OverlayView {
             && let Some(window) = self.session.hovered_window()
             && let Some(rect) = hovered
         {
-            layers.push(self.window_label(
-                window,
-                rect,
-                hovered_element.and(self.session.hovered_element()),
-            ));
+            layers.push(
+                self.window_label(
+                    window,
+                    rect,
+                    hovered_element.and(self.session.hovered_element()),
+                )
+                .into_any_element(),
+            );
         }
         if !selected && desktop_hover {
-            layers.push(self.screen_label(language));
+            layers.push(self.screen_label(language).into_any_element());
         }
 
         let handles = if selected {
@@ -3196,7 +3229,7 @@ impl OverlayView {
                         return;
                     }
                     if key == "f5" {
-                        this.refresh_frame(window, cx);
+                        this.refresh_frame(cx);
                         return;
                     }
                     if key == "f1" {
@@ -3256,7 +3289,7 @@ impl OverlayView {
                         this.session.set_hovered_element(None);
                         cx.notify();
                     } else if key == "f5" {
-                        this.refresh_frame(window, cx);
+                        this.refresh_frame(cx);
                     }
                 }
                 let _ = window;
@@ -3368,6 +3401,23 @@ impl OverlayView {
                             point.x - monitor.origin.x,
                             point.y - monitor.origin.y,
                         );
+                        let edge_tolerance = 6.0 * this.scale.max(0.1);
+                        if let Some(handle) =
+                            edge_resize_handle(selected.rect, local, edge_tolerance)
+                        {
+                            if let Some(selected) = this.selected.as_mut() {
+                                selected.drag = Some(RegionDrag {
+                                    kind: RegionDragKind::Resize(handle),
+                                    start: point,
+                                    original: selected.rect,
+                                });
+                                selected.edit = None;
+                                selected.effects_open = false;
+                                selected.hints_open = false;
+                            }
+                            cx.notify();
+                            return;
+                        }
                         if local.x >= selected.rect.origin.x
                             && local.y >= selected.rect.origin.y
                             && local.x <= selected.rect.origin.x + selected.rect.size.width as i32
@@ -3533,6 +3583,44 @@ fn handle_has_south(handle: ResizeHandle) -> bool {
     )
 }
 
+/// Maps a press near a selection edge or corner to the matching resize handle.
+/// The painted dots stay small, while the whole border becomes a grab target
+/// so the selection can be adjusted again after the initial drag.
+fn edge_resize_handle(
+    rect: PhysicalRect,
+    point: PhysicalPoint,
+    tolerance: f32,
+) -> Option<ResizeHandle> {
+    let left = rect.origin.x as f32;
+    let top = rect.origin.y as f32;
+    let right = left + rect.size.width as f32;
+    let bottom = top + rect.size.height as f32;
+    let x = point.x as f32;
+    let y = point.y as f32;
+    if x < left - tolerance
+        || x > right + tolerance
+        || y < top - tolerance
+        || y > bottom + tolerance
+    {
+        return None;
+    }
+    let west = (x - left).abs() <= tolerance;
+    let east = (x - right).abs() <= tolerance;
+    let north = (y - top).abs() <= tolerance;
+    let south = (y - bottom).abs() <= tolerance;
+    match (west, east, north, south) {
+        (true, _, true, _) => Some(ResizeHandle::NorthWest),
+        (_, true, true, _) => Some(ResizeHandle::NorthEast),
+        (true, _, _, true) => Some(ResizeHandle::SouthWest),
+        (_, true, _, true) => Some(ResizeHandle::SouthEast),
+        (true, _, _, _) => Some(ResizeHandle::West),
+        (_, true, _, _) => Some(ResizeHandle::East),
+        (_, _, true, _) => Some(ResizeHandle::North),
+        (_, _, _, true) => Some(ResizeHandle::South),
+        _ => None,
+    }
+}
+
 fn resize_rect(
     original: PhysicalRect,
     handle: ResizeHandle,
@@ -3678,15 +3766,45 @@ fn dim_rect(left: f32, top: f32, width: f32, height: f32) -> Div {
         .bg(rgba(DIM))
 }
 
-fn border(rect: Bounds<Pixels>, color: Rgba) -> Div {
+fn border(rect: Bounds<Pixels>, color: Rgba, radius: f32) -> Div {
     div()
         .absolute()
         .left(rect.origin.x)
         .top(rect.origin.y)
         .w(rect.size.width)
         .h(rect.size.height)
+        .rounded(px(radius.max(0.0)))
         .border_3()
         .border_color(color)
+}
+
+fn push_rounded_rect(builder: &mut PathBuilder, rect: Bounds<Pixels>, radius: f32) {
+    let left = f32::from(rect.origin.x);
+    let top = f32::from(rect.origin.y);
+    let width = f32::from(rect.size.width);
+    let height = f32::from(rect.size.height);
+    let radius = radius.clamp(0.0, width.min(height) / 2.0);
+    let right = left + width;
+    let bottom = top + height;
+    builder.move_to(point(px(left + radius), px(top)));
+    builder.line_to(point(px(right - radius), px(top)));
+    builder.curve_to(
+        point(px(right), px(top + radius)),
+        point(px(right), px(top)),
+    );
+    builder.line_to(point(px(right), px(bottom - radius)));
+    builder.curve_to(
+        point(px(right - radius), px(bottom)),
+        point(px(right), px(bottom)),
+    );
+    builder.line_to(point(px(left + radius), px(bottom)));
+    builder.curve_to(
+        point(px(left), px(bottom - radius)),
+        point(px(left), px(bottom)),
+    );
+    builder.line_to(point(px(left), px(top + radius)));
+    builder.curve_to(point(px(left + radius), px(top)), point(px(left), px(top)));
+    builder.close();
 }
 
 fn element_border(rect: Bounds<Pixels>) -> Div {
@@ -3713,7 +3831,12 @@ fn screen_border(rect: Bounds<Pixels>, color: Rgba) -> Div {
         .border_color(rgba((u32::from(color) & 0x00FF_FFFF) << 8 | 0xCC))
 }
 
-fn camera_cursor(x: f32, y: f32) -> Div {
+fn camera_cursor(x: f32, y: f32, dark: bool) -> Div {
+    let (background, border, icon, shadow) = if dark {
+        (rgba(0x000000C0), rgba(0xFFFFFF80), rgb(0xFFFFFF), 0.35)
+    } else {
+        (rgba(0xFFFFFFE8), rgba(0x00000033), rgb(0x1B1B1B), 0.18)
+    };
     div()
         .absolute()
         .left(px(x + 2.0))
@@ -3721,23 +3844,23 @@ fn camera_cursor(x: f32, y: f32) -> Div {
         .w(px(28.0))
         .h(px(28.0))
         .rounded(px(7.0))
-        .bg(rgba(0x000000C0))
+        .bg(background)
         .border_1()
-        .border_color(rgba(0xFFFFFF80))
+        .border_color(border)
         .shadow(vec![
-            BoxShadow::new(px(0.0), px(2.0), hsla(0.0, 0.0, 0.0, 0.35)).blur_radius(px(6.0)),
+            BoxShadow::new(px(0.0), px(2.0), hsla(0.0, 0.0, 0.0, shadow)).blur_radius(px(6.0)),
         ])
         .flex()
         .items_center()
         .justify_center()
-        .child(icons::icon(icons::CAMERA, 17.0, rgb(0xFFFFFF)))
+        .child(icons::icon(icons::CAMERA, 17.0, icon))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::frame_matches_monitor;
+    use super::{ResizeHandle, edge_resize_handle, frame_matches_monitor};
     use core_capture::MonitorInfo;
-    use core_types::{DpiScale, MonitorId, PhysicalRect, RgbaFrame};
+    use core_types::{DpiScale, MonitorId, PhysicalPoint, PhysicalRect, RgbaFrame};
 
     fn monitor(width: u32, height: u32) -> MonitorInfo {
         MonitorInfo {
@@ -3759,5 +3882,17 @@ mod tests {
         assert!(frame_matches_monitor(&frame(1921, 1079), &target));
         assert!(!frame_matches_monitor(&frame(1920, 1200), &target));
         assert!(!frame_matches_monitor(&frame(2560, 1440), &target));
+    }
+
+    #[test]
+    fn selection_borders_map_to_resize_handles() {
+        let rect = PhysicalRect::new(10, 20, 100, 80);
+        let handle = |x, y| edge_resize_handle(rect, PhysicalPoint::new(x, y), 6.0);
+        assert_eq!(handle(110, 60), Some(ResizeHandle::East));
+        assert_eq!(handle(10, 100), Some(ResizeHandle::SouthWest));
+        assert_eq!(handle(60, 20), Some(ResizeHandle::North));
+        assert_eq!(handle(110, 100), Some(ResizeHandle::SouthEast));
+        assert_eq!(handle(60, 60), None);
+        assert_eq!(handle(140, 60), None);
     }
 }

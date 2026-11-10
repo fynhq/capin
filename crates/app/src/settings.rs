@@ -11,7 +11,7 @@ use platform_window::{AutostartState, set_autostart, system_accent_hex};
 use crate::i18n::{Language, t};
 use crate::icons;
 use crate::logging::{log_error, log_info};
-use crate::settings_state::{self, AppSettings, RepeatPinBehavior, WindowBackground};
+use crate::settings_state::{self, AppSettings, RepeatPinBehavior};
 use crate::storage;
 
 const PROJECT_URL: &str = "https://github.com/fynhq/capin";
@@ -346,15 +346,12 @@ struct ToggleRow {
     refresh_pin: bool,
 }
 
-/// Popup menus for settings whose options the user asked to present as a
-/// dropdown (window background, padding, repeat-pin behavior). The anchor is
-/// the trigger's window-space bounds captured during paint; the menu itself
-/// renders at the window root so it is not clipped by the card or the
+/// Popup menu for settings presented as a dropdown (repeat-pin behavior). The
+/// anchor is the trigger's window-space bounds captured during paint; the menu
+/// itself renders at the window root so it is not clipped by the card or the
 /// scrolling page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SelectKind {
-    Background,
-    Padding,
     RepeatPin,
 }
 
@@ -374,6 +371,9 @@ struct Theme {
     border: Rgba,
     accent: Rgba,
     accent_text: Rgba,
+    /// Subtle accent wash behind the selected dropdown row, matching the
+    /// native component list highlight.
+    selected_accent: Rgba,
     hover: Rgba,
     selected: Rgba,
     control: Rgba,
@@ -424,6 +424,7 @@ impl Theme {
             border: palette.border,
             accent: rgb(accent_hex),
             accent_text: accent_text_color(accent_hex),
+            selected_accent: rgba(((accent_hex & 0x00FF_FFFF) << 8) | 0x1A),
             hover: palette.hover,
             selected: palette.selected,
             control: palette.control,
@@ -432,7 +433,7 @@ impl Theme {
             knob: rgb(0xFFFFFF),
             popover: palette.popover,
             #[cfg(target_os = "windows")]
-            close_hover: rgb(0xC42B1C),
+            close_hover: rgb(0xEF4444),
             hairline: 1.0 / scale_factor.max(1.0),
         }
     }
@@ -887,7 +888,6 @@ impl SettingsView {
             .child(
                 div()
                     .text_size(px(13.0))
-                    .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text)
                     .child(t(self.settings.language, "settings.title")),
             )
@@ -965,7 +965,6 @@ impl SettingsView {
             .child(
                 div()
                     .text_size(px(13.0))
-                    .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text)
                     .child(t(self.settings.language, "settings.title")),
             );
@@ -1343,36 +1342,6 @@ impl SettingsView {
 
     fn capture_settings(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
-        let mut window_rows = vec![self.toggle_row(
-            theme,
-            cx,
-            ToggleRow {
-                id: "settings-window-composition",
-                icon: icons::WINDOW,
-                title_key: "settings.window_composition",
-                description_key: "settings.window_composition_desc",
-                value: self.settings.window_composition,
-                set: |settings, value| settings.window_composition = value,
-                refresh_pin: false,
-            },
-        )];
-        if self.settings.window_composition {
-            window_rows.push(self.window_background_row(theme, cx));
-            window_rows.push(self.window_padding_row(theme, cx));
-            window_rows.push(self.toggle_row(
-                theme,
-                cx,
-                ToggleRow {
-                    id: "settings-window-shadow",
-                    icon: icons::SHADOW,
-                    title_key: "settings.window_shadow",
-                    description_key: "settings.window_shadow_desc",
-                    value: self.settings.window_shadow,
-                    set: |settings, value| settings.window_shadow = value,
-                    refresh_pin: false,
-                },
-            ));
-        }
 
         div()
             .flex()
@@ -1435,12 +1404,6 @@ impl SettingsView {
                         },
                     )],
                 ),
-            ))
-            .child(group(
-                theme,
-                t(language, "settings.group.window"),
-                t(language, "settings.group.window_desc"),
-                card(theme, window_rows),
             ))
             .child(group(
                 theme,
@@ -1514,27 +1477,6 @@ impl SettingsView {
         )
     }
 
-    fn window_background_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
-        let language = self.settings.language;
-        let current = t(
-            language,
-            background_label_key(self.settings.window_background),
-        );
-        row_shell()
-            .child(row_label_with_icon(
-                theme,
-                icons::IMAGE,
-                t(language, "settings.window_background"),
-                t(language, "settings.window_background_desc"),
-            ))
-            .child(self.select_trigger(
-                theme,
-                current,
-                "settings-window-background",
-                SelectKind::Background,
-                cx,
-            ))
-    }
     fn repeat_pin_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
         let current = t(language, repeat_pin_key(self.settings.repeat_pin));
@@ -1554,47 +1496,10 @@ impl SettingsView {
             ))
     }
 
-    fn window_padding_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
-        let language = self.settings.language;
-        let current = t(language, padding_key(self.settings.window_padding));
-        row_shell()
-            .child(row_label_with_icon(
-                theme,
-                icons::PADDING,
-                t(language, "settings.window_padding"),
-                t(language, "settings.window_padding_desc"),
-            ))
-            .child(self.select_trigger(
-                theme,
-                current,
-                "settings-window-padding",
-                SelectKind::Padding,
-                cx,
-            ))
-    }
-
     fn select_entries(&self, kind: SelectKind) -> Vec<(String, u32, bool)> {
         let language = self.settings.language;
         let mut entries: Vec<(String, u32, bool)> = Vec::new();
         match kind {
-            SelectKind::Background => {
-                for (index, background) in WindowBackground::ALL.into_iter().enumerate() {
-                    entries.push((
-                        t(language, background_label_key(background)).to_owned(),
-                        index as u32,
-                        self.settings.window_background == background,
-                    ));
-                }
-            }
-            SelectKind::Padding => {
-                for padding in [0u32, 24, 48, 96] {
-                    entries.push((
-                        t(language, padding_key(padding)).to_owned(),
-                        padding,
-                        self.settings.window_padding == padding,
-                    ));
-                }
-            }
             SelectKind::RepeatPin => {
                 for (index, behavior) in RepeatPinBehavior::ALL.into_iter().enumerate() {
                     entries.push((
@@ -1610,15 +1515,6 @@ impl SettingsView {
 
     fn apply_select(&mut self, kind: SelectKind, value: u32, cx: &mut Context<Self>) {
         match kind {
-            SelectKind::Background => {
-                let background = WindowBackground::ALL[value as usize];
-                self.settings.window_background = background;
-                settings_state::update(|settings| settings.window_background = background);
-            }
-            SelectKind::Padding => {
-                self.settings.window_padding = value;
-                settings_state::update(|settings| settings.window_padding = value);
-            }
             SelectKind::RepeatPin => {
                 let behavior = RepeatPinBehavior::ALL[value as usize];
                 self.settings.repeat_pin = behavior;
@@ -1766,8 +1662,8 @@ impl SettingsView {
             .gap(px(1.0))
             .occlude();
         for (index, (label, value, selected)) in entries.into_iter().enumerate() {
-            let accent = theme.accent;
-            let accent_text = theme.accent_text;
+            let selected_bg = theme.selected_accent;
+            let check = theme.muted;
             let text = theme.text;
             let hover = theme.hover;
             popup = popup.child(
@@ -1781,7 +1677,7 @@ impl SettingsView {
                     .items_center()
                     .gap(px(6.0))
                     .text_size(px(layout::CONTROL_TEXT))
-                    .when(selected, |item| item.bg(accent).text_color(accent_text))
+                    .when(selected, |item| item.bg(selected_bg).text_color(text))
                     .when(!selected, |item| {
                         item.text_color(text).hover(move |style| style.bg(hover))
                     })
@@ -1791,7 +1687,7 @@ impl SettingsView {
                     }))
                     .child(div().flex_1().min_w(px(0.0)).child(label))
                     .child(div().w(px(12.0)).flex_shrink_0().when(selected, |slot| {
-                        slot.child(icons::icon(icons::CHECK, 12.0, accent_text))
+                        slot.child(icons::icon(icons::CHECK, 14.0, check))
                     })),
             );
         }
@@ -2694,7 +2590,7 @@ fn window_control_button(
                 .hover(move |style| style.bg(theme.close_hover))
         })
         .when(!close, |button| {
-            button.hover(move |style| style.bg(theme.control_hover))
+            button.hover(move |style| style.bg(theme.selected))
         })
         .child(
             svg()
@@ -2929,24 +2825,6 @@ fn repeat_pin_key(behavior: RepeatPinBehavior) -> &'static str {
     match behavior {
         RepeatPinBehavior::RestoreHistory => "settings.repeat_pin_history",
         RepeatPinBehavior::FlashCurrent => "settings.repeat_pin_flash",
-    }
-}
-
-fn background_label_key(background: WindowBackground) -> &'static str {
-    match background {
-        WindowBackground::Transparent => "window_background.transparent",
-        WindowBackground::System => "window_background.system",
-        WindowBackground::Light => "window_background.light",
-        WindowBackground::Dark => "window_background.dark",
-    }
-}
-
-fn padding_key(padding: u32) -> &'static str {
-    match padding {
-        0 => "padding.0",
-        24 => "padding.24",
-        48 => "padding.48",
-        _ => "padding.96",
     }
 }
 

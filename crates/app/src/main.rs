@@ -23,7 +23,7 @@ mod settings_state;
 mod storage;
 mod tray;
 mod ui;
-mod window_style;
+mod window_frame;
 mod windows;
 
 use logging::{log_error, log_info, log_warn};

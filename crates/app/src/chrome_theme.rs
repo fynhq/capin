@@ -24,6 +24,7 @@ const FALLBACK_ACCENT_DARK: u32 = 0x4CC2FF;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ChromeTheme {
+    pub dark: bool,
     pub surface: Rgba,
     pub surface_strong: Rgba,
     pub border: Rgba,
@@ -58,6 +59,7 @@ impl ChromeTheme {
 
     pub fn for_appearance(dark: bool, accent_hex: Option<u32>) -> Self {
         let mut theme = Self::palette(dark);
+        theme.dark = dark;
         let accent_hex = accent_hex.unwrap_or(if dark {
             FALLBACK_ACCENT_DARK
         } else {
@@ -85,6 +87,7 @@ impl ChromeTheme {
     fn palette(dark: bool) -> Self {
         if dark {
             Self {
+                dark: true,
                 surface: rgba(0x2B2B2BF2),
                 surface_strong: rgba(0x2B2B2BF7),
                 border: rgba(0xFFFFFF1A),
@@ -109,6 +112,7 @@ impl ChromeTheme {
             }
         } else {
             Self {
+                dark: false,
                 surface: rgba(0xF9F9F9F2),
                 surface_strong: rgba(0xF9F9F9F7),
                 border: rgba(0x00000014),
@@ -138,6 +142,7 @@ impl ChromeTheme {
     fn palette(dark: bool) -> Self {
         if dark {
             Self {
+                dark: true,
                 surface: rgba(0x2C2C2EE6),
                 surface_strong: rgba(0x2C2C2EF2),
                 border: rgba(0xFFFFFF1F),
@@ -162,6 +167,7 @@ impl ChromeTheme {
             }
         } else {
             Self {
+                dark: false,
                 surface: rgba(0xFFFFFFE6),
                 surface_strong: rgba(0xFFFFFFF2),
                 border: rgba(0x00000014),
@@ -191,6 +197,7 @@ impl ChromeTheme {
     fn palette(dark: bool) -> Self {
         if dark {
             Self {
+                dark: true,
                 surface: rgba(0x2C2C2EE6),
                 surface_strong: rgba(0x2C2C2EF2),
                 border: rgba(0xFFFFFF1F),
@@ -215,6 +222,7 @@ impl ChromeTheme {
             }
         } else {
             Self {
+                dark: false,
                 surface: rgba(0xFFFFFFE6),
                 surface_strong: rgba(0xFFFFFFF2),
                 border: rgba(0x00000014),

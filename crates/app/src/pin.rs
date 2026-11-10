@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use core_annotate::AnnotationDocument;
 use core_types::{PhysicalRect, PhysicalSize, RgbaFrame};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -289,6 +290,15 @@ enum PinKind {
     Text(String),
 }
 
+/// Vector annotations kept alongside a pinned image so reopening the pin
+/// editor does not force the user to edit an already-rasterized image.
+#[derive(Clone)]
+pub(crate) struct PinEditState {
+    pub base: Arc<RgbaFrame>,
+    pub document: AnnotationDocument,
+    pub effects: crate::effects::RegionEffects,
+}
+
 struct PinState {
     kind: PinKind,
     entity: Entity<PinView>,
@@ -301,6 +311,9 @@ struct PinState {
     opacity: f32,
     zoom: f32,
     click_through: bool,
+    /// Present after the pin has been edited in this session. Rotating or
+    /// replacing the image from another source clears it.
+    edit_state: Option<PinEditState>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -402,13 +415,13 @@ fn flash_existing_pin(hash: u64, cx: &mut App) -> bool {
     true
 }
 
-pub fn open_frame_with_hash(frame: RgbaFrame, hash: u64, cx: &mut App) {
+pub fn open_frame_with_hash(frame: RgbaFrame, hash: u64, cx: &mut App) -> Option<u64> {
     LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
     let content = PinContent::from_frame_with_hash(frame, hash);
     let zoom = content.preferred_zoom();
     let (width, height) = content.size(zoom);
     let bounds = default_bounds(cx, width, height);
-    let _ = open_pin_content_at(content, bounds, zoom, true, None, cx);
+    open_pin_content_at(content, bounds, zoom, true, None, cx)
 }
 
 /// Pins a capture at a screen rectangle using a hash already computed by the
@@ -567,7 +580,6 @@ fn open_pin_inner(
             )
         });
         view.update(cx, |view, cx| {
-            view.observe_activation(window, cx);
             view.watch_close(window, cx);
         });
         view
@@ -591,6 +603,7 @@ fn open_pin_inner(
                 opacity,
                 zoom,
                 click_through,
+                edit_state: None,
             };
             PINS.with(|pins| {
                 pins.borrow_mut().insert(id, state);
@@ -697,7 +710,34 @@ pub fn restore(cx: &mut App) {
     save_manifest();
 }
 
-pub fn replace_image(id: u64, frame: RgbaFrame, cx: &mut App) -> bool {
+/// Attaches the vector document to a pin that was just created from the
+/// editor, without rewriting or restarting OCR for its flattened image.
+pub(crate) fn set_edit_state(id: u64, edit_state: PinEditState) {
+    PINS.with(|pins| {
+        if let Some(state) = pins.borrow_mut().get_mut(&id) {
+            state.edit_state = Some(edit_state);
+        }
+    });
+}
+
+/// Updates the pin image and remembers the vector annotation document so the
+/// next edit can select and change existing objects instead of starting from
+/// a flattened bitmap.
+pub(crate) fn replace_image_with_edit_state(
+    id: u64,
+    frame: RgbaFrame,
+    edit_state: PinEditState,
+    cx: &mut App,
+) -> bool {
+    replace_image_inner(id, frame, Some(edit_state), cx)
+}
+
+fn replace_image_inner(
+    id: u64,
+    frame: RgbaFrame,
+    edit_state: Option<PinEditState>,
+    cx: &mut App,
+) -> bool {
     let hash = crate::capture_history::hash_frame(&frame);
     let state = PINS.with(|pins| {
         let pins = pins.borrow();
@@ -746,6 +786,7 @@ pub fn replace_image(id: u64, frame: RgbaFrame, cx: &mut App) -> bool {
                 origin,
                 size: size(px(width), px(height)),
             };
+            state.edit_state = edit_state;
         }
     });
     save_manifest();
@@ -1014,8 +1055,6 @@ struct PinTheme {
     selection: Rgba,
     shadow_near: Hsla,
     shadow_far: Hsla,
-    accent_near: Hsla,
-    accent_far: Hsla,
 }
 
 impl PinTheme {
@@ -1031,8 +1070,6 @@ impl PinTheme {
         });
         let accent = rgb(accent_hex);
         let selection = rgba(((accent_hex & 0x00FF_FFFF) << 8) | 0x66);
-        let accent_near = Hsla::from(accent).opacity(0.58);
-        let accent_far = Hsla::from(accent).opacity(0.30);
         if dark {
             Self {
                 card: rgba(0x1E1E1EF2),
@@ -1047,8 +1084,6 @@ impl PinTheme {
                 // keeps a deeper ink than the light theme.
                 shadow_near: Hsla::from(rgba(0x00000073)),
                 shadow_far: Hsla::from(rgba(0x00000045)),
-                accent_near,
-                accent_far,
             }
         } else {
             Self {
@@ -1062,27 +1097,19 @@ impl PinTheme {
                 selection,
                 shadow_near: Hsla::from(rgba(0x00000026)),
                 shadow_far: Hsla::from(rgba(0x00000017)),
-                accent_near,
-                accent_far,
             }
         }
     }
 
-    /// The pinned image's drop shadow. A neutral pin follows the system
-    /// appearance; a locked (click-through) or focused pin switches the same
-    /// shadow to the system accent.
-    fn pin_shadow(&self, accent: bool) -> Vec<BoxShadow> {
-        if accent {
-            vec![
-                BoxShadow::new(px(0.0), px(2.0), self.accent_near).blur_radius(px(5.0)),
-                BoxShadow::new(px(0.0), px(0.0), self.accent_far).blur_radius(px(12.0)),
-            ]
-        } else {
-            vec![
-                BoxShadow::new(px(0.0), px(2.0), self.shadow_near).blur_radius(px(4.0)),
-                BoxShadow::new(px(0.0), px(5.0), self.shadow_far).blur_radius(px(10.0)),
-            ]
-        }
+    /// The pinned image's neutral window shadow. It stays appearance-aware in
+    /// both themes; focus and click-through no longer tint it with the system
+    /// accent, because the accent ring read as an extra blue border around the
+    /// captured pixels.
+    fn pin_shadow(&self) -> Vec<BoxShadow> {
+        vec![
+            BoxShadow::new(px(0.0), px(2.0), self.shadow_near).blur_radius(px(4.0)),
+            BoxShadow::new(px(0.0), px(5.0), self.shadow_far).blur_radius(px(10.0)),
+        ]
     }
 }
 
@@ -1114,8 +1141,6 @@ struct PinView {
     content_generation: u64,
     flash_alpha: f32,
     flash_generation: u64,
-    active: bool,
-    activation_subscription: Option<Subscription>,
     focus_handle: FocusHandle,
 }
 
@@ -1148,8 +1173,6 @@ impl PinView {
             content_generation: 1,
             flash_alpha: 0.0,
             flash_generation: 0,
-            active: false,
-            activation_subscription: None,
             focus_handle: cx.focus_handle(),
         };
         cx.on_release(|this, cx| {
@@ -1590,20 +1613,6 @@ impl PinView {
         }
     }
 
-    /// Keeps the pin shadow in sync with the window's active state: focused
-    /// pins use the accent shadow, the others the neutral system shadow.
-    fn observe_activation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.active = window.is_window_active();
-        self.activation_subscription =
-            Some(cx.observe_window_activation(window, |this, window, cx| {
-                let active = window.is_window_active();
-                if this.active != active {
-                    this.active = active;
-                    cx.notify();
-                }
-            }));
-    }
-
     /// Releases the pin texture before a native window-close request removes
     /// the renderer. App-driven close already calls `release_image` explicitly.
     fn watch_close(&self, window: &Window, cx: &mut Context<Self>) {
@@ -1615,6 +1624,14 @@ impl PinView {
     }
 
     fn replace_image(&mut self, frame: Arc<RgbaFrame>, hash: u64, cx: &mut Context<Self>) {
+        // Any replacement from outside the editor invalidates the vector
+        // document; `replace_image_with_edit_state` attaches a fresh one after
+        // this call.
+        PINS.with(|pins| {
+            if let Some(state) = pins.borrow_mut().get_mut(&self.id) {
+                state.edit_state = None;
+            }
+        });
         let previous = std::mem::replace(
             &mut self.content,
             PinContent::from_frame_shared(frame, hash),
@@ -1736,14 +1753,23 @@ impl PinView {
     }
 
     fn open_editor(&mut self, cx: &mut Context<Self>) {
-        let Some(frame) = self.frame_for_action() else {
+        let edit_state = PINS.with(|pins| {
+            pins.borrow()
+                .get(&self.id)
+                .and_then(|state| state.edit_state.clone())
+        });
+        let Some(frame) = edit_state
+            .as_ref()
+            .map(|state| state.base.clone())
+            .or_else(|| self.frame_for_action())
+        else {
             return;
         };
         let bounds = PINS.with(|pins| pins.borrow().get(&self.id).map(|state| state.bounds));
         let Some(bounds) = bounds else {
             return;
         };
-        if !crate::editor::open_pin_editor_overlay(self.id, frame, bounds, cx) {
+        if !crate::editor::open_pin_editor_overlay(self.id, frame, bounds, edit_state, cx) {
             let language = settings_state::get().language;
             self.show_notice(t(language, "pin.edit_failed").to_owned(), cx);
         }
@@ -1825,10 +1851,9 @@ impl Render for PinView {
                 .border_color(theme.accent)
                 .opacity(self.flash_alpha)
         });
-        // Click-through pins are locked in place and therefore cannot show a
-        // focus ring; both that state and an active pin use the system accent
-        // shadow. Everything else keeps the neutral, appearance-aware shadow.
-        let shadow = theme.pin_shadow(self.click_through || self.active);
+        // The pinned image keeps the same neutral, appearance-aware window
+        // shadow in every state; the accent tint made it read as a blue border.
+        let shadow = theme.pin_shadow();
         let content = div()
             .absolute()
             .left(px(SHADOW_MARGIN))
