@@ -321,6 +321,34 @@ pub fn place_on_monitor(
     }
 }
 
+/// Moves and resizes a window without forcing the platform to paint its old
+/// content into the new frame.
+///
+/// Interactive resize animations call this on every tick. macOS
+/// `setFrame:display:YES` flushes the previous backing store before GPUI has
+/// laid out the new size, which made a pin's frame jump ahead of the image.
+/// Leaving the redraw to the next render pass keeps both in one presentation.
+pub fn place_on_monitor_deferred(
+    window: &impl HasWindowHandle,
+    bounds: core_types::PhysicalRect,
+    scale: core_types::DpiScale,
+) -> Result<(), PlatformWindowError> {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = scale;
+        windows::place_on_monitor(window, bounds)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::place_on_monitor_deferred(window, bounds, scale)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = (window, bounds, scale);
+        Err(PlatformWindowError::UnsupportedPlatform)
+    }
+}
+
 /// Returns the platform monitor that currently contains the window, as the
 /// same raw identifier used by `MonitorInfo`.
 pub fn monitor_for_window(window: &impl HasWindowHandle) -> Option<u64> {

@@ -9,7 +9,7 @@ use core_types::{DpiScale, PhysicalRect, PhysicalSize, RgbaFrame};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use platform_window::{
-    WindowStyle, apply as apply_window_style, hide_native_border, place_on_monitor,
+    WindowStyle, apply as apply_window_style, hide_native_border, place_on_monitor_deferred,
     set_click_through, system_accent_hex,
 };
 use serde::{Deserialize, Serialize};
@@ -1648,7 +1648,7 @@ impl PinView {
             (width * scale).round().max(1.0) as u32,
             (height * scale).round().max(1.0) as u32,
         );
-        if place_on_monitor(&*window, physical, dpi).is_err() {
+        if place_on_monitor_deferred(&*window, physical, dpi).is_err() {
             window.resize(size(px(width), px(height)));
         }
         self.zoom = zoom;

@@ -45,6 +45,25 @@ pub(super) fn place_on_monitor(
     bounds: core_types::PhysicalRect,
     scale: core_types::DpiScale,
 ) -> Result<(), PlatformWindowError> {
+    place_on_monitor_impl(window, bounds, scale, true)
+}
+
+/// Same placement without `setFrame:display:YES`. The window server and the
+/// GPUI content layer then present the new frame and the new image together.
+pub(super) fn place_on_monitor_deferred(
+    window: &impl HasWindowHandle,
+    bounds: core_types::PhysicalRect,
+    scale: core_types::DpiScale,
+) -> Result<(), PlatformWindowError> {
+    place_on_monitor_impl(window, bounds, scale, false)
+}
+
+fn place_on_monitor_impl(
+    window: &impl HasWindowHandle,
+    bounds: core_types::PhysicalRect,
+    scale: core_types::DpiScale,
+    display_now: bool,
+) -> Result<(), PlatformWindowError> {
     let handle = window.window_handle()?;
     let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
         return Err(PlatformWindowError::NotAppKit);
@@ -65,7 +84,7 @@ pub(super) fn place_on_monitor(
         NSPoint::new(x, main_height - (top + height)),
         NSSize::new(width, height),
     );
-    window.setFrame_display(frame, true);
+    window.setFrame_display(frame, display_now);
     Ok(())
 }
 
