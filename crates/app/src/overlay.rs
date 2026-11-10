@@ -678,10 +678,9 @@ struct OverlayView {
     cursor_style: CursorStyle,
     element_targeting: bool,
     magnifier: Option<Magnifier>,
-    copy_serial: u64,
-    copied: bool,
     notice: Option<String>,
     notice_serial: u64,
+    notice_leaving: bool,
     element_cache: HashMap<WindowId, Vec<PhysicalRect>>,
     element_window: Option<WindowId>,
     element_pending: Option<WindowId>,
@@ -743,10 +742,9 @@ impl OverlayView {
             cursor_style: CursorStyle::Crosshair,
             element_targeting: true,
             magnifier: None,
-            copy_serial: 0,
-            copied: false,
             notice: None,
             notice_serial: 0,
+            notice_leaving: false,
             element_cache: HashMap::new(),
             element_window: None,
             element_pending: None,
@@ -1142,23 +1140,8 @@ impl OverlayView {
         };
         let text = self.color_text(red, green, blue);
         cx.write_to_clipboard(ClipboardItem::new_string(text));
-        self.copied = true;
-        self.copy_serial = self.copy_serial.wrapping_add(1);
-        let serial = self.copy_serial;
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(1200))
-                .await;
-            this.update(cx, |this, cx| {
-                if this.copy_serial == serial {
-                    this.copied = false;
-                    cx.notify();
-                }
-            })
-            .ok();
-        })
-        .detach();
-        cx.notify();
+        let language = settings_state::get().language;
+        self.set_notice(t(language, "overlay.color_copied").to_owned(), cx);
     }
 
     fn cycle_aspect(&mut self, cx: &mut Context<Self>) {
@@ -2059,15 +2042,33 @@ impl OverlayView {
 
     fn set_notice(&mut self, message: String, cx: &mut Context<Self>) {
         self.notice = Some(message);
+        self.notice_leaving = false;
         self.notice_serial = self.notice_serial.wrapping_add(1);
         let serial = self.notice_serial;
         cx.spawn(async move |this, cx| {
             cx.background_executor()
-                .timer(Duration::from_millis(1800))
+                .timer(Duration::from_millis(1600))
+                .await;
+            let alive = this
+                .update(cx, |this, cx| {
+                    if this.notice_serial != serial {
+                        return false;
+                    }
+                    this.notice_leaving = true;
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !alive {
+                return;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
                 .await;
             this.update(cx, |this, cx| {
                 if this.notice_serial == serial {
                     this.notice = None;
+                    this.notice_leaving = false;
                     cx.notify();
                 }
             })
@@ -2437,10 +2438,29 @@ impl OverlayView {
                 .as_ref()
                 .is_some_and(|edit| edit.field == field);
             let value = if let Some(edit) = selected.edit.as_ref().filter(|_| editing) {
-                format!("{}|", edit.buffer)
+                edit.buffer.clone()
             } else {
                 self.info_field_display(selected, field)
             };
+            let mut value_row = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(1.0))
+                .child(div().text_color(self.chrome.text).child(value));
+            if editing {
+                value_row = value_row.child(
+                    div()
+                        .w(px(1.0))
+                        .h(px(12.0))
+                        .bg(self.chrome.accent)
+                        .with_animation(
+                            SharedString::from(format!("overlay-info-caret-{label}")),
+                            crate::ui::caret_blink(),
+                            |caret, delta| caret.opacity(delta),
+                        ),
+                );
+            }
             bar = bar.child(
                 div()
                     .id(format!("overlay-info-{label}"))
@@ -2465,7 +2485,7 @@ impl OverlayView {
                         }),
                     )
                     .child(div().text_color(self.chrome.muted).child(label))
-                    .child(div().text_color(self.chrome.text).child(value)),
+                    .child(value_row),
             );
         }
 
@@ -2565,7 +2585,16 @@ impl OverlayView {
                 .child(icons::icon(icons::REFRESH, 14.0, self.chrome.icon)),
         );
 
-        Some(bar.into_any_element())
+        Some(
+            crate::ui::enter_slide_fade(
+                bar,
+                "overlay-info-enter",
+                f32::from(rect.origin.y),
+                4.0,
+                Duration::from_millis(90),
+            )
+            .into_any_element(),
+        )
     }
 
     fn effects_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -2677,6 +2706,18 @@ impl OverlayView {
                     }))
                     .child(t(language, "overlay.effects_shadow"))
             });
+        let offset = if top >= f32::from(info.origin.y) {
+            5.0
+        } else {
+            -5.0
+        };
+        let panel = crate::ui::enter_slide_fade(
+            panel,
+            "overlay-effects-enter",
+            top,
+            offset,
+            Duration::from_millis(120),
+        );
 
         Some(
             div()
@@ -2834,39 +2875,45 @@ impl OverlayView {
         );
 
         Some(
-            div()
-                .id("overlay-toolbar")
-                .absolute()
-                .left(rect.origin.x)
-                .top(rect.origin.y)
-                .w(rect.size.width)
-                .h(rect.size.height)
-                .occlude()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|_, _, _, cx| cx.stop_propagation()),
-                )
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .px(px(8.0))
-                .rounded(px(self.chrome.radius))
-                .bg(self.chrome.surface)
-                .border_1()
-                .border_color(self.chrome.border)
-                .cursor(CursorStyle::Arrow)
-                .shadow(self.chrome.shadow())
-                .child(tools)
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(1.0))
-                        .child(actions),
-                )
-                .into_any_element(),
+            crate::ui::enter_slide_fade(
+                div()
+                    .id("overlay-toolbar")
+                    .absolute()
+                    .left(rect.origin.x)
+                    .top(rect.origin.y)
+                    .w(rect.size.width)
+                    .h(rect.size.height)
+                    .occlude()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                    )
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .px(px(8.0))
+                    .rounded(px(self.chrome.radius))
+                    .bg(self.chrome.surface)
+                    .border_1()
+                    .border_color(self.chrome.border)
+                    .cursor(CursorStyle::Arrow)
+                    .shadow(self.chrome.shadow())
+                    .child(tools)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(1.0))
+                            .child(actions),
+                    ),
+                "overlay-toolbar-enter",
+                f32::from(rect.origin.y),
+                4.0,
+                Duration::from_millis(90),
+            )
+            .into_any_element(),
         )
     }
 
@@ -2943,6 +2990,13 @@ impl OverlayView {
                     ),
             );
         }
+        let panel = crate::ui::enter_slide_fade(
+            panel,
+            "overlay-hints-enter",
+            top,
+            4.0,
+            Duration::from_millis(120),
+        );
         Some(
             div()
                 .id("overlay-hints-layer")
@@ -3212,29 +3266,14 @@ impl OverlayView {
                             .child(t(language, "overlay.capture_hint")),
                     )
             });
-        let copied = self.copied.then(|| {
-            div()
-                .absolute()
-                .bottom(px(46.0))
-                .left(px(0.0))
-                .right(px(0.0))
-                .flex()
-                .justify_center()
-                .child(
-                    div()
-                        .px(px(12.0))
-                        .py(px(6.0))
-                        .rounded(px(6.0))
-                        .bg(self.chrome.surface_strong)
-                        .border_1()
-                        .border_color(self.chrome.border)
-                        .shadow(self.chrome.shadow())
-                        .text_size(px(11.0))
-                        .text_color(self.chrome.text)
-                        .child(t(language, "overlay.color_copied")),
-                )
-        });
+        let notice_serial = self.notice_serial;
+        let notice_leaving = self.notice_leaving;
         let notice = self.notice.clone().map(|message| {
+            let duration = if notice_leaving {
+                Duration::from_millis(150)
+            } else {
+                Duration::from_millis(120)
+            };
             div()
                 .absolute()
                 .bottom(px(46.0))
@@ -3254,6 +3293,17 @@ impl OverlayView {
                         .text_size(px(11.0))
                         .text_color(self.chrome.text)
                         .child(message),
+                )
+                .with_animation(
+                    SharedString::from(format!("overlay-notice-{notice_serial}-{notice_leaving}")),
+                    Animation::new(duration).with_easing(|delta| 1.0 - (1.0 - delta).powi(3)),
+                    move |toast, delta| {
+                        if notice_leaving {
+                            toast.opacity(1.0 - delta)
+                        } else {
+                            toast.opacity(delta).bottom(px(46.0 - (1.0 - delta) * 4.0))
+                        }
+                    },
                 )
         });
 
@@ -3676,7 +3726,6 @@ impl OverlayView {
             .children(mode_hint)
             .children(window_mode_hint)
             .children(capture_hint)
-            .children(copied)
             .children(notice)
             .children(effects_panel)
             .children(hints_panel)

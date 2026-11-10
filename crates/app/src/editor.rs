@@ -1,5 +1,6 @@
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Duration;
 
 use core_annotate::{
     Annotation, AnnotationDocument, AnnotationStyle, Shape, TextAlignment, rasterize,
@@ -334,6 +335,8 @@ struct TextEdit {
     anchor: usize,
     marked: Option<Range<usize>>,
     style: AnnotationStyle,
+    /// Whether the current pointer gesture is extending a text selection.
+    selecting: bool,
 }
 
 impl TextEdit {
@@ -349,6 +352,7 @@ impl TextEdit {
             anchor: 0,
             marked: None,
             style,
+            selecting: false,
         }
     }
 
@@ -367,6 +371,7 @@ impl TextEdit {
             content,
             marked: None,
             style,
+            selecting: false,
         }
     }
 
@@ -403,37 +408,6 @@ impl TextEdit {
 
     fn next_boundary(&self) -> usize {
         next_char_boundary(&self.content, self.cursor_utf8())
-    }
-
-    fn index_at_local(&self, local_x: f32, local_y: f32, width_logical: f32) -> usize {
-        if self.content.is_empty() {
-            return 0;
-        }
-        let scale = (width_logical / self.bounds.size.width.max(1) as f32).max(0.01);
-        let x = local_x / scale;
-        let y = local_y / scale;
-        let font_size = self.style.font_size.max(1.0);
-        let line_height = font_size * 1.3;
-        let target_line = (y / line_height).floor().max(0.0) as usize;
-        let width = self.bounds.size.width as f32;
-
-        let mut line = 0usize;
-        let mut line_width = 0.0f32;
-        for (index, ch) in self.content.char_indices() {
-            let advance = estimated_char_width(ch, font_size);
-            if line_width + advance > width && line_width > 0.0 {
-                if line == target_line {
-                    return index;
-                }
-                line += 1;
-                line_width = 0.0;
-            }
-            line_width += advance;
-            if line == target_line && x <= line_width - advance / 2.0 {
-                return index;
-            }
-        }
-        self.content.len()
     }
 
     fn offset_from_utf16(&self, offset: usize) -> usize {
@@ -522,13 +496,183 @@ fn next_char_boundary(content: &str, cursor: usize) -> usize {
         .unwrap_or(cursor)
 }
 
-fn estimated_char_width(ch: char, font_size: f32) -> f32 {
-    if ch.is_whitespace() {
-        font_size * 0.35
-    } else if ch.is_ascii() {
-        font_size * 0.6
+/// One visual line produced by GPUI's text shaper. The editor and exporter use
+/// different text engines, so hit-testing and the caret must follow the same
+/// layout that the preview actually paints.
+#[derive(Clone, Copy)]
+struct TextLineBox {
+    start: usize,
+    end: usize,
+    x: f32,
+    width: f32,
+    y: f32,
+}
+
+fn layout_annotation_text(
+    window: &Window,
+    text: &str,
+    font_size: f32,
+    width: f32,
+) -> Option<WrappedLine> {
+    if text.is_empty() || width <= 0.0 {
+        return None;
+    }
+    let run = TextRun {
+        len: text.len(),
+        font: Font::default(),
+        color: Hsla::from(rgb(0x000000FF)),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_text(
+            SharedString::from(text.to_owned()),
+            px(font_size.max(1.0)),
+            &[run],
+            Some(px(width)),
+            None,
+        )
+        .ok()?
+        .into_iter()
+        .next()
+}
+
+fn text_line_boxes(layout: &WrappedLine, line_height: f32) -> Vec<TextLineBox> {
+    let mut boxes = Vec::new();
+    let mut start = 0usize;
+    let mut start_x = 0.0f32;
+    for boundary in layout.wrap_boundaries() {
+        let run = &layout.runs()[boundary.run_ix];
+        let glyph = &run.glyphs[boundary.glyph_ix];
+        let end = glyph.index;
+        let end_x = f32::from(glyph.position.x);
+        boxes.push(TextLineBox {
+            start,
+            end,
+            x: start_x,
+            width: (end_x - start_x).max(0.0),
+            y: boxes.len() as f32 * line_height,
+        });
+        start = end;
+        start_x = end_x;
+    }
+    let end_x = f32::from(layout.unwrapped_layout.width);
+    boxes.push(TextLineBox {
+        start,
+        end: layout.len(),
+        x: start_x,
+        width: (end_x - start_x).max(0.0),
+        y: boxes.len() as f32 * line_height,
+    });
+    boxes
+}
+
+fn text_alignment_offset(alignment: TextAlignment, container_width: f32, line_width: f32) -> f32 {
+    let remaining = (container_width - line_width).max(0.0);
+    match alignment {
+        TextAlignment::Left => 0.0,
+        TextAlignment::Center => remaining / 2.0,
+        TextAlignment::Right => remaining,
+    }
+}
+
+fn text_caret_position(
+    layout: Option<&WrappedLine>,
+    boxes: &[TextLineBox],
+    edit: &TextEdit,
+    container_width: f32,
+) -> Point<Pixels> {
+    let cursor = edit.cursor_utf8();
+    let Some(line) = boxes
+        .iter()
+        .find(|line| cursor <= line.end)
+        .or_else(|| boxes.last())
+    else {
+        return point(
+            px(text_alignment_offset(
+                edit.style.text_alignment,
+                container_width,
+                0.0,
+            )),
+            px(0.0),
+        );
+    };
+    let x = layout.map_or(0.0, |layout| {
+        (f32::from(layout.unwrapped_layout.x_for_index(cursor)) - line.x).clamp(0.0, line.width)
+    });
+    let offset = text_alignment_offset(edit.style.text_alignment, container_width, line.width);
+    point(px(x + offset), px(line.y))
+}
+
+fn text_selection_boxes(
+    layout: &WrappedLine,
+    boxes: &[TextLineBox],
+    selection: &Range<usize>,
+    alignment: TextAlignment,
+    line_height: f32,
+    container_width: f32,
+) -> Vec<Bounds<Pixels>> {
+    let mut rects = Vec::new();
+    for line in boxes {
+        let start = selection.start.max(line.start);
+        let end = selection.end.min(line.end);
+        if start >= end {
+            continue;
+        }
+        let x1 =
+            (f32::from(layout.unwrapped_layout.x_for_index(start)) - line.x).clamp(0.0, line.width);
+        let x2 =
+            (f32::from(layout.unwrapped_layout.x_for_index(end)) - line.x).clamp(0.0, line.width);
+        if x2 <= x1 {
+            continue;
+        }
+        let offset = text_alignment_offset(alignment, container_width, line.width);
+        rects.push(Bounds {
+            origin: point(px(x1 + offset), px(line.y)),
+            size: size(px(x2 - x1), px(line_height)),
+        });
+    }
+    rects
+}
+
+fn word_range_at(content: &str, index: usize) -> Range<usize> {
+    let mut index = index.min(content.len());
+    if !content.is_char_boundary(index) {
+        index = previous_char_boundary(content, index);
+    }
+    let is_word = |ch: char| ch.is_alphanumeric() || ch == '_';
+    let mut start = index;
+    while start > 0 {
+        let previous = previous_char_boundary(content, start);
+        let ch = content[previous..start].chars().next().unwrap_or_default();
+        if is_word(ch) {
+            start = previous;
+        } else {
+            break;
+        }
+    }
+    let mut end = index;
+    while end < content.len() {
+        let next = next_char_boundary(content, end);
+        let ch = content[end..next].chars().next().unwrap_or_default();
+        if is_word(ch) {
+            end = next;
+        } else {
+            break;
+        }
+    }
+    if start == end {
+        if index < content.len() {
+            index..next_char_boundary(content, index)
+        } else if index > 0 {
+            previous_char_boundary(content, index)..index
+        } else {
+            0..0
+        }
     } else {
-        font_size
+        start..end
     }
 }
 
@@ -593,6 +737,7 @@ pub(crate) struct EditorView {
     toolbar_hidden: bool,
     hints_visible: bool,
     status: Option<String>,
+    status_serial: u64,
     pub(crate) focus_handle: FocusHandle,
     inline: Option<InlineHost>,
 }
@@ -704,6 +849,7 @@ impl EditorView {
             toolbar_hidden: false,
             hints_visible: false,
             status: None,
+            status_serial: 0,
             focus_handle: cx.focus_handle(),
             inline: None,
         }
@@ -1063,7 +1209,6 @@ impl EditorView {
             .filter(|_| preview_rgb.len() == 6)
             .map(|rgb| (rgb & 0x00FF_FFFF) << 8 | 0xFF)
             .unwrap_or(palette_color);
-        let cursor = if self.custom_color_fresh { "" } else { "|" };
         let mut hue_row = div().flex().flex_row().items_center().gap(px(3.0));
         for index in 0..12u32 {
             let hue_color = crate::ui::hue_rgb(index as f32 * 30.0);
@@ -1141,11 +1286,29 @@ impl EditorView {
                             .text_size(px(11.0))
                             .text_color(self.chrome.text)
                             .cursor_text()
-                            .child(format!(
-                                "#{}{}",
-                                self.custom_color_buffer.to_ascii_uppercase(),
-                                cursor
-                            )),
+                            .child({
+                                let mut row =
+                                    div().flex().flex_row().items_center().gap(px(1.0)).child(
+                                        format!(
+                                            "#{}",
+                                            self.custom_color_buffer.to_ascii_uppercase()
+                                        ),
+                                    );
+                                if !self.custom_color_fresh {
+                                    row = row.child(
+                                        div()
+                                            .w(px(1.0))
+                                            .h(px(11.0))
+                                            .bg(self.chrome.accent)
+                                            .with_animation(
+                                                "editor-custom-color-caret",
+                                                crate::ui::caret_blink(),
+                                                |caret, delta| caret.opacity(delta),
+                                            ),
+                                    );
+                                }
+                                row
+                            }),
                     ),
             )
             .child(hue_row)
@@ -1155,6 +1318,13 @@ impl EditorView {
                     .text_color(self.chrome.muted)
                     .child(t(language, "editor.custom_color_hint")),
             );
+        let panel = crate::ui::enter_slide_fade(
+            panel,
+            "editor-custom-color-enter",
+            f32::from(rect.origin.y),
+            4.0,
+            Duration::from_millis(120),
+        );
 
         Some(
             div()
@@ -1489,8 +1659,10 @@ impl EditorView {
                 capture.target = CaptureTarget::Region(capture.region);
             }
         }
-        self.status = Some(t(settings_state::get().language, "editor.cropped").to_owned());
-        cx.notify();
+        self.show_status(
+            t(settings_state::get().language, "editor.cropped").to_owned(),
+            cx,
+        );
     }
 
     fn restore_region_image_rect(&mut self, scale: f32, cx: &mut Context<Self>) {
@@ -1552,29 +1724,26 @@ impl EditorView {
         self.commit_text(cx);
         let language = settings_state::get().language;
         let Ok(output) = rasterize(&self.document, &self.frame) else {
-            self.status = Some(t(language, "editor.export_failed").to_owned());
-            cx.notify();
+            self.show_status(t(language, "editor.export_failed").to_owned(), cx);
             return;
         };
         self.push_canvas_snapshot();
         let rotated = output.rotated_cw();
         self.replace_canvas(rotated, cx);
-        self.status = Some(t(language, "editor.rotated").to_owned());
-        cx.notify();
+        self.show_status(t(language, "editor.rotated").to_owned(), cx);
     }
 
     fn flip_canvas(&mut self, horizontal: bool, cx: &mut Context<Self>) {
         self.commit_text(cx);
         let language = settings_state::get().language;
         let Ok(output) = rasterize(&self.document, &self.frame) else {
-            self.status = Some(t(language, "editor.export_failed").to_owned());
-            cx.notify();
+            self.show_status(t(language, "editor.export_failed").to_owned(), cx);
             return;
         };
         self.push_canvas_snapshot();
         let flipped = output.flipped(horizontal);
         self.replace_canvas(flipped, cx);
-        self.status = Some(
+        self.show_status(
             t(
                 language,
                 if horizontal {
@@ -1584,8 +1753,8 @@ impl EditorView {
                 },
             )
             .to_owned(),
+            cx,
         );
-        cx.notify();
     }
 
     fn toggle_crop(&mut self, cx: &mut Context<Self>) {
@@ -1645,8 +1814,10 @@ impl EditorView {
         self.crop_draft = None;
         self.text_edit = None;
         self.reset_view(cx);
-        self.status = Some(t(settings_state::get().language, "editor.cropped").to_owned());
-        cx.notify();
+        self.show_status(
+            t(settings_state::get().language, "editor.cropped").to_owned(),
+            cx,
+        );
     }
 
     fn cancel_crop(&mut self, cx: &mut Context<Self>) {
@@ -2259,6 +2430,122 @@ impl EditorView {
         }
     }
 
+    fn show_status(&mut self, message: String, cx: &mut Context<Self>) {
+        self.status = Some(message);
+        self.status_serial = self.status_serial.wrapping_add(1);
+        let serial = self.status_serial;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(2600))
+                .await;
+            this.update(cx, |this, cx| {
+                if this.status_serial == serial {
+                    this.status = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn text_index_at(&self, window: &Window, position: Point<Pixels>) -> Option<usize> {
+        let edit = self.text_edit.as_ref()?;
+        let bounds = self.text_edit_screen?;
+        let scale = self.image_scale(window);
+        let font_size = (edit.style.font_size * scale).max(8.0);
+        let width = (edit.bounds.size.width as f32 * scale).max(24.0);
+        let Some(layout) = layout_annotation_text(window, &edit.content, font_size, width) else {
+            return Some(0);
+        };
+        let line_height = font_size * 1.3;
+        let boxes = text_line_boxes(&layout, line_height);
+        let local_x = f32::from(position.x - bounds.origin.x).max(0.0);
+        let local_y = f32::from(position.y - bounds.origin.y).max(0.0);
+        let line = boxes
+            .iter()
+            .find(|line| local_y < line.y + line_height)
+            .or_else(|| boxes.last());
+        let offset = line.map_or(0.0, |line| {
+            text_alignment_offset(edit.style.text_alignment, width, line.width)
+        });
+        let point = point(px((local_x - offset).max(0.0)), px(local_y));
+        Some(
+            layout
+                .index_for_position(point, px(line_height))
+                .unwrap_or_else(|index| index),
+        )
+    }
+
+    fn move_text_vertical(
+        &mut self,
+        up: bool,
+        extend: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = (|| {
+            let edit = self.text_edit.as_ref()?;
+            let scale = self.image_scale(window);
+            let font_size = (edit.style.font_size * scale).max(8.0);
+            let width = (edit.bounds.size.width as f32 * scale).max(24.0);
+            let line_height = font_size * 1.3;
+            let layout = layout_annotation_text(window, &edit.content, font_size, width)?;
+            let boxes = text_line_boxes(&layout, line_height);
+            let caret = text_caret_position(Some(&layout), &boxes, edit, width);
+            let target_y =
+                (f32::from(caret.y) + if up { -line_height } else { line_height }).max(0.0);
+            let line = boxes
+                .iter()
+                .find(|line| target_y < line.y + line_height)
+                .or_else(|| boxes.last())?;
+            let offset = text_alignment_offset(edit.style.text_alignment, width, line.width);
+            let x = (f32::from(caret.x) - offset).max(0.0);
+            let y = if target_y >= line.y + line_height {
+                line.y
+            } else {
+                target_y
+            };
+            Some(
+                layout
+                    .index_for_position(point(px(x), px(y)), px(line_height))
+                    .unwrap_or_else(|index| index),
+            )
+        })() else {
+            return;
+        };
+        self.move_text_cursor(index, extend, cx);
+    }
+
+    fn text_line_edge(&self, start: bool, window: &Window) -> Option<usize> {
+        let edit = self.text_edit.as_ref()?;
+        let scale = self.image_scale(window);
+        let font_size = (edit.style.font_size * scale).max(8.0);
+        let width = (edit.bounds.size.width as f32 * scale).max(24.0);
+        let line_height = font_size * 1.3;
+        let layout = layout_annotation_text(window, &edit.content, font_size, width)?;
+        let boxes = text_line_boxes(&layout, line_height);
+        let caret = text_caret_position(Some(&layout), &boxes, edit, width);
+        let y = f32::from(caret.y);
+        let line = boxes
+            .iter()
+            .find(|line| y < line.y + line_height)
+            .or_else(|| boxes.last())?;
+        Some(if start { line.start } else { line.end })
+    }
+
+    fn select_text_word(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(edit) = &mut self.text_edit else {
+            return;
+        };
+        let range = word_range_at(&edit.content, index);
+        edit.anchor = range.start;
+        edit.cursor = range.end;
+        edit.selecting = false;
+        cx.notify();
+    }
+
     fn select_all_text(&mut self, cx: &mut Context<Self>) {
         if let Some(edit) = &mut self.text_edit {
             edit.anchor = 0;
@@ -2277,8 +2564,10 @@ impl EditorView {
         }
         let text = edit.content[selection].to_owned();
         cx.write_to_clipboard(ClipboardItem::new_string(text));
-        self.status = Some(t(settings_state::get().language, "editor.copied").to_owned());
-        cx.notify();
+        self.show_status(
+            t(settings_state::get().language, "editor.copied").to_owned(),
+            cx,
+        );
     }
 
     fn toolbar(
@@ -3265,30 +3554,42 @@ impl EditorView {
         let bar_rect = self.toolbar_rect(window);
         let options_rect = self.options_rect(window, bar_rect);
         let options_panel = (!config_children.is_empty() && !self.toolbar_hidden).then(|| {
-            div()
-                .id("editor-options-panel")
-                .absolute()
-                .left(options_rect.origin.x)
-                .top(options_rect.origin.y)
-                .w(options_rect.size.width)
-                .h(options_rect.size.height)
-                .px(px(10.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .rounded(px(chrome.radius))
-                .bg(chrome.surface_strong)
-                .border_1()
-                .border_color(border)
-                .shadow(chrome.shadow())
-                .occlude()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|_, _, _, cx| cx.stop_propagation()),
-                )
-                .children(config_children)
-                .into_any_element()
+            let top = f32::from(options_rect.origin.y);
+            let offset = if top >= f32::from(bar_rect.origin.y) + f32::from(bar_rect.size.height) {
+                4.0
+            } else {
+                -4.0
+            };
+            crate::ui::enter_slide_fade(
+                div()
+                    .id("editor-options-panel")
+                    .absolute()
+                    .left(options_rect.origin.x)
+                    .top(options_rect.origin.y)
+                    .w(options_rect.size.width)
+                    .h(options_rect.size.height)
+                    .px(px(10.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .rounded(px(chrome.radius))
+                    .bg(chrome.surface_strong)
+                    .border_1()
+                    .border_color(border)
+                    .shadow(chrome.shadow())
+                    .occlude()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                    )
+                    .children(config_children),
+                "editor-options-enter",
+                top,
+                offset,
+                Duration::from_millis(120),
+            )
+            .into_any_element()
         });
 
         let more_panel = (self.more_open && !self.toolbar_hidden && !capture_page).then(|| {
@@ -3347,11 +3648,22 @@ impl EditorView {
                         |this, cx| this.flip_canvas(false, cx),
                     ));
             }
-            panel
+            let top = f32::from(more_rect.origin.y);
+            let offset = if top >= f32::from(bar_rect.origin.y) + f32::from(bar_rect.size.height) {
+                4.0
+            } else {
+                -4.0
+            };
+            crate::ui::enter_slide_fade(
+                panel.h(more_rect.size.height),
+                "editor-more-enter",
+                top,
+                offset,
+                Duration::from_millis(120),
+            )
         });
 
         let more_panel = more_panel.map(|panel| {
-            let more_rect = self.more_rect(window, bar_rect);
             div()
                 .id("editor-more-layer")
                 .absolute()
@@ -3365,7 +3677,7 @@ impl EditorView {
                         cx.notify();
                     }),
                 )
-                .child(panel.h(more_rect.size.height))
+                .child(panel)
                 .into_any_element()
         });
 
@@ -3681,6 +3993,13 @@ impl EditorView {
                     }))
                     .child(t(language, "overlay.effects_shadow"))
             });
+        let panel = crate::ui::enter_slide_fade(
+            panel,
+            "editor-effects-enter",
+            f32::from(rect.origin.y),
+            4.0,
+            Duration::from_millis(120),
+        );
 
         Some(
             div()
@@ -3779,6 +4098,13 @@ impl EditorView {
                     ),
             );
         }
+        let panel = crate::ui::enter_slide_fade(
+            panel,
+            "editor-hints-enter",
+            (window_height - height) / 2.0,
+            4.0,
+            Duration::from_millis(120),
+        );
         Some(
             div()
                 .id("editor-hints-layer")
@@ -3816,12 +4142,14 @@ impl EditorView {
                 _ => frame,
             },
             Err(error) => {
-                self.status = Some(format!(
-                    "{} {}",
-                    t(settings_state::get().language, "editor.refresh_failed"),
-                    error
-                ));
-                cx.notify();
+                self.show_status(
+                    format!(
+                        "{} {}",
+                        t(settings_state::get().language, "editor.refresh_failed"),
+                        error
+                    ),
+                    cx,
+                );
                 return;
             }
         };
@@ -3866,8 +4194,10 @@ impl EditorView {
                 size: size(px(image_width), px(image_height)),
             };
         }
-        self.status = Some(t(settings_state::get().language, "editor.refreshed").to_owned());
-        cx.notify();
+        self.show_status(
+            t(settings_state::get().language, "editor.refreshed").to_owned(),
+            cx,
+        );
     }
 
     fn start_scroll_capture(&mut self, cx: &mut Context<Self>) {
@@ -3964,7 +4294,10 @@ impl EditorView {
             }
             Err(error) => {
                 let language = settings_state::get().language;
-                self.status = Some(format!("{}{}", t(language, "editor.export_failed"), error));
+                self.show_status(
+                    format!("{}{}", t(language, "editor.export_failed"), error),
+                    cx,
+                );
             }
         }
         log_info!("editor", "pin requested");
@@ -4037,7 +4370,7 @@ impl EditorView {
                 messages.push(format!("{}{}", t(language, "editor.export_failed"), error))
             }
         }
-        self.status = Some(messages.join(" · "));
+        self.show_status(messages.join(" · "), cx);
         let close = if copy_only {
             copy_ok
         } else if self.pin_target.is_some() {
@@ -4155,18 +4488,12 @@ impl EntityInputHandler for EditorView {
     fn character_index_for_point(
         &mut self,
         point: Point<Pixels>,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
         let edit = self.text_edit.as_ref()?;
-        let bounds = self.text_edit_screen?;
-        let local_x = (f32::from(point.x - bounds.origin.x)).max(0.0);
-        let local_y = (f32::from(point.y - bounds.origin.y)).max(0.0);
-        Some(edit.offset_to_utf16(edit.index_at_local(
-            local_x,
-            local_y,
-            f32::from(bounds.size.width),
-        )))
+        let index = self.text_index_at(window, point).unwrap_or(0);
+        Some(edit.offset_to_utf16(index))
     }
 
     fn text_length_utf16(
@@ -4210,6 +4537,7 @@ impl Render for EditorView {
             _ => None,
         });
         let status = self.status.clone();
+        let status_serial = self.status_serial;
         let accent_hex = self.accent_hex;
 
         // Build one layer per annotation in document order. Rendering every
@@ -4377,7 +4705,9 @@ impl Render for EditorView {
             let top = edit.origin.y as f32 * scale;
             let font_size = (edit.style.font_size * scale).max(8.0);
             let width = (edit.bounds.size.width as f32 * scale).max(24.0);
+            let line_height = font_size * 1.3;
             let color = edit.style.color;
+            let text_rgb = (color >> 8) & 0x00FF_FFFF;
             let entity = cx.entity();
             let focus = self.focus_handle.clone();
             let input = canvas(
@@ -4392,18 +4722,33 @@ impl Render for EditorView {
             )
             .absolute()
             .inset_0();
-            let cursor = edit.cursor_utf8();
-            let text = if edit.content.is_empty() {
-                "|".to_owned()
-            } else {
-                format!("{}|{}", &edit.content[..cursor], &edit.content[cursor..])
-            };
-            let text_rgb = (color >> 8) & 0x00FF_FFFF;
+            let layout = layout_annotation_text(window, &edit.content, font_size, width);
+            let boxes = layout
+                .as_ref()
+                .map(|layout| text_line_boxes(layout, line_height))
+                .unwrap_or_default();
+            let caret = text_caret_position(layout.as_ref(), &boxes, edit, width);
+            let selection = edit.selection();
+            let selection_boxes = layout
+                .as_ref()
+                .map(|layout| {
+                    text_selection_boxes(
+                        layout,
+                        &boxes,
+                        &selection,
+                        edit.style.text_alignment,
+                        line_height,
+                        width,
+                    )
+                })
+                .unwrap_or_default();
+            let selection_color = rgba(((accent_hex & 0x00FF_FFFF) << 8) | 0x66);
             let mut layer = div()
                 .absolute()
                 .left(px(left))
                 .top(px(top))
                 .w(px(width))
+                .min_h(px(line_height))
                 .text_size(px(font_size))
                 .text_color(if edit.content.is_empty() {
                     rgb(accent_hex)
@@ -4425,25 +4770,82 @@ impl Render for EditorView {
                             rgba(0xFFFFFFBE)
                         });
             }
+            for rect in selection_boxes {
+                layer = layer.child(
+                    div()
+                        .absolute()
+                        .left(rect.origin.x)
+                        .top(rect.origin.y)
+                        .w(rect.size.width)
+                        .h(rect.size.height)
+                        .bg(selection_color),
+                );
+            }
+            if !edit.content.is_empty() {
+                layer = layer.child(edit.content.clone());
+            }
+            layer = layer.child(
+                div()
+                    .absolute()
+                    .left(caret.x)
+                    .top(caret.y)
+                    .w(px(1.5))
+                    .h(px(line_height))
+                    .bg(if edit.content.is_empty() {
+                        rgb(accent_hex)
+                    } else {
+                        rgb(text_rgb)
+                    })
+                    .with_animation(
+                        SharedString::from("editor-text-caret"),
+                        crate::ui::caret_blink(),
+                        |caret, delta| caret.opacity(delta),
+                    ),
+            );
             layer
-                .child(text)
                 .child(input)
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                        if let (Some(bounds), Some(edit)) =
-                            (this.text_edit_screen, this.text_edit.as_ref())
-                        {
-                            let local_x = f32::from(event.position.x - bounds.origin.x).max(0.0);
-                            let local_y = f32::from(event.position.y - bounds.origin.y).max(0.0);
-                            let index =
-                                edit.index_at_local(local_x, local_y, f32::from(bounds.size.width));
-                            if let Some(edit) = this.text_edit.as_mut() {
-                                edit.move_cursor(index, false);
-                            }
+                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                        let index = this.text_index_at(window, event.position).unwrap_or(0);
+                        if event.click_count >= 2 {
+                            this.select_text_word(index, cx);
+                        } else if let Some(edit) = this.text_edit.as_mut() {
+                            edit.move_cursor(index, false);
+                            edit.selecting = true;
                             cx.notify();
                         }
                         cx.stop_propagation();
+                    }),
+                )
+                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                    if event.pressed_button != Some(MouseButton::Left) {
+                        if event.pressed_button.is_none()
+                            && let Some(edit) = this.text_edit.as_mut()
+                        {
+                            edit.selecting = false;
+                        }
+                        return;
+                    }
+                    if !this.text_edit.as_ref().is_some_and(|edit| edit.selecting) {
+                        return;
+                    }
+                    let index = this.text_index_at(window, event.position).unwrap_or(0);
+                    if let Some(edit) = this.text_edit.as_mut() {
+                        edit.move_cursor(index, true);
+                    }
+                    cx.notify();
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                        if let Some(edit) = this.text_edit.as_mut() {
+                            edit.selecting = false;
+                            if edit.selection().is_empty() {
+                                edit.anchor = edit.cursor;
+                            }
+                        }
+                        cx.notify();
                     }),
                 )
                 .into_any_element()
@@ -4707,10 +5109,10 @@ impl Render for EditorView {
                                 current: point,
                             });
                         }
-                        this.status = Some(
+                        this.show_status(
                             t(settings_state::get().language, "editor.polyline_hint").to_owned(),
+                            cx,
                         );
-                        cx.notify();
                         return;
                     }
                     if this.tool == Tool::Select {
@@ -4924,10 +5326,11 @@ impl Render for EditorView {
         let hints_panel = self.hints_panel(window, cx);
         let custom_color_panel = self.custom_color_panel(window, cx);
         let status_toast = status.map(|message| {
+            let top = (f32::from(toolbar_rect.origin.y) - 38.0).max(0.0);
             div()
                 .absolute()
                 .right(px(16.0))
-                .top(px((f32::from(toolbar_rect.origin.y) - 38.0).max(0.0)))
+                .top(px(top))
                 .px(px(10.0))
                 .py(px(6.0))
                 .rounded(px(6.0))
@@ -4938,6 +5341,12 @@ impl Render for EditorView {
                 .text_size(px(12.0))
                 .text_color(self.chrome.text)
                 .child(message)
+                .with_animation(
+                    SharedString::from(format!("editor-status-{status_serial}")),
+                    Animation::new(Duration::from_millis(120))
+                        .with_easing(|delta| 1.0 - (1.0 - delta).powi(3)),
+                    move |toast, delta| toast.opacity(delta).top(px(top + (1.0 - delta) * 4.0)),
+                )
         });
 
         div()
@@ -4960,6 +5369,9 @@ impl Render for EditorView {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    if let Some(edit) = this.text_edit.as_mut() {
+                        edit.selecting = false;
+                    }
                     if this.region_drag.is_some() {
                         this.finish_region_drag(cx);
                     }
@@ -5128,14 +5540,25 @@ impl Render for EditorView {
                             }
                             return;
                         }
+                        "up" => {
+                            this.move_text_vertical(true, extend, window, cx);
+                            return;
+                        }
+                        "down" => {
+                            this.move_text_vertical(false, extend, window, cx);
+                            return;
+                        }
                         "home" => {
-                            this.move_text_cursor(0, extend, cx);
+                            let position = this.text_line_edge(true, window);
+                            if let Some(position) = position {
+                                this.move_text_cursor(position, extend, cx);
+                            }
                             return;
                         }
                         "end" => {
-                            let end = this.text_edit.as_ref().map(|edit| edit.content.len());
-                            if let Some(end) = end {
-                                this.move_text_cursor(end, extend, cx);
+                            let position = this.text_line_edge(false, window);
+                            if let Some(position) = position {
+                                this.move_text_cursor(position, extend, cx);
                             }
                             return;
                         }
@@ -5299,11 +5722,11 @@ impl Render for EditorView {
                     {
                         this.select_annotation(Some(pasted));
                         this.tool = Tool::Select;
-                        this.status = Some(
+                        this.show_status(
                             t(settings_state::get().language, "editor.annotation_pasted")
                                 .to_owned(),
+                            cx,
                         );
-                        cx.notify();
                     }
                     return;
                 }
@@ -6178,7 +6601,7 @@ fn paint_spotlight(
 
 #[cfg(test)]
 mod tests {
-    use super::TextEdit;
+    use super::{TextEdit, word_range_at};
     use crate::ui::hue_rgb;
     use core_annotate::AnnotationStyle;
     use core_types::{PhysicalPoint, PhysicalSize};
@@ -6215,6 +6638,28 @@ mod tests {
         edit.replace(Some(0..3), "", false);
         assert_eq!(edit.content, "");
         assert_eq!(edit.marked, None);
+    }
+
+    #[test]
+    fn word_selection_covers_latin_and_cjk_runs() {
+        assert_eq!(word_range_at("hello world", 2), 0..5);
+        assert_eq!(word_range_at("hello world", 8), 6..11);
+        assert_eq!(word_range_at("hello world", 5), 5..6);
+        assert_eq!(
+            word_range_at("\u{622A}\u{56FE}\u{5DE5}\u{5177} Capin", 8),
+            0..12
+        );
+        assert_eq!(
+            word_range_at("\u{622A}\u{56FE}\u{5DE5}\u{5177} Capin", 16),
+            13..18
+        );
+    }
+
+    #[test]
+    fn word_selection_falls_back_to_one_character() {
+        assert_eq!(word_range_at("a, b", 1), 1..2);
+        assert_eq!(word_range_at("a, b", 4), 3..4);
+        assert_eq!(word_range_at("", 0), 0..0);
     }
 
     #[test]

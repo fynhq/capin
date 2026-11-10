@@ -129,6 +129,7 @@ impl ScrollView {
     }
 
     fn capture_frame(&mut self, cx: &mut Context<Self>) {
+        let previous = self.status.clone();
         let mut backend = platform_backend();
         match backend.capture(CaptureTarget::Region(self.region)) {
             Ok(frame) => match self.stitcher.push(&frame) {
@@ -151,7 +152,9 @@ impl ScrollView {
                 self.status = format!("{}{}", t(self.language, "scroll.failed"), error);
             }
         }
-        cx.notify();
+        if self.status != previous {
+            cx.notify();
+        }
     }
 
     fn finish(&mut self, cx: &mut Context<Self>) {

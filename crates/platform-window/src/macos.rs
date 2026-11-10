@@ -22,6 +22,10 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::{PlatformWindowError, PrivacyPane, WindowStyle};
 
+pub(super) fn reduce_motion() -> bool {
+    NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+}
+
 pub(super) fn pictures_dir() -> Option<PathBuf> {
     home_dir().map(|home| home.join("Pictures"))
 }

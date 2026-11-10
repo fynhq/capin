@@ -622,6 +622,7 @@ struct SettingsView {
     last_accent: Option<u32>,
     status: Option<String>,
     status_serial: u64,
+    status_leaving: bool,
     recording_shortcut: Option<ShortcutSlot>,
     filename_input: Entity<InputState>,
     filename_subscription: Option<Subscription>,
@@ -653,6 +654,7 @@ impl SettingsView {
             last_accent: None,
             status: PENDING_STATUS.with(|slot| slot.borrow_mut().take()),
             status_serial: 0,
+            status_leaving: false,
             recording_shortcut: None,
             filename_input,
             filename_subscription: None,
@@ -709,15 +711,33 @@ impl SettingsView {
     /// goes through this serial-guarded timer.
     fn show_status(&mut self, message: String, cx: &mut Context<Self>) {
         self.status = Some(message);
+        self.status_leaving = false;
         self.status_serial = self.status_serial.wrapping_add(1);
         let serial = self.status_serial;
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(2600))
                 .await;
+            let alive = this
+                .update(cx, |this, cx| {
+                    if this.status_serial != serial {
+                        return false;
+                    }
+                    this.status_leaving = true;
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !alive {
+                return;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
             this.update(cx, |this, cx| {
                 if this.status_serial == serial {
                     this.status = None;
+                    this.status_leaving = false;
                     cx.notify();
                 }
             })
@@ -816,16 +836,6 @@ impl SettingsView {
                     this.select_menu = None;
                     cx.notify();
                 }))
-                .child(
-                    div()
-                        .absolute()
-                        .left(px(0.0))
-                        .top(px((layout::NAV_ITEM_HEIGHT - 16.0) / 2.0))
-                        .w(px(3.0))
-                        .h(px(16.0))
-                        .rounded(px(1.5))
-                        .when(selected, |bar| bar.bg(accent)),
-                )
                 .child(icons::icon(
                     section.icon(),
                     layout::NAV_ICON,
@@ -840,7 +850,31 @@ impl SettingsView {
             nav.push(item.into_any_element());
         }
 
-        let nav = div().w_full().flex().flex_col().gap(px(2.0)).children(nav);
+        let selected_index = SettingsSection::ALL
+            .iter()
+            .position(|candidate| *candidate == self.section)
+            .unwrap_or(0) as f32;
+        let indicator_top = selected_index * (layout::NAV_ITEM_HEIGHT + 2.0)
+            + (layout::NAV_ITEM_HEIGHT - 16.0) / 2.0;
+        let spring =
+            SpringAnimation::new(SpringConfig::new(700.0, 46.0, 1.0)).to(px(indicator_top));
+        let indicator = div()
+            .absolute()
+            .left(px(0.0))
+            .top(px(indicator_top))
+            .w(px(3.0))
+            .h(px(16.0))
+            .rounded(px(1.5))
+            .bg(theme.accent)
+            .with_spring("settings-nav-indicator", spring, |bar, top| bar.top(top));
+        let nav = div()
+            .relative()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .children(nav)
+            .child(indicator);
         let mut sidebar = div()
             .w(px(layout::SIDEBAR_WIDTH))
             .h_full()
@@ -1089,7 +1123,13 @@ impl SettingsView {
                                 SettingsSection::Capture => self.capture_settings(theme, cx),
                                 SettingsSection::Recording => self.recording(theme, cx),
                                 SettingsSection::Shortcuts => self.shortcuts(theme, cx),
-                            }),
+                            })
+                            .with_animation(
+                                SharedString::from(format!("settings-page-{}", self.section.id())),
+                                Animation::new(Duration::from_millis(120))
+                                    .with_easing(|delta| 1.0 - (1.0 - delta).powi(3)),
+                                |page, delta| page.opacity(delta),
+                            ),
                     ),
             )
     }
@@ -2334,7 +2374,6 @@ impl SettingsView {
             .filter(|_| preview_rgb.len() == 6)
             .map(|rgb| (rgb & 0x00FF_FFFF) << 8 | 0xFF)
             .unwrap_or((self.settings.record_cursor_highlight_color << 8) | 0xFF);
-        let cursor = if picker.fresh { "" } else { "|" };
         let mut hue_row = div().flex().flex_row().items_center().gap(px(3.0));
         for index in 0..12u32 {
             let hue_color = crate::ui::hue_rgb(index as f32 * 30.0);
@@ -2366,71 +2405,97 @@ impl SettingsView {
         }
 
         Some(
-            div()
-                .id("settings-record-color-popup")
-                .absolute()
-                .left(px(x))
-                .top(px(y))
-                .w(px(width))
-                .p(px(8.0))
-                .rounded(px(6.0))
-                .bg(theme.popover)
-                .shadow(vec![
-                    BoxShadow::new(px(0.0), px(0.0), Hsla::from(theme.border))
-                        .spread_radius(px(1.0)),
-                    BoxShadow::new(px(0.0), px(4.0), Hsla::from(rgba(0x0000001F)))
-                        .blur_radius(px(3.0))
-                        .spread_radius(px(-1.0)),
-                ])
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .occlude()
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(
-                            div()
-                                .w(px(18.0))
-                                .h(px(18.0))
-                                .rounded(px(4.0))
-                                .bg(rgba(preview))
-                                .border_1()
-                                .border_color(theme.border),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(theme.text)
-                                .child(t(language, "editor.custom_color")),
-                        )
-                        .child(div().flex_1())
-                        .child(
-                            div()
-                                .px(px(6.0))
-                                .py(px(2.0))
-                                .rounded(px(4.0))
-                                .bg(theme.control)
-                                .text_size(px(11.0))
-                                .text_color(theme.text)
-                                .child(format!(
-                                    "#{}{}",
-                                    picker.buffer.to_ascii_uppercase(),
-                                    cursor
-                                )),
-                        ),
-                )
-                .child(hue_row)
-                .child(
-                    div()
-                        .text_size(px(9.5))
-                        .text_color(theme.muted)
-                        .child(t(language, "editor.custom_color_hint")),
-                )
-                .into_any_element(),
+            crate::ui::enter_slide_fade(
+                div()
+                    .id("settings-record-color-popup")
+                    .absolute()
+                    .left(px(x))
+                    .top(px(y))
+                    .w(px(width))
+                    .p(px(8.0))
+                    .rounded(px(6.0))
+                    .bg(theme.popover)
+                    .shadow(vec![
+                        BoxShadow::new(px(0.0), px(0.0), Hsla::from(theme.border))
+                            .spread_radius(px(1.0)),
+                        BoxShadow::new(px(0.0), px(4.0), Hsla::from(rgba(0x0000001F)))
+                            .blur_radius(px(3.0))
+                            .spread_radius(px(-1.0)),
+                    ])
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .occlude()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .w(px(18.0))
+                                    .h(px(18.0))
+                                    .rounded(px(4.0))
+                                    .bg(rgba(preview))
+                                    .border_1()
+                                    .border_color(theme.border),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(theme.text)
+                                    .child(t(language, "editor.custom_color")),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .px(px(6.0))
+                                    .py(px(2.0))
+                                    .rounded(px(4.0))
+                                    .bg(theme.control)
+                                    .text_size(px(11.0))
+                                    .text_color(theme.text)
+                                    .child({
+                                        let mut row = div()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap(px(1.0))
+                                            .child(format!(
+                                                "#{}",
+                                                picker.buffer.to_ascii_uppercase()
+                                            ));
+                                        if !picker.fresh {
+                                            row = row.child(
+                                                div()
+                                                    .w(px(1.0))
+                                                    .h(px(11.0))
+                                                    .bg(theme.accent)
+                                                    .with_animation(
+                                                        "settings-record-color-caret",
+                                                        crate::ui::caret_blink(),
+                                                        |caret, delta| caret.opacity(delta),
+                                                    ),
+                                            );
+                                        }
+                                        row
+                                    }),
+                            ),
+                    )
+                    .child(hue_row)
+                    .child(
+                        div()
+                            .text_size(px(9.5))
+                            .text_color(theme.muted)
+                            .child(t(language, "editor.custom_color_hint")),
+                    ),
+                "settings-record-color-enter",
+                y,
+                4.0,
+                Duration::from_millis(120),
+            )
+            .into_any_element(),
         )
     }
 
@@ -2805,6 +2870,8 @@ impl Render for SettingsView {
         }
         let theme = Theme::for_window(window, self.accent);
         let status = self.status.clone();
+        let status_serial = self.status_serial;
+        let status_leaving = self.status_leaving;
         #[cfg(target_os = "windows")]
         let titlebar = Some(self.titlebar(&theme, window, cx));
         #[cfg(not(target_os = "windows"))]
@@ -2875,6 +2942,11 @@ impl Render for SettingsView {
             .children(select_popup)
             .children(record_color_popup)
             .children(status.map(|message| {
+                let duration = if status_leaving {
+                    Duration::from_millis(150)
+                } else {
+                    Duration::from_millis(120)
+                };
                 div()
                     .absolute()
                     .bottom(px(16.0))
@@ -2887,6 +2959,19 @@ impl Render for SettingsView {
                     .text_size(px(layout::CONTROL_TEXT))
                     .text_color(rgb(0xFFFFFF))
                     .child(message)
+                    .with_animation(
+                        SharedString::from(format!(
+                            "settings-status-{status_serial}-{status_leaving}"
+                        )),
+                        Animation::new(duration).with_easing(|delta| 1.0 - (1.0 - delta).powi(3)),
+                        move |toast, delta| {
+                            if status_leaving {
+                                toast.opacity(1.0 - delta)
+                            } else {
+                                toast.opacity(delta).bottom(px(16.0 - (1.0 - delta) * 4.0))
+                            }
+                        },
+                    )
             }))
     }
 }

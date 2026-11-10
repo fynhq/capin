@@ -47,6 +47,7 @@ fn main() {
         .with_quit_mode(gpui_kit::QuitMode::Explicit)
         .run(|cx| {
             gpui_kit::init(cx);
+            cx.set_reduce_motion(platform_window::reduce_motion());
             platform_window::set_macos_accessory_activation_policy();
             settings_state::apply_startup_autostart();
 

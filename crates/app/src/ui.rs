@@ -1,5 +1,7 @@
 //! Small shared UI helpers used by the auxiliary windows.
 
+use std::time::Duration;
+
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -113,6 +115,60 @@ pub fn bar_button<View: 'static>(
 
 fn opacity_color(color: Rgba, opacity: f32) -> Rgba {
     rgba((u32::from(color) & 0x00FF_FFFF) << 8 | ((opacity * 255.0) as u32))
+}
+
+/// Native text caret blink. `repeat_synced` keeps multiple carets in phase and
+/// the low frame cap avoids waking the renderer at monitor refresh just to
+/// toggle a one-pixel bar.
+pub fn caret_blink() -> Animation {
+    Animation::new(Duration::from_millis(530))
+        .repeat_synced()
+        .with_max_fps(4.0)
+        .with_easing(|delta| if delta < 0.5 { 1.0 } else { 0.0 })
+}
+
+fn ease_out_cubic(delta: f32) -> f32 {
+    1.0 - (1.0 - delta).powi(3)
+}
+
+/// Fades and slightly slides a transient surface in. Only the entrance is
+/// animated; conditional panels disappear immediately so dismissing a menu
+/// never feels delayed.
+pub fn enter_slide_fade<E>(
+    element: E,
+    id: impl Into<ElementId>,
+    base_top: f32,
+    offset: f32,
+    duration: Duration,
+) -> AnimationElement<E>
+where
+    E: IntoElement + Styled + 'static,
+{
+    element.with_animation(
+        id,
+        Animation::new(duration).with_easing(ease_out_cubic),
+        move |element, delta| {
+            element
+                .opacity(delta)
+                .top(px(base_top + (1.0 - delta) * offset))
+        },
+    )
+}
+
+/// Fades a surface in without changing its layout position.
+pub fn enter_fade<E>(
+    element: E,
+    id: impl Into<ElementId>,
+    duration: Duration,
+) -> AnimationElement<E>
+where
+    E: IntoElement + Styled + 'static,
+{
+    element.with_animation(
+        id,
+        Animation::new(duration).with_easing(ease_out_cubic),
+        |element, delta| element.opacity(delta),
+    )
 }
 
 /// Converts a hue in degrees to a saturated RGB swatch used by the custom

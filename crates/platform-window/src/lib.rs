@@ -349,6 +349,24 @@ pub fn place_on_monitor_deferred(
     }
 }
 
+/// Whether the operating system asks applications to reduce decorative
+/// motion. The caller forwards this to GPUI once at startup so `with_animation`
+/// and `with_spring` render their static end state.
+pub fn reduce_motion() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        windows::reduce_motion()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::reduce_motion()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        false
+    }
+}
+
 /// Returns the platform monitor that currently contains the window, as the
 /// same raw identifier used by `MonitorInfo`.
 pub fn monitor_for_window(window: &impl HasWindowHandle) -> Option<u64> {

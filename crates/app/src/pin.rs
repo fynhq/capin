@@ -1208,8 +1208,10 @@ struct PinView {
     click_through: bool,
     notice: Option<String>,
     notice_serial: u64,
+    notice_leaving: bool,
     hud: Option<String>,
     hud_serial: u64,
+    hud_leaving: bool,
     ocr: Option<platform_ocr::OcrOutput>,
     /// Restored pins start OCR from their saved PNG instead of keeping a
     /// full-frame Arc queued for every restored window.
@@ -1220,6 +1222,7 @@ struct PinView {
     hover_text: bool,
     content_generation: u64,
     flash_alpha: f32,
+    flash_active: bool,
     flash_generation: u64,
     focus_handle: FocusHandle,
 }
@@ -1246,8 +1249,10 @@ impl PinView {
             ocr_path,
             notice: None,
             notice_serial: 0,
+            notice_leaving: false,
             hud: None,
             hud_serial: 0,
+            hud_leaving: false,
             ocr: None,
             selection: None,
             selecting: false,
@@ -1255,6 +1260,7 @@ impl PinView {
             hover_text: false,
             content_generation: 1,
             flash_alpha: 0.0,
+            flash_active: false,
             flash_generation: 0,
             focus_handle: cx.focus_handle(),
         };
@@ -1272,30 +1278,16 @@ impl PinView {
     /// pin easy to find instead of stacking another copy on top.
     fn flash(&mut self, cx: &mut Context<Self>) {
         self.flash_generation = self.flash_generation.wrapping_add(1);
-        let generation = self.flash_generation;
+        self.flash_active = true;
         self.flash_alpha = 1.0;
-        cx.notify();
+        let generation = self.flash_generation;
         cx.spawn(async move |this, cx| {
-            for step in 0..5 {
-                cx.background_executor()
-                    .timer(Duration::from_millis(110))
-                    .await;
-                let alive = this
-                    .update(cx, |this, cx| {
-                        if this.flash_generation != generation {
-                            return false;
-                        }
-                        this.flash_alpha = if step % 2 == 0 { 0.2 } else { 1.0 };
-                        cx.notify();
-                        true
-                    })
-                    .unwrap_or(false);
-                if !alive {
-                    return;
-                }
-            }
+            cx.background_executor()
+                .timer(Duration::from_millis(520))
+                .await;
             this.update(cx, |this, cx| {
                 if this.flash_generation == generation {
+                    this.flash_active = false;
                     this.flash_alpha = 0.0;
                     cx.notify();
                 }
@@ -1303,6 +1295,7 @@ impl PinView {
             .ok();
         })
         .detach();
+        cx.notify();
     }
 
     fn persisted_path(&self) -> Option<PathBuf> {
@@ -1660,7 +1653,6 @@ impl PinView {
             },
         );
         update_meta(self.id, self.zoom, self.opacity);
-        schedule_manifest_save(cx);
         cx.notify();
     }
 
@@ -1674,6 +1666,7 @@ impl PinView {
                 self.apply_zoom(self.zoom_target, window, cx);
             }
             self.zoom_center = None;
+            schedule_manifest_save(cx);
             return true;
         }
         let next = self.zoom + difference * 0.35;
@@ -1686,6 +1679,16 @@ impl PinView {
             return;
         }
         self.zoom_target = target.clamp(0.15, 4.0);
+        let language = settings_state::get().language;
+        let percent = (self.zoom_target * 100.0).round() as i32;
+        if cx.reduce_motion() {
+            self.zoom_center = None;
+            let target = self.zoom_target;
+            self.apply_zoom(target, window, cx);
+            schedule_manifest_save(cx);
+            self.show_hud(format!("{} {percent}%", t(language, "pin.zoom_hud")), cx);
+            return;
+        }
         if self.zoom_center.is_none() {
             let bounds = window.bounds();
             self.zoom_center = Some((
@@ -1696,8 +1699,6 @@ impl PinView {
         self.zoom_serial = self.zoom_serial.wrapping_add(1);
         let serial = self.zoom_serial;
         let handle = window.window_handle();
-        let language = settings_state::get().language;
-        let percent = (self.zoom_target * 100.0).round() as i32;
         self.show_hud(format!("{} {percent}%", t(language, "pin.zoom_hud")), cx);
         cx.spawn(async move |this, cx| {
             loop {
@@ -1809,15 +1810,33 @@ impl PinView {
 
     fn show_notice(&mut self, message: String, cx: &mut Context<Self>) {
         self.notice = Some(message);
+        self.notice_leaving = false;
         self.notice_serial = self.notice_serial.wrapping_add(1);
         let serial = self.notice_serial;
         cx.spawn(async move |this, cx| {
             cx.background_executor()
-                .timer(Duration::from_millis(1200))
+                .timer(Duration::from_millis(2200))
+                .await;
+            let alive = this
+                .update(cx, |this, cx| {
+                    if this.notice_serial != serial {
+                        return false;
+                    }
+                    this.notice_leaving = true;
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !alive {
+                return;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
                 .await;
             this.update(cx, |this, cx| {
                 if this.notice_serial == serial {
                     this.notice = None;
+                    this.notice_leaving = false;
                     cx.notify();
                 }
             })
@@ -1831,15 +1850,33 @@ impl PinView {
     /// `notice` so a zoom tick does not hide a copy/save message.
     fn show_hud(&mut self, message: String, cx: &mut Context<Self>) {
         self.hud = Some(message);
+        self.hud_leaving = false;
         self.hud_serial = self.hud_serial.wrapping_add(1);
         let serial = self.hud_serial;
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(900))
                 .await;
+            let alive = this
+                .update(cx, |this, cx| {
+                    if this.hud_serial != serial {
+                        return false;
+                    }
+                    this.hud_leaving = true;
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !alive {
+                return;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
             this.update(cx, |this, cx| {
                 if this.hud_serial == serial {
                     this.hud = None;
+                    this.hud_leaving = false;
                     cx.notify();
                 }
             })
@@ -1982,7 +2019,11 @@ impl Render for PinView {
         let theme = PinTheme::for_window(window);
         let language = settings_state::get().language;
         let notice = self.notice.clone();
+        let notice_serial = self.notice_serial;
+        let notice_leaving = self.notice_leaving;
         let hud = self.hud.clone();
+        let hud_serial = self.hud_serial;
+        let hud_leaving = self.hud_leaving;
         let body = self.body(&theme, language).opacity(self.opacity);
         let zoom = self.zoom.max(0.1);
         let text_layers: Vec<Div> = self
@@ -1998,13 +2039,26 @@ impl Render for PinView {
                     .bg(theme.selection)
             })
             .collect();
-        let flash = (self.flash_alpha > 0.001).then(|| {
-            div()
+        let flash = self.flash_active.then(|| {
+            let outline = div()
                 .absolute()
                 .inset_0()
                 .border_4()
-                .border_color(theme.accent)
-                .opacity(self.flash_alpha)
+                .border_color(theme.accent);
+            if cx.reduce_motion() {
+                outline.opacity(self.flash_alpha).into_any_element()
+            } else {
+                outline
+                    .with_animation(
+                        SharedString::from(format!("pin-flash-{}", self.flash_generation)),
+                        Animation::new(Duration::from_millis(520)).with_easing(|delta| {
+                            let pulse = (delta * std::f32::consts::TAU * 2.0).sin().abs();
+                            (pulse * (1.0 - delta) * 1.15).min(1.0)
+                        }),
+                        |outline, delta| outline.opacity(delta),
+                    )
+                    .into_any_element()
+            }
         });
         let content = div()
             .absolute()
@@ -2161,6 +2215,11 @@ impl Render for PinView {
             .child(content);
 
         root.children(hud.map(|message| {
+            let duration = if hud_leaving {
+                Duration::from_millis(150)
+            } else {
+                Duration::from_millis(120)
+            };
             div()
                 .absolute()
                 .top(px(6.0))
@@ -2180,8 +2239,24 @@ impl Render for PinView {
                         .text_color(theme.text)
                         .child(message),
                 )
+                .with_animation(
+                    SharedString::from(format!("pin-hud-{hud_serial}-{hud_leaving}")),
+                    Animation::new(duration).with_easing(|delta| 1.0 - (1.0 - delta).powi(3)),
+                    move |hud, delta| {
+                        if hud_leaving {
+                            hud.opacity(1.0 - delta)
+                        } else {
+                            hud.opacity(delta).top(px(6.0 - (1.0 - delta) * 3.0))
+                        }
+                    },
+                )
         }))
         .children(notice.map(|notice| {
+            let duration = if notice_leaving {
+                Duration::from_millis(150)
+            } else {
+                Duration::from_millis(120)
+            };
             div()
                 .absolute()
                 .bottom(px(8.0))
@@ -2197,7 +2272,22 @@ impl Render for PinView {
                         .bg(rgba(0x000000CC))
                         .text_size(px(10.0))
                         .text_color(rgb(0xFFFFFF))
+                        .max_w_full()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
                         .child(notice),
+                )
+                .with_animation(
+                    SharedString::from(format!("pin-notice-{notice_serial}-{notice_leaving}")),
+                    Animation::new(duration).with_easing(|delta| 1.0 - (1.0 - delta).powi(3)),
+                    move |notice, delta| {
+                        if notice_leaving {
+                            notice.opacity(1.0 - delta)
+                        } else {
+                            notice.opacity(delta).bottom(px(8.0 - (1.0 - delta) * 4.0))
+                        }
+                    },
                 )
         }))
     }
@@ -2206,6 +2296,7 @@ impl Render for PinView {
 struct PinMenuView {
     pin_id: u64,
     items: Vec<(PinMenuAction, String)>,
+    selected: usize,
     focus_handle: FocusHandle,
     _blur_subscription: Option<gpui_kit::Subscription>,
 }
@@ -2213,6 +2304,8 @@ struct PinMenuView {
 impl Render for PinMenuView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = PinTheme::for_window(window);
+        let pin_id = self.pin_id;
+        let actions: Vec<PinMenuAction> = self.items.iter().map(|(action, _)| *action).collect();
         let mut menu = div()
             .size_full()
             .p(px(PIN_MENU_PADDING))
@@ -2226,17 +2319,39 @@ impl Render for PinMenuView {
             .flex()
             .flex_col()
             .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape" {
-                    forget_pin_menu();
-                    window.remove_window();
-                    cx.stop_propagation();
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                match event.keystroke.key.as_str() {
+                    "escape" => {
+                        forget_pin_menu();
+                        window.remove_window();
+                        cx.stop_propagation();
+                    }
+                    "up" => {
+                        this.selected = this.selected.saturating_sub(1);
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
+                    "down" => {
+                        this.selected = (this.selected + 1).min(actions.len().saturating_sub(1));
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
+                    "enter" => {
+                        let action = actions.get(this.selected).copied();
+                        if let Some(action) = action {
+                            forget_pin_menu();
+                            window.remove_window();
+                            cx.defer(move |cx| perform_pin_action(pin_id, action, cx));
+                        }
+                        cx.stop_propagation();
+                    }
+                    _ => {}
                 }
             }));
         for (index, (action, label)) in self.items.iter().enumerate() {
             let action = *action;
             let label = label.clone();
-            let pin_id = self.pin_id;
+            let selected = index == self.selected;
             if index > 0 && action.separated() {
                 menu = menu.child(
                     div()
@@ -2256,6 +2371,7 @@ impl Render for PinMenuView {
                     .items_center()
                     .text_size(px(12.5))
                     .text_color(theme.text)
+                    .when(selected, |item| item.bg(theme.menu_hover))
                     .hover(move |style| style.bg(theme.menu_hover))
                     .on_mouse_down(
                         MouseButton::Left,
@@ -2271,7 +2387,7 @@ impl Render for PinMenuView {
                     .child(label),
             );
         }
-        menu
+        crate::ui::enter_fade(menu, "pin-menu-enter", Duration::from_millis(90))
     }
 }
 
@@ -2364,6 +2480,7 @@ fn open_pin_menu(
         let view = cx.new(|cx| PinMenuView {
             pin_id,
             items,
+            selected: 0,
             focus_handle: cx.focus_handle(),
             _blur_subscription: None,
         });

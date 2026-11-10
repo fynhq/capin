@@ -151,6 +151,7 @@ struct RecordBar {
     language: Language,
     shortcuts_ok: bool,
     auto_close_scheduled: bool,
+    closing: bool,
 }
 
 impl RecordBar {
@@ -193,6 +194,7 @@ impl RecordBar {
             language,
             shortcuts_ok,
             auto_close_scheduled: false,
+            closing: false,
         };
         cx.on_release(|_, cx| {
             crate::hotkey::set_recording_shortcuts(false);
@@ -211,8 +213,7 @@ impl RecordBar {
                             return false;
                         }
                         if this.blocked {
-                            cx.notify();
-                            return true;
+                            return false;
                         }
                         if this.recorder.is_none() && this.countdown_started.elapsed() < COUNTDOWN {
                             cx.notify();
@@ -300,6 +301,22 @@ impl RecordBar {
         self.auto_close_scheduled = true;
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(COMPLETE_LINGER).await;
+            let alive = this
+                .update(cx, |this, cx| {
+                    if this.closing {
+                        return false;
+                    }
+                    this.closing = true;
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !alive {
+                return;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
             this.update(cx, |this, cx| this.close(cx)).ok();
         })
         .detach();
@@ -469,91 +486,152 @@ impl Render for RecordBar {
         } else {
             rgb(0xFF453A)
         };
-
-        div().size_full().flex().items_center().child(
+        let dot_core = div()
+            .w(px(if recording { 9.0 } else { 7.0 }))
+            .h(px(if recording { 9.0 } else { 7.0 }))
+            .rounded(px(5.0))
+            .bg(dot);
+        let dot = if recording {
+            dot_core
+                .with_animation(
+                    "record-dot-pulse",
+                    Animation::new(Duration::from_millis(1600))
+                        .repeat_synced()
+                        .with_max_fps(30.0)
+                        .with_easing(|delta| 0.7 + 0.3 * (delta * std::f32::consts::TAU).cos()),
+                    |dot, delta| dot.opacity(delta),
+                )
+                .into_any_element()
+        } else {
+            dot_core.into_any_element()
+        };
+        let timer_text = div()
+            .text_size(px(12.5))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(theme.accent)
+            .child(timer);
+        let timer_text = if counting_down {
+            crate::ui::enter_fade(
+                timer_text,
+                SharedString::from(format!("record-countdown-{}", self.countdown_remaining())),
+                Duration::from_millis(180),
+            )
+            .into_any_element()
+        } else {
+            timer_text.into_any_element()
+        };
+        let progress = counting_down.then(|| {
             div()
-                .size_full()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(10.0))
-                .px(px(12.0))
-                .rounded(px(10.0))
-                .bg(theme.surface)
-                .border_1()
-                .border_color(theme.border)
-                .shadow(theme.shadow())
-                .text_color(theme.text)
+                .absolute()
+                .left(px(12.0))
+                .right(px(12.0))
+                .bottom(px(2.0))
+                .h(px(2.0))
+                .rounded(px(1.0))
+                .bg(theme.selected)
                 .child(
                     div()
-                        .w(px(30.0))
-                        .h(px(30.0))
-                        .flex_shrink_0()
-                        .rounded(px(15.0))
-                        .bg(if recording {
-                            rgba(0xFF453A33)
-                        } else {
-                            theme.selected
-                        })
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            div()
-                                .w(px(if recording { 9.0 } else { 7.0 }))
-                                .h(px(if recording { 9.0 } else { 7.0 }))
-                                .rounded(px(5.0))
-                                .bg(dot),
+                        .h_full()
+                        .rounded(px(1.0))
+                        .bg(theme.accent)
+                        .with_animation(
+                            "record-countdown-progress",
+                            Animation::new(COUNTDOWN).with_easing(|delta| delta),
+                            |line, delta| line.w(relative(1.0 - delta)),
                         ),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(1.0))
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(7.0))
-                                .child(
-                                    div()
-                                        .text_size(px(12.5))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(state),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.5))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(theme.accent)
-                                        .child(timer),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(10.5))
-                                        .text_color(theme.muted)
-                                        .child(format!("MP4 · {} fps", FRAME_RATE)),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(theme.muted)
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .child(status),
-                        ),
-                )
-                .children(pause)
-                .children(stop)
-                .children(open_folder)
-                .children(close),
-        )
+        });
+
+        let bar = div()
+            .size_full()
+            .flex()
+            .items_center()
+            .relative()
+            .child(
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(10.0))
+                    .px(px(12.0))
+                    .rounded(px(10.0))
+                    .bg(theme.surface)
+                    .border_1()
+                    .border_color(theme.border)
+                    .shadow(theme.shadow())
+                    .text_color(theme.text)
+                    .child(
+                        div()
+                            .w(px(30.0))
+                            .h(px(30.0))
+                            .flex_shrink_0()
+                            .rounded(px(15.0))
+                            .bg(if recording {
+                                rgba(0xFF453A33)
+                            } else {
+                                theme.selected
+                            })
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(dot),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.0))
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(7.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(12.5))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(state),
+                                    )
+                                    .child(timer_text)
+                                    .child(
+                                        div()
+                                            .text_size(px(10.5))
+                                            .text_color(theme.muted)
+                                            .child(format!("MP4 · {} fps", FRAME_RATE)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(theme.muted)
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(status),
+                            ),
+                    )
+                    .children(pause)
+                    .children(stop)
+                    .children(open_folder)
+                    .children(close),
+            )
+            .children(progress);
+
+        if self.closing && !cx.reduce_motion() {
+            bar.with_animation(
+                "record-bar-exit",
+                Animation::new(Duration::from_millis(150))
+                    .with_easing(|delta| 1.0 - (1.0 - delta).powi(3)),
+                |bar, delta| bar.opacity(1.0 - delta),
+            )
+            .into_any_element()
+        } else {
+            bar.into_any_element()
+        }
     }
 }
 
