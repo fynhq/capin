@@ -32,7 +32,7 @@ pub(super) fn monitor_for_window(window: &impl HasWindowHandle) -> Option<u64> {
     };
     let hwnd = HWND(win32.hwnd.get() as *mut c_void);
     let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
-    (!monitor.0.is_null()).then(|| monitor.0 as usize as u64)
+    (!monitor.0.is_null()).then_some(monitor.0 as usize as u64)
 }
 
 pub(super) fn place_on_monitor(

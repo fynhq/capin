@@ -8,7 +8,9 @@
 //! platforms once a window is not on the primary display.
 
 use core_capture::MonitorInfo;
-use gpui_kit::{Bounds, Pixels, point, px, size};
+use gpui_kit::{Bounds, Pixels};
+#[cfg(target_os = "macos")]
+use gpui_kit::{point, px};
 
 /// Returns `bounds` in the space used by `WindowOptions.window_bounds` for a
 /// window that belongs to `monitor`.
@@ -38,6 +40,9 @@ pub fn window_bounds_on_monitor(monitor: &MonitorInfo, bounds: Bounds<Pixels>) -
 mod tests {
     use super::*;
     use core_types::{DpiScale, MonitorId, PhysicalRect};
+    use gpui_kit::size;
+    #[cfg(not(target_os = "macos"))]
+    use gpui_kit::{point, px};
 
     fn monitor(x: i32, y: i32, width: u32, height: u32, scale: f32) -> MonitorInfo {
         MonitorInfo {
