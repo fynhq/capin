@@ -639,41 +639,43 @@ fn text_selection_boxes(
 
 fn word_range_at(content: &str, index: usize) -> Range<usize> {
     let mut index = index.min(content.len());
-    if !content.is_char_boundary(index) {
-        index = previous_char_boundary(content, index);
+    while index > 0 && !content.is_char_boundary(index) {
+        index -= 1;
     }
+    if content.is_empty() {
+        return 0..0;
+    }
+    let mut start = if index == content.len() {
+        previous_char_boundary(content, index)
+    } else {
+        index
+    };
     let is_word = |ch: char| ch.is_alphanumeric() || ch == '_';
-    let mut start = index;
+    let word = content[start..].chars().next().is_some_and(is_word);
     while start > 0 {
         let previous = previous_char_boundary(content, start);
         let ch = content[previous..start].chars().next().unwrap_or_default();
-        if is_word(ch) {
+        if is_word(ch) == word {
             start = previous;
         } else {
             break;
         }
     }
-    let mut end = index;
+    let mut end = if index == content.len() {
+        content.len()
+    } else {
+        next_char_boundary(content, index)
+    };
     while end < content.len() {
         let next = next_char_boundary(content, end);
         let ch = content[end..next].chars().next().unwrap_or_default();
-        if is_word(ch) {
+        if is_word(ch) == word {
             end = next;
         } else {
             break;
         }
     }
-    if start == end {
-        if index < content.len() {
-            index..next_char_boundary(content, index)
-        } else if index > 0 {
-            previous_char_boundary(content, index)..index
-        } else {
-            0..0
-        }
-    } else {
-        start..end
-    }
+    start..end
 }
 
 pub(crate) struct EditorView {
@@ -6657,7 +6659,7 @@ mod tests {
 
     #[test]
     fn word_selection_falls_back_to_one_character() {
-        assert_eq!(word_range_at("a, b", 1), 1..2);
+        assert_eq!(word_range_at("a, b", 1), 1..3);
         assert_eq!(word_range_at("a, b", 4), 3..4);
         assert_eq!(word_range_at("", 0), 0..0);
     }
