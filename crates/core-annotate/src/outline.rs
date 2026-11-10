@@ -10,10 +10,10 @@ use core_types::PhysicalPoint;
 
 use crate::{AnnotationStyle, Shape};
 
-const HEAD_LENGTH_FACTOR: f32 = 3.5;
-const MIN_HEAD_LENGTH: f32 = 10.0;
+const HEAD_LENGTH_FACTOR: f32 = 5.0;
+const MIN_HEAD_LENGTH: f32 = 14.0;
 const HEAD_BACK: f32 = 0.85;
-const HEAD_HALF_WIDTH: f32 = 0.5;
+const HEAD_HALF_WIDTH: f32 = 0.55;
 const HEAD_NOTCH: f32 = 0.55;
 const CAP_SEGMENTS: usize = 24;
 
@@ -196,6 +196,24 @@ mod tests {
             .map(|point| point.x)
             .fold(f32::MIN, f32::max);
         assert!(tip >= 190.0, "head should reach the arrow tip");
+    }
+
+    #[test]
+    fn arrow_head_is_prominent_at_the_default_stroke_width() {
+        let shape = Shape::Arrow {
+            start: PhysicalPoint::new(20, 50),
+            end: PhysicalPoint::new(220, 50),
+        };
+        let polygons = stroke_outline(&shape, &style()).unwrap();
+        let head = polygons
+            .iter()
+            .find(|polygon| polygon.iter().any(|point| point.x >= 219.9))
+            .expect("the end head exists");
+        let min_x = head.iter().map(|point| point.x).fold(f32::MAX, f32::min);
+        assert!(
+            min_x <= 205.0,
+            "head should span at least 15 image pixels at width 4"
+        );
     }
 
     #[test]

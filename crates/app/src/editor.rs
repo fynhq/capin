@@ -790,21 +790,17 @@ impl EditorView {
     /// style has to be repainted.
     fn update_selection_hover(&mut self, point: PhysicalPoint, window: &Window) -> bool {
         let scale = self.image_scale(window);
-        let hover = match self
+        let handle = self
             .document
             .selected()
             .and_then(|id| self.document.object(id))
-        {
-            Some(annotation) => {
-                if let Some(handle) = hit_resize_handle(&annotation.shape, point, 6.0 / scale) {
-                    SelectionHover::Handle(handle)
-                } else if self.document.hit_test(point) == Some(annotation.id) {
-                    SelectionHover::Body
-                } else {
-                    SelectionHover::None
-                }
-            }
-            None => SelectionHover::None,
+            .and_then(|annotation| annotation_handle_at(&annotation.shape, point, scale));
+        let hover = if let Some(handle) = handle {
+            SelectionHover::Handle(handle)
+        } else if self.document.hit_test(point).is_some() {
+            SelectionHover::Body
+        } else {
+            SelectionHover::None
         };
         if hover == self.selection_hover {
             return false;
@@ -1512,10 +1508,10 @@ impl EditorView {
                 div()
                     .id(format!("editor-region-handle-{:?}", handle))
                     .absolute()
-                    .left(px(f32::from(position.x) - 3.5))
-                    .top(px(f32::from(position.y) - 3.5))
-                    .w(px(7.0))
-                    .h(px(7.0))
+                    .left(px(f32::from(position.x) - 4.5))
+                    .top(px(f32::from(position.y) - 4.5))
+                    .w(px(9.0))
+                    .h(px(9.0))
                     .rounded(px(1.5))
                     .bg(rgb(0xFFFFFF))
                     .border_1()
@@ -4438,8 +4434,9 @@ impl Render for EditorView {
         } else {
             match self.selection_hover {
                 SelectionHover::Handle(handle) => handle_cursor(handle),
-                SelectionHover::Body if self.tool == Tool::Select => CursorStyle::OpenHand,
-                SelectionHover::Body => CursorStyle::Crosshair,
+                // Any annotation under the pointer can be selected and moved,
+                // even while a drawing tool is active.
+                SelectionHover::Body => CursorStyle::OpenHand,
                 SelectionHover::None if self.tool == Tool::Select => CursorStyle::Arrow,
                 SelectionHover::None => CursorStyle::Crosshair,
             }
@@ -4537,8 +4534,7 @@ impl Render for EditorView {
                         .selected()
                         .and_then(|id| this.document.object(id))
                         .cloned()
-                        && let Some(handle) =
-                            hit_resize_handle(&annotation.shape, point, 6.0 / scale)
+                        && let Some(handle) = annotation_handle_at(&annotation.shape, point, scale)
                     {
                         this.resize_draft = Some(ResizeDraft {
                             id: annotation.id,
@@ -4572,7 +4568,7 @@ impl Render for EditorView {
                         && let Some(handle) = edge_resize_handle(
                             PhysicalRect::new(0, 0, this.image_size.width, this.image_size.height),
                             point,
-                            (6.0 / scale).max(1.0),
+                            (8.0 / scale).max(1.0),
                         )
                     {
                         this.begin_region_drag(handle, cx);
@@ -4895,9 +4891,51 @@ impl Render for EditorView {
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
                     if this.region_drag.is_some() {
                         this.finish_region_drag(cx);
+                    }
+                    // Toolbars and panels overlap the image on small captures
+                    // and consume the mouse-up before the image layer sees it.
+                    // Finish any in-flight drag here so the object does not
+                    // snap back to its pre-drag position on the next click.
+                    let mut changed = false;
+                    if let Some(move_draft) = this.move_draft.take() {
+                        let point = this
+                            .to_image_point(event.position, window)
+                            .unwrap_or(move_draft.current);
+                        let dx = point.x - move_draft.start.x;
+                        let dy = point.y - move_draft.start.y;
+                        if dx != 0 || dy != 0 {
+                            this.document.move_selected(dx, dy);
+                        }
+                        changed = true;
+                    }
+                    if this.resize_draft.is_some() {
+                        let point = this
+                            .to_image_point(event.position, window)
+                            .or_else(|| this.resize_draft.as_ref().map(|draft| draft.current));
+                        if let Some(point) = point {
+                            this.finish_resize(point, cx);
+                        } else {
+                            this.resize_draft = None;
+                        }
+                        changed = true;
+                    }
+                    if let Some(mut draft) = this.draft.take() {
+                        let point = this
+                            .to_image_point(event.position, window)
+                            .unwrap_or(draft.current);
+                        draft.current = point;
+                        draft.shift = event.modifiers.shift;
+                        if let Some(shape) = finalize_shape(&draft, point) {
+                            this.document.add(shape, this.effective_style());
+                            this.status = None;
+                        }
+                        changed = true;
+                    }
+                    if changed {
+                        cx.notify();
                     }
                 }),
             )
@@ -5381,25 +5419,33 @@ pub fn open_long_capture_inline(frame: RgbaFrame, monitor_id: MonitorId, cx: &mu
     let frame = Arc::new(frame);
     let monitors = platform_backend().monitors().unwrap_or_default();
     let monitor = monitors.iter().find(|monitor| monitor.id == monitor_id);
-    let (window_bounds, display_id) = match monitor {
+    let (window_bounds, display_id, screen_origin) = match monitor {
         Some(monitor) => {
             let scale = monitor.scale.get().max(0.1);
+            let global = Bounds {
+                origin: point(
+                    px(monitor.bounds.origin.x as f32 / scale),
+                    px(monitor.bounds.origin.y as f32 / scale),
+                ),
+                size: size(
+                    px(monitor.bounds.size.width as f32 / scale),
+                    px(monitor.bounds.size.height as f32 / scale),
+                ),
+            };
+            // `WindowOptions` uses display-local coordinates on macOS; passing
+            // the virtual-desktop origin pushed the result off-screen on a
+            // secondary display.
             (
-                Bounds {
-                    origin: point(
-                        px(monitor.bounds.origin.x as f32 / scale),
-                        px(monitor.bounds.origin.y as f32 / scale),
-                    ),
-                    size: size(
-                        px(monitor.bounds.size.width as f32 / scale),
-                        px(monitor.bounds.size.height as f32 / scale),
-                    ),
-                },
+                crate::display::window_bounds_on_monitor(monitor, global),
                 Some(DisplayId::new(monitor.id.raw())),
+                global.origin,
             )
         }
         None => match cx.primary_display() {
-            Some(display) => (display.bounds(), Some(display.id())),
+            Some(display) => {
+                let bounds = display.bounds();
+                (bounds, Some(display.id()), bounds.origin)
+            }
             None => {
                 log_error!("editor", "no display available for long capture");
                 return false;
@@ -5412,7 +5458,7 @@ pub fn open_long_capture_inline(frame: RgbaFrame, monitor_id: MonitorId, cx: &mu
         image_rect,
         window_bounds,
         display_id,
-        window_bounds.origin,
+        screen_origin,
         None,
         true,
         Tool::Select,
@@ -5423,7 +5469,10 @@ pub fn open_long_capture_inline(frame: RgbaFrame, monitor_id: MonitorId, cx: &mu
 }
 
 fn fit_long_capture_rect(frame: &RgbaFrame, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
-    const MARGIN: f32 = 24.0;
+    // Keep the result clear of the macOS menu bar (which can be up to 37 pt on
+    // notched displays) and the window edges elsewhere, so a tall capture
+    // never opens partially off-screen.
+    const MARGIN: f32 = 44.0;
     const GAP: f32 = 8.0;
     let window_width = f32::from(bounds.size.width);
     let window_height = f32::from(bounds.size.height);
@@ -5638,6 +5687,47 @@ fn hit_resize_handle(shape: &Shape, point: PhysicalPoint, tolerance: f32) -> Opt
         .map(|(handle, _)| handle)
 }
 
+/// Resolves a resize handle without stealing drags from the object body.
+///
+/// The tolerance is in logical points. Clicks deep inside a closed shape are
+/// body drags even when the object is small; otherwise a Retina capture made
+/// short annotations impossible to move because every interior point sat
+/// within the handle radius.
+fn annotation_handle_at(shape: &Shape, point: PhysicalPoint, scale: f32) -> Option<ResizeHandle> {
+    let scale = scale.max(0.01);
+    let tolerance_pt = if matches!(shape, Shape::Arrow { .. } | Shape::Polyline { .. }) {
+        4.0
+    } else {
+        let bounds = shape.bounds();
+        let min_pt = (bounds.size.width.min(bounds.size.height) as f32) * scale;
+        (min_pt * 0.35).clamp(1.5, 4.0)
+    };
+    let body_inset = 2.5 / scale;
+    if closed_shape_contains(shape, point, body_inset) {
+        return None;
+    }
+    hit_resize_handle(shape, point, tolerance_pt / scale)
+}
+
+fn closed_shape_contains(shape: &Shape, point: PhysicalPoint, inset: f32) -> bool {
+    match shape {
+        Shape::Arrow { .. } | Shape::Polyline { .. } => false,
+        _ => {
+            let rect = shape.bounds();
+            let left = rect.origin.x as f32 + inset;
+            let top = rect.origin.y as f32 + inset;
+            let right = rect.right() as f32 - inset;
+            let bottom = rect.bottom() as f32 - inset;
+            left < right
+                && top < bottom
+                && (point.x as f32) >= left
+                && (point.y as f32) >= top
+                && (point.x as f32) <= right
+                && (point.y as f32) <= bottom
+        }
+    }
+}
+
 fn resize_shape(
     original: &Shape,
     handle: ResizeHandle,
@@ -5834,8 +5924,8 @@ fn paint_selection(
     let draw_handle = |window: &mut Window, handle_pos: PhysicalPoint| {
         let center = to_point(handle_pos.x as f32, handle_pos.y as f32);
         for (half, color) in [
-            (px(4.5), rgba((accent_hex << 8) | 0xFF)),
-            (px(2.5), rgb(0xFFFFFF)),
+            (px(5.5), rgba((accent_hex << 8) | 0xFF)),
+            (px(3.0), rgb(0xFFFFFF)),
         ] {
             let mut builder = PathBuilder::fill();
             builder.move_to(point(center.x - half, center.y - half));
@@ -6074,5 +6164,50 @@ mod tests {
         assert_eq!(hue_rgb(0.0), hue_rgb(360.0));
         assert_ne!(hue_rgb(0.0), hue_rgb(120.0));
         assert_ne!(hue_rgb(120.0), hue_rgb(240.0));
+    }
+
+    #[test]
+    fn small_closed_annotations_drag_from_the_body() {
+        let shape = super::Shape::Rect(core_types::PhysicalRect::new(0, 0, 12, 12));
+        assert_eq!(
+            super::annotation_handle_at(&shape, PhysicalPoint::new(6, 6), 0.5),
+            None
+        );
+        assert!(
+            super::annotation_handle_at(&shape, PhysicalPoint::new(0, 0), 0.5).is_some(),
+            "the painted corner remains a resize handle"
+        );
+    }
+
+    #[test]
+    fn arrow_body_drags_instead_of_resizing_from_an_endpoint() {
+        let shape = super::Shape::Arrow {
+            start: PhysicalPoint::new(10, 50),
+            end: PhysicalPoint::new(210, 50),
+        };
+        assert_eq!(
+            super::annotation_handle_at(&shape, PhysicalPoint::new(100, 50), 0.5),
+            None
+        );
+        assert!(
+            super::annotation_handle_at(&shape, PhysicalPoint::new(210, 50), 0.5).is_some(),
+            "the tip remains a resize handle"
+        );
+    }
+
+    #[test]
+    fn long_capture_fit_keeps_room_for_the_menu_bar_and_toolbar() {
+        use gpui_kit::{Bounds, point, px, size};
+        let frame =
+            core_types::RgbaFrame::from_pixels(400, 12_000, vec![0; 400 * 12_000 * 4]).unwrap();
+        let bounds = Bounds {
+            origin: point(px(0.0), px(0.0)),
+            size: size(px(1440.0), px(900.0)),
+        };
+        let rect = super::fit_long_capture_rect(&frame, bounds);
+        assert!(f32::from(rect.origin.y) >= 44.0);
+        assert!(f32::from(rect.origin.y) + f32::from(rect.size.height) <= 900.0 - 44.0);
+        assert!(f32::from(rect.origin.x) >= 44.0);
+        assert!(f32::from(rect.size.width) <= 1440.0 - 88.0 + 0.5);
     }
 }
