@@ -107,9 +107,17 @@ mod imp {
     }
 
     fn load_icon() -> Option<Icon> {
-        // Both platforms use the same two-ring glyph. The glyph sits on the
-        // taskbar on Windows and the menu bar on macOS: a light surface needs
-        // the dark glyph and vice versa.
+        // Windows uses the raw 32 px glyph on the taskbar. macOS menu bar
+        // items follow the HIG at 16 pt with breathing room, so that platform
+        // ships a 44 px asset whose 32 px glyph is centred in a transparent
+        // margin; AppKit scales it to 22 pt (the menu bar cap).
+        #[cfg(target_os = "macos")]
+        let bytes: &[u8] = if surface_is_light() {
+            include_bytes!("../../../assets/icon/tray/capin_tray_light_macos.png")
+        } else {
+            include_bytes!("../../../assets/icon/tray/capin_tray_dark_macos.png")
+        };
+        #[cfg(not(target_os = "macos"))]
         let bytes: &[u8] = if surface_is_light() {
             include_bytes!("../../../assets/icon/tray/capin_tray_light.png")
         } else {
