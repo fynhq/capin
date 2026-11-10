@@ -17,6 +17,30 @@ use crate::settings_state;
 const BAR_WIDTH: f32 = 520.0;
 const BAR_HEIGHT: f32 = 64.0;
 const COUNTDOWN: Duration = Duration::from_secs(3);
+const COMPLETE_LINGER: Duration = Duration::from_millis(3000);
+
+thread_local! {
+    static RECORD_BAR: std::cell::RefCell<Option<WeakEntity<RecordBar>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RecordShortcut {
+    Pause,
+    Stop,
+}
+
+/// Handles F9/F10 while the recording bar is alive. The global hotkey manager
+/// routes these to the single active session.
+pub(crate) fn handle_shortcut(shortcut: RecordShortcut, cx: &mut App) {
+    let view = RECORD_BAR.with(|slot| slot.borrow().as_ref().and_then(|weak| weak.upgrade()));
+    if let Some(view) = view {
+        view.update(cx, |bar, cx| match shortcut {
+            RecordShortcut::Pause => bar.toggle_pause(cx),
+            RecordShortcut::Stop => bar.stop(cx),
+        });
+    }
+}
 
 pub fn start(target: CaptureTarget, cx: &mut App) {
     log_info!("record", "recording requested for {:?}", target);
@@ -38,6 +62,9 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
         }),
     };
 
+    crate::region_outline::open(target, cx);
+
+    let shortcuts_ok = crate::hotkey::set_recording_shortcuts(true);
     let monitor_id = target_monitor(target);
     let monitor = monitor_id.and_then(|id| {
         platform_backend()
@@ -81,15 +108,34 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
         let excluded: Vec<u64> = platform_window::native_window_id(&*window)
             .into_iter()
             .collect();
-        cx.new(|cx| RecordBar::new(output, config, excluded, exclusion_ok, bar_overlaps, cx))
+        let window_handle = window.window_handle();
+        cx.new(|cx| {
+            RecordBar::new(
+                output,
+                config,
+                excluded,
+                exclusion_ok,
+                bar_overlaps,
+                shortcuts_ok,
+                window_handle,
+                cx,
+            )
+        })
     }) {
-        Ok(_) => {}
-        Err(error) => log_error!("record", "failed to open recording bar: {error}"),
+        Ok((_, entity)) => {
+            RECORD_BAR.with(|slot| *slot.borrow_mut() = Some(entity.downgrade()));
+        }
+        Err(error) => {
+            crate::hotkey::set_recording_shortcuts(false);
+            crate::region_outline::close(cx);
+            log_error!("record", "failed to open recording bar: {error}");
+        }
     }
 }
 
 struct RecordBar {
     output: PathBuf,
+    window_handle: AnyWindowHandle,
     recorder: Option<Recorder>,
     config: RecordConfig,
     excluded: Vec<u64>,
@@ -103,15 +149,20 @@ struct RecordBar {
     blocked: bool,
     status: Option<String>,
     language: Language,
+    shortcuts_ok: bool,
+    auto_close_scheduled: bool,
 }
 
 impl RecordBar {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         output: PathBuf,
         config: RecordConfig,
         excluded: Vec<u64>,
         exclusion_ok: bool,
         bar_overlaps: bool,
+        shortcuts_ok: bool,
+        window_handle: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) -> Self {
         let settings = settings_state::get();
@@ -126,6 +177,7 @@ impl RecordBar {
 
         let bar = Self {
             output,
+            window_handle,
             recorder: None,
             config,
             excluded,
@@ -139,7 +191,15 @@ impl RecordBar {
             blocked,
             status,
             language,
+            shortcuts_ok,
+            auto_close_scheduled: false,
         };
+        cx.on_release(|_, cx| {
+            crate::hotkey::set_recording_shortcuts(false);
+            RECORD_BAR.with(|slot| *slot.borrow_mut() = None);
+            crate::region_outline::close(cx);
+        })
+        .detach();
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -170,6 +230,9 @@ impl RecordBar {
                             this.completed = true;
                             this.stopping = false;
                             this.apply_final_status();
+                            if this.output_saved() {
+                                this.schedule_auto_close(cx);
+                            }
                             cx.notify();
                             return false;
                         }
@@ -222,6 +285,32 @@ impl RecordBar {
         });
     }
 
+    fn output_saved(&self) -> bool {
+        self.recorder
+            .as_ref()
+            .is_some_and(|recorder| recorder.error().is_none())
+    }
+
+    /// The completion prompt is transient: keep it on screen long enough to
+    /// click "Open folder", then remove the bar and the region outline.
+    fn schedule_auto_close(&mut self, cx: &mut Context<Self>) {
+        if self.auto_close_scheduled {
+            return;
+        }
+        self.auto_close_scheduled = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COMPLETE_LINGER).await;
+            this.update(cx, |this, cx| this.close(cx)).ok();
+        })
+        .detach();
+    }
+
+    fn open_folder(&mut self, cx: &mut Context<Self>) {
+        if let Some(directory) = self.output.parent() {
+            cx.open_with_system(directory);
+        }
+    }
+
     fn elapsed(&self) -> Duration {
         let Some(started) = self.started else {
             return Duration::ZERO;
@@ -271,9 +360,12 @@ impl RecordBar {
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
-        let handles = cx.windows();
+        crate::hotkey::set_recording_shortcuts(false);
+        RECORD_BAR.with(|slot| *slot.borrow_mut() = None);
+        crate::region_outline::close(cx);
+        let handle = self.window_handle;
         cx.defer(move |cx| {
-            crate::windows::close_capture_auxiliary(cx, handles);
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
         });
     }
 }
@@ -312,11 +404,14 @@ impl Render for RecordBar {
             .status
             .clone()
             .unwrap_or_else(|| self.output.display().to_string());
-        let pause_label = if self.paused {
+        let mut pause_label = if self.paused {
             t(language, "record.resume").to_owned()
         } else {
             t(language, "record.pause").to_owned()
         };
+        if self.shortcuts_ok {
+            pause_label = format!("{pause_label} · F9");
+        }
         let pause = (!self.blocked && self.recorder.is_some() && !self.stopping && !self.completed)
             .then(|| {
                 crate::ui::bar_button(
@@ -329,15 +424,30 @@ impl Render for RecordBar {
                     Self::toggle_pause,
                 )
             });
+        let mut stop_label = t(language, "record.stop").to_owned();
+        if self.shortcuts_ok {
+            stop_label = format!("{stop_label} · F10");
+        }
         let stop = (!self.blocked && !self.stopping && !self.completed).then(|| {
             crate::ui::bar_button(
                 "record-stop",
-                t(language, "record.stop").to_owned(),
+                stop_label,
                 None,
                 crate::ui::BarButtonTone::Danger,
                 &theme,
                 cx,
                 Self::stop,
+            )
+        });
+        let open_folder = (self.completed && self.output_saved()).then(|| {
+            crate::ui::bar_button(
+                "record-open-folder",
+                t(language, "record.open_folder").to_owned(),
+                Some(crate::icons::FOLDER),
+                crate::ui::BarButtonTone::Neutral,
+                &theme,
+                cx,
+                Self::open_folder,
             )
         });
         let close = (self.completed || self.blocked).then(|| {
@@ -441,6 +551,7 @@ impl Render for RecordBar {
                 )
                 .children(pause)
                 .children(stop)
+                .children(open_folder)
                 .children(close),
         )
     }

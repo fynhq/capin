@@ -17,6 +17,7 @@ mod ocr_queue;
 mod overlay;
 mod pin;
 mod record;
+mod region_outline;
 mod scroll;
 mod settings;
 mod settings_state;

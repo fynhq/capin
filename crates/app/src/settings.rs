@@ -1026,6 +1026,13 @@ impl SettingsView {
         let top = 0.0;
         #[cfg(not(target_os = "macos"))]
         let top = layout::TITLEBAR_HEIGHT;
+        // Pin the card column to the window width instead of letting flex
+        // content decide it. Language changes alter label lengths; without a
+        // fixed width the cards visibly jumped between Chinese and English.
+        let content_width = (f32::from(window.bounds().size.width)
+            - layout::SIDEBAR_WIDTH
+            - layout::CONTENT_PAD_X * 2.0)
+            .clamp(240.0, layout::CONTENT_MAX_WIDTH);
         div()
             .flex_1()
             .h_full()
@@ -1040,12 +1047,7 @@ impl SettingsView {
                     .px(px(layout::CONTENT_PAD_X))
                     .pt(px(layout::CONTENT_PAD_TOP))
                     .pb(px(layout::HEADER_GAP))
-                    .child(
-                        div()
-                            .w_full()
-                            .max_w(px(layout::CONTENT_MAX_WIDTH))
-                            .child(self.section_header(theme)),
-                    ),
+                    .child(div().w(px(content_width)).child(self.section_header(theme))),
             )
             .child(
                 div()
@@ -1060,8 +1062,7 @@ impl SettingsView {
                     .overflow_y_scroll()
                     .child(
                         div()
-                            .w_full()
-                            .max_w(px(layout::CONTENT_MAX_WIDTH))
+                            .w(px(content_width))
                             .flex()
                             .flex_col()
                             .gap(px(layout::CONTENT_GAP))

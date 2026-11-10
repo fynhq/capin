@@ -79,6 +79,11 @@ fn record_png(hash: u64, write: impl FnOnce(&Path) -> bool) -> bool {
 }
 
 /// Returns the next older screenshot after the one matching `hash`.
+///
+/// The pin shortcut calls this after a pin is closed, so the walk must keep
+/// going even when the previous image is no longer on screen. If `hash` does
+/// not belong to the history (for example a clipboard-only pin), the walk
+/// starts at the newest screenshot instead of skipping it.
 pub fn cycle(hash: u64) -> Option<RgbaFrame> {
     let entries = entries();
     if entries.is_empty() {
@@ -86,28 +91,25 @@ pub fn cycle(hash: u64) -> Option<RgbaFrame> {
     }
     let directory = history_dir()?;
     let same_source = LAST_HASH.with(|last| last.get()) == Some(hash);
-    let mut cursor = if same_source {
+    let start = if same_source {
         CURSOR.with(|cursor| cursor.get())
     } else {
-        LAST_HASH.with(|last| last.set(Some(hash)));
-        0
+        // Start before the first entry when the hash is unknown so the first
+        // candidate below is the newest screenshot.
+        entries
+            .iter()
+            .position(|entry| entry.hash == hash)
+            .unwrap_or(entries.len().saturating_sub(1))
     };
 
-    if entries.len() == 1 {
-        // The single entry is the image that triggered the repeat, so there is
-        // no older screenshot to restore. Returning it again used to pin a
-        // duplicate every time the shortcut repeated.
-        CURSOR.with(|slot| slot.set(0));
-        return None;
-    }
-
-    for _ in 0..entries.len() {
-        cursor = (cursor + 1) % entries.len();
+    for step in 1..=entries.len() {
+        let cursor = (start + step) % entries.len();
         if entries[cursor].hash == hash {
             continue;
         }
         if let Some(frame) = load_entry(&directory, &entries[cursor]) {
             CURSOR.with(|slot| slot.set(cursor));
+            LAST_HASH.with(|last| last.set(Some(hash)));
             return Some(frame);
         }
     }
@@ -117,6 +119,16 @@ pub fn cycle(hash: u64) -> Option<RgbaFrame> {
 /// Whether `hash` belongs to a screenshot in the current history.
 pub fn contains(hash: u64) -> bool {
     entries().iter().any(|entry| entry.hash == hash)
+}
+
+/// Loads the history entry with `hash`. Used when the pin shortcut needs to
+/// reopen the image it was already showing after a history walk ends.
+pub fn find(hash: u64) -> Option<RgbaFrame> {
+    let directory = history_dir()?;
+    entries()
+        .iter()
+        .find(|entry| entry.hash == hash)
+        .and_then(|entry| load_entry(&directory, entry))
 }
 
 /// Loads the newest exported screenshot. The pin shortcut falls back to this

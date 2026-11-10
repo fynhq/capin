@@ -16,6 +16,9 @@ use platform_window::{WindowStyle, apply as apply_window_style, system_accent_he
 use crate::chrome_theme::ChromeTheme;
 use crate::effects::RegionEffects;
 use crate::logging::{log_error, log_info};
+use crate::overlay::{
+    ResizeHandle as RegionHandle, edge_resize_handle, handle_positions, resize_rect,
+};
 use crate::settings_state::AnnotationColorTool;
 use crate::{i18n::t, icons, image_util, settings_state};
 
@@ -308,6 +311,13 @@ pub(crate) struct InlineCapture {
     pub(crate) effects: RegionEffects,
 }
 
+#[derive(Clone, Copy)]
+struct RegionAdjustDraft {
+    handle: RegionHandle,
+    original: PhysicalRect,
+    current: PhysicalRect,
+}
+
 struct TextEdit {
     target: Option<core_annotate::AnnotationId>,
     origin: PhysicalPoint,
@@ -522,6 +532,11 @@ pub(crate) struct EditorView {
     blur_images: [Option<Arc<RenderImage>>; BLUR_RADII.len()],
     images_released: bool,
     frame: Arc<RgbaFrame>,
+    /// Frozen monitor frame behind an inline screenshot editor. Present only
+    /// for plain region captures, where the crop can be widened or shrunk
+    /// again while no annotation object is selected.
+    region_source: Option<Arc<RgbaFrame>>,
+    region_drag: Option<RegionAdjustDraft>,
     pin_target: Option<u64>,
     document: AnnotationDocument,
     image_size: PhysicalSize,
@@ -614,6 +629,8 @@ impl EditorView {
             blur_images,
             images_released: false,
             frame,
+            region_source: None,
+            region_drag: None,
             pin_target,
             document: AnnotationDocument::new(image_size),
             image_size,
@@ -694,6 +711,7 @@ impl EditorView {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_inline(
         frame: Arc<RgbaFrame>,
+        region_source: Option<Arc<RgbaFrame>>,
         image_rect: Bounds<Pixels>,
         screen_origin: Point<Pixels>,
         initial_tool: Tool,
@@ -705,6 +723,7 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut view = Self::new(frame, pin_target, cx);
+        view.region_source = region_source;
         if let Some(document) = document
             && document.image_size() == view.image_size
         {
@@ -1313,6 +1332,209 @@ impl EditorView {
         self.crop_mode = false;
         self.crop_draft = None;
         self.reset_view(cx);
+    }
+
+    fn region_capture(&self) -> Option<(CaptureRegion, PhysicalRect)> {
+        let inline = self.inline.as_ref()?;
+        if inline.zoomable {
+            return None;
+        }
+        let capture = inline.capture.as_ref()?;
+        let CaptureTarget::Region(region) = capture.target else {
+            return None;
+        };
+        Some((region, region.rect))
+    }
+
+    fn can_adjust_region(&self) -> bool {
+        self.region_source.is_some()
+            && self.region_capture().is_some()
+            && self.document.selected().is_none()
+            && self.draft.is_none()
+            && self.move_draft.is_none()
+            && self.resize_draft.is_none()
+            && self.polyline_draft.is_none()
+            && self.text_edit.is_none()
+            && !self.crop_mode
+            && self.region_drag.is_none()
+    }
+
+    fn begin_region_drag(&mut self, handle: RegionHandle, cx: &mut Context<Self>) {
+        let Some((_, rect)) = self.region_capture() else {
+            return;
+        };
+        self.region_drag = Some(RegionAdjustDraft {
+            handle,
+            original: rect,
+            current: rect,
+        });
+        self.status = None;
+        cx.notify();
+    }
+
+    fn update_region_drag(
+        &mut self,
+        position: Point<Pixels>,
+        modifiers: Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(source) = self.region_source.clone() else {
+            return;
+        };
+        let Some(capture) = self.inline.and_then(|inline| inline.capture) else {
+            return;
+        };
+        let Some(draft) = self.region_drag.as_ref().copied() else {
+            return;
+        };
+        let scale = capture.scale.max(0.1);
+        let cursor_point = PhysicalPoint::new(
+            (f32::from(position.x) * scale).round() as i32,
+            (f32::from(position.y) * scale).round() as i32,
+        );
+        let image_size = PhysicalSize::new(source.width(), source.height());
+        let rect = resize_rect(
+            draft.original,
+            draft.handle,
+            cursor_point,
+            None,
+            modifiers.shift,
+            modifiers.alt,
+            image_size,
+        );
+        if let Some(draft) = self.region_drag.as_mut() {
+            draft.current = rect;
+        }
+        if let Some(inline) = self.inline.as_mut() {
+            inline.image_rect = Bounds {
+                origin: point(
+                    px(rect.origin.x as f32 / scale),
+                    px(rect.origin.y as f32 / scale),
+                ),
+                size: size(
+                    px(rect.size.width as f32 / scale),
+                    px(rect.size.height as f32 / scale),
+                ),
+            };
+        }
+        cx.notify();
+    }
+
+    fn finish_region_drag(&mut self, cx: &mut Context<Self>) {
+        let Some(draft) = self.region_drag.take() else {
+            return;
+        };
+        let Some(source) = self.region_source.clone() else {
+            return;
+        };
+        let Some(capture) = self.inline.and_then(|inline| inline.capture) else {
+            return;
+        };
+        let scale = capture.scale.max(0.1);
+        if draft.current == draft.original {
+            self.restore_region_image_rect(scale, cx);
+            return;
+        }
+        let Some(cropped) = source.cropped(draft.current) else {
+            self.restore_region_image_rect(scale, cx);
+            return;
+        };
+        let dx = draft.current.origin.x - draft.original.origin.x;
+        let dy = draft.current.origin.y - draft.original.origin.y;
+        let new_size = PhysicalSize::new(cropped.width(), cropped.height());
+        let mut document = AnnotationDocument::new(new_size);
+        for annotation in self.document.objects() {
+            let translated = annotation.clone().translated(-dx, -dy);
+            document.add(translated.shape, translated.style);
+        }
+        document.clear_history();
+        self.frame = Arc::new(cropped);
+        self.image_size = new_size;
+        self.refresh_frame_images(cx);
+        self.document = document;
+        self.canvas_undo.clear();
+        self.canvas_redo.clear();
+        self.text_edit = None;
+        self.draft = None;
+        self.move_draft = None;
+        self.resize_draft = None;
+        self.polyline_draft = None;
+        self.selection_hover = SelectionHover::None;
+        self.view_zoom = 1.0;
+        self.view_pan = point(px(0.0), px(0.0));
+        if let Some(inline) = self.inline.as_mut() {
+            inline.image_rect = Bounds {
+                origin: point(
+                    px(draft.current.origin.x as f32 / scale),
+                    px(draft.current.origin.y as f32 / scale),
+                ),
+                size: size(
+                    px(draft.current.size.width as f32 / scale),
+                    px(draft.current.size.height as f32 / scale),
+                ),
+            };
+            if let Some(capture) = inline.capture.as_mut() {
+                capture.region = CaptureRegion::new(capture.region.monitor, draft.current);
+                capture.target = CaptureTarget::Region(capture.region);
+            }
+        }
+        self.status = Some(t(settings_state::get().language, "editor.cropped").to_owned());
+        cx.notify();
+    }
+
+    fn restore_region_image_rect(&mut self, scale: f32, cx: &mut Context<Self>) {
+        let Some((_, rect)) = self.region_capture() else {
+            return;
+        };
+        if let Some(inline) = self.inline.as_mut() {
+            inline.image_rect = Bounds {
+                origin: point(
+                    px(rect.origin.x as f32 / scale),
+                    px(rect.origin.y as f32 / scale),
+                ),
+                size: size(
+                    px(rect.size.width as f32 / scale),
+                    px(rect.size.height as f32 / scale),
+                ),
+            };
+        }
+        cx.notify();
+    }
+
+    fn region_handles(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        if !self.can_adjust_region() {
+            return Vec::new();
+        }
+        let rect = self.image_view_rect(window);
+        let mut handles = Vec::new();
+        for (handle, position) in handle_positions(rect) {
+            handles.push(
+                div()
+                    .id(format!("editor-region-handle-{:?}", handle))
+                    .absolute()
+                    .left(px(f32::from(position.x) - 3.5))
+                    .top(px(f32::from(position.y) - 3.5))
+                    .w(px(7.0))
+                    .h(px(7.0))
+                    .rounded(px(1.5))
+                    .bg(rgb(0xFFFFFF))
+                    .border_1()
+                    .border_color(rgba((self.accent_hex << 8) | 0xFF))
+                    .cursor(region_handle_cursor(handle))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            let focus = this.focus_handle.clone();
+                            window.focus(&focus, cx);
+                            this.begin_region_drag(handle, cx);
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+            );
+        }
+        handles
     }
 
     fn rotate_canvas(&mut self, cx: &mut Context<Self>) {
@@ -3530,6 +3752,12 @@ impl EditorView {
                 return;
             }
         };
+        if matches!(capture.target, CaptureTarget::Region(_))
+            && let Ok(source) = core_capture::platform_backend()
+                .capture(CaptureTarget::Monitor(capture.region.monitor))
+        {
+            self.region_source = Some(Arc::new(source));
+        }
         let image_size = PhysicalSize::new(frame.width(), frame.height());
         let size_changed = image_size != self.image_size;
         self.frame = Arc::new(frame);
@@ -4330,6 +4558,21 @@ impl Render for EditorView {
                         this.commit_text(cx);
                     }
                     let hit = this.document.hit_test(point);
+                    // With nothing selected, the image edge is a live crop
+                    // handle. Clicking an object still wins so edge-adjacent
+                    // annotations remain selectable.
+                    if hit.is_none()
+                        && this.can_adjust_region()
+                        && let Some(handle) = edge_resize_handle(
+                            PhysicalRect::new(0, 0, this.image_size.width, this.image_size.height),
+                            point,
+                            (6.0 / scale).max(1.0),
+                        )
+                    {
+                        this.begin_region_drag(handle, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
                     // Text edits are a double-click affordance on the object
                     // itself, not on the Select tool, so a just-created text
                     // annotation can be reopened without switching tools.
@@ -4596,6 +4839,7 @@ impl Render for EditorView {
             }));
 
         let toolbar_rect = self.toolbar_rect(window);
+        let region_handles = self.region_handles(window, cx);
         let (toolbar, options_panel, more_panel) = self.toolbar(window, cx);
         let info_bar = if inline {
             self.info_bar(window, cx)
@@ -4636,6 +4880,24 @@ impl Render for EditorView {
                 if let Some(draft) = &mut this.draft {
                     draft.shift = event.modifiers.shift;
                     cx.notify();
+                }
+            }))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if this.region_drag.is_some() {
+                    this.update_region_drag(event.position, event.modifiers, cx);
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                    if this.region_drag.is_some() {
+                        this.finish_region_drag(cx);
+                    }
+                }),
+            )
+            .on_mouse_exit(cx.listener(|this, _event: &MouseExitEvent, _window, cx| {
+                if this.region_drag.is_some() {
+                    this.finish_region_drag(cx);
                 }
             }))
             .on_mouse_down(
@@ -4871,7 +5133,41 @@ impl Render for EditorView {
                     this.zoom_at(factor, center, window, cx);
                     return;
                 }
-                if key == "escape" || (command && matches!(key, "w" | "q")) {
+                if key == "escape" {
+                    if this.region_drag.is_some() {
+                        this.region_drag = None;
+                        let scale = this
+                            .inline
+                            .and_then(|inline| inline.capture)
+                            .map(|capture| capture.scale.max(0.1))
+                            .unwrap_or(1.0);
+                        this.restore_region_image_rect(scale, cx);
+                        return;
+                    }
+                    // First Escape clears the current annotation selection or
+                    // active drawing tool; only the next one leaves the editor.
+                    if this.document.selected().is_some() || this.tool != Tool::Select {
+                        this.select_annotation(None);
+                        this.tool = Tool::Select;
+                        this.draft = None;
+                        this.move_draft = None;
+                        this.resize_draft = None;
+                        this.pan_draft = None;
+                        this.selection_hover = SelectionHover::None;
+                        this.status = None;
+                        cx.notify();
+                        return;
+                    }
+                    this.release_images(cx);
+                    if this.inline.is_some() {
+                        let handles = cx.windows();
+                        cx.defer(move |cx| crate::windows::close_capture_auxiliary(cx, handles));
+                    } else {
+                        window.remove_window();
+                    }
+                    return;
+                }
+                if command && matches!(key, "w" | "q") {
                     this.release_images(cx);
                     if this.inline.is_some() {
                         let handles = cx.windows();
@@ -4933,6 +5229,7 @@ impl Render for EditorView {
             }))
             .children(outside_backdrop)
             .child(image_layer)
+            .children(region_handles)
             .children(info_bar)
             .child(toolbar)
             .children(options_panel)
@@ -5178,6 +5475,7 @@ fn open_inline_editor_window(
         let editor = cx.new(|cx| {
             EditorView::new_inline(
                 frame,
+                None,
                 image_rect,
                 screen_origin,
                 initial_tool,
@@ -5270,6 +5568,15 @@ fn distance(a: PhysicalPoint, b: PhysicalPoint) -> f32 {
     let dx = (a.x - b.x) as f32;
     let dy = (a.y - b.y) as f32;
     (dx * dx + dy * dy).sqrt()
+}
+
+fn region_handle_cursor(handle: RegionHandle) -> CursorStyle {
+    match handle {
+        RegionHandle::NorthWest | RegionHandle::SouthEast => CursorStyle::ResizeUpLeftDownRight,
+        RegionHandle::NorthEast | RegionHandle::SouthWest => CursorStyle::ResizeUpRightDownLeft,
+        RegionHandle::North | RegionHandle::South => CursorStyle::ResizeUpDown,
+        RegionHandle::East | RegionHandle::West => CursorStyle::ResizeLeftRight,
+    }
 }
 
 fn handle_cursor(handle: ResizeHandle) -> CursorStyle {
@@ -5563,40 +5870,6 @@ fn paint_shape(
             bounds.origin.y + px(y * scale),
         )
     };
-    // GPUI strokes have butt caps, while the exported raster uses round caps.
-    // Paint a round cap at every tail end so the preview matches the output.
-    let draw_cap = |window: &mut Window, center: PhysicalPoint| {
-        let radius = stroke / 2.0;
-        let c = to_point(center.x as f32, center.y as f32);
-        let k = radius * 0.552_284_8;
-        let mut builder = PathBuilder::fill();
-        builder.move_to(point(c.x - radius, c.y));
-        builder.cubic_bezier_to(
-            point(c.x - radius, c.y - k),
-            point(c.x - k, c.y - radius),
-            point(c.x, c.y - radius),
-        );
-        builder.cubic_bezier_to(
-            point(c.x + k, c.y - radius),
-            point(c.x + radius, c.y - k),
-            point(c.x + radius, c.y),
-        );
-        builder.cubic_bezier_to(
-            point(c.x + radius, c.y + k),
-            point(c.x + k, c.y + radius),
-            point(c.x, c.y + radius),
-        );
-        builder.cubic_bezier_to(
-            point(c.x - k, c.y + radius),
-            point(c.x - radius, c.y + k),
-            point(c.x - radius, c.y),
-        );
-        builder.close();
-        if let Ok(path) = builder.build() {
-            window.paint_path(path, color);
-        }
-    };
-
     match shape {
         Shape::Rect(rect) => {
             let left = rect.origin.x as f32;
@@ -5661,100 +5934,23 @@ fn paint_shape(
                 window.paint_path(path, color);
             }
         }
-        Shape::Arrow { start, end } => {
-            let mut builder = PathBuilder::stroke(stroke);
-            builder.move_to(to_point(start.x as f32, start.y as f32));
-            builder.line_to(to_point(end.x as f32, end.y as f32));
-
-            let dx = (end.x - start.x) as f32;
-            let dy = (end.y - start.y) as f32;
-            let angle = dy.atan2(dx);
-            let head = (style.stroke_width * 3.5).max(10.0);
-            let spread = 0.55;
-            let push_head = |builder: &mut PathBuilder, tip_x: f32, tip_y: f32, angle: f32| {
-                let left = (
-                    tip_x - head * (angle - spread).cos(),
-                    tip_y - head * (angle - spread).sin(),
-                );
-                let right = (
-                    tip_x - head * (angle + spread).cos(),
-                    tip_y - head * (angle + spread).sin(),
-                );
-                builder.move_to(to_point(left.0, left.1));
-                builder.line_to(to_point(tip_x, tip_y));
-                builder.line_to(to_point(right.0, right.1));
-            };
-            if style.arrow_end {
-                push_head(&mut builder, end.x as f32, end.y as f32, angle);
-            }
-            if style.arrow_start {
-                push_head(
-                    &mut builder,
-                    start.x as f32,
-                    start.y as f32,
-                    (-dy).atan2(-dx),
-                );
-            }
-            if let Ok(path) = builder.build() {
-                window.paint_path(path, color);
-            }
-            if !style.arrow_start {
-                draw_cap(window, *start);
-            }
-            if !style.arrow_end {
-                draw_cap(window, *end);
-            }
-        }
-        Shape::Polyline { points } => {
-            if points.len() < 2 {
+        Shape::Arrow { .. } | Shape::Polyline { .. } => {
+            let Some(polygons) = core_annotate::stroke_outline(shape, &style) else {
                 return;
-            }
-            let mut builder = PathBuilder::stroke(stroke);
-            builder.move_to(to_point(points[0].x as f32, points[0].y as f32));
-            for point in &points[1..] {
-                builder.line_to(to_point(point.x as f32, point.y as f32));
-            }
-            let head = (style.stroke_width * 3.5).max(10.0);
-            let spread = 0.55;
-            let push_head = |builder: &mut PathBuilder, tip: PhysicalPoint, angle: f32| {
-                let left = (
-                    tip.x as f32 - head * (angle - spread).cos(),
-                    tip.y as f32 - head * (angle - spread).sin(),
-                );
-                let right = (
-                    tip.x as f32 - head * (angle + spread).cos(),
-                    tip.y as f32 - head * (angle + spread).sin(),
-                );
-                builder.move_to(to_point(left.0, left.1));
-                builder.line_to(to_point(tip.x as f32, tip.y as f32));
-                builder.line_to(to_point(right.0, right.1));
             };
-            if style.arrow_end {
-                let last = points[points.len() - 1];
-                let previous = points[points.len() - 2];
-                push_head(
-                    &mut builder,
-                    last,
-                    ((last.y - previous.y) as f32).atan2((last.x - previous.x) as f32),
-                );
-            }
-            if style.arrow_start {
-                let first = points[0];
-                let next = points[1];
-                push_head(
-                    &mut builder,
-                    first,
-                    ((first.y - next.y) as f32).atan2((first.x - next.x) as f32),
-                );
-            }
-            if let Ok(path) = builder.build() {
-                window.paint_path(path, color);
-            }
-            if !style.arrow_start {
-                draw_cap(window, points[0]);
-            }
-            if !style.arrow_end {
-                draw_cap(window, points[points.len() - 1]);
+            for polygon in polygons {
+                let Some(first) = polygon.first() else {
+                    continue;
+                };
+                let mut builder = PathBuilder::fill();
+                builder.move_to(to_point(first.x, first.y));
+                for vertex in &polygon[1..] {
+                    builder.line_to(to_point(vertex.x, vertex.y));
+                }
+                builder.close();
+                if let Ok(path) = builder.build() {
+                    window.paint_path(path, color);
+                }
             }
         }
         Shape::HighlighterBox(rect) => {

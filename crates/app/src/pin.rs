@@ -5,12 +5,12 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use core_annotate::AnnotationDocument;
-use core_types::{PhysicalRect, PhysicalSize, RgbaFrame};
+use core_types::{DpiScale, PhysicalRect, PhysicalSize, RgbaFrame};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use platform_window::{
-    WindowStyle, apply as apply_window_style, hide_native_border, set_click_through,
-    system_accent_hex,
+    WindowStyle, apply as apply_window_style, hide_native_border, place_on_monitor,
+    set_click_through, system_accent_hex,
 };
 use serde::{Deserialize, Serialize};
 
@@ -48,6 +48,49 @@ thread_local! {
     static PIN_MENU: RefCell<Option<AnyWindowHandle>> = const { RefCell::new(None) };
     static MANIFEST_REVISION: Cell<u64> = const { Cell::new(0) };
     static LAST_PIN_TRIGGER: Cell<Option<u64>> = const { Cell::new(None) };
+    /// Signature of the clipboard image seen when the current pin sequence
+    /// started. A changed clipboard starts a fresh sequence; an unchanged one
+    /// keeps walking the screenshot history even after the previous pin was
+    /// closed.
+    static PIN_CLIPBOARD: Cell<Option<u64>> = const { Cell::new(None) };
+    static PIN_CLIPBOARD_TEXT: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+fn clipboard_signature_of(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    hash
+}
+
+/// Cheap content signature for the first clipboard image. Bytes are hashed
+/// without decoding, so checking whether the clipboard changed costs one read.
+fn clipboard_image_signature(cx: &mut App) -> Option<u64> {
+    let item = cx.read_from_clipboard()?;
+    for entry in item.entries() {
+        let ClipboardEntry::Image(image) = entry else {
+            continue;
+        };
+        return Some(clipboard_signature_of(&image.bytes));
+    }
+    None
+}
+
+fn clipboard_text_signature(cx: &mut App) -> Option<u64> {
+    let item = cx.read_from_clipboard()?;
+    for entry in item.entries() {
+        let ClipboardEntry::String(text) = entry else {
+            continue;
+        };
+        let text = text.text.trim_end();
+        if text.is_empty() {
+            continue;
+        }
+        return Some(clipboard_signature_of(text.as_bytes()));
+    }
+    None
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -297,39 +340,117 @@ struct PersistedPin {
 }
 
 pub fn pin_last(cx: &mut App) {
+    let mut clipboard_frame = None;
+    let mut clipboard_signature = None;
+    let mut clipboard_text = None;
+    let mut clipboard_text_signature = None;
     if let Some(item) = cx.read_from_clipboard() {
         for entry in item.entries() {
             let ClipboardEntry::Image(image) = entry else {
                 continue;
             };
+            clipboard_signature = Some(clipboard_signature_of(&image.bytes));
             let Ok(image) = image::load_from_memory(&image.bytes) else {
                 continue;
             };
             let rgba = image.to_rgba8();
             let (width, height) = rgba.dimensions();
             if let Ok(frame) = RgbaFrame::from_pixels(width, height, rgba.into_raw()) {
-                pin_image(frame, cx);
-                return;
+                clipboard_frame = Some(frame);
+                break;
             }
         }
-        for entry in item.entries() {
-            let ClipboardEntry::String(text) = entry else {
-                continue;
-            };
-            let text = text.text.trim_end();
-            if text.is_empty() {
-                continue;
+        if clipboard_frame.is_none() {
+            for entry in item.entries() {
+                let ClipboardEntry::String(text) = entry else {
+                    continue;
+                };
+                let text = text.text.trim_end();
+                if text.is_empty() {
+                    continue;
+                }
+                clipboard_text_signature = Some(clipboard_signature_of(text.as_bytes()));
+                clipboard_text = Some(text.to_owned());
+                break;
             }
-            open_pin_content(PinContent::Text(text.to_owned()), cx);
-            return;
         }
     }
 
+    if let Some(frame) = clipboard_frame {
+        let previous_clipboard = PIN_CLIPBOARD.get();
+        // A clipboard image that has not changed since the sequence started
+        // must not hijack the walk: pressing the shortcut after closing a pin
+        // continues upward through the screenshots.
+        let clipboard_changed = match (previous_clipboard, clipboard_signature) {
+            (Some(previous), Some(current)) => previous != current,
+            // No image existed when the sequence started, so a new one is
+            // user-provided content rather than part of the walk.
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if LAST_PIN_TRIGGER.with(|slot| slot.get()).is_none() || clipboard_changed {
+            pin_image(frame, cx);
+            return;
+        }
+        if pin_history_step(cx) {
+            return;
+        }
+        if let Some(current) = LAST_PIN_TRIGGER.with(|slot| slot.get())
+            && let Some(current) = crate::capture_history::find(current)
+        {
+            pin_image(current, cx);
+            return;
+        }
+        pin_image(frame, cx);
+        return;
+    }
+
+    if let Some(text) = clipboard_text {
+        let text_changed = match (PIN_CLIPBOARD_TEXT.get(), clipboard_text_signature) {
+            (Some(previous), Some(current)) => previous != current,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        if LAST_PIN_TRIGGER.with(|slot| slot.get()).is_none() || text_changed {
+            open_pin_content(PinContent::Text(text), cx);
+            return;
+        }
+        if pin_history_step(cx) {
+            return;
+        }
+        open_pin_content(PinContent::Text(text), cx);
+        return;
+    }
+
+    if LAST_PIN_TRIGGER.with(|slot| slot.get()).is_some() && pin_history_step(cx) {
+        return;
+    }
     if let Some(frame) = crate::capture_history::latest() {
         pin_image(frame, cx);
     } else {
         log_warn!("pin", "no clipboard content or recent capture to pin");
     }
+}
+
+/// Pins the next older screenshot in history, or reports that the history has
+/// no other image to show. Respects the flash-current repeat preference while
+/// that pin is still on screen.
+fn pin_history_step(cx: &mut App) -> bool {
+    let Some(current) = LAST_PIN_TRIGGER.with(|slot| slot.get()) else {
+        return false;
+    };
+    if settings_state::get().repeat_pin == settings_state::RepeatPinBehavior::FlashCurrent
+        && flash_existing_pin(current, cx)
+    {
+        return true;
+    }
+    let Some(frame) = crate::capture_history::cycle(current) else {
+        return false;
+    };
+    let hash = crate::capture_history::hash_frame(&frame);
+    LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
+    open_pin_content(PinContent::from_frame_with_hash(frame, hash), cx);
+    true
 }
 
 /// Pins an image, or applies the configured repeat behavior when the same
@@ -573,6 +694,8 @@ fn open_pin_inner(
             PINS.with(|pins| {
                 pins.borrow_mut().insert(id, state);
             });
+            PIN_CLIPBOARD.with(|slot| slot.set(clipboard_image_signature(cx)));
+            PIN_CLIPBOARD_TEXT.with(|slot| slot.set(clipboard_text_signature(cx)));
             // OCR already holds its own Arc source; drop the pin's CPU frame
             // now that the PNG path is recorded. Actions reload it lazily.
             view_for_release.update(cx, |view, _| view.release_frame_if_persisted());
@@ -1073,6 +1196,14 @@ struct PinView {
     id: u64,
     content: PinContent,
     zoom: f32,
+    /// Wheel zoom animates toward this value so a sequence of notches keeps
+    /// moving in the same direction instead of restarting from the current
+    /// window size.
+    zoom_target: f32,
+    zoom_serial: u64,
+    /// Screen point that stays fixed across a zoom gesture. Captured once per
+    /// gesture so frame-placement latency cannot make the pin creep.
+    zoom_center: Option<(f32, f32)>,
     opacity: f32,
     click_through: bool,
     notice: Option<String>,
@@ -1107,6 +1238,9 @@ impl PinView {
             id,
             content,
             zoom,
+            zoom_target: zoom,
+            zoom_serial: 0,
+            zoom_center: None,
             opacity,
             click_through,
             ocr_path,
@@ -1489,14 +1623,35 @@ impl PinView {
         true
     }
 
-    fn set_zoom(&mut self, zoom: f32, window: &mut Window, cx: &mut Context<Self>) {
+    /// Applies one animation step around the window centre. Resizing from the
+    /// top-left made wheel zoom drift towards the bottom-right; moving the
+    /// native frame keeps the image's centre anchored.
+    fn apply_zoom(&mut self, zoom: f32, window: &mut Window, cx: &mut Context<Self>) {
         if self.content.image_size().is_none() {
             return;
         }
-        self.zoom = zoom.clamp(0.15, 4.0);
-        let (width, height) = self.content.size(self.zoom);
-        window.resize(size(px(width), px(height)));
-        let origin = window.bounds().origin;
+        let zoom = zoom.clamp(0.15, 4.0);
+        let (width, height) = self.content.size(zoom);
+        let bounds = window.bounds();
+        let (center_x, center_y) = self.zoom_center.unwrap_or_else(|| {
+            (
+                f32::from(bounds.origin.x) + f32::from(bounds.size.width) / 2.0,
+                f32::from(bounds.origin.y) + f32::from(bounds.size.height) / 2.0,
+            )
+        });
+        let origin = point(px(center_x - width / 2.0), px(center_y - height / 2.0));
+        let scale = window.scale_factor().max(0.1);
+        let dpi = DpiScale::new(scale).unwrap_or_default();
+        let physical = PhysicalRect::new(
+            (f32::from(origin.x) * scale).round() as i32,
+            (f32::from(origin.y) * scale).round() as i32,
+            (width * scale).round().max(1.0) as u32,
+            (height * scale).round().max(1.0) as u32,
+        );
+        if place_on_monitor(&*window, physical, dpi).is_err() {
+            window.resize(size(px(width), px(height)));
+        }
+        self.zoom = zoom;
         update_bounds_state(
             self.id,
             Bounds {
@@ -1506,10 +1661,61 @@ impl PinView {
         );
         update_meta(self.id, self.zoom, self.opacity);
         schedule_manifest_save(cx);
-        let language = settings_state::get().language;
-        let percent = (self.zoom * 100.0).round() as i32;
-        self.show_hud(format!("{} {percent}%", t(language, "pin.zoom_hud")), cx);
         cx.notify();
+    }
+
+    fn step_zoom(&mut self, serial: u64, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if serial != self.zoom_serial {
+            return true;
+        }
+        let difference = self.zoom_target - self.zoom;
+        if difference.abs() <= 0.001 {
+            if (self.zoom_target - self.zoom).abs() > f32::EPSILON {
+                self.apply_zoom(self.zoom_target, window, cx);
+            }
+            self.zoom_center = None;
+            return true;
+        }
+        let next = self.zoom + difference * 0.35;
+        self.apply_zoom(next, window, cx);
+        false
+    }
+
+    fn zoom_toward(&mut self, target: f32, window: &mut Window, cx: &mut Context<Self>) {
+        if self.content.image_size().is_none() {
+            return;
+        }
+        self.zoom_target = target.clamp(0.15, 4.0);
+        if self.zoom_center.is_none() {
+            let bounds = window.bounds();
+            self.zoom_center = Some((
+                f32::from(bounds.origin.x) + f32::from(bounds.size.width) / 2.0,
+                f32::from(bounds.origin.y) + f32::from(bounds.size.height) / 2.0,
+            ));
+        }
+        self.zoom_serial = self.zoom_serial.wrapping_add(1);
+        let serial = self.zoom_serial;
+        let handle = window.window_handle();
+        let language = settings_state::get().language;
+        let percent = (self.zoom_target * 100.0).round() as i32;
+        self.show_hud(format!("{} {percent}%", t(language, "pin.zoom_hud")), cx);
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+                let done = handle
+                    .update(cx, |_, window, cx| {
+                        this.update(cx, |this, cx| this.step_zoom(serial, window, cx))
+                            .unwrap_or(true)
+                    })
+                    .unwrap_or(true);
+                if done {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     fn set_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
@@ -1585,6 +1791,9 @@ impl PinView {
             &mut self.content,
             PinContent::from_frame_shared(frame, hash),
         );
+        self.zoom_target = self.zoom;
+        self.zoom_center = None;
+        self.zoom_serial = self.zoom_serial.wrapping_add(1);
         if let PinContent::Image { image, .. } = previous {
             // Replacement runs inside an entity update, where `App::drop_image`
             // cannot see the pin window; defer until the update completes.
@@ -1946,7 +2155,7 @@ impl Render for PinView {
                 if event.modifiers.shift || this.content.image_size().is_none() {
                     this.set_opacity(this.opacity - delta * 0.05, cx);
                 } else {
-                    this.set_zoom(this.zoom + delta * 0.1, window, cx);
+                    this.zoom_toward(this.zoom_target + delta * 0.1, window, cx);
                 }
             }))
             .child(content);

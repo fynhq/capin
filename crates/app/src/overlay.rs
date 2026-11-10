@@ -184,7 +184,7 @@ enum InfoField {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ResizeHandle {
+pub(crate) enum ResizeHandle {
     North,
     South,
     East,
@@ -1654,8 +1654,12 @@ impl OverlayView {
         self.editing_rect = Some(editor_rect);
         self.selected = None;
         self.session.cancel();
-        // The editor receives the captured pixels; keeping the overlay frame
-        // alive would duplicate a full 4K image for the whole edit session.
+        // Region captures keep the frozen monitor frame so the editor can
+        // re-crop when the user drags the image edges. Window/monitor captures
+        // do not need it and release the full frame as before.
+        let region_source = matches!(selected.target, CaptureTarget::Region(_))
+            .then(|| self.frame.clone())
+            .flatten();
         self.frame = None;
         let frame = Arc::new(frame);
 
@@ -1671,6 +1675,7 @@ impl OverlayView {
                     let editor = cx.new(|cx| {
                         EditorView::new_inline(
                             frame,
+                            region_source,
                             editor_rect,
                             screen_origin,
                             tool,
@@ -3089,6 +3094,13 @@ impl OverlayView {
                 if self.window_only {
                     layers.push(camera_cursor(x, y, self.chrome.dark).into_any_element());
                 } else {
+                    // Follow the system appearance: a black guide on light
+                    // desktops and a white guide on dark ones.
+                    let guide = if self.chrome.dark {
+                        rgba(0xFFFFFFFF)
+                    } else {
+                        rgba(0x000000FF)
+                    };
                     layers.push(
                         div()
                             .absolute()
@@ -3096,17 +3108,7 @@ impl OverlayView {
                             .top(px(0.0))
                             .w(px(1.0))
                             .h(px(height))
-                            .bg(rgba(0x00000055))
-                            .into_any_element(),
-                    );
-                    layers.push(
-                        div()
-                            .absolute()
-                            .left(px(x + 1.0))
-                            .top(px(0.0))
-                            .w(px(1.0))
-                            .h(px(height))
-                            .bg(rgba(0xFFFFFFE0))
+                            .bg(guide)
                             .into_any_element(),
                     );
                     layers.push(
@@ -3116,17 +3118,7 @@ impl OverlayView {
                             .top(px(y))
                             .w(px(width))
                             .h(px(1.0))
-                            .bg(rgba(0x00000055))
-                            .into_any_element(),
-                    );
-                    layers.push(
-                        div()
-                            .absolute()
-                            .left(px(0.0))
-                            .top(px(y + 1.0))
-                            .w(px(width))
-                            .h(px(1.0))
-                            .bg(rgba(0xFFFFFFE0))
+                            .bg(guide)
                             .into_any_element(),
                     );
                 }
@@ -3614,7 +3606,7 @@ fn handle_has_south(handle: ResizeHandle) -> bool {
 /// Maps a press near a selection edge or corner to the matching resize handle.
 /// The painted dots stay small, while the whole border becomes a grab target
 /// so the selection can be adjusted again after the initial drag.
-fn edge_resize_handle(
+pub(crate) fn edge_resize_handle(
     rect: PhysicalRect,
     point: PhysicalPoint,
     tolerance: f32,
@@ -3649,7 +3641,7 @@ fn edge_resize_handle(
     }
 }
 
-fn resize_rect(
+pub(crate) fn resize_rect(
     original: PhysicalRect,
     handle: ResizeHandle,
     cursor: PhysicalPoint,
@@ -3765,7 +3757,7 @@ fn resize_rect(
     )
 }
 
-fn handle_positions(rect: Bounds<Pixels>) -> Vec<(ResizeHandle, Point<Pixels>)> {
+pub(crate) fn handle_positions(rect: Bounds<Pixels>) -> Vec<(ResizeHandle, Point<Pixels>)> {
     let left = f32::from(rect.origin.x);
     let top = f32::from(rect.origin.y);
     let right = left + f32::from(rect.size.width);

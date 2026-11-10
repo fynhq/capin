@@ -11,7 +11,10 @@ use tiny_skia::{
     IntSize, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, Transform,
 };
 
-use crate::{Annotation, AnnotationDocument, AnnotationId, AnnotationStyle, Shape, TextAlignment};
+use crate::{
+    Annotation, AnnotationDocument, AnnotationId, AnnotationStyle, OutlinePoint, Shape,
+    TextAlignment, stroke_outline,
+};
 
 /// Label color for a sequence badge. Badges read as solid chips, so the
 /// foreground only flips to dark on light fills; mid-tone colors such as the
@@ -68,10 +71,26 @@ pub fn rasterize(
             continue;
         }
 
-        let path = build_path(annotation)?;
         let (red, green, blue, alpha) = unpack(annotation.style.color);
         let mut paint = Paint::default();
         paint.set_color_rgba8(red, green, blue, alpha);
+        if let Some(polygons) = stroke_outline(&annotation.shape, &annotation.style) {
+            for polygon in polygons {
+                let Some(path) = polygon_path(&polygon) else {
+                    continue;
+                };
+                pixmap.as_mut().fill_path(
+                    &path,
+                    &paint,
+                    tiny_skia::FillRule::Winding,
+                    Transform::identity(),
+                    None,
+                );
+            }
+            continue;
+        }
+
+        let path = build_path(annotation)?;
         let mut target = pixmap.as_mut();
         if fills_shape(annotation) {
             target.fill_path(
@@ -101,24 +120,18 @@ pub fn rasterize(
     )?)
 }
 
-fn push_arrow_head(
-    builder: &mut PathBuilder,
-    tip: PhysicalPoint,
-    angle: f32,
-    head_length: f32,
-    spread: f32,
-) {
-    let left = (
-        tip.x as f32 - head_length * (angle - spread).cos(),
-        tip.y as f32 - head_length * (angle - spread).sin(),
-    );
-    let right = (
-        tip.x as f32 - head_length * (angle + spread).cos(),
-        tip.y as f32 - head_length * (angle + spread).sin(),
-    );
-    builder.move_to(left.0, left.1);
-    builder.line_to(tip.x as f32, tip.y as f32);
-    builder.line_to(right.0, right.1);
+fn polygon_path(polygon: &[OutlinePoint]) -> Option<Path> {
+    let first = polygon.first()?;
+    if polygon.len() < 3 {
+        return None;
+    }
+    let mut builder = PathBuilder::new();
+    builder.move_to(first.x, first.y);
+    for point in &polygon[1..] {
+        builder.line_to(point.x, point.y);
+    }
+    builder.close();
+    builder.finish()
 }
 
 fn fills_shape(annotation: &Annotation) -> bool {
@@ -138,47 +151,8 @@ fn build_path(annotation: &Annotation) -> Result<Path, RasterError> {
             builder.finish().ok_or(RasterError::InvalidGeometry)
         }
         Shape::HighlighterBox(rect) => rounded_rect_path(*rect, 0.0),
-        Shape::Arrow { start, end } => {
-            let mut builder = PathBuilder::new();
-            builder.move_to(start.x as f32, start.y as f32);
-            builder.line_to(end.x as f32, end.y as f32);
-
-            let dx = (end.x - start.x) as f32;
-            let dy = (end.y - start.y) as f32;
-            let head_length = (annotation.style.stroke_width * 3.5).max(10.0);
-            let spread = 0.55;
-            if annotation.style.arrow_end {
-                push_arrow_head(&mut builder, *end, dy.atan2(dx), head_length, spread);
-            }
-            if annotation.style.arrow_start {
-                push_arrow_head(&mut builder, *start, (-dy).atan2(-dx), head_length, spread);
-            }
-            builder.finish().ok_or(RasterError::InvalidGeometry)
-        }
-        Shape::Polyline { points } => {
-            if points.len() < 2 {
-                return Err(RasterError::InvalidGeometry);
-            }
-            let mut builder = PathBuilder::new();
-            builder.move_to(points[0].x as f32, points[0].y as f32);
-            for point in &points[1..] {
-                builder.line_to(point.x as f32, point.y as f32);
-            }
-            let head_length = (annotation.style.stroke_width * 3.5).max(10.0);
-            let spread = 0.55;
-            if annotation.style.arrow_end {
-                let last = points[points.len() - 1];
-                let previous = points[points.len() - 2];
-                let angle = ((last.y - previous.y) as f32).atan2((last.x - previous.x) as f32);
-                push_arrow_head(&mut builder, last, angle, head_length, spread);
-            }
-            if annotation.style.arrow_start {
-                let first = points[0];
-                let next = points[1];
-                let angle = ((first.y - next.y) as f32).atan2((first.x - next.x) as f32);
-                push_arrow_head(&mut builder, first, angle, head_length, spread);
-            }
-            builder.finish().ok_or(RasterError::InvalidGeometry)
+        Shape::Arrow { .. } | Shape::Polyline { .. } => {
+            Err(RasterError::Unsupported(annotation.id))
         }
         Shape::Blur(_) => Err(RasterError::Unsupported(annotation.id)),
         Shape::Spotlight(_) => Err(RasterError::Unsupported(annotation.id)),

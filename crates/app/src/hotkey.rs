@@ -20,6 +20,10 @@ mod imp {
         static PIN_KEY: RefCell<Option<HotKey>> = const { RefCell::new(None) };
         static CAPTURE_ENABLED: Cell<bool> = const { Cell::new(false) };
         static PIN_ENABLED: Cell<bool> = const { Cell::new(false) };
+        static RECORD_PAUSE_ID: Cell<u32> = const { Cell::new(0) };
+        static RECORD_STOP_ID: Cell<u32> = const { Cell::new(0) };
+        static RECORD_PAUSE_KEY: RefCell<Option<HotKey>> = const { RefCell::new(None) };
+        static RECORD_STOP_KEY: RefCell<Option<HotKey>> = const { RefCell::new(None) };
         static REGISTRATION_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
     }
 
@@ -127,6 +131,8 @@ mod imp {
                 cx.update(|cx| {
                     let capture_id = CAPTURE_ID.with(|id| id.get());
                     let pin_id = PIN_ID.with(|id| id.get());
+                    let record_pause_id = RECORD_PAUSE_ID.with(|id| id.get());
+                    let record_stop_id = RECORD_STOP_ID.with(|id| id.get());
                     let capture_enabled = CAPTURE_ENABLED.with(|enabled| enabled.get());
                     let pin_enabled = PIN_ENABLED.with(|enabled| enabled.get());
                     for id in actions {
@@ -149,6 +155,15 @@ mod imp {
                             } else {
                                 crate::pin::pin_last(cx);
                             }
+                        } else if record_pause_id != 0 && id == record_pause_id {
+                            log_info!("hotkey", "recording pause shortcut pressed");
+                            crate::record::handle_shortcut(
+                                crate::record::RecordShortcut::Pause,
+                                cx,
+                            );
+                        } else if record_stop_id != 0 && id == record_stop_id {
+                            log_info!("hotkey", "recording stop shortcut pressed");
+                            crate::record::handle_shortcut(crate::record::RecordShortcut::Stop, cx);
                         }
                     }
                 });
@@ -230,6 +245,46 @@ mod imp {
                 pin.into_string()
             );
             Ok(())
+        })
+    }
+
+    /// Registers or releases the recording-only shortcuts (F9 pause, F10 stop).
+    /// Returns whether the requested state is active.
+    pub fn set_recording_shortcuts(enabled: bool) -> bool {
+        MANAGER.with(|slot| {
+            let manager_borrow = slot.borrow();
+            let Some(manager) = manager_borrow.as_ref() else {
+                return false;
+            };
+            if enabled {
+                if RECORD_PAUSE_ID.with(|id| id.get()) != 0 {
+                    return true;
+                }
+                let pause = HotKey::new(None, Code::F9);
+                let stop = HotKey::new(None, Code::F10);
+                if manager.register(pause).is_err() {
+                    return false;
+                }
+                if manager.register(stop).is_err() {
+                    let _ = manager.unregister(pause);
+                    return false;
+                }
+                RECORD_PAUSE_ID.with(|id| id.set(pause.id()));
+                RECORD_STOP_ID.with(|id| id.set(stop.id()));
+                RECORD_PAUSE_KEY.with(|key| *key.borrow_mut() = Some(pause));
+                RECORD_STOP_KEY.with(|key| *key.borrow_mut() = Some(stop));
+                true
+            } else {
+                if let Some(key) = RECORD_PAUSE_KEY.with(|key| key.borrow_mut().take()) {
+                    let _ = manager.unregister(key);
+                }
+                if let Some(key) = RECORD_STOP_KEY.with(|key| key.borrow_mut().take()) {
+                    let _ = manager.unregister(key);
+                }
+                RECORD_PAUSE_ID.with(|id| id.set(0));
+                RECORD_STOP_ID.with(|id| id.set(0));
+                true
+            }
         })
     }
 
@@ -319,7 +374,10 @@ mod imp {
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-pub use imp::{display_hotkey, install, refresh, registration_error, shortcut_from_key};
+pub use imp::{
+    display_hotkey, install, refresh, registration_error, set_recording_shortcuts,
+    shortcut_from_key,
+};
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn install(_cx: &mut gpui_kit::App) {}
@@ -348,4 +406,9 @@ pub fn shortcut_from_key(
     _meta: bool,
 ) -> Option<String> {
     None
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn set_recording_shortcuts(_enabled: bool) -> bool {
+    false
 }

@@ -12,17 +12,9 @@ use crate::i18n::{Language, t};
 use crate::logging::{log_error, log_info};
 use crate::settings_state;
 
-const BAR_WIDTH: f32 = 540.0;
+const BAR_WIDTH: f32 = 460.0;
 const BAR_HEIGHT: f32 = 62.0;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CaptureOutcome {
-    Added,
-    Duplicate,
-    NoOverlap,
-    Failed,
-    Stopped,
-}
+const CAPTURE_INTERVAL: Duration = Duration::from_millis(600);
 
 pub fn open_session(region: CaptureRegion, first_frame: RgbaFrame, cx: &mut App) {
     let config = StitchConfig::default();
@@ -38,6 +30,8 @@ pub fn open_session(region: CaptureRegion, first_frame: RgbaFrame, cx: &mut App)
         return;
     }
     log_info!("scroll", "scroll capture started");
+
+    crate::region_outline::open(CaptureTarget::Region(region), cx);
 
     let desktop_bounds = bar_bounds(region);
     let monitor = platform_backend().monitors().ok().and_then(|monitors| {
@@ -75,7 +69,10 @@ pub fn open_session(region: CaptureRegion, first_frame: RgbaFrame, cx: &mut App)
         cx.new(|cx| ScrollView::new(region, stitcher, exclusion_ok, cx))
     }) {
         Ok(_) => {}
-        Err(error) => log_error!("scroll", "failed to open scroll bar: {error}"),
+        Err(error) => {
+            crate::region_outline::close(cx);
+            log_error!("scroll", "failed to open scroll bar: {error}");
+        }
     }
 }
 
@@ -84,7 +81,7 @@ struct ScrollView {
     stitcher: Stitcher,
     status: String,
     language: Language,
-    auto: bool,
+    running: bool,
 }
 
 impl ScrollView {
@@ -92,10 +89,10 @@ impl ScrollView {
         region: CaptureRegion,
         stitcher: Stitcher,
         exclusion_ok: bool,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Self {
         let language = settings_state::get().language;
-        Self {
+        let view = Self {
             region,
             stitcher,
             status: if exclusion_ok {
@@ -104,105 +101,64 @@ impl ScrollView {
                 t(language, "scroll.exclusion_failed").to_owned()
             },
             language,
-            auto: false,
-        }
+            running: true,
+        };
+        cx.on_release(|_, cx| crate::region_outline::close(cx))
+            .detach();
+        // Stitching is automatic: injected wheel events are unreliable, so the
+        // session samples the selected region while the user scrolls.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(CAPTURE_INTERVAL).await;
+                let alive = this
+                    .update(cx, |this, cx| {
+                        if !this.running {
+                            return false;
+                        }
+                        this.capture_frame(cx);
+                        true
+                    })
+                    .unwrap_or(false);
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
+        view
     }
 
-    fn capture_frame(&mut self, cx: &mut Context<Self>) -> CaptureOutcome {
+    fn capture_frame(&mut self, cx: &mut Context<Self>) {
         let mut backend = platform_backend();
-        let outcome = match backend.capture(CaptureTarget::Region(self.region)) {
+        match backend.capture(CaptureTarget::Region(self.region)) {
             Ok(frame) => match self.stitcher.push(&frame) {
-                Ok(report) if report.appended_rows == 0 => {
-                    self.status = t(self.language, "scroll.duplicate").to_owned();
-                    CaptureOutcome::Duplicate
-                }
+                Ok(report) if report.appended_rows == 0 => {}
                 Ok(report) => {
                     self.status = format!(
                         "{} · {} px",
                         t(self.language, "scroll.added"),
                         report.appended_rows
                     );
-                    CaptureOutcome::Added
                 }
                 Err(StitchError::NoOverlap) => {
                     self.status = t(self.language, "scroll.no_overlap").to_owned();
-                    CaptureOutcome::NoOverlap
                 }
                 Err(error) => {
                     self.status = format!("{}{}", t(self.language, "scroll.failed"), error);
-                    CaptureOutcome::Failed
                 }
             },
             Err(error) => {
                 self.status = format!("{}{}", t(self.language, "scroll.failed"), error);
-                CaptureOutcome::Failed
             }
-        };
-        cx.notify();
-        outcome
-    }
-
-    fn capture(&mut self, cx: &mut Context<Self>) {
-        self.capture_frame(cx);
-    }
-
-    /// Automatic scrolling is intentionally gone: injected wheel events are
-    /// unreliable across apps, so the user scrolls and this mode only keeps
-    /// grabbing frames while they do.
-    fn toggle_auto(&mut self, cx: &mut Context<Self>) {
-        if self.auto {
-            self.auto = false;
-            self.status = t(self.language, "scroll.auto_stopped").to_owned();
-            cx.notify();
-            return;
         }
-
-        self.auto = true;
-        self.status = t(self.language, "scroll.auto_running").to_owned();
         cx.notify();
-
-        cx.spawn(async move |this, cx| {
-            let mut duplicates = 0u32;
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(700))
-                    .await;
-                let outcome = this
-                    .update(cx, |this, cx| {
-                        if this.auto {
-                            this.capture_frame(cx)
-                        } else {
-                            CaptureOutcome::Stopped
-                        }
-                    })
-                    .unwrap_or(CaptureOutcome::Stopped);
-                match outcome {
-                    CaptureOutcome::Added => duplicates = 0,
-                    CaptureOutcome::Duplicate => {
-                        duplicates += 1;
-                        if duplicates >= 4 {
-                            break;
-                        }
-                    }
-                    CaptureOutcome::NoOverlap
-                    | CaptureOutcome::Failed
-                    | CaptureOutcome::Stopped => break,
-                }
-            }
-            this.update(cx, |this, cx| {
-                if this.auto {
-                    this.auto = false;
-                    this.status = t(this.language, "scroll.auto_stopped").to_owned();
-                    cx.notify();
-                }
-            })
-            .ok();
-        })
-        .detach();
     }
 
     fn finish(&mut self, cx: &mut Context<Self>) {
-        self.auto = false;
+        self.running = false;
+        // Pick up the final viewport before closing the session; otherwise a
+        // quick finish can stop one sample short of what the user sees.
+        self.capture_frame(cx);
         match self.stitcher.finish() {
             Ok(frame) => {
                 let handles = cx.windows();
@@ -222,6 +178,7 @@ impl ScrollView {
     }
 
     fn cancel(&mut self, cx: &mut Context<Self>) {
+        self.running = false;
         let handles = cx.windows();
         cx.defer(move |cx| {
             crate::windows::close_capture_auxiliary(cx, handles);
@@ -235,36 +192,8 @@ impl Render for ScrollView {
         let language = self.language;
         let title = t(language, "scroll.title").to_owned();
         let status = self.status.clone();
-        let capture_label = t(language, "scroll.capture").to_owned();
         let finish_label = t(language, "scroll.finish").to_owned();
         let cancel_label = t(language, "scroll.cancel").to_owned();
-        let auto_label = if self.auto {
-            t(language, "scroll.stop").to_owned()
-        } else {
-            t(language, "scroll.auto").to_owned()
-        };
-        let auto = crate::ui::bar_button(
-            "scroll-auto",
-            auto_label,
-            None,
-            if self.auto {
-                crate::ui::BarButtonTone::Danger
-            } else {
-                crate::ui::BarButtonTone::Neutral
-            },
-            &theme,
-            cx,
-            Self::toggle_auto,
-        );
-        let capture = crate::ui::bar_button(
-            "scroll-capture",
-            capture_label,
-            Some(crate::icons::CAPTURE),
-            crate::ui::BarButtonTone::Neutral,
-            &theme,
-            cx,
-            Self::capture,
-        );
         let finish = crate::ui::bar_button(
             "scroll-finish",
             finish_label,
@@ -334,8 +263,6 @@ impl Render for ScrollView {
                                 .child(status),
                         ),
                 )
-                .child(capture)
-                .child(auto)
                 .child(finish)
                 .child(cancel),
         )
