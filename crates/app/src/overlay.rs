@@ -29,14 +29,17 @@ const FALLBACK_HOVER_ACCENT: u32 = 0x4c9aff;
 /// window hover that shares the system accent.
 const ELEMENT_HOVER: u32 = 0xffb020;
 const MAGNIFIER_SIZE: u32 = 144;
-const MAGNIFIER_SOURCE: u32 = 24;
+/// Source pixels shown in the magnifier. An odd count keeps the sampled pixel
+/// exactly in the centre; nine pixels over 144 points gives 16-point blocks,
+/// so the pixel matrix stays legible on both 1x and 2x displays.
+const MAGNIFIER_SOURCE: u32 = 9;
 const MAGNIFIER_PANEL: f32 = 160.0;
 const MAGNIFIER_PANEL_HEIGHT: f32 = 228.0;
 const INFO_BAR_HEIGHT: f32 = 30.0;
 const INFO_BAR_WIDTH: f32 = 440.0;
 const SELECTION_TOOLBAR_HEIGHT: f32 = 40.0;
 const SELECTION_TOOLBAR_WIDTH: f32 = 560.0;
-const HANDLE_SIZE: f32 = 7.0;
+const HANDLE_SIZE: f32 = 9.0;
 const REGION_GAP: f32 = 8.0;
 const MIN_REGION_SIZE: i32 = 2;
 
@@ -664,6 +667,13 @@ struct OverlayView {
     /// Whether the current press started in Ctrl window mode, so releasing
     /// Ctrl before the mouse-up still opens the editor.
     click_opens_editor: bool,
+    /// macOS turns Ctrl+click into a secondary click before it reaches the
+    /// window. Track the synthesized right press so it still drives the normal
+    /// capture path instead of the context-menu path.
+    ctrl_click_primary: bool,
+    /// Cursor shown by the overlay root. Selection states swap it to a hand
+    /// or resize arrows so movable and resizable targets read correctly.
+    cursor_style: CursorStyle,
     element_targeting: bool,
     magnifier: Option<Magnifier>,
     copy_serial: u64,
@@ -727,6 +737,8 @@ impl OverlayView {
             shift_held: false,
             window_only: false,
             click_opens_editor: false,
+            ctrl_click_primary: false,
+            cursor_style: CursorStyle::Crosshair,
             element_targeting: true,
             magnifier: None,
             copy_serial: 0,
@@ -1070,13 +1082,13 @@ impl OverlayView {
             return;
         };
         let monitor = self.session.monitor_bounds();
-        let (scale_x, _) = self.frame_ratio();
+        let output_size = (MAGNIFIER_SIZE as f32 * window.scale_factor().max(0.1)).round() as u32;
         let image = image_util::magnifier_image(
             frame,
             point.x - monitor.origin.x,
             point.y - monitor.origin.y,
-            (MAGNIFIER_SOURCE as f32 * scale_x).round().max(1.0) as u32,
-            MAGNIFIER_SIZE,
+            MAGNIFIER_SOURCE,
+            output_size.max(1),
         );
         // GPUI keeps direct `img(RenderImage)` uploads in the window atlas
         // until they are dropped explicitly; a fresh image per pointer move
@@ -1278,9 +1290,12 @@ impl OverlayView {
         top = top.clamp(0.0, (window_height - MAGNIFIER_PANEL_HEIGHT).max(0.0));
 
         let color = self.sample_color(point);
+        // Pixel matrix: one cell per source pixel. The centre cell gets a
+        // stronger outline so the sampled pixel is unambiguous.
+        let step = MAGNIFIER_SIZE as f32 / MAGNIFIER_SOURCE as f32;
         let mut lines: Vec<Div> = Vec::new();
-        for step in 1..3 {
-            let offset = MAGNIFIER_SIZE as f32 * step as f32 / 3.0;
+        for index in 1..MAGNIFIER_SOURCE {
+            let offset = step * index as f32;
             lines.push(
                 div()
                     .absolute()
@@ -1300,23 +1315,16 @@ impl OverlayView {
                     .bg(self.chrome.grid),
             );
         }
+        let centre = step * (MAGNIFIER_SOURCE as f32 / 2.0).floor();
         lines.push(
             div()
                 .absolute()
-                .left(px(MAGNIFIER_SIZE as f32 / 2.0))
-                .top(px(0.0))
-                .w(px(1.0))
-                .h(px(MAGNIFIER_SIZE as f32))
-                .bg(self.chrome.grid_strong),
-        );
-        lines.push(
-            div()
-                .absolute()
-                .left(px(0.0))
-                .top(px(MAGNIFIER_SIZE as f32 / 2.0))
-                .w(px(MAGNIFIER_SIZE as f32))
-                .h(px(1.0))
-                .bg(self.chrome.grid_strong),
+                .left(px(centre))
+                .top(px(centre))
+                .w(px(step))
+                .h(px(step))
+                .border_1()
+                .border_color(self.chrome.grid_strong),
         );
 
         let color_row = color.map(|(red, green, blue)| {
@@ -1554,26 +1562,52 @@ impl OverlayView {
             .ok_or_else(|| "no selection".to_owned())?;
         let frame = match selected.target {
             CaptureTarget::Window(id) => {
-                let mut backend = platform_backend();
-                let captured = if settings_state::get().capture_cursor {
-                    backend.capture_with_cursor(CaptureTarget::Window(id))
-                } else {
-                    backend.capture(CaptureTarget::Window(id))
-                };
-                match captured {
-                    Ok(frame) => {
-                        crate::window_frame::compose_window_capture(id, frame, selected.scale)
+                // macOS re-captures a window through ScreenCaptureKit after
+                // the overlay has taken key status. The target window is now
+                // inactive (gray traffic lights) and translucent sidebars
+                // composite against a different backing, so the result no
+                // longer matches what the user saw. When the window is fully
+                // visible and unoccluded, crop the frozen frame instead.
+                let frozen = {
+                    #[cfg(target_os = "macos")]
+                    {
+                        !settings_state::get().capture_cursor
+                            && self.window_is_fully_visible(id)
+                            && self.frame.is_some()
                     }
-                    Err(error) => {
-                        // Shell surfaces such as the taskbar reject some
-                        // window-capture paths. The frozen desktop already
-                        // contains exactly what the user selected, so fall
-                        // back to that instead of failing the capture.
-                        log_warn!(
-                            "overlay",
-                            "window capture failed ({error}); cropping the frozen frame"
-                        );
-                        self.crop_selected_frame(selected)?
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        false
+                    }
+                };
+                if frozen {
+                    crate::window_frame::compose_window_capture(
+                        id,
+                        self.crop_selected_frame(selected)?,
+                        selected.scale,
+                    )
+                } else {
+                    let mut backend = platform_backend();
+                    let captured = if settings_state::get().capture_cursor {
+                        backend.capture_with_cursor(CaptureTarget::Window(id))
+                    } else {
+                        backend.capture(CaptureTarget::Window(id))
+                    };
+                    match captured {
+                        Ok(frame) => {
+                            crate::window_frame::compose_window_capture(id, frame, selected.scale)
+                        }
+                        Err(error) => {
+                            // Shell surfaces such as the taskbar reject some
+                            // window-capture paths. The frozen desktop already
+                            // contains exactly what the user selected, so fall
+                            // back to that instead of failing the capture.
+                            log_warn!(
+                                "overlay",
+                                "window capture failed ({error}); cropping the frozen frame"
+                            );
+                            self.crop_selected_frame(selected)?
+                        }
                     }
                 }
             }
@@ -1594,6 +1628,33 @@ impl OverlayView {
             .ok_or_else(|| "the capture frame is no longer available".to_owned())?
             .cropped(selected.rect)
             .ok_or_else(|| "empty selection".to_owned())
+    }
+
+    /// Whether the selected window is completely inside this monitor and no
+    /// higher window covers it. Only then does the frozen frame contain the
+    /// exact window pixels the user saw, without occluders or clipped edges.
+    #[cfg(target_os = "macos")]
+    fn window_is_fully_visible(&self, id: WindowId) -> bool {
+        let Some(window) = self.session.window(id) else {
+            return false;
+        };
+        let monitor = self.session.monitor_bounds();
+        if window.bounds.intersection(monitor) != Some(window.bounds) {
+            return false;
+        }
+        for candidate in self.session.windows() {
+            if candidate.id == id {
+                break;
+            }
+            if candidate
+                .bounds
+                .intersection(window.bounds)
+                .is_some_and(|overlap| !overlap.is_empty())
+            {
+                return false;
+            }
+        }
+        true
     }
 
     fn selected_output(&self) -> Result<RgbaFrame, String> {
@@ -1710,6 +1771,101 @@ impl OverlayView {
                 });
             });
         });
+    }
+
+    fn primary_pointer_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        let point = self.to_physical(event.position);
+        self.cursor = Some(point);
+        self.set_window_only(event.modifiers.control, cx);
+        self.click_opens_editor = self.window_only && self.selected.is_none();
+        if let Some(selected) = self.selected.clone() {
+            if selected.edit.is_some() {
+                self.commit_edit(cx);
+            }
+            let monitor = self.session.monitor_bounds();
+            let local = PhysicalPoint::new(point.x - monitor.origin.x, point.y - monitor.origin.y);
+            let edge_tolerance = 8.0 * self.effective_scale();
+            if let Some(handle) = edge_resize_handle(selected.rect, local, edge_tolerance) {
+                if let Some(selected) = self.selected.as_mut() {
+                    selected.drag = Some(RegionDrag {
+                        kind: RegionDragKind::Resize(handle),
+                        start: point,
+                        original: selected.rect,
+                    });
+                    selected.edit = None;
+                    selected.effects_open = false;
+                    selected.hints_open = false;
+                }
+                self.cursor_style = overlay_handle_cursor(handle);
+                cx.notify();
+                return;
+            }
+            if local.x >= selected.rect.origin.x
+                && local.y >= selected.rect.origin.y
+                && local.x <= selected.rect.origin.x + selected.rect.size.width as i32
+                && local.y <= selected.rect.origin.y + selected.rect.size.height as i32
+            {
+                if event.click_count >= 2 {
+                    self.copy_selected(cx);
+                    return;
+                }
+                if let Some(selected) = self.selected.as_mut() {
+                    selected.drag = Some(RegionDrag {
+                        kind: RegionDragKind::Move,
+                        start: point,
+                        original: selected.rect,
+                    });
+                    selected.effects_open = false;
+                    selected.hints_open = false;
+                }
+                self.cursor_style = CursorStyle::ClosedHand;
+                cx.notify();
+                return;
+            }
+            self.selected = None;
+            self.cursor_style = CursorStyle::Crosshair;
+        }
+        self.session.pointer_moved(point);
+        self.refresh_auto_target(point, cx);
+        self.session.pointer_pressed(point);
+        cx.notify();
+    }
+
+    fn primary_pointer_up(
+        &mut self,
+        event: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .selected
+            .as_ref()
+            .is_some_and(|selected| selected.drag.is_some())
+        {
+            self.finish_region_drag(cx);
+            return;
+        }
+        if self.selected.is_some() {
+            return;
+        }
+        let point = self.to_physical(event.position);
+        self.cursor = Some(point);
+        let action = self.session.pointer_released(point);
+        if let SelectionAction::Capture(outcome) = action {
+            if self.mode == OverlayMode::Capture {
+                let click_opens_editor = self.click_opens_editor;
+                self.click_opens_editor = false;
+                self.begin_selection(outcome, cx);
+                platform_window::set_cursor_hidden(false);
+                if click_opens_editor {
+                    self.window_only = false;
+                    self.open_editor_for_selected(Tool::Select, window, cx);
+                }
+            } else {
+                self.finish_mode(outcome, window, cx);
+            }
+        }
+        cx.notify();
     }
 
     fn copy_selected(&mut self, cx: &mut Context<Self>) {
@@ -2331,6 +2487,7 @@ impl OverlayView {
                     .flex_row()
                     .items_center()
                     .gap(px(4.0))
+                    .text_color(self.chrome.text)
                     .when(selected.effects_open, |chip| chip.bg(self.chrome.selected))
                     .when(!selected.effects_open, |chip| {
                         chip.hover(|style| style.bg(self.chrome.hover))
@@ -2782,16 +2939,7 @@ impl OverlayView {
         };
         let mut handles = Vec::new();
         for (handle, position) in handle_positions(selection) {
-            let cursor = match handle {
-                ResizeHandle::North | ResizeHandle::South => CursorStyle::ResizeUpDown,
-                ResizeHandle::East | ResizeHandle::West => CursorStyle::ResizeLeftRight,
-                ResizeHandle::NorthEast | ResizeHandle::SouthWest => {
-                    CursorStyle::ResizeUpRightDownLeft
-                }
-                ResizeHandle::NorthWest | ResizeHandle::SouthEast => {
-                    CursorStyle::ResizeUpLeftDownRight
-                }
-            };
+            let cursor = overlay_handle_cursor(handle);
             handles.push(
                 div()
                     .id(format!("overlay-handle-{:?}", handle))
@@ -3095,6 +3243,7 @@ impl OverlayView {
 
         if self.mode == OverlayMode::Capture
             && self.selected.is_none()
+            && self.window_only
             && let Some(cursor) = self.cursor
         {
             let monitor = self.session.monitor_bounds();
@@ -3104,37 +3253,7 @@ impl OverlayView {
             let width = f32::from(self.window_size.width);
             let height = f32::from(self.window_size.height);
             if x >= 0.0 && y >= 0.0 && x <= width && y <= height {
-                if self.window_only {
-                    layers.push(camera_cursor(x, y, self.chrome.dark).into_any_element());
-                } else {
-                    // Follow the system appearance: a black guide on light
-                    // desktops and a white guide on dark ones.
-                    let guide = if self.chrome.dark {
-                        rgba(0xFFFFFFFF)
-                    } else {
-                        rgba(0x000000FF)
-                    };
-                    layers.push(
-                        div()
-                            .absolute()
-                            .left(px(x))
-                            .top(px(0.0))
-                            .w(px(1.0))
-                            .h(px(height))
-                            .bg(guide)
-                            .into_any_element(),
-                    );
-                    layers.push(
-                        div()
-                            .absolute()
-                            .left(px(0.0))
-                            .top(px(y))
-                            .w(px(width))
-                            .h(px(1.0))
-                            .bg(guide)
-                            .into_any_element(),
-                    );
-                }
+                layers.push(camera_cursor(x, y, self.chrome.dark).into_any_element());
             }
         }
 
@@ -3168,7 +3287,7 @@ impl OverlayView {
         div()
             .relative()
             .size_full()
-            .cursor(CursorStyle::Crosshair)
+            .cursor(self.cursor_style)
             .track_focus(&self.focus_handle)
             .on_modifiers_changed(cx.listener(
                 |this, event: &ModifiersChangedEvent, _window, cx| {
@@ -3360,6 +3479,7 @@ impl OverlayView {
                     .as_ref()
                     .is_some_and(|selected| selected.drag.is_some())
                 {
+                    this.cursor_style = CursorStyle::ClosedHand;
                     if event.pressed_button.is_none() {
                         this.finish_region_drag(cx);
                     } else {
@@ -3367,10 +3487,28 @@ impl OverlayView {
                     }
                     return;
                 }
-                if this.selected.is_some() {
+                if let Some(selected) = this.selected.as_ref() {
+                    let monitor = this.session.monitor_bounds();
+                    let local =
+                        PhysicalPoint::new(point.x - monitor.origin.x, point.y - monitor.origin.y);
+                    let edge_tolerance = 8.0 * this.effective_scale();
+                    let inside = local.x >= selected.rect.origin.x
+                        && local.y >= selected.rect.origin.y
+                        && local.x <= selected.rect.origin.x + selected.rect.size.width as i32
+                        && local.y <= selected.rect.origin.y + selected.rect.size.height as i32;
+                    this.cursor_style = if let Some(handle) =
+                        edge_resize_handle(selected.rect, local, edge_tolerance)
+                    {
+                        overlay_handle_cursor(handle)
+                    } else if inside {
+                        CursorStyle::OpenHand
+                    } else {
+                        CursorStyle::Crosshair
+                    };
                     cx.notify();
                     return;
                 }
+                this.cursor_style = CursorStyle::Crosshair;
                 if this.session.has_drag() && event.pressed_button.is_none() {
                     // The mouse-up happened outside this overlay. Drop the
                     // stale press instead of turning the next click into a
@@ -3400,7 +3538,20 @@ impl OverlayView {
             }))
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    // macOS delivers Ctrl+click as a secondary click. Window
+                    // mode is a primary-click action, so route it through the
+                    // normal capture path instead of the context-menu path.
+                    if cfg!(target_os = "macos")
+                        && event.modifiers.control
+                        && this.mode == OverlayMode::Capture
+                        && this.selected.is_none()
+                    {
+                        this.ctrl_click_primary = true;
+                        this.primary_pointer_down(event, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
                     // Right click never leaves the capture. While annotating,
                     // the editor consumes it to confirm the current object.
                     if this
@@ -3418,100 +3569,36 @@ impl OverlayView {
                     cx.stop_propagation();
                 }),
             )
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    if this.ctrl_click_primary {
+                        this.ctrl_click_primary = false;
+                        this.primary_pointer_up(event, window, cx);
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                    let point = this.to_physical(event.position);
-                    this.cursor = Some(point);
-                    this.set_window_only(event.modifiers.control, cx);
-                    this.click_opens_editor = this.window_only && this.selected.is_none();
-                    if let Some(selected) = this.selected.clone() {
-                        if selected.edit.is_some() {
-                            this.commit_edit(cx);
-                        }
-                        let monitor = this.session.monitor_bounds();
-                        let local = PhysicalPoint::new(
-                            point.x - monitor.origin.x,
-                            point.y - monitor.origin.y,
-                        );
-                        let edge_tolerance = 6.0 * this.effective_scale();
-                        if let Some(handle) =
-                            edge_resize_handle(selected.rect, local, edge_tolerance)
-                        {
-                            if let Some(selected) = this.selected.as_mut() {
-                                selected.drag = Some(RegionDrag {
-                                    kind: RegionDragKind::Resize(handle),
-                                    start: point,
-                                    original: selected.rect,
-                                });
-                                selected.edit = None;
-                                selected.effects_open = false;
-                                selected.hints_open = false;
-                            }
-                            cx.notify();
-                            return;
-                        }
-                        if local.x >= selected.rect.origin.x
-                            && local.y >= selected.rect.origin.y
-                            && local.x <= selected.rect.origin.x + selected.rect.size.width as i32
-                            && local.y <= selected.rect.origin.y + selected.rect.size.height as i32
-                        {
-                            if event.click_count >= 2 {
-                                this.copy_selected(cx);
-                                return;
-                            }
-                            if let Some(selected) = this.selected.as_mut() {
-                                selected.drag = Some(RegionDrag {
-                                    kind: RegionDragKind::Move,
-                                    start: point,
-                                    original: selected.rect,
-                                });
-                                selected.effects_open = false;
-                                selected.hints_open = false;
-                            }
-                            cx.notify();
-                            return;
-                        }
-                        this.selected = None;
+                    if this.ctrl_click_primary {
+                        return;
                     }
-                    this.session.pointer_moved(point);
-                    this.refresh_auto_target(point, cx);
-                    this.session.pointer_pressed(point);
-                    cx.notify();
+                    this.primary_pointer_down(event, cx);
                 }),
             )
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseUpEvent, window, cx| {
-                    if this
-                        .selected
-                        .as_ref()
-                        .is_some_and(|selected| selected.drag.is_some())
-                    {
-                        this.finish_region_drag(cx);
+                    if this.ctrl_click_primary {
+                        // Some macOS versions pair the synthesized secondary
+                        // down with the original primary up.
+                        this.ctrl_click_primary = false;
+                        this.primary_pointer_up(event, window, cx);
                         return;
                     }
-                    if this.selected.is_some() {
-                        return;
-                    }
-                    let point = this.to_physical(event.position);
-                    this.cursor = Some(point);
-                    let action = this.session.pointer_released(point);
-                    if let SelectionAction::Capture(outcome) = action {
-                        if this.mode == OverlayMode::Capture {
-                            let click_opens_editor = this.click_opens_editor;
-                            this.click_opens_editor = false;
-                            this.begin_selection(outcome, cx);
-                            platform_window::set_cursor_hidden(false);
-                            if click_opens_editor {
-                                this.window_only = false;
-                                this.open_editor_for_selected(Tool::Select, window, cx);
-                            }
-                        } else {
-                            this.finish_mode(outcome, window, cx);
-                        }
-                    }
-                    cx.notify();
+                    this.primary_pointer_up(event, window, cx);
                 }),
             )
             .on_mouse_exit(cx.listener(|this, _event: &MouseExitEvent, _window, cx| {
@@ -3523,6 +3610,8 @@ impl OverlayView {
                     this.finish_region_drag(cx);
                 }
                 this.cursor = None;
+                this.cursor_style = CursorStyle::Crosshair;
+                this.ctrl_click_primary = false;
                 this.element_window = None;
                 this.element_pending = None;
                 this.element_candidates.clear();
@@ -3586,6 +3675,15 @@ fn fit_ratio_rect(rect: PhysicalRect, ratio: f32, size: core_types::PhysicalSize
         height.round() as u32,
     );
     clamp_to_monitor(clamped, size)
+}
+
+fn overlay_handle_cursor(handle: ResizeHandle) -> CursorStyle {
+    match handle {
+        ResizeHandle::North | ResizeHandle::South => CursorStyle::ResizeUpDown,
+        ResizeHandle::East | ResizeHandle::West => CursorStyle::ResizeLeftRight,
+        ResizeHandle::NorthEast | ResizeHandle::SouthWest => CursorStyle::ResizeUpRightDownLeft,
+        ResizeHandle::NorthWest | ResizeHandle::SouthEast => CursorStyle::ResizeUpLeftDownRight,
+    }
 }
 
 fn handle_has_west(handle: ResizeHandle) -> bool {

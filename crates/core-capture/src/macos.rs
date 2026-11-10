@@ -772,6 +772,34 @@ fn ensure_permission() -> Result<()> {
     Err(CaptureError::PermissionDenied)
 }
 
+/// Window ids whose owner disabled sharing (`NSWindowSharingType::None`).
+///
+/// The capture helpers (overlay, capture bars, inline editor and pin menus)
+/// are the only Capin windows that set it. ScreenCaptureKit excludes those
+/// windows so they never appear in a frozen frame, while pins and the
+/// settings page must stay capturable and visible.
+pub(super) fn capture_excluded_window_ids() -> Vec<u32> {
+    let option = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements;
+    let raw = unsafe { core_graphics::window::CGWindowListCopyWindowInfo(option, kCGNullWindowID) };
+    if raw.is_null() {
+        return Vec::new();
+    }
+    let windows: CFArray<CFDictionary<CFString, CFType>> =
+        unsafe { CFArray::wrap_under_create_rule(raw) };
+    let mut ids = Vec::new();
+    for info in windows.iter() {
+        if integer_field(&info, "kCGWindowSharingState").unwrap_or(1) != 0 {
+            continue;
+        }
+        if let Some(id) = integer_field(&info, "kCGWindowNumber")
+            && let Ok(id) = u32::try_from(id)
+        {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
 fn integer_field(info: &CFDictionary<CFString, CFType>, key: &str) -> Option<i64> {
     let key = CFString::new(key);
     info.find(&key)?.downcast::<CFNumber>()?.to_i64()

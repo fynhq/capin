@@ -347,17 +347,23 @@ fn build_config(
     Ok(config)
 }
 
-/// Returns Capin's own on-screen windows so display captures never include
-/// pins, menus, or helper bars. `NSWindow.sharingType` is ignored by
-/// ScreenCaptureKit on macOS 15, so the exclusion must happen in the filter.
+/// Returns Capin's own capture-helper windows so display captures never
+/// include overlays, capture bars, inline editors, or pin menus. Pins and the
+/// settings page stay capturable, exactly as the user sees them.
+///
+/// `NSWindow.sharingType` is ignored by ScreenCaptureKit on macOS 15, so the
+/// exclusion must happen in the filter. The sharing flag is still readable
+/// from the window server, which is what marks the helper windows.
 fn own_windows(content: &SCShareableContent) -> Vec<Retained<SCWindow>> {
     let process = std::process::id() as i32;
+    let excluded = super::capture_excluded_window_ids();
     unsafe { content.windows() }
         .iter()
         .filter(|window| {
             unsafe { window.owningApplication() }
                 .is_some_and(|application| unsafe { application.processID() } == process)
         })
+        .filter(|window| excluded.contains(&unsafe { window.windowID() }))
         .collect()
 }
 
