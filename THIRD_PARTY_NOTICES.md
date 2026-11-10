@@ -7,7 +7,7 @@ The list covers the components used by the Windows and macOS binaries
 (464 packages in the union of all four shipped targets).
 A package may be present on only some platforms or architectures.
 
-Generated from Cargo.lock. Dependency-set fingerprint: 7bd0bf7695959c1ec830bfe0708a8b434bfb40aaa53e29a9b8925b5358db6dab.
+Generated from Cargo.lock. Dependency-set fingerprint: eb6123fdc7e1cd6f8cd7eec3d12e7c8c81d4c5194d6f45e9df0a4c98fce3e51f.
 
 License expressions are shown as declared by the upstream package (usually
 SPDX syntax). Where a component is offered under several licenses, Capin
@@ -139,24 +139,24 @@ authoritative.
 | gif | 0.14.2 | MIT OR Apache-2.0 | https://github.com/image-rs/image-gif |
 | gimli | 0.34.0 | MIT OR Apache-2.0 | https://github.com/gimli-rs/gimli |
 | global-hotkey | 0.9.0 | Apache-2.0 OR MIT | https://github.com/tauri-apps/global-hotkey |
-| gpui-base | 0.9.0 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
-| gpui-kit | 0.9.0 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
-| gpui-pre | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-apple | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-collections | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-derive-refineable | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-http-client | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-macos | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-macros | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-platform | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-refineable | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-scheduler | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-shared-string | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-sum-tree | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-util | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-windows | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-ztracing | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-ztracing-macro | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-base | 0.9.1 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
+| gpui-kit | 0.9.1 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
+| gpui-pre | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-apple | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-collections | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-derive-refineable | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-http-client | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-macos | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-macros | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-platform | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-refineable | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-scheduler | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-shared-string | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-sum-tree | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-util | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-windows | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-ztracing | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-ztracing-macro | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
 | half | 2.7.1 | MIT OR Apache-2.0 | https://github.com/VoidStarKat/half-rs |
 | harfrust | 0.5.2 | MIT | https://github.com/harfbuzz/harfrust |
 | hash32 | 0.3.1 | MIT OR Apache-2.0 | https://github.com/japaric/hash32 |
@@ -6123,7 +6123,7 @@ Creator: Person: Daniel Thompson-Yvetot
 
 ### LICENSE-APACHE / longbridge__gpui-kit / main__LICENSE-APACHE / longbridge__gpui-kit / master__LICENSE-APACHE
 
-Used by: gpui-base 0.9.0, gpui-kit 0.9.0
+Used by: gpui-base 0.9.1, gpui-kit 0.9.1
 
 <pre>
 Copyright 2024 - 2026 Longbridge <https://longbridge.com>
@@ -6321,7 +6321,7 @@ END OF TERMS AND CONDITIONS
 
 ### LICENSE-APACHE
 
-Used by: gpui-pre 0.3.11, gpui-pre-apple 0.3.11, gpui-pre-collections 0.3.11, gpui-pre-derive-refineable 0.3.11, gpui-pre-http-client 0.3.11, gpui-pre-macos 0.3.11, gpui-pre-macros 0.3.11, gpui-pre-platform 0.3.11, gpui-pre-refineable 0.3.11, gpui-pre-scheduler 0.3.11, gpui-pre-shared-string 0.3.11, gpui-pre-sum-tree 0.3.11, gpui-pre-util 0.3.11, gpui-pre-windows 0.3.11, gpui-pre-ztracing 0.3.11, gpui-pre-ztracing-macro 0.3.11
+Used by: gpui-pre 0.3.12, gpui-pre-apple 0.3.12, gpui-pre-collections 0.3.12, gpui-pre-derive-refineable 0.3.12, gpui-pre-http-client 0.3.12, gpui-pre-macos 0.3.12, gpui-pre-macros 0.3.12, gpui-pre-platform 0.3.12, gpui-pre-refineable 0.3.12, gpui-pre-scheduler 0.3.12, gpui-pre-shared-string 0.3.12, gpui-pre-sum-tree 0.3.12, gpui-pre-util 0.3.12, gpui-pre-windows 0.3.12, gpui-pre-ztracing 0.3.12, gpui-pre-ztracing-macro 0.3.12
 
 <pre>
 Copyright 2022 - 2025 Zed Industries, Inc.
