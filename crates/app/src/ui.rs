@@ -114,3 +114,24 @@ pub fn bar_button<View: 'static>(
 fn opacity_color(color: Rgba, opacity: f32) -> Rgba {
     rgba((u32::from(color) & 0x00FF_FFFF) << 8 | ((opacity * 255.0) as u32))
 }
+
+/// Converts a hue in degrees to a saturated RGB swatch used by the custom
+/// color panels.
+pub fn hue_rgb(hue: f32) -> u32 {
+    let hue = hue.rem_euclid(360.0) / 60.0;
+    let saturation = 0.82;
+    let value = 0.95;
+    let chroma = value * saturation;
+    let secondary = chroma * (1.0 - (hue % 2.0 - 1.0).abs());
+    let (red, green, blue) = match hue as u32 {
+        0 => (chroma, secondary, 0.0),
+        1 => (secondary, chroma, 0.0),
+        2 => (0.0, chroma, secondary),
+        3 => (0.0, secondary, chroma),
+        4 => (secondary, 0.0, chroma),
+        _ => (chroma, 0.0, secondary),
+    };
+    let offset = value - chroma;
+    let channel = |value: f32| ((value + offset) * 255.0).round().clamp(0.0, 255.0) as u32;
+    (channel(red) << 16) | (channel(green) << 8) | channel(blue)
+}

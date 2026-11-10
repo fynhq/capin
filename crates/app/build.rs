@@ -15,6 +15,13 @@ fn main() {
     println!("cargo:rerun-if-changed=../../assets/icon/capin_icon.ico");
     println!("cargo:rerun-if-changed=../../locales");
     println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-env-changed=CAPIN_BUILD_ID");
+    if let Ok(id) = std::env::var("CAPIN_BUILD_ID") {
+        let id = id.trim();
+        if !id.is_empty() {
+            println!("cargo:rustc-env=CAPIN_BUILD_ID={id}");
+        }
+    }
 
     check_locales();
 

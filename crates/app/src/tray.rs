@@ -5,7 +5,10 @@ mod imp {
 
     use gpui_kit::*;
     use tray_icon::menu::{IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-    use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+    use tray_icon::{
+        Icon, MouseButton as TrayMouseButton, MouseButtonState, TrayIcon, TrayIconBuilder,
+        TrayIconEvent,
+    };
 
     use crate::i18n::t;
     #[cfg(target_os = "windows")]
@@ -44,11 +47,13 @@ mod imp {
 
         let builder = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
+            .with_menu_on_left_click(false)
+            .with_menu_on_right_click(true)
             .with_tooltip("Capin");
         #[cfg(target_os = "macos")]
         let builder = builder.with_icon_templated(icon);
         #[cfg(target_os = "windows")]
-        let builder = builder.with_icon(icon).with_menu_on_left_click(false);
+        let builder = builder.with_icon(icon);
 
         let tray = match builder.build() {
             Ok(tray) => tray,
@@ -177,11 +182,26 @@ mod imp {
                 while let Ok(event) = MenuEvent::receiver().try_recv() {
                     actions.push(event.id().as_ref().to_owned());
                 }
-                if actions.is_empty() {
+                let mut start_capture = false;
+                while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+                    if let TrayIconEvent::Click {
+                        button: TrayMouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        start_capture = true;
+                    }
+                }
+                if actions.is_empty() && !start_capture {
                     continue;
                 }
 
                 cx.update(|cx| {
+                    if start_capture && !crate::overlay::has_open_overlays() {
+                        log_info!("tray", "tray click: starting capture");
+                        crate::overlay::open_overlays(cx);
+                    }
                     for action in actions {
                         log_info!("tray", "menu action: {action}");
                         handle_action(&action, cx);

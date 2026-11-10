@@ -1,33 +1,57 @@
-use core_compose::{Background, WindowCanvas, compose_window};
+use core_compose::{Background, Shadow, WindowCanvas, compose_window};
 use core_types::{RgbaFrame, WindowId};
 
 use crate::logging::log_error;
+use crate::settings_state::{self, AppSettings, WindowBackground};
 
-/// Applies the platform window's own corner radius without adding padding,
-/// background, or a synthetic shadow. Windows Graphics Capture returns square
-/// corners; macOS ScreenCaptureKit already returns the native rounded frame
-/// with its shadow, so the pixels are left untouched there.
-pub fn round_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> RgbaFrame {
-    if platform_window::window_capture_includes_native_shadow() {
-        return frame;
-    }
+const LIGHT_CANVAS: [u8; 4] = [0xF5, 0xF5, 0xF7, 0xFF];
+const DARK_CANVAS: [u8; 4] = [0x1C, 0x1C, 0x1E, 0xFF];
+const SHADOW_OFFSET: f32 = 6.0;
+const SHADOW_BLUR: f32 = 16.0;
+const SHADOW_OPACITY: f32 = 0.35;
+
+/// Composes a window capture with the fixed window styling: the system corner
+/// radius, a system-style drop shadow, the configured background and at least
+/// 24 logical pixels of padding. macOS captures already carry the native
+/// window shadow, so only the padding and background are added there.
+pub fn compose_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> RgbaFrame {
+    let settings = settings_state::get();
     let scale = scale.max(0.1);
-    let corner_radius = core_capture::window_corner_radius(id, scale);
-    if corner_radius == 0 {
-        return frame;
-    }
     let canvas = WindowCanvas {
-        padding: 0,
-        corner_radius,
-        shadow: None,
-        background: Background::Transparent,
+        padding: (settings.window_padding as f32 * scale)
+            .round()
+            .clamp(0.0, 2048.0) as u32,
+        corner_radius: core_capture::window_corner_radius(id, scale),
+        shadow: (!platform_window::window_capture_includes_native_shadow()).then_some(Shadow {
+            offset_y: (SHADOW_OFFSET * scale).round() as i32,
+            blur_radius: (SHADOW_BLUR * scale).round() as u32,
+            opacity: SHADOW_OPACITY,
+        }),
+        background: background(&settings),
         border: None,
     };
+
     match compose_window(&frame, &canvas) {
         Ok(frame) => frame,
         Err(error) => {
-            log_error!("window", "failed to round the window capture: {error}");
+            log_error!("window", "failed to compose the window capture: {error}");
             frame
         }
+    }
+}
+
+fn background(settings: &AppSettings) -> Background {
+    match settings.window_background {
+        WindowBackground::Transparent => Background::Transparent,
+        WindowBackground::System => {
+            let light = platform_window::system_uses_light_theme().unwrap_or(true);
+            Background::Solid(if light {
+                [0xFF, 0xFF, 0xFF, 0xFF]
+            } else {
+                [0x00, 0x00, 0x00, 0xFF]
+            })
+        }
+        WindowBackground::Light => Background::Solid(LIGHT_CANVAS),
+        WindowBackground::Dark => Background::Solid(DARK_CANVAS),
     }
 }

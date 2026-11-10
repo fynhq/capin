@@ -1890,11 +1890,17 @@ impl Render for PinView {
                     return;
                 }
                 if key == "escape" {
-                    this.selection = None;
-                    this.selecting = false;
-                    cx.notify();
+                    crate::pin::close_pin(this.id);
+                    cx.stop_propagation();
                 }
             }))
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|this, _, _, cx| {
+                    crate::pin::close_pin(this.id);
+                    cx.stop_propagation();
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {

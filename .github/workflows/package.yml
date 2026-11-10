@@ -33,6 +33,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+      - name: Resolve dev build id
+        if: ${{ inputs.release == false }}
+        shell: bash
+        run: echo "CAPIN_BUILD_ID=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
       - name: Build
         run: cargo build --release --locked -p app --target ${{ matrix.target }}
       - name: Install Inno Setup
@@ -223,6 +227,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+      - name: Resolve dev build id
+        if: ${{ inputs.release == false }}
+        shell: bash
+        run: echo "CAPIN_BUILD_ID=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
       - name: Build
         run: cargo build --release --locked -p app --target ${{ matrix.target }}
       - name: Package app bundle and dmg

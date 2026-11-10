@@ -39,6 +39,10 @@ pub const ANNOTATION_COLORS: [(u32, &str, &str); 6] = [
 
 pub const ANNOTATION_COLOR_TOOL_COUNT: usize = 6;
 
+/// Pastel presets for the recording cursor disc. Custom colors are entered
+/// through the settings hex picker.
+pub const RECORD_HIGHLIGHT_COLORS: [u32; 4] = [0xFFE082, 0x90CAF9, 0xCE93D8, 0xA5D6A7];
+
 /// Color-bearing annotation tools. Shapes that do not use a color
 /// (selection, blur, spotlight) are intentionally absent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,6 +92,43 @@ impl AnnotationColorTool {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowBackground {
+    #[default]
+    Transparent,
+    System,
+    Light,
+    Dark,
+}
+
+impl WindowBackground {
+    pub const ALL: [Self; 4] = [Self::Transparent, Self::System, Self::Light, Self::Dark];
+
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Transparent => "transparent",
+            Self::System => "system",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "transparent" => Some(Self::Transparent),
+            "system" => Some(Self::System),
+            "light" => Some(Self::Light),
+            "dark" => Some(Self::Dark),
+            _ => None,
+        }
+    }
+}
+
+/// Frame padding offered for window captures. Zero is deliberately absent:
+/// window screenshots always keep room for the system-style shadow.
+pub const WINDOW_PADDINGS: [u32; 3] = [24, 48, 96];
+pub const DEFAULT_WINDOW_PADDING: u32 = 24;
+
 /// What the pin shortcut does when it is triggered again for an image that is
 /// already on screen.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -136,6 +177,8 @@ pub struct AppSettings {
     pub screenshot_dir: Option<PathBuf>,
     pub recording_dir: Option<PathBuf>,
     pub filename_template: String,
+    pub window_background: WindowBackground,
+    pub window_padding: u32,
     pub capture_cursor: bool,
     /// Shared color used when `annotation_uniform_color` is enabled.
     pub annotation_color: u32,
@@ -146,6 +189,8 @@ pub struct AppSettings {
     pub annotation_font_size: f32,
     pub annotation_arrow_start: bool,
     pub annotation_arrow_end: bool,
+    /// New arrow annotations use the polyline form.
+    pub annotation_arrow_polyline: bool,
     pub annotation_text_background: bool,
     pub annotation_text_outline: bool,
     pub annotation_text_alignment: TextAlignment,
@@ -153,6 +198,8 @@ pub struct AppSettings {
     pub annotation_blur_radius: u32,
     pub annotation_rect_filled: bool,
     pub annotation_ellipse_filled: bool,
+    /// New rectangle-tool annotations use the ellipse form.
+    pub annotation_rect_ellipse: bool,
     pub annotation_spotlight_intensity: u8,
     pub pin_text_ocr: bool,
     pub pin_qr: bool,
@@ -189,13 +236,15 @@ impl Default for AppSettings {
             copy_to_clipboard: true,
             record_cursor: true,
             record_cursor_highlight: false,
-            record_cursor_highlight_color: 0xFFCC00,
+            record_cursor_highlight_color: RECORD_HIGHLIGHT_COLORS[0],
             capture_hotkey: DEFAULT_CAPTURE_HOTKEY.to_owned(),
             pin_hotkey: DEFAULT_PIN_HOTKEY.to_owned(),
             repeat_pin: RepeatPinBehavior::RestoreHistory,
             screenshot_dir: None,
             recording_dir: None,
             filename_template: DEFAULT_FILENAME_TEMPLATE.to_owned(),
+            window_background: WindowBackground::Transparent,
+            window_padding: DEFAULT_WINDOW_PADDING,
             capture_cursor: false,
             annotation_color: DEFAULT_ANNOTATION_COLOR,
             annotation_colors: [DEFAULT_ANNOTATION_COLOR; ANNOTATION_COLOR_TOOL_COUNT],
@@ -204,6 +253,7 @@ impl Default for AppSettings {
             annotation_font_size: DEFAULT_ANNOTATION_FONT_SIZE,
             annotation_arrow_start: false,
             annotation_arrow_end: true,
+            annotation_arrow_polyline: false,
             annotation_text_background: false,
             annotation_text_outline: false,
             annotation_text_alignment: TextAlignment::Left,
@@ -211,6 +261,7 @@ impl Default for AppSettings {
             annotation_blur_radius: 16,
             annotation_rect_filled: false,
             annotation_ellipse_filled: false,
+            annotation_rect_ellipse: false,
             annotation_spotlight_intensity: 60,
             pin_text_ocr: true,
             pin_qr: true,
@@ -303,6 +354,22 @@ fn parse(text: &str) -> AppSettings {
                     settings.filename_template = value.chars().take(120).collect();
                 }
             }
+            "window_background" => {
+                if let Some(background) = WindowBackground::from_code(value) {
+                    settings.window_background = background;
+                }
+            }
+            "window_padding" => {
+                if let Ok(padding) = value.parse::<u32>() {
+                    // Older files may hold 0 or an arbitrary value; window
+                    // captures now always keep a shadow margin of at least 24.
+                    settings.window_padding = if WINDOW_PADDINGS.contains(&padding) {
+                        padding
+                    } else {
+                        DEFAULT_WINDOW_PADDING
+                    };
+                }
+            }
             "capture_cursor" => settings.capture_cursor = value != "false",
             "annotation_color" => {
                 if let Some(color) = parse_rgba(value) {
@@ -330,6 +397,7 @@ fn parse(text: &str) -> AppSettings {
             }
             "annotation_arrow_start" => settings.annotation_arrow_start = value != "false",
             "annotation_arrow_end" => settings.annotation_arrow_end = value != "false",
+            "annotation_arrow_polyline" => settings.annotation_arrow_polyline = value != "false",
             "annotation_text_background" => settings.annotation_text_background = value != "false",
             "annotation_text_outline" => settings.annotation_text_outline = value != "false",
             "annotation_text_alignment" => {
@@ -351,6 +419,7 @@ fn parse(text: &str) -> AppSettings {
             }
             "annotation_rect_filled" => settings.annotation_rect_filled = value != "false",
             "annotation_ellipse_filled" => settings.annotation_ellipse_filled = value != "false",
+            "annotation_rect_ellipse" => settings.annotation_rect_ellipse = value != "false",
             "annotation_spotlight_intensity" => {
                 if let Ok(intensity) = value.parse::<u8>() {
                     settings.annotation_spotlight_intensity = intensity.min(100);
@@ -444,7 +513,7 @@ fn serialize(settings: &AppSettings) -> String {
         .map(|path| path.display().to_string())
         .unwrap_or_default();
     let mut text = format!(
-        "language={}\nauto_start={}\nauto_start_explicit={}\ncopy_to_clipboard={}\nrecord_cursor={}\ncapture_hotkey={}\npin_hotkey={}\nscreenshot_dir={}\nrecording_dir={}\nfilename_template={}\ncapture_cursor={}\nannotation_color={:08x}\npin_text_ocr={}\npin_qr={}\n",
+        "language={}\nauto_start={}\nauto_start_explicit={}\ncopy_to_clipboard={}\nrecord_cursor={}\ncapture_hotkey={}\npin_hotkey={}\nscreenshot_dir={}\nrecording_dir={}\nfilename_template={}\nwindow_background={}\nwindow_padding={}\ncapture_cursor={}\nannotation_color={:08x}\npin_text_ocr={}\npin_qr={}\n",
         settings.language.code(),
         settings.auto_start,
         settings.auto_start_explicit,
@@ -455,6 +524,8 @@ fn serialize(settings: &AppSettings) -> String {
         screenshot_dir,
         recording_dir,
         settings.filename_template.replace(['\n', '\r'], " "),
+        settings.window_background.code(),
+        settings.window_padding,
         settings.capture_cursor,
         settings.annotation_color,
         settings.pin_text_ocr,
@@ -467,12 +538,13 @@ fn serialize(settings: &AppSettings) -> String {
         settings.repeat_pin.code(),
     ));
     text.push_str(&format!(
-        "annotation_uniform_color={}\nannotation_stroke_width={}\nannotation_font_size={}\nannotation_arrow_start={}\nannotation_arrow_end={}\nannotation_text_background={}\nannotation_text_outline={}\nannotation_text_alignment={}\nannotation_corner_radius={}\nannotation_blur_radius={}\nannotation_rect_filled={}\nannotation_ellipse_filled={}\nannotation_spotlight_intensity={}\n",
+        "annotation_uniform_color={}\nannotation_stroke_width={}\nannotation_font_size={}\nannotation_arrow_start={}\nannotation_arrow_end={}\nannotation_arrow_polyline={}\nannotation_text_background={}\nannotation_text_outline={}\nannotation_text_alignment={}\nannotation_corner_radius={}\nannotation_blur_radius={}\nannotation_rect_filled={}\nannotation_ellipse_filled={}\nannotation_rect_ellipse={}\nannotation_spotlight_intensity={}\n",
         settings.annotation_uniform_color,
         settings.annotation_stroke_width,
         settings.annotation_font_size,
         settings.annotation_arrow_start,
         settings.annotation_arrow_end,
+        settings.annotation_arrow_polyline,
         settings.annotation_text_background,
         settings.annotation_text_outline,
         text_alignment_code(settings.annotation_text_alignment),
@@ -480,6 +552,7 @@ fn serialize(settings: &AppSettings) -> String {
         settings.annotation_blur_radius,
         settings.annotation_rect_filled,
         settings.annotation_ellipse_filled,
+        settings.annotation_rect_ellipse,
         settings.annotation_spotlight_intensity,
     ));
     for tool in AnnotationColorTool::ALL {
@@ -579,6 +652,8 @@ mod tests {
         assert_eq!(defaults.annotation_font_size, DEFAULT_ANNOTATION_FONT_SIZE);
         assert!(!defaults.annotation_arrow_start);
         assert!(defaults.annotation_arrow_end);
+        assert!(!defaults.annotation_arrow_polyline);
+        assert!(!defaults.annotation_rect_ellipse);
         assert!(!defaults.annotation_text_background);
         assert!(!defaults.annotation_text_outline);
         assert_eq!(defaults.annotation_text_alignment, TextAlignment::Left);
@@ -589,12 +664,13 @@ mod tests {
         assert_eq!(defaults.annotation_spotlight_intensity, 60);
 
         let settings = parse(
-            "annotation_stroke_width=8\nannotation_font_size=32\nannotation_arrow_start=true\nannotation_arrow_end=false\nannotation_text_background=true\nannotation_text_outline=true\nannotation_text_alignment=center\nannotation_corner_radius=16\nannotation_blur_radius=32\nannotation_rect_filled=true\nannotation_ellipse_filled=true\nannotation_spotlight_intensity=80\n",
+            "annotation_stroke_width=8\nannotation_font_size=32\nannotation_arrow_start=true\nannotation_arrow_end=false\nannotation_arrow_polyline=true\nannotation_text_background=true\nannotation_text_outline=true\nannotation_text_alignment=center\nannotation_corner_radius=16\nannotation_blur_radius=32\nannotation_rect_filled=true\nannotation_ellipse_filled=true\nannotation_rect_ellipse=true\nannotation_spotlight_intensity=80\n",
         );
         assert_eq!(settings.annotation_stroke_width, 8.0);
         assert_eq!(settings.annotation_font_size, 32.0);
         assert!(settings.annotation_arrow_start);
         assert!(!settings.annotation_arrow_end);
+        assert!(settings.annotation_arrow_polyline);
         assert!(settings.annotation_text_background);
         assert!(settings.annotation_text_outline);
         assert_eq!(settings.annotation_text_alignment, TextAlignment::Center);
@@ -602,6 +678,7 @@ mod tests {
         assert_eq!(settings.annotation_blur_radius, 32);
         assert!(settings.annotation_rect_filled);
         assert!(settings.annotation_ellipse_filled);
+        assert!(settings.annotation_rect_ellipse);
         assert_eq!(settings.annotation_spotlight_intensity, 80);
     }
 
@@ -613,6 +690,7 @@ mod tests {
             annotation_font_size: 32.0,
             annotation_arrow_start: true,
             annotation_arrow_end: false,
+            annotation_arrow_polyline: true,
             annotation_text_background: true,
             annotation_text_outline: true,
             annotation_text_alignment: TextAlignment::Center,
@@ -620,6 +698,7 @@ mod tests {
             annotation_blur_radius: 32,
             annotation_rect_filled: true,
             annotation_ellipse_filled: true,
+            annotation_rect_ellipse: true,
             annotation_spotlight_intensity: 80,
             ..Default::default()
         };
@@ -627,6 +706,28 @@ mod tests {
         settings.apply_annotation_color(AnnotationColorTool::Text, 0x0A84FFFF);
 
         assert_eq!(parse(&serialize(&settings)), settings);
+    }
+
+    #[test]
+    fn window_capture_defaults_and_padding_floor() {
+        let defaults = AppSettings::default();
+        assert_eq!(defaults.window_background, WindowBackground::Transparent);
+        assert_eq!(defaults.window_padding, DEFAULT_WINDOW_PADDING);
+
+        assert_eq!(
+            parse("window_background=system\n").window_background,
+            WindowBackground::System
+        );
+        assert_eq!(
+            parse("window_padding=48\n").window_padding,
+            48,
+            "offered values are kept"
+        );
+        assert_eq!(
+            parse("window_padding=0\n").window_padding,
+            DEFAULT_WINDOW_PADDING,
+            "zero padding is no longer offered"
+        );
     }
 
     #[test]
@@ -643,7 +744,10 @@ mod tests {
     #[test]
     fn default_recording_options() {
         let defaults = AppSettings::default();
-        assert_eq!(defaults.record_cursor_highlight_color, 0xFFCC00);
+        assert_eq!(
+            defaults.record_cursor_highlight_color,
+            RECORD_HIGHLIGHT_COLORS[0]
+        );
         assert_eq!(defaults.repeat_pin, RepeatPinBehavior::RestoreHistory);
     }
 

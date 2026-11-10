@@ -11,10 +11,15 @@ use platform_window::{AutostartState, set_autostart, system_accent_hex};
 use crate::i18n::{Language, t};
 use crate::icons;
 use crate::logging::{log_error, log_info};
-use crate::settings_state::{self, AppSettings, RepeatPinBehavior};
+use crate::settings_state::{
+    self, AppSettings, RepeatPinBehavior, WINDOW_PADDINGS, WindowBackground,
+};
 use crate::storage;
 
 const PROJECT_URL: &str = "https://github.com/fynhq/capin";
+/// Short commit hash injected by dev packaging builds; formal releases leave
+/// it unset and show the bare semver version.
+const BUILD_ID: Option<&str> = option_env!("CAPIN_BUILD_ID");
 
 thread_local! {
     /// Status handed to the next settings window when a tray or hotkey action
@@ -352,6 +357,8 @@ struct ToggleRow {
 /// scrolling page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SelectKind {
+    WindowBackground,
+    WindowPadding,
     RepeatPin,
 }
 
@@ -359,6 +366,12 @@ enum SelectKind {
 struct SelectMenu {
     kind: SelectKind,
     anchor: Bounds<Pixels>,
+}
+
+struct RecordColorPicker {
+    anchor: Bounds<Pixels>,
+    buffer: String,
+    fresh: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -623,6 +636,7 @@ struct SettingsView {
     #[cfg(target_os = "macos")]
     titlebar_drag: bool,
     select_menu: Option<SelectMenu>,
+    record_color_picker: Option<RecordColorPicker>,
     #[cfg(target_os = "macos")]
     permission_screen: bool,
     #[cfg(target_os = "macos")]
@@ -653,6 +667,7 @@ impl SettingsView {
             #[cfg(target_os = "macos")]
             titlebar_drag: false,
             select_menu: None,
+            record_color_picker: None,
             #[cfg(target_os = "macos")]
             permission_screen: platform_window::screen_capture_trusted(),
             #[cfg(target_os = "macos")]
@@ -927,6 +942,10 @@ impl SettingsView {
 
     fn sidebar_footer(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let accent = theme.accent;
+        let version = match BUILD_ID {
+            Some(id) => format!("Capin v{}+{id}", env!("CARGO_PKG_VERSION")),
+            None => format!("Capin v{}", env!("CARGO_PKG_VERSION")),
+        };
         div()
             .mt_auto()
             .w_full()
@@ -943,7 +962,7 @@ impl SettingsView {
                     .cursor_pointer()
                     .hover(move |style| style.text_color(accent))
                     .on_click(cx.listener(|this, _, _, cx| this.open_project(cx)))
-                    .child(format!("Capin v{}", env!("CARGO_PKG_VERSION"))),
+                    .child(version),
             )
     }
 
@@ -1386,6 +1405,18 @@ impl SettingsView {
             ))
             .child(group(
                 theme,
+                t(language, "settings.group.window"),
+                t(language, "settings.group.window_desc"),
+                card(
+                    theme,
+                    vec![
+                        self.window_background_row(theme, cx),
+                        self.window_padding_row(theme, cx),
+                    ],
+                ),
+            ))
+            .child(group(
+                theme,
                 t(language, "settings.group.annotation"),
                 t(language, "settings.group.annotation_desc"),
                 card(
@@ -1477,6 +1508,47 @@ impl SettingsView {
         )
     }
 
+    fn window_background_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let language = self.settings.language;
+        let current = t(
+            language,
+            background_label_key(self.settings.window_background),
+        );
+        row_shell()
+            .child(row_label_with_icon(
+                theme,
+                icons::IMAGE,
+                t(language, "settings.window_background"),
+                t(language, "settings.window_background_desc"),
+            ))
+            .child(self.select_trigger(
+                theme,
+                current,
+                "settings-window-background",
+                SelectKind::WindowBackground,
+                cx,
+            ))
+    }
+
+    fn window_padding_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let language = self.settings.language;
+        let current = self.settings.window_padding.to_string();
+        row_shell()
+            .child(row_label_with_icon(
+                theme,
+                icons::PADDING,
+                t(language, "settings.window_padding"),
+                t(language, "settings.window_padding_desc"),
+            ))
+            .child(self.select_trigger(
+                theme,
+                &current,
+                "settings-window-padding",
+                SelectKind::WindowPadding,
+                cx,
+            ))
+    }
+
     fn repeat_pin_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
         let current = t(language, repeat_pin_key(self.settings.repeat_pin));
@@ -1500,6 +1572,24 @@ impl SettingsView {
         let language = self.settings.language;
         let mut entries: Vec<(String, u32, bool)> = Vec::new();
         match kind {
+            SelectKind::WindowBackground => {
+                for (index, background) in WindowBackground::ALL.into_iter().enumerate() {
+                    entries.push((
+                        t(language, background_label_key(background)).to_owned(),
+                        index as u32,
+                        self.settings.window_background == background,
+                    ));
+                }
+            }
+            SelectKind::WindowPadding => {
+                for padding in WINDOW_PADDINGS {
+                    entries.push((
+                        t(language, padding_key(padding)).to_owned(),
+                        padding,
+                        self.settings.window_padding == padding,
+                    ));
+                }
+            }
             SelectKind::RepeatPin => {
                 for (index, behavior) in RepeatPinBehavior::ALL.into_iter().enumerate() {
                     entries.push((
@@ -1515,6 +1605,17 @@ impl SettingsView {
 
     fn apply_select(&mut self, kind: SelectKind, value: u32, cx: &mut Context<Self>) {
         match kind {
+            SelectKind::WindowBackground => {
+                let background = WindowBackground::ALL[value as usize];
+                self.settings.window_background = background;
+                settings_state::update(|settings| settings.window_background = background);
+            }
+            SelectKind::WindowPadding => {
+                if WINDOW_PADDINGS.contains(&value) {
+                    self.settings.window_padding = value;
+                    settings_state::update(|settings| settings.window_padding = value);
+                }
+            }
             SelectKind::RepeatPin => {
                 let behavior = RepeatPinBehavior::ALL[value as usize];
                 self.settings.repeat_pin = behavior;
@@ -1993,14 +2094,18 @@ impl SettingsView {
             .child(card(theme, rows))
     }
 
-    /// Six-color palette for the recording cursor disc. The color is stored as
-    /// RGB; the recorder applies a fixed translucent alpha.
+    /// Pastel swatches plus a custom hex picker for the recording cursor
+    /// disc. The color is stored as RGB; the recorder applies a fixed
+    /// translucent alpha.
     fn record_highlight_color_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
+        let current = self.settings.record_cursor_highlight_color;
         let mut swatches = Vec::new();
-        for (index, (color, _code, _)) in settings_state::ANNOTATION_COLORS.into_iter().enumerate()
+        for (index, color) in settings_state::RECORD_HIGHLIGHT_COLORS
+            .into_iter()
+            .enumerate()
         {
-            let selected = self.settings.record_cursor_highlight_color == color;
+            let selected = current == color;
             let swatch = div()
                 .id(("settings-record-highlight-color", index))
                 .w(px(28.0))
@@ -2015,6 +2120,7 @@ impl SettingsView {
                 .active(|style| style.opacity(0.85))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.settings.record_cursor_highlight_color = color;
+                    this.record_color_picker = None;
                     settings_state::update(|settings| {
                         settings.record_cursor_highlight_color = color
                     });
@@ -2031,6 +2137,60 @@ impl SettingsView {
                 );
             swatches.push(swatch.into_any_element());
         }
+
+        let anchor: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
+        let anchor_for_paint = anchor.clone();
+        let probe = canvas(
+            move |bounds, _, _| anchor_for_paint.set(Some(bounds)),
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0()
+        .into_any_element();
+        let custom_selected = !settings_state::RECORD_HIGHLIGHT_COLORS.contains(&current);
+        let picker_open = self.record_color_picker.is_some();
+        let custom_tooltip = t(language, "editor.custom_color").to_owned();
+        let custom = div()
+            .id("settings-record-highlight-custom")
+            .tooltip(move |_, cx| crate::editor::tooltip_view(custom_tooltip.clone(), cx))
+            .relative()
+            .w(px(28.0))
+            .h(px(28.0))
+            .flex_shrink_0()
+            .rounded(px(14.0))
+            .p(px(3.0))
+            .cursor_pointer()
+            .border_1()
+            .when(custom_selected || picker_open, |item| {
+                item.border_2().border_color(theme.accent)
+            })
+            .when(!custom_selected && !picker_open, |item| {
+                item.border_color(theme.border)
+            })
+            .active(|style| style.opacity(0.85))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if let Some(anchor) = anchor.get() {
+                    this.open_record_color_picker(anchor, window, cx);
+                }
+            }))
+            .child(
+                div()
+                    .size_full()
+                    .rounded(px(11.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(custom_selected, |item| item.bg(rgb(current)))
+                    .when(!custom_selected, |item| {
+                        item.bg(theme.control)
+                            .child(icons::icon(icons::PALETTE, 14.0, theme.muted))
+                    })
+                    .border_1()
+                    .border_color(theme.card_border),
+            )
+            .child(probe);
+        swatches.push(custom.into_any_element());
+
         row_shell()
             .child(row_label_with_icon(
                 theme,
@@ -2046,6 +2206,218 @@ impl SettingsView {
                     .gap(px(4.0))
                     .children(swatches),
             )
+    }
+
+    fn open_record_color_picker(
+        &mut self,
+        anchor: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.record_color_picker = Some(RecordColorPicker {
+            anchor,
+            buffer: format!("{:06x}", self.settings.record_cursor_highlight_color),
+            fresh: true,
+        });
+        self.select_menu = None;
+        self.status = None;
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+    }
+
+    fn apply_record_color_buffer(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(picker) = self.record_color_picker.as_mut() else {
+            return false;
+        };
+        let hex = picker.buffer.trim().trim_start_matches('#');
+        if hex.len() != 6 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            return false;
+        }
+        let Ok(rgb) = u32::from_str_radix(hex, 16) else {
+            return false;
+        };
+        let color = rgb & 0x00FF_FFFF;
+        self.settings.record_cursor_highlight_color = color;
+        settings_state::update(|settings| settings.record_cursor_highlight_color = color);
+        self.status = None;
+        cx.notify();
+        true
+    }
+
+    fn handle_record_color_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        let Some(picker) = self.record_color_picker.as_mut() else {
+            return false;
+        };
+        let key = event.keystroke.key.as_str();
+        match key {
+            "escape" => {
+                self.record_color_picker = None;
+                cx.notify();
+                return true;
+            }
+            "enter" => {
+                self.apply_record_color_buffer(cx);
+                return true;
+            }
+            "backspace" | "delete" => {
+                if picker.fresh {
+                    picker.buffer.clear();
+                    picker.fresh = false;
+                } else {
+                    picker.buffer.pop();
+                }
+                cx.notify();
+                return true;
+            }
+            _ => {}
+        }
+        let command = event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
+        if !command
+            && let Some(ch) = event.keystroke.key.chars().next()
+            && ch.is_ascii_hexdigit()
+        {
+            if picker.fresh {
+                picker.buffer.clear();
+                picker.fresh = false;
+            }
+            if picker.buffer.len() < 6 {
+                picker.buffer.push(ch.to_ascii_lowercase());
+            }
+            cx.notify();
+            return true;
+        }
+        // Let the window shortcuts (Cmd/Ctrl+W, Cmd/Ctrl+Q) through.
+        !command
+    }
+
+    fn record_color_popup(
+        &self,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let picker = self.record_color_picker.as_ref()?;
+        let language = self.settings.language;
+        let width = 240.0;
+        let height = 84.0;
+        let viewport = window.viewport_size();
+        let viewport_width = f32::from(viewport.width);
+        let viewport_height = f32::from(viewport.height);
+        let anchor_x = f32::from(picker.anchor.origin.x);
+        let anchor_y = f32::from(picker.anchor.origin.y);
+        let anchor_width = f32::from(picker.anchor.size.width);
+        let anchor_height = f32::from(picker.anchor.size.height);
+        let mut x = anchor_x + anchor_width / 2.0 - width / 2.0;
+        let mut y = anchor_y + anchor_height + 4.0;
+        if y + height > viewport_height - 8.0 {
+            y = (anchor_y - height - 4.0).max(8.0);
+        }
+        x = x.clamp(8.0, (viewport_width - width - 8.0).max(8.0));
+
+        let preview_rgb = picker.buffer.trim().trim_start_matches('#');
+        let preview = u32::from_str_radix(preview_rgb, 16)
+            .ok()
+            .filter(|_| preview_rgb.len() == 6)
+            .map(|rgb| (rgb & 0x00FF_FFFF) << 8 | 0xFF)
+            .unwrap_or((self.settings.record_cursor_highlight_color << 8) | 0xFF);
+        let cursor = if picker.fresh { "" } else { "|" };
+        let mut hue_row = div().flex().flex_row().items_center().gap(px(3.0));
+        for index in 0..12u32 {
+            let hue_color = crate::ui::hue_rgb(index as f32 * 30.0);
+            hue_row = hue_row.child(
+                div()
+                    .id(("settings-record-hue", index))
+                    .w(px(15.0))
+                    .h(px(15.0))
+                    .rounded(px(8.0))
+                    .bg(rgb(hue_color))
+                    .border_1()
+                    .border_color(theme.border)
+                    .cursor_pointer()
+                    .hover(|style| style.opacity(0.85))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let color = hue_color;
+                        this.settings.record_cursor_highlight_color = color;
+                        settings_state::update(|settings| {
+                            settings.record_cursor_highlight_color = color
+                        });
+                        if let Some(picker) = this.record_color_picker.as_mut() {
+                            picker.buffer = format!("{color:06x}");
+                            picker.fresh = false;
+                        }
+                        this.status = None;
+                        cx.notify();
+                    })),
+            );
+        }
+
+        Some(
+            div()
+                .id("settings-record-color-popup")
+                .absolute()
+                .left(px(x))
+                .top(px(y))
+                .w(px(width))
+                .p(px(8.0))
+                .rounded(px(6.0))
+                .bg(theme.popover)
+                .shadow(vec![
+                    BoxShadow::new(px(0.0), px(0.0), Hsla::from(theme.border))
+                        .spread_radius(px(1.0)),
+                    BoxShadow::new(px(0.0), px(4.0), Hsla::from(rgba(0x0000001F)))
+                        .blur_radius(px(3.0))
+                        .spread_radius(px(-1.0)),
+                ])
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .occlude()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .w(px(18.0))
+                                .h(px(18.0))
+                                .rounded(px(4.0))
+                                .bg(rgba(preview))
+                                .border_1()
+                                .border_color(theme.border),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme.text)
+                                .child(t(language, "editor.custom_color")),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .px(px(6.0))
+                                .py(px(2.0))
+                                .rounded(px(4.0))
+                                .bg(theme.control)
+                                .text_size(px(11.0))
+                                .text_color(theme.text)
+                                .child(format!(
+                                    "#{}{}",
+                                    picker.buffer.to_ascii_uppercase(),
+                                    cursor
+                                )),
+                        ),
+                )
+                .child(hue_row)
+                .child(
+                    div()
+                        .text_size(px(9.5))
+                        .text_color(theme.muted)
+                        .child(t(language, "editor.custom_color_hint")),
+                )
+                .into_any_element(),
+        )
     }
 
     fn shortcuts(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
@@ -2254,6 +2626,13 @@ impl SettingsView {
                             t(language, "shortcuts.value.right_click"),
                             Some(icons::MORE),
                         ),
+                        info_row(
+                            theme,
+                            t(language, "shortcuts.pin_close"),
+                            t(language, "shortcuts.pin_close_desc"),
+                            t(language, "shortcuts.value.esc_middle"),
+                            Some(icons::CLOSE),
+                        ),
                     ],
                 ),
             ));
@@ -2405,12 +2784,28 @@ impl SettingsView {
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.settings.record_cursor_highlight {
+            self.record_color_picker = None;
+        }
         let theme = Theme::for_window(window, self.accent);
         let status = self.status.clone();
         #[cfg(target_os = "windows")]
         let titlebar = Some(self.titlebar(&theme, window, cx));
         #[cfg(not(target_os = "windows"))]
         let titlebar: Option<Div> = None;
+        let color_backdrop = self.record_color_picker.as_ref().map(|_| {
+            div()
+                .id("settings-record-color-backdrop")
+                .absolute()
+                .inset_0()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.record_color_picker = None;
+                        cx.notify();
+                    }),
+                )
+        });
         let select_backdrop = self.select_menu.map(|_| {
             div()
                 .id("settings-select-backdrop")
@@ -2425,6 +2820,7 @@ impl Render for SettingsView {
                 )
         });
         let select_popup = self.select_popup(&theme, window, cx);
+        let record_color_popup = self.record_color_popup(&theme, window, cx);
         div()
             .relative()
             .size_full()
@@ -2436,6 +2832,9 @@ impl Render for SettingsView {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let command =
                     event.keystroke.modifiers.platform || event.keystroke.modifiers.control;
+                if this.record_color_picker.is_some() && this.handle_record_color_key(event, cx) {
+                    return;
+                }
                 if this.select_menu.is_some() && event.keystroke.key == "escape" {
                     this.select_menu = None;
                     cx.notify();
@@ -2455,8 +2854,10 @@ impl Render for SettingsView {
             .child(self.sidebar(&theme, cx))
             .child(self.content(&theme, window, cx))
             .children(titlebar)
+            .children(color_backdrop)
             .children(select_backdrop)
             .children(select_popup)
+            .children(record_color_popup)
             .children(status.map(|message| {
                 div()
                     .absolute()
@@ -2821,6 +3222,23 @@ fn input_editor_style(theme: &Theme) -> InputEditorStyle {
     }
 }
 
+fn background_label_key(background: WindowBackground) -> &'static str {
+    match background {
+        WindowBackground::Transparent => "window_background.transparent",
+        WindowBackground::System => "window_background.system",
+        WindowBackground::Light => "window_background.light",
+        WindowBackground::Dark => "window_background.dark",
+    }
+}
+
+fn padding_key(padding: u32) -> &'static str {
+    match padding {
+        24 => "padding.24",
+        48 => "padding.48",
+        _ => "padding.96",
+    }
+}
+
 fn repeat_pin_key(behavior: RepeatPinBehavior) -> &'static str {
     match behavior {
         RepeatPinBehavior::RestoreHistory => "settings.repeat_pin_history",
@@ -2831,8 +3249,8 @@ fn repeat_pin_key(behavior: RepeatPinBehavior) -> &'static str {
 fn action_button(theme: &Theme, label: String) -> Div {
     let hover = theme.control_hover;
     div()
-        .h(px(layout::BUTTON_HEIGHT))
-        .px(px(12.0))
+        .h(px(layout::SEGMENT_HEIGHT))
+        .px(px(8.0))
         .rounded(px(layout::BUTTON_RADIUS))
         .flex_shrink_0()
         .bg(theme.control)

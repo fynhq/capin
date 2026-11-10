@@ -36,11 +36,11 @@ const CANVAS_HISTORY_LIMIT: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Tool {
+    /// Internal selection mode; clicking an existing object enters it without
+    /// a dedicated toolbar button.
     Select,
     Rect,
-    Ellipse,
     Arrow,
-    Polyline,
     Highlighter,
     Blur,
     Text,
@@ -49,12 +49,9 @@ pub(crate) enum Tool {
 }
 
 impl Tool {
-    pub(crate) const ALL: [Self; 10] = [
-        Self::Select,
+    pub(crate) const ALL: [Self; 7] = [
         Self::Rect,
-        Self::Ellipse,
         Self::Arrow,
-        Self::Polyline,
         Self::Highlighter,
         Self::Blur,
         Self::Text,
@@ -66,9 +63,7 @@ impl Tool {
         match self {
             Self::Select => "editor-tool-select",
             Self::Rect => "editor-tool-rect",
-            Self::Ellipse => "editor-tool-ellipse",
             Self::Arrow => "editor-tool-arrow",
-            Self::Polyline => "editor-tool-polyline",
             Self::Highlighter => "editor-tool-highlighter",
             Self::Blur => "editor-tool-blur",
             Self::Text => "editor-tool-text",
@@ -81,9 +76,7 @@ impl Tool {
         match self {
             Self::Select => icons::SELECT,
             Self::Rect => icons::RECT,
-            Self::Ellipse => icons::ELLIPSE,
             Self::Arrow => icons::ARROW,
-            Self::Polyline => icons::POLYLINE,
             Self::Highlighter => icons::HIGHLIGHTER,
             Self::Blur => icons::BLUR,
             Self::Text => icons::TEXT,
@@ -96,9 +89,7 @@ impl Tool {
         match self {
             Self::Select => "editor.tool.select",
             Self::Rect => "editor.tool.rect",
-            Self::Ellipse => "editor.tool.ellipse",
             Self::Arrow => "editor.tool.arrow",
-            Self::Polyline => "editor.tool.polyline",
             Self::Highlighter => "editor.tool.highlighter",
             Self::Blur => "editor.tool.blur",
             Self::Text => "editor.tool.text",
@@ -110,8 +101,7 @@ impl Tool {
     pub(crate) fn color_tool(self) -> Option<AnnotationColorTool> {
         match self {
             Self::Rect => Some(AnnotationColorTool::Rect),
-            Self::Ellipse => Some(AnnotationColorTool::Ellipse),
-            Self::Arrow | Self::Polyline => Some(AnnotationColorTool::Arrow),
+            Self::Arrow => Some(AnnotationColorTool::Arrow),
             Self::Highlighter => Some(AnnotationColorTool::Highlighter),
             Self::Text => Some(AnnotationColorTool::Text),
             Self::Number => Some(AnnotationColorTool::Number),
@@ -121,10 +111,8 @@ impl Tool {
 
     fn from_shape(shape: &Shape) -> Option<Self> {
         match shape {
-            Shape::Rect(_) => Some(Self::Rect),
-            Shape::Ellipse(_) => Some(Self::Ellipse),
-            Shape::Arrow { .. } => Some(Self::Arrow),
-            Shape::Polyline { .. } => Some(Self::Polyline),
+            Shape::Rect(_) | Shape::Ellipse(_) => Some(Self::Rect),
+            Shape::Arrow { .. } | Shape::Polyline { .. } => Some(Self::Arrow),
             Shape::HighlighterBox(_) => Some(Self::Highlighter),
             Shape::Blur(_) => Some(Self::Blur),
             Shape::Text { .. } => Some(Self::Text),
@@ -182,6 +170,8 @@ struct Draft {
     current: PhysicalPoint,
     /// Constrain rectangle-like tools to a square/circle while Shift is held.
     shift: bool,
+    /// Rectangle tool drafts an ellipse.
+    ellipse: bool,
 }
 
 struct MoveDraft {
@@ -527,26 +517,6 @@ fn estimated_char_width(ch: char, font_size: f32) -> f32 {
     }
 }
 
-/// Saturated hue swatch used by the custom color strip.
-fn hue_rgb(hue: f32) -> u32 {
-    let hue = hue.rem_euclid(360.0) / 60.0;
-    let saturation = 0.82;
-    let value = 0.95;
-    let chroma = value * saturation;
-    let secondary = chroma * (1.0 - (hue % 2.0 - 1.0).abs());
-    let (red, green, blue) = match hue as u32 {
-        0 => (chroma, secondary, 0.0),
-        1 => (secondary, chroma, 0.0),
-        2 => (0.0, chroma, secondary),
-        3 => (0.0, secondary, chroma),
-        4 => (secondary, 0.0, chroma),
-        _ => (chroma, 0.0, secondary),
-    };
-    let offset = value - chroma;
-    let channel = |value: f32| ((value + offset) * 255.0).round().clamp(0.0, 255.0) as u32;
-    (channel(red) << 16) | (channel(green) << 8) | channel(blue)
-}
-
 pub(crate) struct EditorView {
     image: Arc<RenderImage>,
     blur_images: [Option<Arc<RenderImage>>; BLUR_RADII.len()],
@@ -560,6 +530,7 @@ pub(crate) struct EditorView {
     font_size: f32,
     arrow_start: bool,
     arrow_end: bool,
+    arrow_polyline: bool,
     text_background: bool,
     text_outline: bool,
     text_alignment: TextAlignment,
@@ -567,6 +538,7 @@ pub(crate) struct EditorView {
     blur_radius: u32,
     rect_filled: bool,
     ellipse_filled: bool,
+    shape_ellipse: bool,
     spotlight_intensity: u8,
     active_color_tool: AnnotationColorTool,
     draft: Option<Draft>,
@@ -616,6 +588,7 @@ impl EditorView {
         let font_size = settings.annotation_font_size;
         let arrow_start = settings.annotation_arrow_start;
         let arrow_end = settings.annotation_arrow_end;
+        let arrow_polyline = settings.annotation_arrow_polyline;
         let text_background = settings.annotation_text_background;
         let text_outline = settings.annotation_text_outline;
         let text_alignment = settings.annotation_text_alignment;
@@ -623,6 +596,7 @@ impl EditorView {
         let blur_radius = settings.annotation_blur_radius;
         let rect_filled = settings.annotation_rect_filled;
         let ellipse_filled = settings.annotation_ellipse_filled;
+        let shape_ellipse = settings.annotation_rect_ellipse;
         let spotlight_intensity = settings.annotation_spotlight_intensity;
         cx.on_release(|this, cx| {
             if this.images_released {
@@ -661,6 +635,7 @@ impl EditorView {
             font_size,
             arrow_start,
             arrow_end,
+            arrow_polyline,
             text_background,
             text_outline,
             text_alignment,
@@ -668,6 +643,7 @@ impl EditorView {
             blur_radius,
             rect_filled,
             ellipse_filled,
+            shape_ellipse,
             spotlight_intensity,
             active_color_tool,
             draft: None,
@@ -743,9 +719,12 @@ impl EditorView {
         match initial_tool {
             Tool::Rect => {
                 view.style.corner_radius = view.corner_radius;
-                view.style.filled = view.rect_filled;
+                view.style.filled = if view.shape_ellipse {
+                    view.ellipse_filled
+                } else {
+                    view.rect_filled
+                };
             }
-            Tool::Ellipse => view.style.filled = view.ellipse_filled,
             Tool::Blur => view.style.blur_radius = view.blur_radius,
             Tool::Spotlight => view.style.spotlight_intensity = view.spotlight_intensity,
             _ => {}
@@ -993,7 +972,7 @@ impl EditorView {
         let window_width = f32::from(window.viewport_size().width);
         let window_height = f32::from(window.viewport_size().height);
         let width = 250.0_f32.min((window_width - 16.0).max(120.0));
-        let height = 52.0;
+        let height = 86.0;
         let left = f32::from(info.origin.x).clamp(8.0, (window_width - width - 8.0).max(8.0));
         let top =
             crate::ui::popover_top(info, height, window_height, Some(self.toolbar_rect(window)));
@@ -1057,7 +1036,7 @@ impl EditorView {
         let cursor = if self.custom_color_fresh { "" } else { "|" };
         let mut hue_row = div().flex().flex_row().items_center().gap(px(3.0));
         for index in 0..12u32 {
-            let hue_color = hue_rgb(index as f32 * 30.0);
+            let hue_color = crate::ui::hue_rgb(index as f32 * 30.0);
             let label = format!("#{hue_color:06x}");
             hue_row = hue_row.child(
                 div()
@@ -1465,10 +1444,14 @@ impl EditorView {
             style.color = (style.color & 0xFFFFFF00) | 0x80;
             style.stroke_width = 12.0;
         }
-        style.filled = (self.tool == Tool::Rect && self.rect_filled)
-            || (self.tool == Tool::Ellipse && self.ellipse_filled);
+        style.filled = self.tool == Tool::Rect
+            && if self.shape_ellipse {
+                self.ellipse_filled
+            } else {
+                self.rect_filled
+            };
         if self.tool == Tool::Rect && style.filled {
-            // Rectangles are opaque by design; there is no opacity control.
+            // Filled shapes are opaque by design; there is no opacity control.
             style.color |= 0x000000FF;
         }
         if self.tool == Tool::Text {
@@ -1477,7 +1460,7 @@ impl EditorView {
             style.text_outline = self.text_outline;
             style.text_alignment = self.text_alignment;
         }
-        if matches!(self.tool, Tool::Arrow | Tool::Polyline) {
+        if self.tool == Tool::Arrow {
             style.arrow_start = self.arrow_start;
             style.arrow_end = self.arrow_end;
         }
@@ -1523,6 +1506,30 @@ impl EditorView {
             return Some(tool);
         }
         (self.tool != Tool::Select).then_some(self.tool)
+    }
+
+    fn config_shape_ellipse(&self) -> bool {
+        if let Some(shape) = self
+            .document
+            .selected()
+            .and_then(|id| self.document.object(id))
+            .map(|annotation| &annotation.shape)
+        {
+            return matches!(shape, Shape::Ellipse(_));
+        }
+        self.shape_ellipse
+    }
+
+    fn config_arrow_polyline(&self) -> bool {
+        if let Some(shape) = self
+            .document
+            .selected()
+            .and_then(|id| self.document.object(id))
+            .map(|annotation| &annotation.shape)
+        {
+            return matches!(shape, Shape::Polyline { .. });
+        }
+        self.arrow_polyline
     }
 
     fn palette_color(&self) -> u32 {
@@ -1615,6 +1622,12 @@ impl EditorView {
         });
     }
 
+    fn apply_arrow_polyline(&mut self, polyline: bool) {
+        self.arrow_polyline = polyline;
+        self.polyline_draft = None;
+        settings_state::update(|settings| settings.annotation_arrow_polyline = polyline);
+    }
+
     fn apply_corner_radius(&mut self, radius: f32) {
         self.corner_radius = radius;
         self.update_style(|style| style.corner_radius = radius);
@@ -1633,16 +1646,22 @@ impl EditorView {
         };
         match tool {
             Tool::Rect => {
-                self.rect_filled = filled;
-                settings_state::update(|settings| settings.annotation_rect_filled = filled);
-            }
-            Tool::Ellipse => {
-                self.ellipse_filled = filled;
-                settings_state::update(|settings| settings.annotation_ellipse_filled = filled);
+                if self.config_shape_ellipse() {
+                    self.ellipse_filled = filled;
+                    settings_state::update(|settings| settings.annotation_ellipse_filled = filled);
+                } else {
+                    self.rect_filled = filled;
+                    settings_state::update(|settings| settings.annotation_rect_filled = filled);
+                }
             }
             _ => return,
         }
         self.update_style(|style| style.filled = filled);
+    }
+
+    fn apply_shape_ellipse(&mut self, ellipse: bool) {
+        self.shape_ellipse = ellipse;
+        settings_state::update(|settings| settings.annotation_rect_ellipse = ellipse);
     }
 
     fn apply_spotlight_intensity(&mut self, intensity: u8) {
@@ -1757,10 +1776,14 @@ impl EditorView {
                 }
                 match tool {
                     Tool::Rect => {
+                        self.shape_ellipse = matches!(&annotation.shape, Shape::Ellipse(_));
                         self.corner_radius = annotation.style.corner_radius;
-                        self.rect_filled = annotation.style.filled;
+                        if self.shape_ellipse {
+                            self.ellipse_filled = annotation.style.filled;
+                        } else {
+                            self.rect_filled = annotation.style.filled;
+                        }
                     }
-                    Tool::Ellipse => self.ellipse_filled = annotation.style.filled,
                     Tool::Text => {
                         self.font_size = annotation.style.font_size;
                         self.text_background = annotation.style.text_background;
@@ -1771,6 +1794,7 @@ impl EditorView {
                     Tool::Arrow => {
                         self.arrow_start = annotation.style.arrow_start;
                         self.arrow_end = annotation.style.arrow_end;
+                        self.arrow_polyline = matches!(&annotation.shape, Shape::Polyline { .. });
                     }
                     Tool::Blur => self.blur_radius = annotation.style.blur_radius,
                     Tool::Spotlight => {
@@ -2017,9 +2041,12 @@ impl EditorView {
                     match tool {
                         Tool::Rect => {
                             this.style.corner_radius = this.corner_radius;
-                            this.style.filled = this.rect_filled;
+                            this.style.filled = if this.shape_ellipse {
+                                this.ellipse_filled
+                            } else {
+                                this.rect_filled
+                            };
                         }
-                        Tool::Ellipse => this.style.filled = this.ellipse_filled,
                         Tool::Blur => this.style.blur_radius = this.blur_radius,
                         Tool::Spotlight => {
                             this.style.spotlight_intensity = this.spotlight_intensity
@@ -2044,24 +2071,31 @@ impl EditorView {
             .and_then(|id| self.document.object(id))
             .map(|annotation| annotation.style);
         let config_style = selected_style.unwrap_or(self.style);
+        let config_ellipse = self.config_shape_ellipse();
         let config_filled = match config_tool {
-            Some(Tool::Rect) => selected_style.map_or(self.rect_filled, |style| style.filled),
-            Some(Tool::Ellipse) => selected_style.map_or(self.ellipse_filled, |style| style.filled),
+            Some(Tool::Rect) => selected_style.map_or(
+                if config_ellipse {
+                    self.ellipse_filled
+                } else {
+                    self.rect_filled
+                },
+                |style| style.filled,
+            ),
             _ => false,
         };
         let config_intensity =
             selected_style.map_or(self.spotlight_intensity, |style| style.spotlight_intensity);
         let show_color = config_tool.and_then(Tool::color_tool).is_some();
-        let show_fill = matches!(config_tool, Some(Tool::Rect | Tool::Ellipse));
+        let show_fill = config_tool == Some(Tool::Rect);
         let show_width = match config_tool {
             Some(Tool::Arrow) => true,
-            Some(Tool::Rect | Tool::Ellipse) => !config_filled,
+            Some(Tool::Rect) => !config_filled,
             _ => false,
         };
         let show_font = config_tool == Some(Tool::Text);
         let show_text_style = config_tool == Some(Tool::Text);
         let show_arrow_heads = config_tool == Some(Tool::Arrow);
-        let show_corner = config_tool == Some(Tool::Rect);
+        let show_corner = config_tool == Some(Tool::Rect) && !config_ellipse;
         let show_blur = config_tool == Some(Tool::Blur);
         let show_spotlight = config_tool == Some(Tool::Spotlight);
 
@@ -2144,6 +2178,63 @@ impl EditorView {
                     .items_center()
                     .gap(px(6.0))
                     .children(swatches)
+                    .into_any_element(),
+            );
+        }
+
+        if config_tool == Some(Tool::Rect) {
+            let mut options = Vec::new();
+            for (ellipse, id, label_key, icon) in [
+                (false, "editor-shape-rect", "editor.tool.rect", icons::RECT),
+                (
+                    true,
+                    "editor-shape-ellipse",
+                    "editor.tool.ellipse",
+                    icons::ELLIPSE,
+                ),
+            ] {
+                let selected = config_ellipse == ellipse;
+                let label = t(language, label_key).to_owned();
+                let button = div()
+                    .id(id)
+                    .tooltip(move |_, cx| tooltip_view(label.clone(), cx))
+                    .w(px(22.0))
+                    .h(px(22.0))
+                    .rounded(px(5.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(selected, |button| button.bg(accent_selected))
+                    .when(!selected, |button| {
+                        button.hover(move |style| style.bg(hover))
+                    })
+                    .active(|style| style.opacity(0.85))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.commit_text(cx);
+                        this.document.select(None);
+                        this.apply_shape_ellipse(ellipse);
+                        this.style.filled = if ellipse {
+                            this.ellipse_filled
+                        } else {
+                            this.rect_filled
+                        };
+                        this.status = None;
+                        cx.notify();
+                    }))
+                    .child(icons::icon(
+                        icon,
+                        16.0,
+                        if selected { accent } else { muted },
+                    ));
+                options.push(button.into_any_element());
+            }
+            groups.push(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(2.0))
+                    .children(options)
                     .into_any_element(),
             );
         }
@@ -2452,6 +2543,36 @@ impl EditorView {
                     );
                 buttons.push(button.into_any_element());
             }
+            let polyline = self.config_arrow_polyline();
+            let tooltip = t(language, "editor.tool.polyline").to_owned();
+            buttons.push(
+                div()
+                    .id("editor-arrow-polyline")
+                    .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
+                    .w(px(24.0))
+                    .h(px(22.0))
+                    .rounded(px(5.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(polyline, |button| button.bg(accent_selected))
+                    .when(!polyline, |button| {
+                        button.hover(move |style| style.bg(hover))
+                    })
+                    .active(|style| style.opacity(0.85))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.document.select(None);
+                        this.apply_arrow_polyline(!polyline);
+                        this.status = None;
+                        cx.notify();
+                    }))
+                    .child(icons::icon(
+                        icons::POLYLINE,
+                        14.0,
+                        if polyline { accent } else { muted },
+                    ))
+                    .into_any_element(),
+            );
             groups.push(
                 div()
                     .flex()
@@ -3236,7 +3357,35 @@ impl EditorView {
                     .text_color(self.chrome.muted)
                     .child(t(language, "overlay.effects_corner")),
             )
-            .child(corner_row);
+            .child(corner_row)
+            .child({
+                let shadow = self.effects.shadow;
+                div()
+                    .id("editor-effects-shadow")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .px(px(7.0))
+                    .py(px(3.0))
+                    .rounded(px(5.0))
+                    .when(shadow, |chip| chip.bg(self.chrome.accent))
+                    .when(!shadow, |chip| {
+                        chip.hover(|style| style.bg(self.chrome.hover))
+                    })
+                    .text_size(px(10.5))
+                    .text_color(if shadow {
+                        self.chrome.accent_text
+                    } else {
+                        self.chrome.muted
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.effects.shadow = !this.effects.shadow;
+                        cx.notify();
+                    }))
+                    .child(t(language, "overlay.effects_shadow"))
+            });
 
         Some(
             div()
@@ -3367,7 +3516,7 @@ impl EditorView {
         let frame = match captured {
             Ok(frame) => match capture.target {
                 CaptureTarget::Window(id) => {
-                    crate::window_frame::round_window_capture(id, frame, capture.scale)
+                    crate::window_frame::compose_window_capture(id, frame, capture.scale)
                 }
                 _ => frame,
             },
@@ -4233,7 +4382,7 @@ impl Render for EditorView {
                         this.export(true, cx);
                         return;
                     }
-                    if this.tool == Tool::Polyline {
+                    if this.tool == Tool::Arrow && this.arrow_polyline {
                         this.resize_draft = None;
                         this.move_draft = None;
                         if event.click_count >= 2 {
@@ -4309,6 +4458,7 @@ impl Render for EditorView {
                         start: point,
                         current: point,
                         shift: event.modifiers.shift,
+                        ellipse: this.tool == Tool::Rect && this.shape_ellipse,
                     });
                     cx.notify();
                 }),
@@ -5067,11 +5217,11 @@ fn finalize_shape(draft: &Draft, end: PhysicalPoint) -> Option<Shape> {
     match draft.tool {
         Tool::Rect => {
             let rect = constrained_rect(draft.start, end, draft.shift);
-            (rect.size.width >= 2 && rect.size.height >= 2).then_some(Shape::Rect(rect))
-        }
-        Tool::Ellipse => {
-            let rect = constrained_rect(draft.start, end, draft.shift);
-            (rect.size.width >= 2 && rect.size.height >= 2).then_some(Shape::Ellipse(rect))
+            (rect.size.width >= 2 && rect.size.height >= 2).then_some(if draft.ellipse {
+                Shape::Ellipse(rect)
+            } else {
+                Shape::Rect(rect)
+            })
         }
         Tool::Blur => {
             let rect = normalized_rect(draft.start, end);
@@ -5089,7 +5239,7 @@ fn finalize_shape(draft: &Draft, end: PhysicalPoint) -> Option<Shape> {
             let rect = normalized_rect(draft.start, end);
             (rect.size.width >= 2 && rect.size.height >= 2).then_some(Shape::HighlighterBox(rect))
         }
-        Tool::Text | Tool::Select | Tool::Number | Tool::Polyline => None,
+        Tool::Text | Tool::Select | Tool::Number => None,
     }
 }
 
@@ -5413,6 +5563,39 @@ fn paint_shape(
             bounds.origin.y + px(y * scale),
         )
     };
+    // GPUI strokes have butt caps, while the exported raster uses round caps.
+    // Paint a round cap at every tail end so the preview matches the output.
+    let draw_cap = |window: &mut Window, center: PhysicalPoint| {
+        let radius = stroke / 2.0;
+        let c = to_point(center.x as f32, center.y as f32);
+        let k = radius * 0.552_284_8;
+        let mut builder = PathBuilder::fill();
+        builder.move_to(point(c.x - radius, c.y));
+        builder.cubic_bezier_to(
+            point(c.x - radius, c.y - k),
+            point(c.x - k, c.y - radius),
+            point(c.x, c.y - radius),
+        );
+        builder.cubic_bezier_to(
+            point(c.x + k, c.y - radius),
+            point(c.x + radius, c.y - k),
+            point(c.x + radius, c.y),
+        );
+        builder.cubic_bezier_to(
+            point(c.x + radius, c.y + k),
+            point(c.x + k, c.y + radius),
+            point(c.x, c.y + radius),
+        );
+        builder.cubic_bezier_to(
+            point(c.x - k, c.y + radius),
+            point(c.x - radius, c.y + k),
+            point(c.x - radius, c.y),
+        );
+        builder.close();
+        if let Ok(path) = builder.build() {
+            window.paint_path(path, color);
+        }
+    };
 
     match shape {
         Shape::Rect(rect) => {
@@ -5515,6 +5698,12 @@ fn paint_shape(
             if let Ok(path) = builder.build() {
                 window.paint_path(path, color);
             }
+            if !style.arrow_start {
+                draw_cap(window, *start);
+            }
+            if !style.arrow_end {
+                draw_cap(window, *end);
+            }
         }
         Shape::Polyline { points } => {
             if points.len() < 2 {
@@ -5560,6 +5749,12 @@ fn paint_shape(
             }
             if let Ok(path) = builder.build() {
                 window.paint_path(path, color);
+            }
+            if !style.arrow_start {
+                draw_cap(window, points[0]);
+            }
+            if !style.arrow_end {
+                draw_cap(window, points[points.len() - 1]);
             }
         }
         Shape::HighlighterBox(rect) => {
@@ -5629,7 +5824,8 @@ fn paint_spotlight(
 
 #[cfg(test)]
 mod tests {
-    use super::{TextEdit, hue_rgb};
+    use super::TextEdit;
+    use crate::ui::hue_rgb;
     use core_annotate::AnnotationStyle;
     use core_types::{PhysicalPoint, PhysicalSize};
 

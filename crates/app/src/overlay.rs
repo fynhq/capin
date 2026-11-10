@@ -1553,7 +1553,7 @@ impl OverlayView {
                 };
                 match captured {
                     Ok(frame) => {
-                        crate::window_frame::round_window_capture(id, frame, selected.scale)
+                        crate::window_frame::compose_window_capture(id, frame, selected.scale)
                     }
                     Err(error) => {
                         // Shell surfaces such as the taskbar reject some
@@ -2370,7 +2370,7 @@ impl OverlayView {
         let info = self.info_rect()?;
         let language = settings_state::get().language;
         let width = 246.0_f32.min(f32::from(self.window_size.width) - 16.0);
-        let height = 52.0;
+        let height = 86.0;
         let left = f32::from(info.origin.x).clamp(
             8.0,
             (f32::from(self.window_size.width) - width - 8.0).max(8.0),
@@ -2442,7 +2442,35 @@ impl OverlayView {
                     .text_color(self.chrome.muted)
                     .child(t(language, "overlay.effects_corner")),
             )
-            .child(corner_row);
+            .child(corner_row)
+            .child({
+                let shadow = self.effects.shadow;
+                div()
+                    .id("overlay-effects-shadow")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .px(px(7.0))
+                    .py(px(3.0))
+                    .rounded(px(5.0))
+                    .when(shadow, |chip| chip.bg(self.chrome.accent))
+                    .when(!shadow, |chip| {
+                        chip.hover(|style| style.bg(self.chrome.hover))
+                    })
+                    .text_size(px(10.5))
+                    .text_color(if shadow {
+                        self.chrome.accent_text
+                    } else {
+                        self.chrome.muted
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.effects.shadow = !this.effects.shadow;
+                        cx.notify();
+                    }))
+                    .child(t(language, "overlay.effects_shadow"))
+            });
 
         Some(
             div()
@@ -2473,7 +2501,7 @@ impl OverlayView {
         let rect = self.toolbar_rect()?;
         let language = settings_state::get().language;
         let mut tools = div().flex().flex_row().items_center().gap(px(1.0));
-        for tool in Tool::ALL.into_iter().filter(|tool| *tool != Tool::Select) {
+        for tool in Tool::ALL {
             let label = t(language, tool.label_key()).to_owned();
             tools = tools.child(
                 div()
