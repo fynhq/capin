@@ -3,23 +3,27 @@ use std::mem::size_of;
 use std::path::PathBuf;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, POINT, WPARAM};
+use windows::Win32::Foundation::POINT as ScreenPoint;
+use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+    ClientToScreen, GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MonitorFromWindow,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT, ReleaseCapture, SendInput,
+    INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
 };
 use windows::Win32::UI::Shell::{
     FOLDERID_Pictures, FOLDERID_Videos, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetWindowLongPtrW, HTCAPTION, HWND_TOPMOST, LWA_ALPHA, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SendMessageW,
-    SetForegroundWindow, SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowLongPtrW,
-    SetWindowPos, WDA_EXCLUDEFROMCAPTURE, WM_NCLBUTTONDOWN, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WindowFromPoint,
+    GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetCursorPos, GetWindowLongPtrW, GetWindowRect,
+    HWND_TOPMOST, IDC_ARROW, LWA_ALPHA, LoadCursorW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow,
+    SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos,
+    WDA_EXCLUDEFROMCAPTURE, WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+    WindowFromPoint,
 };
 use windows::core::GUID;
 
@@ -44,28 +48,68 @@ pub(super) fn place_on_monitor(
         return Err(PlatformWindowError::NotWin32);
     };
     let hwnd = HWND(win32.hwnd.get() as *mut c_void);
-    let width = i32::try_from(bounds.size.width).map_err(|_| PlatformWindowError::Platform {
-        operation: "SetWindowPos",
-        message: "window width exceeds i32".to_owned(),
-    })?;
-    let height = i32::try_from(bounds.size.height).map_err(|_| PlatformWindowError::Platform {
-        operation: "SetWindowPos",
-        message: "window height exceeds i32".to_owned(),
-    })?;
+    // `bounds` describes the client area that must cover the monitor. A
+    // window that still carries non-client frame styles would place its
+    // client area a few pixels inside this rectangle, scaling the frozen
+    // frame and clipping the right/bottom edges. Expand the native window by
+    // the measured frame insets so the client matches the monitor.
+    let (inset_left, inset_top, extra_width, extra_height) = client_frame_insets(hwnd);
+    let width = i32::try_from(bounds.size.width)
+        .ok()
+        .and_then(|width| width.checked_add(extra_width))
+        .ok_or_else(|| PlatformWindowError::Platform {
+            operation: "SetWindowPos",
+            message: "window width exceeds i32".to_owned(),
+        })?;
+    let height = i32::try_from(bounds.size.height)
+        .ok()
+        .and_then(|height| height.checked_add(extra_height))
+        .ok_or_else(|| PlatformWindowError::Platform {
+            operation: "SetWindowPos",
+            message: "window height exceeds i32".to_owned(),
+        })?;
     // SAFETY: hwnd belongs to a live window created by the caller. The
     // rectangle is in physical pixels because the process is PerMonitorV2.
     unsafe {
         SetWindowPos(
             hwnd,
             None,
-            bounds.origin.x,
-            bounds.origin.y,
+            bounds.origin.x - inset_left,
+            bounds.origin.y - inset_top,
             width,
             height,
             SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         )
     }
     .map_err(|error| platform_error("SetWindowPos", error))
+}
+
+/// Native frame thickness around the client area, as
+/// `(left, top, total_width, total_height)` in physical pixels.
+fn client_frame_insets(hwnd: HWND) -> (i32, i32, i32, i32) {
+    let mut window_rect = RECT::default();
+    let mut client_rect = RECT::default();
+    // SAFETY: both output buffers match the requested structures and hwnd
+    // belongs to a live window created by the caller.
+    if unsafe { GetWindowRect(hwnd, &mut window_rect) }.is_err()
+        || unsafe { GetClientRect(hwnd, &mut client_rect) }.is_err()
+    {
+        return (0, 0, 0, 0);
+    }
+    let mut client_origin = ScreenPoint { x: 0, y: 0 };
+    // SAFETY: hwnd is live and the point is a caller-owned output value.
+    if !unsafe { ClientToScreen(hwnd, &mut client_origin) }.as_bool() {
+        return (0, 0, 0, 0);
+    }
+    let window_width = window_rect.right - window_rect.left;
+    let window_height = window_rect.bottom - window_rect.top;
+    let client_width = client_rect.right - client_rect.left;
+    let client_height = client_rect.bottom - client_rect.top;
+    let left = client_origin.x - window_rect.left;
+    let top = client_origin.y - window_rect.top;
+    let right = window_width - left - client_width;
+    let bottom = window_height - top - client_height;
+    (left, top, left + right, top + bottom)
 }
 
 pub(super) fn apply(
@@ -77,6 +121,31 @@ pub(super) fn apply(
         return Err(PlatformWindowError::NotWin32);
     };
     let hwnd = HWND(win32.hwnd.get() as *mut c_void);
+
+    if style.borderless && style.opaque {
+        // GPUI's popup windows keep the resize frame on the left, right and
+        // bottom even after the title bar is hidden. A capture overlay must
+        // cover the monitor exactly, so drop the whole non-client frame
+        // instead of living with a client area that is a few pixels smaller
+        // than the display. Transparent inline editors keep GPUI's frame
+        // compensation: they are placed before their style is applied.
+        let mut window_style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
+        window_style &=
+            !(WS_CAPTION.0 | WS_THICKFRAME.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0);
+        window_style |= WS_POPUP.0;
+        unsafe {
+            SetWindowLongPtrW(hwnd, GWL_STYLE, window_style as isize);
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
 
     if style.skip_taskbar || style.no_activate {
         // SAFETY: hwnd belongs to a live window created by the caller.
@@ -175,33 +244,69 @@ fn platform_error(operation: &'static str, error: impl std::fmt::Display) -> Pla
     }
 }
 
-pub(super) fn begin_window_drag(window: &impl HasWindowHandle) -> Result<(), PlatformWindowError> {
-    let handle = window.window_handle()?;
-    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
-        return Err(PlatformWindowError::NotWin32);
-    };
-    let hwnd = HWND(win32.hwnd.get() as *mut c_void);
-    // SAFETY: hwnd belongs to a live window created by the caller. The
-    // message is processed synchronously and returns once the OS move loop
-    // ends on left-button release.
-    unsafe {
-        let _ = ReleaseCapture();
-        SendMessageW(
-            hwnd,
-            WM_NCLBUTTONDOWN,
-            Some(WPARAM(HTCAPTION as usize)),
-            Some(LPARAM(0)),
-        );
-    }
-    Ok(())
-}
-
 pub(super) fn native_window_id(window: &impl HasWindowHandle) -> Option<u64> {
     let handle = window.window_handle().ok()?;
     let RawWindowHandle::Win32(win32) = handle.as_raw() else {
         return None;
     };
     Some(win32.hwnd.get() as u64)
+}
+
+pub(super) fn cursor_screen_position() -> Option<(i32, i32)> {
+    let mut point = ScreenPoint { x: 0, y: 0 };
+    // SAFETY: the point is a caller-owned output buffer.
+    unsafe { GetCursorPos(&mut point) }.ok()?;
+    Some((point.x, point.y))
+}
+
+pub(super) fn window_screen_origin(window: &impl HasWindowHandle) -> Option<(i32, i32)> {
+    let handle = window.window_handle().ok()?;
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return None;
+    };
+    let hwnd = HWND(win32.hwnd.get() as *mut c_void);
+    let mut rect = RECT::default();
+    // SAFETY: the rectangle is a caller-owned output buffer and hwnd is live.
+    unsafe { GetWindowRect(hwnd, &mut rect) }.ok()?;
+    Some((rect.left, rect.top))
+}
+
+pub(super) fn move_window_to(
+    window: &impl HasWindowHandle,
+    x: i32,
+    y: i32,
+) -> Result<(), PlatformWindowError> {
+    let handle = window.window_handle()?;
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return Err(PlatformWindowError::NotWin32);
+    };
+    let hwnd = HWND(win32.hwnd.get() as *mut c_void);
+    // SAFETY: hwnd is live; only the origin changes, size and z-order stay.
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    }
+    .map_err(|error| platform_error("SetWindowPos", error))
+}
+
+pub(super) fn set_cursor_hidden(hidden: bool) {
+    let cursor = if hidden {
+        None
+    } else {
+        // SAFETY: IDC_ARROW is a system cursor resource.
+        unsafe { LoadCursorW(None, IDC_ARROW) }.ok()
+    };
+    // SAFETY: the cursor belongs to this thread's window; None hides it.
+    unsafe {
+        SetCursor(cursor);
+    }
 }
 
 pub(super) fn scroll_wheel_at(monitor: u64, x: i32, y: i32, notches: i32) -> bool {

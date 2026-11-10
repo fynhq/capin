@@ -2156,6 +2156,13 @@ impl SettingsView {
                         ),
                         info_row(
                             theme,
+                            t(language, "shortcuts.window_mode"),
+                            t(language, "shortcuts.window_mode_desc"),
+                            "Ctrl",
+                            Some(icons::CAMERA),
+                        ),
+                        info_row(
+                            theme,
                             t(language, "shortcuts.adjust_target"),
                             t(language, "shortcuts.adjust_target_desc"),
                             t(language, "shortcuts.value.wheel"),
@@ -2266,7 +2273,7 @@ impl SettingsView {
                             theme,
                             t(language, "shortcuts.pin_select_text"),
                             t(language, "shortcuts.pin_select_text_desc"),
-                            t(language, "shortcuts.value.shift_drag"),
+                            t(language, "shortcuts.value.drag"),
                             Some(icons::TEXT),
                         ),
                         info_row(

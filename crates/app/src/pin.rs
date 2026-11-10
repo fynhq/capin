@@ -1013,6 +1013,13 @@ impl PinTheme {
     }
 }
 
+/// Native window drag started from a pin. Screen coordinates are physical so
+/// mixed-DPI desktops move the window at the same speed as the cursor.
+struct PinDrag {
+    cursor_start: (i32, i32),
+    window_start: (i32, i32),
+}
+
 struct PinView {
     id: u64,
     content: PinContent,
@@ -1029,9 +1036,8 @@ struct PinView {
     ocr_path: Option<PathBuf>,
     selection: Option<(usize, usize)>,
     selecting: bool,
-    /// Window-local press position while a text click may still turn into a
-    /// window drag.
-    press: Option<Point<Pixels>>,
+    drag: Option<PinDrag>,
+    hover_text: bool,
     content_generation: u64,
     flash_alpha: f32,
     flash_generation: u64,
@@ -1062,7 +1068,8 @@ impl PinView {
             ocr: None,
             selection: None,
             selecting: false,
-            press: None,
+            drag: None,
+            hover_text: false,
             content_generation: 1,
             flash_alpha: 0.0,
             flash_generation: 0,
@@ -1469,15 +1476,35 @@ impl PinView {
     fn begin_window_drag(&mut self, window: &mut Window) {
         #[cfg(target_os = "windows")]
         {
-            // GPUI's Windows backend leaves `start_window_move` as a no-op, so
-            // ask the native title-bar move loop directly.
-            let _ = platform_window::begin_window_drag(&*window);
-            update_bounds(self.id, window.bounds());
+            // GPUI's Windows backend dispatches non-client presses back into
+            // the view, so the native move loop never runs. Move the window
+            // ourselves from the physical cursor delta instead; GPUI already
+            // captured the mouse until button release.
+            let cursor = platform_window::cursor_screen_position();
+            let origin = platform_window::window_screen_origin(&*window);
+            if let (Some(cursor), Some(origin)) = (cursor, origin) {
+                self.drag = Some(PinDrag {
+                    cursor_start: cursor,
+                    window_start: origin,
+                });
+            }
         }
         #[cfg(not(target_os = "windows"))]
         {
             window.start_window_move();
         }
+    }
+
+    fn update_window_drag(&mut self, window: &mut Window) {
+        let Some(drag) = &self.drag else {
+            return;
+        };
+        let Some((cursor_x, cursor_y)) = platform_window::cursor_screen_position() else {
+            return;
+        };
+        let x = drag.window_start.0 + cursor_x - drag.cursor_start.0;
+        let y = drag.window_start.1 + cursor_y - drag.cursor_start.1;
+        let _ = platform_window::move_window_to(&*window, x, y);
     }
 
     fn release_image(&mut self, cx: &mut Context<Self>) {
@@ -1703,6 +1730,8 @@ impl Render for PinView {
                 .opacity(self.flash_alpha)
         });
         let cursor = match &self.content {
+            PinContent::Image { .. } if self.drag.is_some() => CursorStyle::ClosedHand,
+            PinContent::Image { .. } if self.hover_text => CursorStyle::IBeam,
             PinContent::Image { .. } => CursorStyle::OpenHand,
             PinContent::Text(_) => CursorStyle::IBeam,
         };
@@ -1735,6 +1764,7 @@ impl Render for PinView {
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     crate::pin::close_pin_menu(cx);
                     window.focus(&this.focus_handle, cx);
+                    this.hover_text = this.text_index_at(event.position).is_some();
                     if event.click_count >= 2 {
                         this.select_word_at(event.position, cx);
                         cx.notify();
@@ -1748,16 +1778,14 @@ impl Render for PinView {
                         || y < margin
                         || x > f32::from(bounds.width) - margin
                         || y > f32::from(bounds.height) - margin;
-                    if near_edge
-                        || event.modifiers.alt
-                        || !this.begin_text_selection(event.position)
-                    {
+                    let over_text = this.begin_text_selection(event.position);
+                    if near_edge || event.modifiers.alt || !over_text {
+                        // Dragging text selects it; Alt or an edge drag moves
+                        // the pin. Both gestures stay available on text-heavy
+                        // images.
                         this.selection = None;
                         this.selecting = false;
-                        this.press = None;
                         this.begin_window_drag(window);
-                    } else {
-                        this.press = Some(event.position);
                     }
                     cx.notify();
                 }),
@@ -1771,35 +1799,39 @@ impl Render for PinView {
                         px(f32::from(bounds.origin.y) + f32::from(event.position.y)),
                     );
                     let items = this.menu_items(settings_state::get().language);
-                    crate::pin::open_pin_menu(this.id, position, items, cx);
+                    let pin_id = this.id;
+                    // Opening a GPUI window inside an input callback re-enters
+                    // the App borrow and panics; create the menu after the
+                    // event dispatch finishes.
+                    cx.defer(move |cx| crate::pin::open_pin_menu(pin_id, position, items, cx));
                     cx.stop_propagation();
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                if this.drag.is_some() {
+                    this.update_window_drag(window);
+                    return;
+                }
                 if this.selecting {
-                    let moved = this.press.is_some_and(|press| {
-                        let dx = f32::from(event.position.x) - f32::from(press.x);
-                        let dy = f32::from(event.position.y) - f32::from(press.y);
-                        dx * dx + dy * dy > 25.0
-                    });
-                    if moved && !event.modifiers.shift {
-                        // Plain drag moves the pin even when it starts on a
-                        // text run; Shift keeps the drag as text selection.
-                        this.selection = None;
-                        this.selecting = false;
-                        this.press = None;
-                        this.begin_window_drag(window);
-                        cx.notify();
-                        return;
-                    }
                     this.update_text_selection(event.position);
+                    cx.notify();
+                    return;
+                }
+                let over_text = this.text_index_at(event.position).is_some();
+                if over_text != this.hover_text {
+                    this.hover_text = over_text;
                     cx.notify();
                 }
             }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
-                    this.press = None;
+                    if this.drag.take().is_some() {
+                        update_bounds(this.id, window.bounds());
+                        schedule_manifest_save(cx);
+                        cx.notify();
+                        return;
+                    }
                     if this.selecting {
                         this.finish_text_selection(cx);
                     } else {
@@ -1807,6 +1839,23 @@ impl Render for PinView {
                     }
                 }),
             )
+            .on_mouse_exit(cx.listener(|this, _, window, cx| {
+                // A very fast drag can outrun the window; without this the
+                // drag state would survive a mouse-up delivered outside and
+                // the pin would keep following the cursor afterwards.
+                if this.drag.take().is_some() {
+                    update_bounds(this.id, window.bounds());
+                    schedule_manifest_save(cx);
+                    cx.notify();
+                }
+                if this.selecting {
+                    this.finish_text_selection(cx);
+                }
+                if this.hover_text {
+                    this.hover_text = false;
+                    cx.notify();
+                }
+            }))
             .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
                 let delta = match event.delta {
                     ScrollDelta::Lines(delta) => delta.y,
@@ -1925,8 +1974,10 @@ impl Render for PinMenuView {
                     )
                     .on_click(cx.listener(move |_, _, window, cx| {
                         forget_pin_menu();
-                        perform_pin_action(pin_id, action, cx);
                         window.remove_window();
+                        // Edit opens a full-screen editor window; doing that
+                        // inside this input callback would re-enter the App.
+                        cx.defer(move |cx| perform_pin_action(pin_id, action, cx));
                     }))
                     .child(label),
             );

@@ -596,6 +596,32 @@ mod tests {
     }
 
     #[test]
+    fn restyling_one_object_leaves_the_others_untouched() {
+        let mut doc = document();
+        let rect = doc.add(
+            Shape::Rect(PhysicalRect::new(10, 10, 50, 50)),
+            AnnotationStyle::default(),
+        );
+        let text = doc.add(
+            Shape::Text {
+                bounds: PhysicalRect::new(10, 80, 120, 24),
+                text: "note".to_owned(),
+            },
+            AnnotationStyle {
+                color: 0x0A84FFFF,
+                ..Default::default()
+            },
+        );
+        doc.select(Some(rect));
+        let mut style = doc.object(rect).unwrap().style;
+        style.color = 0x34C759FF;
+        assert!(doc.update_selected_style(style));
+
+        assert_eq!(doc.object(rect).unwrap().style.color, 0x34C759FF);
+        assert_eq!(doc.object(text).unwrap().style.color, 0x0A84FFFF);
+    }
+
+    #[test]
     fn clear_is_undoable() {
         let mut doc = document();
         doc.add(

@@ -464,7 +464,11 @@ impl TextEdit {
         start..end
     }
 
-    fn replace(&mut self, range: Option<Range<usize>>, text: &str) {
+    /// Replaces text as either an IME composition (`mark`) or committed text.
+    ///
+    /// A committed IME result must replace the in-flight composition instead
+    /// of being appended after it, and only a composition may stay marked.
+    fn replace(&mut self, range: Option<Range<usize>>, text: &str, mark: bool) {
         let selection = self.selection();
         let range = range
             .or_else(|| self.marked.take())
@@ -477,7 +481,7 @@ impl TextEdit {
         self.content.replace_range(range.clone(), &text);
         self.cursor = range.start + text.len();
         self.anchor = self.cursor;
-        self.marked = (!text.is_empty()).then_some(range.start..range.start + text.len());
+        self.marked = (mark && !text.is_empty()).then_some(range.start..range.start + text.len());
     }
 
     fn finish_bounds(&self) -> PhysicalRect {
@@ -523,6 +527,26 @@ fn estimated_char_width(ch: char, font_size: f32) -> f32 {
     }
 }
 
+/// Saturated hue swatch used by the custom color strip.
+fn hue_rgb(hue: f32) -> u32 {
+    let hue = hue.rem_euclid(360.0) / 60.0;
+    let saturation = 0.82;
+    let value = 0.95;
+    let chroma = value * saturation;
+    let secondary = chroma * (1.0 - (hue % 2.0 - 1.0).abs());
+    let (red, green, blue) = match hue as u32 {
+        0 => (chroma, secondary, 0.0),
+        1 => (secondary, chroma, 0.0),
+        2 => (0.0, chroma, secondary),
+        3 => (0.0, secondary, chroma),
+        4 => (secondary, 0.0, chroma),
+        _ => (chroma, 0.0, secondary),
+    };
+    let offset = value - chroma;
+    let channel = |value: f32| ((value + offset) * 255.0).round().clamp(0.0, 255.0) as u32;
+    (channel(red) << 16) | (channel(green) << 8) | channel(blue)
+}
+
 pub(crate) struct EditorView {
     image: Arc<RenderImage>,
     blur_images: [Option<Arc<RenderImage>>; BLUR_RADII.len()],
@@ -559,6 +583,9 @@ pub(crate) struct EditorView {
     canvas_undo: Vec<EditorSnapshot>,
     canvas_redo: Vec<EditorSnapshot>,
     annotation_clipboard: Option<Annotation>,
+    custom_color_open: bool,
+    custom_color_buffer: String,
+    custom_color_fresh: bool,
     text_edit: Option<TextEdit>,
     text_edit_screen: Option<Bounds<Pixels>>,
     accent_hex: u32,
@@ -657,6 +684,9 @@ impl EditorView {
             canvas_undo: Vec::new(),
             canvas_redo: Vec::new(),
             annotation_clipboard: None,
+            custom_color_open: false,
+            custom_color_buffer: String::new(),
+            custom_color_fresh: false,
             text_edit: None,
             text_edit_screen: None,
             accent_hex,
@@ -763,7 +793,7 @@ impl EditorView {
             .and_then(|id| self.document.object(id))
         {
             Some(annotation) => {
-                if let Some(handle) = hit_resize_handle(&annotation.shape, point, 9.0 / scale) {
+                if let Some(handle) = hit_resize_handle(&annotation.shape, point, 6.0 / scale) {
                     SelectionHover::Handle(handle)
                 } else if self.document.hit_test(point) == Some(annotation.id) {
                     SelectionHover::Body
@@ -835,12 +865,32 @@ impl EditorView {
 
     fn options_rect(&self, window: &Window, toolbar: Bounds<Pixels>) -> Bounds<Pixels> {
         let window_width = f32::from(window.viewport_size().width);
+        let window_height = f32::from(window.viewport_size().height);
         let width = 560.0_f32.min((window_width - 16.0).max(120.0));
         let left = f32::from(toolbar.origin.x).clamp(8.0, (window_width - width - 8.0).max(8.0));
-        let mut top = f32::from(toolbar.origin.y) - OPTIONS_PANEL_HEIGHT - 6.0;
-        if top < 8.0 {
-            top = f32::from(toolbar.origin.y) + f32::from(toolbar.size.height) + 6.0;
-        }
+        let toolbar_top = f32::from(toolbar.origin.y);
+        let toolbar_bottom = toolbar_top + f32::from(toolbar.size.height);
+        let anchor = self.toolbar_anchor(window);
+        let anchor_bottom = f32::from(anchor.origin.y) + f32::from(anchor.size.height);
+        // Keep the options on the same side as the toolbar, i.e. further away
+        // from the capture. Placing them between the toolbar and the image
+        // covered the bottom of small selections.
+        let toolbar_below = toolbar_top >= anchor_bottom;
+        let below = toolbar_bottom + 6.0;
+        let above = toolbar_top - OPTIONS_PANEL_HEIGHT - 6.0;
+        let (preferred, fallback) = if toolbar_below {
+            (below, above)
+        } else {
+            (above, below)
+        };
+        let fits = |top: f32| top >= 8.0 && top + OPTIONS_PANEL_HEIGHT <= window_height - 8.0;
+        let top = if fits(preferred) {
+            preferred
+        } else if fits(fallback) {
+            fallback
+        } else {
+            preferred.clamp(8.0, (window_height - OPTIONS_PANEL_HEIGHT - 8.0).max(8.0))
+        };
         Bounds {
             origin: point(px(left), px(top)),
             size: size(px(width), px(OPTIONS_PANEL_HEIGHT)),
@@ -853,20 +903,59 @@ impl EditorView {
         let window_height = f32::from(window.viewport_size().height);
         let width = INFO_BAR_WIDTH.min((window_width - 16.0).max(120.0));
         let left = f32::from(anchor.origin.x).clamp(8.0, (window_width - width - 8.0).max(8.0));
-        let mut top = f32::from(anchor.origin.y) - INFO_BAR_HEIGHT - 8.0;
         let toolbar = self.toolbar_rect(window);
-        let inside_top = f32::from(anchor.origin.y) + 8.0;
-        let below = f32::from(anchor.origin.y) + f32::from(anchor.size.height) + 8.0;
-        if top < 8.0 {
-            top = inside_top;
-        } else if f32::from(toolbar.origin.y) < f32::from(anchor.origin.y) {
-            top = if below + INFO_BAR_HEIGHT <= window_height - 8.0 {
-                below
-            } else {
-                inside_top
-            };
+        let anchor_top = f32::from(anchor.origin.y);
+        let anchor_bottom = anchor_top + f32::from(anchor.size.height);
+        let toolbar_top = f32::from(toolbar.origin.y);
+        let toolbar_bottom = toolbar_top + f32::from(toolbar.size.height);
+        let options_visible = self.config_tool().is_some() && !self.toolbar_hidden;
+        let options = self.options_rect(window, toolbar);
+        let options_top = f32::from(options.origin.y);
+        let options_bottom = options_top + f32::from(options.size.height);
+        let fits = |top: f32| top >= 8.0 && top + INFO_BAR_HEIGHT <= window_height - 8.0;
+        let overlaps_toolbar = |top: f32| {
+            !self.toolbar_hidden && top < toolbar_bottom && top + INFO_BAR_HEIGHT > toolbar_top
+        };
+        let above = anchor_top - INFO_BAR_HEIGHT - 8.0;
+        let below = anchor_bottom + 8.0;
+        let mut candidates = Vec::new();
+        if fits(above) && !overlaps_toolbar(above) {
+            candidates.push(above);
         }
-        top = top.clamp(8.0, (window_height - INFO_BAR_HEIGHT - 8.0).max(8.0));
+        if toolbar_top >= anchor_bottom {
+            let outside = if options_visible {
+                options_bottom + 6.0
+            } else {
+                toolbar_bottom + 6.0
+            };
+            if fits(outside) {
+                candidates.push(outside);
+            }
+        }
+        if toolbar_bottom <= anchor_top {
+            let outside = if options_visible {
+                options_top - INFO_BAR_HEIGHT - 6.0
+            } else {
+                toolbar_top - INFO_BAR_HEIGHT - 6.0
+            };
+            if fits(outside) {
+                candidates.push(outside);
+            }
+        }
+        if fits(below) && !overlaps_toolbar(below) {
+            candidates.push(below);
+        }
+        if fits(anchor_top + 8.0) {
+            candidates.push(anchor_top + 8.0);
+        }
+        if fits(anchor_bottom - INFO_BAR_HEIGHT - 8.0) {
+            candidates.push(anchor_bottom - INFO_BAR_HEIGHT - 8.0);
+        }
+        let top = candidates
+            .first()
+            .copied()
+            .unwrap_or(8.0)
+            .clamp(8.0, (window_height - INFO_BAR_HEIGHT - 8.0).max(8.0));
         Some(Bounds {
             origin: point(px(left), px(top)),
             size: size(px(width), px(INFO_BAR_HEIGHT)),
@@ -907,6 +996,169 @@ impl EditorView {
             origin: point(px(left), px(top)),
             size: size(px(width), px(height)),
         })
+    }
+
+    fn custom_color_rect(&self, window: &Window) -> Option<Bounds<Pixels>> {
+        if !self.custom_color_open {
+            return None;
+        }
+        let toolbar = self.toolbar_rect(window);
+        let options = self.options_rect(window, toolbar);
+        let window_width = f32::from(window.viewport_size().width);
+        let window_height = f32::from(window.viewport_size().height);
+        let width = 236.0_f32.min((window_width - 16.0).max(120.0));
+        let height = 116.0;
+        let left = ((f32::from(options.origin.x) + f32::from(options.size.width) / 2.0)
+            - width / 2.0)
+            .clamp(8.0, (window_width - width - 8.0).max(8.0));
+        let options_below_toolbar = f32::from(options.origin.y)
+            >= f32::from(toolbar.origin.y) + f32::from(toolbar.size.height);
+        let preferred = if options_below_toolbar {
+            f32::from(options.origin.y) + f32::from(options.size.height) + 6.0
+        } else {
+            f32::from(options.origin.y) - height - 6.0
+        };
+        let fits = preferred >= 8.0 && preferred + height <= window_height - 8.0;
+        let top = if fits {
+            preferred
+        } else {
+            crate::ui::popover_top(options, height, window_height, Some(toolbar))
+        };
+        Some(Bounds {
+            origin: point(px(left), px(top)),
+            size: size(px(width), px(height)),
+        })
+    }
+
+    fn custom_color_panel(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.custom_color_open || self.toolbar_hidden {
+            return None;
+        }
+        let rect = self.custom_color_rect(window)?;
+        let language = settings_state::get().language;
+        let palette_color = self.palette_color();
+        let preview_rgb = self
+            .custom_color_buffer
+            .trim()
+            .trim_start_matches('#')
+            .chars()
+            .take(6)
+            .collect::<String>();
+        let preview = u32::from_str_radix(&preview_rgb, 16)
+            .ok()
+            .filter(|_| preview_rgb.len() == 6)
+            .map(|rgb| (rgb & 0x00FF_FFFF) << 8 | 0xFF)
+            .unwrap_or(palette_color);
+        let cursor = if self.custom_color_fresh { "" } else { "|" };
+        let mut hue_row = div().flex().flex_row().items_center().gap(px(3.0));
+        for index in 0..12u32 {
+            let hue_color = hue_rgb(index as f32 * 30.0);
+            let label = format!("#{hue_color:06x}");
+            hue_row = hue_row.child(
+                div()
+                    .id(format!("editor-hue-{index}"))
+                    .tooltip(move |_, cx| tooltip_view(label.clone(), cx))
+                    .w(px(14.0))
+                    .h(px(14.0))
+                    .rounded(px(7.0))
+                    .bg(rgb(hue_color))
+                    .border_1()
+                    .border_color(self.chrome.border)
+                    .cursor_pointer()
+                    .hover(|style| style.opacity(0.85))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.apply_color((hue_color << 8) | 0xFF);
+                        this.custom_color_buffer = format!("{hue_color:06x}");
+                        this.custom_color_fresh = false;
+                        this.status = None;
+                        cx.notify();
+                    })),
+            );
+        }
+
+        let panel = div()
+            .id("editor-custom-color-panel")
+            .absolute()
+            .left(rect.origin.x)
+            .top(rect.origin.y)
+            .w(rect.size.width)
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .p(px(8.0))
+            .rounded(px(self.chrome.radius))
+            .bg(self.chrome.surface_strong)
+            .border_1()
+            .border_color(self.chrome.border)
+            .shadow(self.chrome.shadow())
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .w(px(18.0))
+                            .h(px(18.0))
+                            .rounded(px(4.0))
+                            .bg(rgba(preview))
+                            .border_1()
+                            .border_color(self.chrome.border),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(self.chrome.text)
+                            .child(t(language, "editor.custom_color")),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .px(px(6.0))
+                            .py(px(2.0))
+                            .rounded(px(4.0))
+                            .bg(self.chrome.selected)
+                            .text_size(px(11.0))
+                            .text_color(self.chrome.text)
+                            .cursor_text()
+                            .child(format!(
+                                "#{}{}",
+                                self.custom_color_buffer.to_ascii_uppercase(),
+                                cursor
+                            )),
+                    ),
+            )
+            .child(hue_row)
+            .child(
+                div()
+                    .text_size(px(9.5))
+                    .text_color(self.chrome.muted)
+                    .child(t(language, "editor.custom_color_hint")),
+            );
+
+        Some(
+            div()
+                .id("editor-custom-color-layer")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.close_custom_color();
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
+                .child(panel)
+                .into_any_element(),
+        )
     }
 
     fn zoom_at(
@@ -1260,6 +1512,42 @@ impl EditorView {
         (self.tool != Tool::Select).then_some(self.tool)
     }
 
+    fn palette_color(&self) -> u32 {
+        self.document
+            .selected()
+            .and_then(|id| self.document.object(id))
+            .map(|annotation| annotation.style.color)
+            .unwrap_or_else(|| self.tool_color(self.palette_color_tool()))
+    }
+
+    fn open_custom_color(&mut self) {
+        self.custom_color_buffer = format!("{:06x}", (self.palette_color() >> 8) & 0x00FF_FFFF);
+        self.custom_color_fresh = true;
+        self.custom_color_open = true;
+    }
+
+    fn close_custom_color(&mut self) {
+        self.custom_color_open = false;
+        self.custom_color_fresh = false;
+    }
+
+    /// Applies a typed `RRGGBB` value. Returns false while the buffer is not a
+    /// complete color, so the panel can stay open.
+    fn apply_custom_color(&mut self, cx: &mut Context<Self>) -> bool {
+        let hex = self.custom_color_buffer.trim().trim_start_matches('#');
+        if hex.len() != 6 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            return false;
+        }
+        let Ok(rgb) = u32::from_str_radix(hex, 16) else {
+            return false;
+        };
+        self.apply_color((rgb << 8) | 0xFF);
+        self.close_custom_color();
+        self.status = None;
+        cx.notify();
+        true
+    }
+
     fn apply_stroke_width(&mut self, width: f32) {
         self.update_style(|style| style.stroke_width = width);
         settings_state::update(|settings| settings.annotation_stroke_width = width);
@@ -1446,6 +1734,7 @@ impl EditorView {
     }
 
     fn select_annotation(&mut self, id: Option<core_annotate::AnnotationId>) {
+        self.close_custom_color();
         self.document.select(id);
         if let Some(annotation) = id.and_then(|id| self.document.object(id)) {
             self.style = annotation.style;
@@ -1562,6 +1851,15 @@ impl EditorView {
         let Some(mut edit) = self.text_edit.take() else {
             return;
         };
+        // Clicking elsewhere can commit while a composition is still in
+        // flight; never persist the IME's pinyin buffer as user text.
+        if let Some(range) = edit.marked.take()
+            && range.end <= edit.content.len()
+        {
+            edit.content.replace_range(range.clone(), "");
+            edit.cursor = range.start;
+            edit.anchor = range.start;
+        }
         let text = edit.content.trim_end().to_owned();
         if text.is_empty() {
             if let Some(id) = edit.target {
@@ -1692,6 +1990,7 @@ impl EditorView {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.commit_text(cx);
                     this.document.select(None);
+                    this.close_custom_color();
                     this.crop_mode = false;
                     this.crop_draft = None;
                     this.polyline_draft = None;
@@ -1753,12 +2052,7 @@ impl EditorView {
 
         let mut groups: Vec<AnyElement> = Vec::new();
         if show_color {
-            let palette_color = self
-                .document
-                .selected()
-                .and_then(|id| self.document.object(id))
-                .map(|annotation| annotation.style.color)
-                .unwrap_or_else(|| self.tool_color(self.palette_color_tool()));
+            let palette_color = self.palette_color();
             let mut swatches = Vec::new();
             for (color, name, label_key) in settings_state::ANNOTATION_COLORS {
                 let selected = (palette_color & 0xFFFFFF00) == (color & 0xFFFFFF00);
@@ -1780,6 +2074,52 @@ impl EditorView {
                     }));
                 swatches.push(swatch.into_any_element());
             }
+            // The palette is not limited to the six presets: this swatch opens
+            // an exact color panel with a hue strip and a hex field.
+            let custom_label = t(language, "editor.custom_color").to_owned();
+            let custom_active = self.custom_color_open
+                || !settings_state::ANNOTATION_COLORS
+                    .iter()
+                    .any(|(color, _, _)| (palette_color & 0xFFFFFF00) == (color & 0xFFFFFF00));
+            swatches.push(
+                div()
+                    .id("editor-color-custom")
+                    .tooltip(move |_, cx| tooltip_view(custom_label.clone(), cx))
+                    .w(px(18.0))
+                    .h(px(18.0))
+                    .rounded(px(9.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(if custom_active {
+                        accent_selected
+                    } else {
+                        chrome.surface
+                    })
+                    .border_2()
+                    .border_color(if custom_active { text } else { border })
+                    .hover(move |style| style.bg(hover))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.commit_text(cx);
+                        if this.custom_color_open {
+                            this.close_custom_color();
+                        } else {
+                            this.open_custom_color();
+                            this.more_open = false;
+                            this.effects_open = false;
+                            this.hints_visible = false;
+                        }
+                        this.status = None;
+                        cx.notify();
+                    }))
+                    .child(icons::icon(
+                        icons::PALETTE,
+                        12.0,
+                        if custom_active { accent } else { muted },
+                    ))
+                    .into_any_element(),
+            );
             groups.push(
                 div()
                     .flex()
@@ -2473,14 +2813,13 @@ impl EditorView {
 
         let bar_rect = self.toolbar_rect(window);
         let options_rect = self.options_rect(window, bar_rect);
-        let options_right = f32::from(window.viewport_size().width)
-            - (f32::from(bar_rect.origin.x) + f32::from(bar_rect.size.width));
         let options_panel = (!config_children.is_empty() && !self.toolbar_hidden).then(|| {
             div()
                 .id("editor-options-panel")
                 .absolute()
-                .right(px(options_right.max(8.0)))
+                .left(options_rect.origin.x)
                 .top(options_rect.origin.y)
+                .w(options_rect.size.width)
                 .h(options_rect.size.height)
                 .px(px(10.0))
                 .flex()
@@ -3108,11 +3447,12 @@ impl EditorView {
 
     pub(crate) fn pin(&mut self, cx: &mut Context<Self>) {
         self.commit_text(cx);
+        let inline_host = self.inline;
         match rasterize(&self.document, &self.frame) {
             Ok(output) => {
                 let output = self.effects.apply(output, self.region_effects_scale());
                 let hash = crate::capture_history::hash_frame(&output);
-                let placement = self.inline.map(|inline| {
+                let placement = inline_host.map(|inline| {
                     // The editor image may already be zoomed; use its displayed
                     // scale so the pin opens at the same size and center. This
                     // also keeps pins on the same monitor as the capture, long
@@ -3139,25 +3479,32 @@ impl EditorView {
                         display_scale,
                     )
                 });
-                if let Some((bounds, zoom)) = placement {
-                    let monitor = self
-                        .inline
-                        .and_then(|inline| inline.capture)
-                        .map(|capture| capture.region.monitor);
-                    crate::pin::open_frame_at_with_hash(output, bounds, zoom, hash, monitor, cx);
-                } else {
-                    crate::pin::open_frame_with_hash(output, hash, cx);
+                let monitor = inline_host
+                    .and_then(|inline| inline.capture)
+                    .map(|capture| capture.region.monitor);
+                if inline_host.is_some() {
+                    self.release_images(cx);
                 }
+                let handles = cx.windows();
+                // Pin windows must not be created inside the toolbar's input
+                // callback; close the editor first and open the pin next turn.
+                cx.defer(move |cx| {
+                    if inline_host.is_some() {
+                        crate::windows::close_capture_auxiliary(cx, handles);
+                    }
+                    if let Some((bounds, zoom)) = placement {
+                        crate::pin::open_frame_at_with_hash(
+                            output, bounds, zoom, hash, monitor, cx,
+                        );
+                    } else {
+                        crate::pin::open_frame_with_hash(output, hash, cx);
+                    }
+                });
             }
             Err(error) => {
                 let language = settings_state::get().language;
                 self.status = Some(format!("{}{}", t(language, "editor.export_failed"), error));
             }
-        }
-        if self.inline.is_some() {
-            self.release_images(cx);
-            let handles = cx.windows();
-            cx.defer(move |cx| crate::windows::close_capture_auxiliary(cx, handles));
         }
         log_info!("editor", "pin requested");
         cx.notify();
@@ -3298,8 +3645,9 @@ impl EntityInputHandler for EditorView {
             let range = range_utf16
                 .as_ref()
                 .map(|range| edit.range_from_utf16(range));
-            edit.marked = None;
-            edit.replace(range, new_text);
+            // A committed IME result arrives with no range; `replace` then
+            // consumes the marked composition range before inserting it.
+            edit.replace(range, new_text, false);
             window.notify_text_input_changed(&self.focus_handle);
             cx.notify();
         }
@@ -3317,7 +3665,7 @@ impl EntityInputHandler for EditorView {
             let range = range_utf16
                 .as_ref()
                 .map(|range| edit.range_from_utf16(range));
-            edit.replace(range, new_text);
+            edit.replace(range, new_text, true);
             window.notify_text_input_changed(&self.focus_handle);
             cx.notify();
         }
@@ -3769,6 +4117,11 @@ impl Render for EditorView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    // Clicking the image must keep keyboard focus in the
+                    // editor, otherwise Delete/arrow shortcuts stop working
+                    // after a toolbar interaction.
+                    let focus = this.focus_handle.clone();
+                    window.focus(&focus, cx);
                     if this.space_down && this.text_edit.is_none() {
                         this.pan_draft = Some(PanDraft {
                             start: event.position,
@@ -3792,7 +4145,7 @@ impl Render for EditorView {
                         .and_then(|id| this.document.object(id))
                         .cloned()
                         && let Some(handle) =
-                            hit_resize_handle(&annotation.shape, point, 9.0 / scale)
+                            hit_resize_handle(&annotation.shape, point, 6.0 / scale)
                     {
                         this.resize_draft = Some(ResizeDraft {
                             id: annotation.id,
@@ -3834,6 +4187,13 @@ impl Render for EditorView {
                     if this.polyline_draft.is_none()
                         && let Some(id) = hit
                     {
+                        log_info!(
+                            "editor",
+                            "annotation selected at image ({}, {}), {} object(s)",
+                            point.x,
+                            point.y,
+                            this.document.objects().len()
+                        );
                         this.draft = None;
                         this.resize_draft = None;
                         if this.document.selected() != Some(id) {
@@ -4051,12 +4411,26 @@ impl Render for EditorView {
             .on_mouse_exit(cx.listener(|this, _, _, cx| {
                 let hover_reset = this.selection_hover != SelectionHover::None;
                 this.selection_hover = SelectionHover::None;
-                if hover_reset
-                    || this.draft.take().is_some()
-                    || this.move_draft.take().is_some()
-                    || this.resize_draft.take().is_some()
-                    || this.pan_draft.take().is_some()
-                {
+                // A drag that ends outside the image would otherwise be lost;
+                // commit the last known move/resize before clearing it.
+                let mut changed = hover_reset;
+                if let Some(move_draft) = this.move_draft.take() {
+                    let dx = move_draft.current.x - move_draft.start.x;
+                    let dy = move_draft.current.y - move_draft.start.y;
+                    if dx != 0 || dy != 0 {
+                        this.document.move_selected(dx, dy);
+                        changed = true;
+                    }
+                }
+                if let Some(resize) = &this.resize_draft {
+                    let point = resize.current;
+                    this.finish_resize(point, cx);
+                    changed = true;
+                }
+                if this.draft.take().is_some() || this.pan_draft.take().is_some() {
+                    changed = true;
+                }
+                if changed {
                     cx.notify();
                 }
             }));
@@ -4074,6 +4448,7 @@ impl Render for EditorView {
             None
         };
         let hints_panel = self.hints_panel(window, cx);
+        let custom_color_panel = self.custom_color_panel(window, cx);
         let status_toast = status.map(|message| {
             div()
                 .absolute()
@@ -4144,7 +4519,58 @@ impl Render for EditorView {
                 let key = event.keystroke.key.as_str();
                 let command =
                     event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
+                if this.custom_color_open {
+                    match key {
+                        "escape" => {
+                            this.close_custom_color();
+                            cx.notify();
+                            return;
+                        }
+                        "enter" => {
+                            if this.apply_custom_color(cx) {
+                                return;
+                            }
+                        }
+                        "backspace" | "delete" => {
+                            if this.custom_color_fresh {
+                                this.custom_color_buffer.clear();
+                                this.custom_color_fresh = false;
+                            } else {
+                                this.custom_color_buffer.pop();
+                            }
+                            cx.notify();
+                            return;
+                        }
+                        _ => {}
+                    }
+                    if !command
+                        && let Some(ch) = event.keystroke.key.chars().next()
+                        && ch.is_ascii_hexdigit()
+                    {
+                        if this.custom_color_fresh {
+                            this.custom_color_buffer.clear();
+                            this.custom_color_fresh = false;
+                        }
+                        if this.custom_color_buffer.len() < 6 {
+                            this.custom_color_buffer.push(ch.to_ascii_lowercase());
+                        }
+                        cx.notify();
+                        return;
+                    }
+                    return;
+                }
                 if this.text_edit.is_some() {
+                    // While an IME composition is in flight, Enter, Esc,
+                    // arrows and Backspace belong to the input method. Handling
+                    // them here committed the pinyin composition together with
+                    // the final Chinese text.
+                    if this
+                        .text_edit
+                        .as_ref()
+                        .is_some_and(|edit| edit.marked.is_some())
+                    {
+                        return;
+                    }
                     let extend = event.keystroke.modifiers.shift;
                     match key {
                         "escape" => {
@@ -4352,6 +4778,7 @@ impl Render for EditorView {
             .children(options_panel)
             .children(more_panel)
             .children(effects_panel)
+            .children(custom_color_panel)
             .children(hints_panel)
             .children(status_toast)
             .children((!inline).then(|| {
@@ -5174,5 +5601,53 @@ fn paint_spotlight(
         if let Ok(path) = builder.build() {
             window.paint_path(path, rgba(u32::from(alpha)));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TextEdit, hue_rgb};
+    use core_annotate::AnnotationStyle;
+    use core_types::{PhysicalPoint, PhysicalSize};
+
+    fn empty_edit() -> TextEdit {
+        TextEdit::start(
+            PhysicalPoint::new(0, 0),
+            PhysicalSize::new(800, 600),
+            AnnotationStyle::default(),
+        )
+    }
+
+    #[test]
+    fn committed_ime_result_replaces_the_composition() {
+        let mut edit = empty_edit();
+        edit.replace(None, "ni", true);
+        assert_eq!(edit.content, "ni");
+        assert_eq!(edit.marked, Some(0..2));
+
+        edit.replace(None, "NI", false);
+        assert_eq!(edit.content, "NI");
+        assert_eq!(edit.marked, None);
+
+        edit.replace(None, "ma", true);
+        edit.replace(None, "MA", false);
+        assert_eq!(edit.content, "NIMA");
+        assert_eq!(edit.marked, None);
+    }
+
+    #[test]
+    fn an_open_composition_can_be_cleared_without_touching_committed_text() {
+        let mut edit = empty_edit();
+        edit.replace(None, "hao", true);
+        edit.replace(Some(0..3), "", false);
+        assert_eq!(edit.content, "");
+        assert_eq!(edit.marked, None);
+    }
+
+    #[test]
+    fn hue_strip_wraps_and_stays_saturated() {
+        assert_eq!(hue_rgb(0.0), hue_rgb(360.0));
+        assert_ne!(hue_rgb(0.0), hue_rgb(120.0));
+        assert_ne!(hue_rgb(120.0), hue_rgb(240.0));
     }
 }

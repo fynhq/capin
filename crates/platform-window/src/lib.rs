@@ -170,21 +170,60 @@ pub fn set_click_through(
     }
 }
 
-/// Starts a native window-move drag from a left-button press.
-///
-/// GPUI's Windows backend does not implement `Window::start_window_move`, so
-/// pin windows otherwise never follow the cursor. This sends the same
-/// `WM_NCLBUTTONDOWN`/`HTCAPTION` pair a native title bar uses, which keeps
-/// the move loop and cursor capture in the OS.
-pub fn begin_window_drag(window: &impl HasWindowHandle) -> Result<(), PlatformWindowError> {
+/// Physical screen position of the mouse cursor.
+pub fn cursor_screen_position() -> Option<(i32, i32)> {
     #[cfg(target_os = "windows")]
     {
-        windows::begin_window_drag(window)
+        windows::cursor_screen_position()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
+/// Physical screen origin of a native window.
+pub fn window_screen_origin(window: &impl HasWindowHandle) -> Option<(i32, i32)> {
+    #[cfg(target_os = "windows")]
+    {
+        windows::window_screen_origin(window)
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = window;
+        None
+    }
+}
+
+/// Moves a native window without resizing or changing its z-order.
+pub fn move_window_to(
+    window: &impl HasWindowHandle,
+    x: i32,
+    y: i32,
+) -> Result<(), PlatformWindowError> {
+    #[cfg(target_os = "windows")]
+    {
+        windows::move_window_to(window, x, y)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (window, x, y);
         Err(PlatformWindowError::UnsupportedPlatform)
+    }
+}
+
+/// Hides or restores the system cursor for the current thread's window.
+///
+/// The capture overlay hides it while Ctrl window mode paints a camera glyph
+/// at the pointer. No-op on platforms where GPUI already owns the cursor.
+pub fn set_cursor_hidden(hidden: bool) {
+    #[cfg(target_os = "windows")]
+    {
+        windows::set_cursor_hidden(hidden);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = hidden;
     }
 }
 

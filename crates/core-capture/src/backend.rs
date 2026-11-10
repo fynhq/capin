@@ -9,10 +9,24 @@ pub trait CaptureBackend {
 
     /// Returns top-level windows in top-to-bottom z-order.
     ///
-    /// Implementations must omit their own overlay/helper windows, invisible
-    /// windows, DWM-cloaked windows, and platform shell surfaces (desktop,
-    /// taskbar) so callers can use the returned order for hover hit-testing.
+    /// Implementations include other windows owned by this process (pins and
+    /// settings are valid capture targets) and the taskbar, but must omit
+    /// invisible windows, cloaked windows, and the desktop shell so callers
+    /// can use the returned order for hover hit-testing. Callers that show
+    /// their own full-screen helper windows pass them to
+    /// [`Self::windows_excluding`].
     fn windows(&mut self) -> Result<Vec<WindowInfo>, CaptureError>;
+
+    /// Same as [`Self::windows`], without the given windows. Capture overlays
+    /// use this to hide themselves without hiding pins or the settings page.
+    fn windows_excluding(
+        &mut self,
+        excluded: &[core_types::WindowId],
+    ) -> Result<Vec<WindowInfo>, CaptureError> {
+        let mut windows = self.windows()?;
+        windows.retain(|window| !excluded.contains(&window.id));
+        Ok(windows)
+    }
 
     fn capture(&mut self, target: CaptureTarget) -> Result<RgbaFrame, CaptureError>;
 

@@ -43,7 +43,9 @@ impl WindowStyle {
         // Pins must accept keyboard focus so the system copy shortcut works on
         // a selected text run; a nonactivating window never receives it.
         no_activate: false,
-        exclude_from_capture: true,
+        // Pins are valid screenshot targets. Excluding them would hide them
+        // from the frozen frame and make a selected pin capture black.
+        exclude_from_capture: false,
         borderless: false,
         opaque: false,
     };

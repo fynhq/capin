@@ -19,15 +19,14 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
 };
-use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Accessibility::{CUIAutomation, TreeScope_Descendants};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, GetDpiForWindow,
     MDT_EFFECTIVE_DPI, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetDesktopWindow, GetShellWindow, GetWindowRect, IsIconic, IsZoomed,
-    MONITORINFOF_PRIMARY,
+    GetClassNameW, GetDesktopWindow, GetShellWindow, GetWindowDisplayAffinity, GetWindowRect,
+    IsIconic, IsZoomed, MONITORINFOF_PRIMARY, WDA_EXCLUDEFROMCAPTURE,
 };
 use windows::core::BOOL;
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
@@ -316,7 +315,6 @@ fn enumerate_windows() -> Result<Vec<WindowInfo>> {
     let windows = Window::enumerate().map_err(|error| platform_error("EnumWindows", error))?;
     let shell_window = unsafe { GetShellWindow() };
     let desktop_window = unsafe { GetDesktopWindow() };
-    let current_process = unsafe { GetCurrentProcessId() };
 
     let mut result = Vec::with_capacity(windows.len());
     for window in windows {
@@ -325,18 +323,11 @@ fn enumerate_windows() -> Result<Vec<WindowInfo>> {
             continue;
         }
 
-        match window.process_id() {
-            Ok(process_id) if process_id == current_process => continue,
-            Ok(_) => {}
-            // Without a process id we cannot rule out our own overlay.
-            Err(_) => continue,
-        }
-
         // SAFETY: hwnd came from a live window enumeration.
         if unsafe { IsIconic(hwnd) }.as_bool() {
             continue;
         }
-        if is_cloaked(hwnd) || is_shell_surface(hwnd) {
+        if is_cloaked(hwnd) || is_shell_surface(hwnd) || is_capture_excluded(hwnd) {
             continue;
         }
 
@@ -388,10 +379,20 @@ fn is_shell_surface(hwnd: HWND) -> bool {
     }
 
     let class = String::from_utf16_lossy(&buffer[..length as usize]);
-    matches!(
-        class.as_str(),
-        "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
-    )
+    // The taskbar is a valid capture target. Only the desktop host windows
+    // are excluded; their content is the wallpaper, not a window the user
+    // can pick.
+    matches!(class.as_str(), "Progman" | "WorkerW")
+}
+
+/// Windows marked with `WDA_EXCLUDEFROMCAPTURE` cannot appear in a capture
+/// (the overlay, capture bars and pin menus use this). They must not be
+/// offered as hover targets, or a click would capture black content.
+fn is_capture_excluded(hwnd: HWND) -> bool {
+    let mut affinity = 0u32;
+    // SAFETY: the affinity value is a caller-owned output buffer.
+    unsafe { GetWindowDisplayAffinity(hwnd, &mut affinity) }.is_ok()
+        && affinity == WDA_EXCLUDEFROMCAPTURE.0
 }
 
 fn window_bounds(hwnd: HWND) -> Option<PhysicalRect> {

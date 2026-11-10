@@ -59,14 +59,15 @@ impl CaptureBackend for MacosCapture {
         let windows: CFArray<CFDictionary<CFString, CFType>> =
             unsafe { CFArray::wrap_under_create_rule(raw) };
 
-        let process = i64::from(std::process::id());
         let mut result = Vec::new();
         for info in windows.iter() {
-            let owner_pid = integer_field(&info, "kCGWindowOwnerPID").unwrap_or(0);
-            if owner_pid == process {
+            if integer_field(&info, "kCGWindowIsOnscreen").unwrap_or(1) != 1 {
                 continue;
             }
-            if integer_field(&info, "kCGWindowIsOnscreen").unwrap_or(1) != 1 {
+            // Windows with sharing disabled (capture overlays, capture bars
+            // and pin menus) cannot appear in a screenshot, so they must not
+            // be hover targets.
+            if integer_field(&info, "kCGWindowSharingState").unwrap_or(1) == 0 {
                 continue;
             }
             if integer_field(&info, "kCGWindowLayer").unwrap_or(0) != 0 {
