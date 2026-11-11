@@ -257,6 +257,21 @@ pub fn hide_native_border(window: &impl HasWindowHandle) {
     }
 }
 
+/// Stops the platform from drawing an outer non-client shadow around a
+/// borderless surface. Pins contain their own captured edge shadow and must
+/// not receive a second system shadow. No-op on platforms without a native
+/// window shadow.
+pub fn disable_native_shadow(window: &impl HasWindowHandle) {
+    #[cfg(target_os = "windows")]
+    {
+        windows::disable_native_shadow(window);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+    }
+}
+
 /// Whether the platform's window capture already includes the native window
 /// shadow. macOS 13's ScreenCaptureKit path does; macOS 14+ can ignore it.
 pub fn window_capture_includes_native_shadow() -> bool {

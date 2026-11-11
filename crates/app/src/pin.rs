@@ -9,8 +9,8 @@ use core_types::{DpiScale, PhysicalRect, PhysicalSize, RgbaFrame};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use platform_window::{
-    WindowStyle, apply as apply_window_style, hide_native_border, place_on_monitor_deferred,
-    set_click_through, system_accent_hex,
+    WindowStyle, apply as apply_window_style, disable_native_shadow, hide_native_border,
+    place_on_monitor_deferred, set_click_through, system_accent_hex,
 };
 use serde::{Deserialize, Serialize};
 
@@ -654,6 +654,10 @@ fn open_pin_inner(
             log_error!("pin", "failed to style pin window: {error}");
         }
         hide_native_border(&*window);
+        // A pin owns every pixel it displays: the captured window's edge
+        // shadow is baked into the image, so a second system shadow around the
+        // pin window is wrong.
+        disable_native_shadow(&*window);
         if click_through {
             let _ = set_click_through(&*window, true);
         }
