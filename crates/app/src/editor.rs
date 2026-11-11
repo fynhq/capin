@@ -1530,7 +1530,8 @@ impl EditorView {
     }
 
     fn can_adjust_region(&self) -> bool {
-        self.region_source.is_some()
+        self.tool == Tool::Select
+            && self.region_source.is_some()
             && self.region_capture().is_some()
             && self.document.selected().is_none()
             && self.draft.is_none()
@@ -1588,18 +1589,9 @@ impl EditorView {
         if let Some(draft) = self.region_drag.as_mut() {
             draft.current = rect;
         }
-        if let Some(inline) = self.inline.as_mut() {
-            inline.image_rect = Bounds {
-                origin: point(
-                    px(rect.origin.x as f32 / scale),
-                    px(rect.origin.y as f32 / scale),
-                ),
-                size: size(
-                    px(rect.size.width as f32 / scale),
-                    px(rect.size.height as f32 / scale),
-                ),
-            };
-        }
+        // Keep the captured image and annotations at their current size while
+        // the crop frame moves; resizing the image element here stretched the
+        // already-captured pixels until the pointer was released.
         cx.notify();
     }
 
@@ -1630,6 +1622,10 @@ impl EditorView {
             let translated = annotation.clone().translated(-dx, -dy);
             document.add(translated.shape, translated.style);
         }
+        // `add` selects the newest object; a crop should leave the document
+        // deselected instead of popping annotation handles the user did not
+        // ask for.
+        document.select(None);
         document.clear_history();
         self.frame = Arc::new(cropped);
         self.image_size = new_size;
@@ -1720,6 +1716,108 @@ impl EditorView {
             );
         }
         handles
+    }
+
+    /// Paints the crop frame while a region edge is being dragged. The image
+    /// stays at its current size so the captured pixels are never stretched;
+    /// the frame and its handles preview the rectangle that will be applied on
+    /// release.
+    fn region_drag_preview(&self) -> Option<AnyElement> {
+        let draft = self.region_drag?;
+        let capture = self.inline.as_ref()?.capture.as_ref()?;
+        let scale = capture.scale.max(0.1);
+        let rect = Bounds {
+            origin: point(
+                px(draft.current.origin.x as f32 / scale),
+                px(draft.current.origin.y as f32 / scale),
+            ),
+            size: size(
+                px(draft.current.size.width as f32 / scale),
+                px(draft.current.size.height as f32 / scale),
+            ),
+        };
+        let accent = rgba((self.accent_hex << 8) | 0xFF);
+        let mut layer = div()
+            .absolute()
+            .left(rect.origin.x)
+            .top(rect.origin.y)
+            .w(rect.size.width)
+            .h(rect.size.height)
+            .border_1()
+            .border_color(accent);
+        for (_, position) in handle_positions(rect) {
+            layer = layer.child(
+                div()
+                    .absolute()
+                    .left(px(f32::from(position.x) - f32::from(rect.origin.x) - 4.5))
+                    .top(px(f32::from(position.y) - f32::from(rect.origin.y) - 4.5))
+                    .w(px(9.0))
+                    .h(px(9.0))
+                    .rounded(px(1.5))
+                    .bg(rgb(0xFFFFFF))
+                    .border_1()
+                    .border_color(accent),
+            );
+        }
+        Some(layer.into_any_element())
+    }
+
+    /// Selection outline and resize handles as regular elements. They sit
+    /// above the image layer (so handles on the image edge are not clipped)
+    /// and are rebuilt with every render, unlike the scene-painted canvas
+    /// selection that could lag behind a click.
+    fn selection_layer(&self, window: &Window) -> Option<AnyElement> {
+        if self.text_edit.is_some() {
+            return None;
+        }
+        let shape = self
+            .document
+            .selected()
+            .and_then(|id| self.document.object(id))
+            .map(|annotation| annotation.shape.clone())?;
+        let image_rect = self.image_view_rect(window);
+        let scale = f32::from(image_rect.size.width) / self.image_size.width.max(1) as f32;
+        if !scale.is_finite() || scale <= 0.0 {
+            return None;
+        }
+        let accent = rgba((self.accent_hex << 8) | 0xFF);
+        let rect = shape.bounds();
+        let left = f32::from(image_rect.origin.x) + rect.origin.x as f32 * scale;
+        let top = f32::from(image_rect.origin.y) + rect.origin.y as f32 * scale;
+        let mut layer = div().absolute().inset_0();
+        layer = layer.child(
+            div()
+                .absolute()
+                .left(px(left))
+                .top(px(top))
+                .w(px((rect.size.width as f32 * scale).max(0.0)))
+                .h(px((rect.size.height as f32 * scale).max(0.0)))
+                .border_1()
+                .border_color(accent),
+        );
+        for (_, handle) in handle_points(&shape) {
+            let centre_x = f32::from(image_rect.origin.x) + handle.x as f32 * scale;
+            let centre_y = f32::from(image_rect.origin.y) + handle.y as f32 * scale;
+            layer = layer.child(
+                div()
+                    .absolute()
+                    .left(px(centre_x - SELECTION_HANDLE_HALF))
+                    .top(px(centre_y - SELECTION_HANDLE_HALF))
+                    .w(px(SELECTION_HANDLE_HALF * 2.0))
+                    .h(px(SELECTION_HANDLE_HALF * 2.0))
+                    .bg(accent)
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(SELECTION_HANDLE_HALF - 3.0))
+                            .top(px(SELECTION_HANDLE_HALF - 3.0))
+                            .w(px(6.0))
+                            .h(px(6.0))
+                            .bg(rgb(0xFFFFFF)),
+                    ),
+            );
+        }
+        Some(layer.into_any_element())
     }
 
     fn rotate_canvas(&mut self, cx: &mut Context<Self>) {
@@ -4523,11 +4621,6 @@ impl Render for EditorView {
             ),
         });
         let objects = self.document.objects().to_vec();
-        let selected_shape = self
-            .document
-            .selected()
-            .and_then(|id| objects.iter().find(|annotation| annotation.id == id))
-            .map(|annotation| annotation.shape.clone());
         let crop_selection = self
             .crop_draft
             .as_ref()
@@ -4688,9 +4781,6 @@ impl Render for EditorView {
             move |bounds, _, window, _| {
                 if let Some((shape, style)) = &preview {
                     paint_shape(window, bounds, scale, shape, *style);
-                }
-                if let Some(shape) = &selected_shape {
-                    paint_selection(window, bounds, scale, shape, accent_hex);
                 }
                 if let Some(rect) = crop_selection {
                     paint_crop_overlay(window, bounds, scale, rect, accent_hex);
@@ -5313,6 +5403,8 @@ impl Render for EditorView {
 
         let toolbar_rect = self.toolbar_rect(window);
         let region_handles = self.region_handles(window, cx);
+        let selection_layer = self.selection_layer(window);
+        let region_preview = self.region_drag_preview();
         let (toolbar, options_panel, more_panel) = self.toolbar(window, cx);
         let info_bar = if inline {
             self.info_bar(window, cx)
@@ -5756,6 +5848,8 @@ impl Render for EditorView {
             .children(outside_backdrop)
             .child(image_layer)
             .children(region_handles)
+            .children(selection_layer)
+            .children(region_preview)
             .children(info_bar)
             .child(toolbar)
             .children(options_panel)
@@ -6372,65 +6466,6 @@ fn paint_crop_overlay(
     builder.close();
     if let Ok(path) = builder.build() {
         window.paint_path(path, rgba((accent_hex << 8) | 0xFF));
-    }
-}
-
-fn paint_selection(
-    window: &mut Window,
-    bounds: Bounds<Pixels>,
-    scale: f32,
-    shape: &Shape,
-    accent_hex: u32,
-) {
-    let rect = shape.bounds();
-    let left = rect.origin.x as f32;
-    let top = rect.origin.y as f32;
-    let right = left + rect.size.width as f32;
-    let bottom = top + rect.size.height as f32;
-    let stroke = px((1.5 * scale).max(1.0));
-    let to_point = |x: f32, y: f32| {
-        point(
-            bounds.origin.x + px(x * scale),
-            bounds.origin.y + px(y * scale),
-        )
-    };
-    let mut builder = PathBuilder::stroke(stroke);
-    builder.move_to(to_point(left, top));
-    builder.line_to(to_point(right, top));
-    builder.line_to(to_point(right, bottom));
-    builder.line_to(to_point(left, bottom));
-    builder.close();
-    if let Ok(path) = builder.build() {
-        window.paint_path(path, rgba((accent_hex << 8) | 0xFF));
-    }
-
-    let draw_handle = |window: &mut Window, handle_pos: PhysicalPoint| {
-        let center = to_point(handle_pos.x as f32, handle_pos.y as f32);
-        for (half, color) in [
-            (px(SELECTION_HANDLE_HALF), rgba((accent_hex << 8) | 0xFF)),
-            (px(3.0), rgb(0xFFFFFF)),
-        ] {
-            let mut builder = PathBuilder::fill();
-            builder.move_to(point(center.x - half, center.y - half));
-            builder.line_to(point(center.x + half, center.y - half));
-            builder.line_to(point(center.x + half, center.y + half));
-            builder.line_to(point(center.x - half, center.y + half));
-            builder.close();
-            if let Ok(path) = builder.build() {
-                window.paint_path(path, color);
-            }
-        }
-    };
-    match shape {
-        Shape::Arrow { start, end } => {
-            draw_handle(window, *start);
-            draw_handle(window, *end);
-        }
-        _ => {
-            for (_, handle) in handle_points(shape) {
-                draw_handle(window, handle);
-            }
-        }
     }
 }
 
