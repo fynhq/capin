@@ -362,6 +362,22 @@ struct RegionAdjustDraft {
     current: PhysicalRect,
 }
 
+/// Region screenshots annotate the frozen monitor image directly. The
+/// selection is only an export frame: annotations keep monitor coordinates and
+/// the edge handles move the frame without cropping the document.
+#[derive(Clone, Copy)]
+struct FullCanvas {
+    /// Region captures expose edge handles; monitor captures stay full-frame.
+    adjustable: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct FullCanvasInit {
+    pub(crate) image: Arc<RenderImage>,
+    pub(crate) image_size: PhysicalSize,
+    pub(crate) adjustable: bool,
+}
+
 struct TextEdit {
     target: Option<core_annotate::AnnotationId>,
     origin: PhysicalPoint,
@@ -727,6 +743,9 @@ pub(crate) struct EditorView {
     /// shared with the overlay, so widening a selection does not keep a second
     /// full RGBA monitor frame alive.
     region_source: Option<Arc<RenderImage>>,
+    /// Present for region/monitor screenshots that annotate the frozen monitor
+    /// image instead of a cropped canvas.
+    full_canvas: Option<FullCanvas>,
     region_drag: Option<RegionAdjustDraft>,
     pin_target: Option<u64>,
     document: AnnotationDocument,
@@ -794,6 +813,20 @@ impl EditorView {
     fn new(frame: Arc<RgbaFrame>, pin_target: Option<u64>, cx: &mut Context<Self>) -> Self {
         let image_size = PhysicalSize::new(frame.width(), frame.height());
         let image = image_util::render_image_ref(&frame);
+        Self::new_with_image(frame, image, image_size, pin_target, cx)
+    }
+
+    /// Builds an editor whose display image and coordinate space can differ
+    /// from the CPU frame used for export. Region screenshots pass the frozen
+    /// monitor BGRA image plus a cropped selection copy; pin and long-capture
+    /// editors pass the image built from their frame.
+    fn new_with_image(
+        frame: Arc<RgbaFrame>,
+        image: Arc<RenderImage>,
+        image_size: PhysicalSize,
+        pin_target: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // Blur previews are built lazily: most captures never use the blur
         // tool, and eagerly resizing four full frames cost startup CPU.
         let blur_images: [Option<Arc<RenderImage>>; BLUR_RADII.len()] =
@@ -836,6 +869,7 @@ impl EditorView {
             images_released: false,
             frame,
             region_source: None,
+            full_canvas: None,
             region_drag: None,
             pin_target,
             document: AnnotationDocument::new(image_size),
@@ -933,9 +967,17 @@ impl EditorView {
         zoomable: bool,
         document: Option<AnnotationDocument>,
         effects: RegionEffects,
+        full_canvas: Option<FullCanvasInit>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut view = Self::new(frame, pin_target, cx);
+        let full_setting = full_canvas.as_ref().map(|full| FullCanvas {
+            adjustable: full.adjustable,
+        });
+        let mut view = match full_canvas {
+            Some(full) => Self::new_with_image(frame, full.image, full.image_size, pin_target, cx),
+            None => Self::new(frame, pin_target, cx),
+        };
+        view.full_canvas = full_setting;
         view.ui_scale = if image_rect.size.width > px(0.0) {
             (view.image_size.width as f32 / f32::from(image_rect.size.width)).clamp(0.25, 8.0)
         } else {
@@ -1042,6 +1084,11 @@ impl EditorView {
         let inline = self.inline?;
         let capture = inline.capture?;
         let image = self.image_view_rect(window);
+        if self.full_canvas.is_some() {
+            // Full-canvas editors show the whole monitor; the selection is an
+            // arbitrary rect inside it, not the image boundary.
+            return full_selection_bounds(image, self.image_size, capture.region.rect);
+        }
         let scale = capture.scale.max(0.1);
         let width = capture.region.rect.size.width as f32 / scale;
         let height = capture.region.rect.size.height as f32 / scale;
@@ -1051,6 +1098,29 @@ impl EditorView {
             origin: point(px(center_x - width / 2.0), px(center_y - height / 2.0)),
             size: size(px(width), px(height)),
         })
+    }
+
+    /// Selection frame in full-monitor physical pixels.
+    fn full_selection(&self) -> Option<PhysicalRect> {
+        self.full_canvas.as_ref()?;
+        Some(self.inline?.capture?.region.rect)
+    }
+
+    /// Builds the annotation document for the current export frame. Full-canvas
+    /// editors keep objects in monitor coordinates, so export translates them
+    /// into the cropped output instead of cropping the live document.
+    fn action_document(&self) -> AnnotationDocument {
+        let Some(selection) = self.full_selection() else {
+            return self.document.clone();
+        };
+        cropped_document(&self.document, selection)
+    }
+
+    /// Selection frame in window logical coordinates for pin placement.
+    fn full_selection_screen_bounds(&self) -> Option<Bounds<Pixels>> {
+        let selection = self.full_selection()?;
+        let inline = self.inline?;
+        full_selection_bounds(inline.image_rect, self.image_size, selection)
     }
 
     fn toolbar_anchor(&self, window: &Window) -> Bounds<Pixels> {
@@ -1491,7 +1561,11 @@ impl EditorView {
         if let Some(image) = &self.blur_images[index] {
             return image.clone();
         }
-        let image = image_util::blurred_image(&self.frame, radius);
+        let image = if self.full_canvas.is_some() {
+            image_util::blurred_image_from_render(&self.image, radius)
+        } else {
+            image_util::blurred_image(&self.frame, radius)
+        };
         self.blur_images[index] = Some(image.clone());
         image
     }
@@ -1589,8 +1663,12 @@ impl EditorView {
     }
 
     fn can_adjust_region(&self) -> bool {
+        let has_source = self.region_source.is_some()
+            || self
+                .full_canvas
+                .is_some_and(|full_canvas| full_canvas.adjustable);
         self.tool == Tool::Select
-            && self.region_source.is_some()
+            && has_source
             && self.region_capture().is_some()
             && self.document.selected().is_none()
             && self.draft.is_none()
@@ -1621,21 +1699,25 @@ impl EditorView {
         modifiers: Modifiers,
         cx: &mut Context<Self>,
     ) {
-        let Some(source) = self.region_source.clone() else {
-            return;
-        };
         let Some(capture) = self.inline.and_then(|inline| inline.capture) else {
             return;
         };
         let Some(draft) = self.region_drag.as_ref().copied() else {
             return;
         };
+        let image_size = if self.full_canvas.is_some() {
+            self.image_size
+        } else {
+            let Some(source) = self.region_source.clone() else {
+                return;
+            };
+            image_util::image_size(&source)
+        };
         let scale = capture.scale.max(0.1);
         let cursor_point = PhysicalPoint::new(
             (f32::from(position.x) * scale).round() as i32,
             (f32::from(position.y) * scale).round() as i32,
         );
-        let image_size = image_util::image_size(&source);
         let rect = resize_rect(
             draft.original,
             draft.handle,
@@ -1658,10 +1740,39 @@ impl EditorView {
         let Some(draft) = self.region_drag.take() else {
             return;
         };
-        let Some(source) = self.region_source.clone() else {
+        let Some(capture) = self.inline.and_then(|inline| inline.capture) else {
             return;
         };
-        let Some(capture) = self.inline.and_then(|inline| inline.capture) else {
+        if self.full_canvas.is_some() {
+            if draft.current == draft.original {
+                return;
+            }
+            let Some(cropped) = image_util::cropped_rgba(&self.image, draft.current) else {
+                return;
+            };
+            self.frame = Arc::new(cropped);
+            if let Some(inline) = self.inline.as_mut()
+                && let Some(capture) = inline.capture.as_mut()
+            {
+                capture.region = CaptureRegion::new(capture.region.monitor, draft.current);
+                capture.target = CaptureTarget::Region(capture.region);
+            }
+            // Keep the object data, but do not leave a hidden object selected
+            // outside the new export frame.
+            if let Some(id) = self.document.selected()
+                && self
+                    .document
+                    .object(id)
+                    .is_none_or(|object| !object.shape.bounds().intersects(draft.current))
+            {
+                self.document.select(None);
+                self.selection_hover = SelectionHover::None;
+            }
+            self.status = None;
+            cx.notify();
+            return;
+        }
+        let Some(source) = self.region_source.clone() else {
             return;
         };
         let scale = capture.scale.max(0.1);
@@ -1723,6 +1834,9 @@ impl EditorView {
     }
 
     fn restore_region_image_rect(&mut self, scale: f32, cx: &mut Context<Self>) {
+        if self.full_canvas.is_some() {
+            return;
+        }
         let Some((_, rect)) = self.region_capture() else {
             return;
         };
@@ -1745,7 +1859,9 @@ impl EditorView {
         if !self.can_adjust_region() {
             return Vec::new();
         }
-        let rect = self.image_view_rect(window);
+        let rect = self
+            .inline_selection_rect(window)
+            .unwrap_or_else(|| self.image_view_rect(window));
         let mut handles = Vec::new();
         for (handle, position) in handle_positions(rect) {
             handles.push(
@@ -1880,6 +1996,9 @@ impl EditorView {
     }
 
     fn rotate_canvas(&mut self, cx: &mut Context<Self>) {
+        if self.full_canvas.is_some() {
+            return;
+        }
         self.commit_text(cx);
         let language = settings_state::get().language;
         let Ok(output) = rasterize(&self.document, &self.frame) else {
@@ -1893,6 +2012,9 @@ impl EditorView {
     }
 
     fn flip_canvas(&mut self, horizontal: bool, cx: &mut Context<Self>) {
+        if self.full_canvas.is_some() {
+            return;
+        }
         self.commit_text(cx);
         let language = settings_state::get().language;
         let Ok(output) = rasterize(&self.document, &self.frame) else {
@@ -1917,6 +2039,9 @@ impl EditorView {
     }
 
     fn toggle_crop(&mut self, cx: &mut Context<Self>) {
+        if self.full_canvas.is_some() {
+            return;
+        }
         self.commit_text(cx);
         self.crop_mode = !self.crop_mode;
         self.crop_draft = None;
@@ -1935,6 +2060,9 @@ impl EditorView {
     }
 
     fn apply_crop(&mut self, cx: &mut Context<Self>) {
+        if self.full_canvas.is_some() {
+            return;
+        }
         let Some(draft) = self.crop_draft.take() else {
             return;
         };
@@ -1995,7 +2123,14 @@ impl EditorView {
         {
             return None;
         }
-        Some(PhysicalPoint::new(x, y))
+        let point = PhysicalPoint::new(x, y);
+        if self
+            .full_selection()
+            .is_some_and(|selection| !selection.contains(point))
+        {
+            return None;
+        }
+        Some(point)
     }
 
     fn effective_style(&self) -> AnnotationStyle {
@@ -4441,7 +4576,117 @@ impl EditorView {
         )
     }
 
+    fn refresh_full_canvas(&mut self, cx: &mut Context<Self>) {
+        let Some(capture) = self.inline.and_then(|inline| inline.capture) else {
+            return;
+        };
+        let monitor = capture.region.monitor;
+        let region_target = matches!(capture.target, CaptureTarget::Region(_));
+        let mut backend = core_capture::platform_backend();
+        let captured = if settings_state::get().capture_cursor {
+            backend.capture_with_cursor(CaptureTarget::Monitor(monitor))
+        } else {
+            backend.capture(CaptureTarget::Monitor(monitor))
+        };
+        let frame = match captured {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.show_status(
+                    format!(
+                        "{} {}",
+                        t(settings_state::get().language, "editor.refresh_failed"),
+                        error
+                    ),
+                    cx,
+                );
+                return;
+            }
+        };
+        let new_size = PhysicalSize::new(frame.width(), frame.height());
+        let size_changed = new_size != self.image_size;
+        let image = image_util::render_image(frame);
+        let old_image = std::mem::replace(&mut self.image, image);
+        let old_blur_images =
+            std::mem::replace(&mut self.blur_images, std::array::from_fn(|_| None));
+        self.images_released = false;
+        cx.defer(move |cx| {
+            cx.drop_image(old_image, None);
+            for image in old_blur_images.into_iter().flatten() {
+                cx.drop_image(image, None);
+            }
+        });
+        if size_changed {
+            self.image_size = new_size;
+            self.document = AnnotationDocument::new(new_size);
+            self.canvas_undo.clear();
+            self.canvas_redo.clear();
+            self.text_edit = None;
+            self.draft = None;
+            self.move_draft = None;
+            self.resize_draft = None;
+            self.crop_mode = false;
+            self.crop_draft = None;
+            self.polyline_draft = None;
+            self.region_drag = None;
+            self.selection_hover = SelectionHover::None;
+            self.document.select(None);
+            if let Some(inline) = self.inline.as_mut()
+                && let Some(capture) = inline.capture.as_mut()
+            {
+                if region_target {
+                    let width = capture.region.rect.size.width.min(new_size.width);
+                    let height = capture.region.rect.size.height.min(new_size.height);
+                    let x = capture
+                        .region
+                        .rect
+                        .origin
+                        .x
+                        .clamp(0, (new_size.width - width) as i32);
+                    let y = capture
+                        .region
+                        .rect
+                        .origin
+                        .y
+                        .clamp(0, (new_size.height - height) as i32);
+                    capture.region = CaptureRegion::new(
+                        capture.region.monitor,
+                        PhysicalRect::new(x, y, width, height),
+                    );
+                } else {
+                    capture.region = CaptureRegion::new(
+                        capture.region.monitor,
+                        PhysicalRect::new(0, 0, new_size.width, new_size.height),
+                    );
+                }
+                capture.target = if region_target {
+                    CaptureTarget::Region(capture.region)
+                } else {
+                    CaptureTarget::Monitor(monitor)
+                };
+            }
+            if let Some(inline) = &self.inline
+                && f32::from(inline.image_rect.size.width) > 0.0
+            {
+                self.ui_scale = (new_size.width as f32 / f32::from(inline.image_rect.size.width))
+                    .clamp(0.25, 8.0);
+            }
+        }
+        if let Some(selection) = self.full_selection()
+            && let Some(cropped) = image_util::cropped_rgba(&self.image, selection)
+        {
+            self.frame = Arc::new(cropped);
+        }
+        self.show_status(
+            t(settings_state::get().language, "editor.refreshed").to_owned(),
+            cx,
+        );
+    }
+
     fn refresh_capture(&mut self, cx: &mut Context<Self>) {
+        if self.full_canvas.is_some() {
+            self.refresh_full_canvas(cx);
+            return;
+        }
         let Some(capture) = self.inline.and_then(|inline| inline.capture) else {
             return;
         };
@@ -4522,7 +4767,8 @@ impl EditorView {
             return;
         };
         self.commit_text(cx);
-        let first_frame = match rasterize(&self.document, &self.frame) {
+        let document = self.action_document();
+        let first_frame = match rasterize(&document, &self.frame) {
             Ok(frame) => frame,
             Err(error) => {
                 self.show_status(
@@ -4558,7 +4804,9 @@ impl EditorView {
     pub(crate) fn pin(&mut self, cx: &mut Context<Self>) {
         self.commit_text(cx);
         let inline_host = self.inline;
-        match rasterize(&self.document, &self.frame) {
+        let selection_bounds = self.full_selection_screen_bounds();
+        let document = self.action_document();
+        match rasterize(&document, &self.frame) {
             Ok(output) => {
                 let output = if self.region_effects_active() {
                     self.effects.apply(output, self.region_effects_scale())
@@ -4579,12 +4827,25 @@ impl EditorView {
                     .max(0.01);
                     let width = output.width() as f32 * display_scale;
                     let height = output.height() as f32 * display_scale;
-                    let center_x = f32::from(inline.screen_origin.x)
-                        + f32::from(inline.image_rect.origin.x)
-                        + f32::from(inline.image_rect.size.width) / 2.0;
-                    let center_y = f32::from(inline.screen_origin.y)
-                        + f32::from(inline.image_rect.origin.y)
-                        + f32::from(inline.image_rect.size.height) / 2.0;
+                    let (center_x, center_y) = if let Some(selection) = selection_bounds {
+                        (
+                            f32::from(inline.screen_origin.x)
+                                + f32::from(selection.origin.x)
+                                + f32::from(selection.size.width) / 2.0,
+                            f32::from(inline.screen_origin.y)
+                                + f32::from(selection.origin.y)
+                                + f32::from(selection.size.height) / 2.0,
+                        )
+                    } else {
+                        (
+                            f32::from(inline.screen_origin.x)
+                                + f32::from(inline.image_rect.origin.x)
+                                + f32::from(inline.image_rect.size.width) / 2.0,
+                            f32::from(inline.screen_origin.y)
+                                + f32::from(inline.image_rect.origin.y)
+                                + f32::from(inline.image_rect.size.height) / 2.0,
+                        )
+                    };
                     (
                         Bounds {
                             origin: point(px(center_x - width / 2.0), px(center_y - height / 2.0)),
@@ -4616,7 +4877,7 @@ impl EditorView {
                 let handles = cx.windows();
                 let edit_state = crate::pin::PinEditState::new(
                     self.frame.clone(),
-                    self.document.clone(),
+                    document,
                     self.stored_region_effects(),
                 );
                 // Pin windows must not be created inside the toolbar's input
@@ -4662,7 +4923,8 @@ impl EditorView {
         let mut copy_ok = false;
         let mut save_ok = false;
         let mut pin_ok = false;
-        match rasterize(&self.document, &self.frame) {
+        let document = self.action_document();
+        match rasterize(&document, &self.frame) {
             Ok(output) => {
                 let output = if self.region_effects_active() {
                     self.effects.apply(output, self.region_effects_scale())
@@ -4707,7 +4969,7 @@ impl EditorView {
                 if !copy_only && let Some(pin_id) = self.pin_target {
                     let edit_state = crate::pin::PinEditState::new(
                         self.frame.clone(),
-                        self.document.clone(),
+                        document,
                         self.stored_region_effects(),
                     );
                     if crate::pin::replace_image_with_edit_state(pin_id, output, edit_state, cx) {
@@ -5260,6 +5522,90 @@ impl Render for EditorView {
                 }),
             )
         });
+        let full_frame = self.full_selection();
+        let show_full_frame = self
+            .full_canvas
+            .is_some_and(|full_canvas| full_canvas.adjustable);
+        let selection_clip = show_full_frame
+            .then_some(full_frame)
+            .flatten()
+            .map(|rect| Bounds {
+                origin: point(
+                    px(rect.origin.x as f32 * scale),
+                    px(rect.origin.y as f32 * scale),
+                ),
+                size: size(
+                    px(rect.size.width as f32 * scale),
+                    px(rect.size.height as f32 * scale),
+                ),
+            });
+        let dim_layer = selection_clip.map(|clip| {
+            let full_width = f32::from(image_rect.size.width);
+            let full_height = f32::from(image_rect.size.height);
+            let left = f32::from(clip.origin.x);
+            let top = f32::from(clip.origin.y);
+            let right = left + f32::from(clip.size.width);
+            let bottom = top + f32::from(clip.size.height);
+            let dim_rect = move |x: f32, y: f32, width: f32, height: f32| {
+                div()
+                    .absolute()
+                    .left(px(x))
+                    .top(px(y))
+                    .w(px(width.max(0.0)))
+                    .h(px(height.max(0.0)))
+                    .bg(rgba(0x00000066))
+            };
+            let mut layer = div().absolute().inset_0();
+            if top > 0.0 {
+                layer = layer.child(dim_rect(0.0, 0.0, full_width, top));
+            }
+            if bottom < full_height {
+                layer = layer.child(dim_rect(0.0, bottom, full_width, full_height - bottom));
+            }
+            if left > 0.0 {
+                layer = layer.child(dim_rect(0.0, top, left, bottom - top));
+            }
+            if right < full_width {
+                layer = layer.child(dim_rect(right, top, full_width - right, bottom - top));
+            }
+            layer
+        });
+        let annotation_content = div()
+            .absolute()
+            .left(px(
+                selection_clip.map_or(0.0, |clip| -f32::from(clip.origin.x))
+            ))
+            .top(px(
+                selection_clip.map_or(0.0, |clip| -f32::from(clip.origin.y))
+            ))
+            .w(image_rect.size.width)
+            .h(image_rect.size.height)
+            .children(object_layers)
+            .children(preview_blur_layer)
+            .child(overlay_canvas)
+            .children(text_overlay);
+        let annotation_layer = if let Some(clip) = selection_clip {
+            div()
+                .absolute()
+                .left(clip.origin.x)
+                .top(clip.origin.y)
+                .w(clip.size.width)
+                .h(clip.size.height)
+                .overflow_hidden()
+                .child(annotation_content)
+        } else {
+            annotation_content
+        };
+        let frame_border = selection_clip.map(|clip| {
+            div()
+                .absolute()
+                .left(clip.origin.x)
+                .top(clip.origin.y)
+                .w(clip.size.width)
+                .h(clip.size.height)
+                .border_1()
+                .border_color(rgba((accent_hex << 8) | 0xFF))
+        });
         let image_layer = div()
             .absolute()
             .left(image_rect.origin.x)
@@ -5267,7 +5613,7 @@ impl Render for EditorView {
             .w(image_rect.size.width)
             .h(image_rect.size.height)
             .cursor(image_cursor)
-            .rounded(px(if effects_active {
+            .rounded(px(if effects_active && !show_full_frame {
                 self.effects.corner_radius as f32
             } else {
                 0.0
@@ -5284,10 +5630,9 @@ impl Render for EditorView {
                     .size_full()
                     .object_fit(ObjectFit::Fill),
             )
-            .children(object_layers)
-            .children(preview_blur_layer)
-            .child(overlay_canvas)
-            .children(text_overlay)
+            .children(dim_layer)
+            .child(annotation_layer)
+            .children(frame_border)
             .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
                 let zoomable = this.inline.is_some_and(|inline| inline.zoomable);
                 if this.inline.is_some() && !zoomable {
@@ -6395,6 +6740,7 @@ fn open_inline_editor_window(
                 zoomable,
                 document,
                 effects,
+                None,
                 cx,
             )
         });
@@ -6421,6 +6767,40 @@ fn open_inline_editor_window(
             false
         }
     }
+}
+
+fn full_selection_bounds(
+    image_rect: Bounds<Pixels>,
+    image_size: PhysicalSize,
+    selection: PhysicalRect,
+) -> Option<Bounds<Pixels>> {
+    let scale = f32::from(image_rect.size.width) / image_size.width.max(1) as f32;
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    Some(Bounds {
+        origin: point(
+            px(f32::from(image_rect.origin.x) + selection.origin.x as f32 * scale),
+            px(f32::from(image_rect.origin.y) + selection.origin.y as f32 * scale),
+        ),
+        size: size(
+            px(selection.size.width as f32 * scale),
+            px(selection.size.height as f32 * scale),
+        ),
+    })
+}
+
+fn cropped_document(document: &AnnotationDocument, selection: PhysicalRect) -> AnnotationDocument {
+    let mut cropped = AnnotationDocument::new(selection.size);
+    for annotation in document.objects() {
+        let translated = annotation
+            .clone()
+            .translated(-selection.origin.x, -selection.origin.y);
+        cropped.add(translated.shape, translated.style);
+    }
+    cropped.select(None);
+    cropped.clear_history();
+    cropped
 }
 
 fn finalize_shape(draft: &Draft, end: PhysicalPoint) -> Option<Shape> {
@@ -6963,10 +7343,10 @@ fn paint_spotlight(
 
 #[cfg(test)]
 mod tests {
-    use super::{TextEdit, word_range_at};
+    use super::{TextEdit, cropped_document, word_range_at};
     use crate::ui::hue_rgb;
-    use core_annotate::AnnotationStyle;
-    use core_types::{PhysicalPoint, PhysicalSize};
+    use core_annotate::{AnnotationDocument, AnnotationStyle, Shape};
+    use core_types::{PhysicalPoint, PhysicalRect, PhysicalSize};
 
     fn empty_edit() -> TextEdit {
         TextEdit::start(
@@ -7127,5 +7507,50 @@ mod tests {
         assert!(f32::from(rect.origin.y) + f32::from(rect.size.height) <= 900.0 - 44.0);
         assert!(f32::from(rect.origin.x) >= 44.0);
         assert!(f32::from(rect.size.width) <= 1440.0 - 88.0 + 0.5);
+    }
+
+    #[test]
+    fn cropped_document_translates_objects_and_keeps_outside_data() {
+        let mut document = AnnotationDocument::new(PhysicalSize::new(100, 100));
+        document.add(
+            Shape::Rect(PhysicalRect::new(10, 20, 30, 40)),
+            AnnotationStyle::default(),
+        );
+        document.add(
+            Shape::Rect(PhysicalRect::new(80, 80, 10, 10)),
+            AnnotationStyle::default(),
+        );
+
+        let cropped = cropped_document(&document, PhysicalRect::new(20, 10, 50, 50));
+        assert_eq!(cropped.image_size(), PhysicalSize::new(50, 50));
+        assert_eq!(cropped.objects().len(), 2);
+        assert_eq!(
+            cropped.objects()[0].shape.bounds(),
+            PhysicalRect::new(-10, 10, 30, 40)
+        );
+        assert_eq!(
+            cropped.objects()[1].shape.bounds(),
+            PhysicalRect::new(60, 70, 10, 10)
+        );
+        assert!(cropped.selected().is_none());
+    }
+
+    #[test]
+    fn full_selection_bounds_offset_the_frame_inside_the_monitor() {
+        use gpui_kit::{Bounds, point, px, size};
+        let image = Bounds {
+            origin: point(px(0.0), px(0.0)),
+            size: size(px(200.0), px(100.0)),
+        };
+        let bounds = super::full_selection_bounds(
+            image,
+            PhysicalSize::new(400, 200),
+            PhysicalRect::new(40, 20, 100, 60),
+        )
+        .unwrap();
+        assert_eq!(f32::from(bounds.origin.x), 20.0);
+        assert_eq!(f32::from(bounds.origin.y), 10.0);
+        assert_eq!(f32::from(bounds.size.width), 50.0);
+        assert_eq!(f32::from(bounds.size.height), 30.0);
     }
 }

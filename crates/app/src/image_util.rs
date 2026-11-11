@@ -28,6 +28,15 @@ pub fn render_image_ref(frame: &RgbaFrame) -> Arc<RenderImage> {
     render_image(frame.clone())
 }
 
+/// One transparent pixel, used by overlays whose editor already paints the
+/// frozen monitor image and no longer needs a second full-screen background.
+pub fn transparent_image() -> Arc<RenderImage> {
+    render_image(
+        RgbaFrame::from_pixels(1, 1, vec![0, 0, 0, 0])
+            .expect("one transparent pixel is a valid frame"),
+    )
+}
+
 /// Dimensions of the BGRA render image.
 pub fn image_size(image: &RenderImage) -> PhysicalSize {
     let size = image.size(0);
@@ -142,18 +151,70 @@ impl image::GenericImageView for FrameView<'_> {
     }
 }
 
+struct RenderFrameView<'a> {
+    size: PhysicalSize,
+    bytes: Option<&'a [u8]>,
+}
+
+impl<'a> RenderFrameView<'a> {
+    fn new(image: &'a RenderImage) -> Self {
+        Self {
+            size: image_size(image),
+            bytes: image.as_bytes(0),
+        }
+    }
+}
+
+impl image::GenericImageView for RenderFrameView<'_> {
+    type Pixel = image::Rgba<u8>;
+
+    fn dimensions(&self) -> (u32, u32) {
+        (self.size.width, self.size.height)
+    }
+
+    fn get_pixel(&self, x: u32, y: u32) -> Self::Pixel {
+        if x >= self.size.width || y >= self.size.height {
+            return image::Rgba([0, 0, 0, 0]);
+        }
+        let Some(bytes) = self.bytes else {
+            return image::Rgba([0, 0, 0, 0]);
+        };
+        let offset = (y as usize * self.size.width as usize + x as usize) * 4;
+        let Some([blue, green, red, alpha]) = bytes
+            .get(offset..offset + 4)
+            .map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]])
+        else {
+            return image::Rgba([0, 0, 0, 0]);
+        };
+        image::Rgba([red, green, blue, alpha])
+    }
+}
+
 /// Builds the preview for a box-blur radius. The frame is downscaled by two
 /// before the Gaussian pass so the preview keeps the exported radius; the
 /// previous eighth-resolution preview compressed every strength into the same
 /// frosted look. The downscale reads the source frame directly instead of
 /// cloning a full RGBA image first.
 pub fn blurred_image(frame: &RgbaFrame, radius: u32) -> Arc<RenderImage> {
-    let width = frame.width();
-    let height = frame.height();
+    blur_from_view(&FrameView(frame), frame.width(), frame.height(), radius)
+}
+
+/// Blur preview for editors that display a BGRA render image directly.
+pub fn blurred_image_from_render(image: &RenderImage, radius: u32) -> Arc<RenderImage> {
+    let view = RenderFrameView::new(image);
+    blur_from_view(&view, view.size.width, view.size.height, radius)
+}
+
+fn blur_from_view(
+    view: &impl image::GenericImageView<Pixel = image::Rgba<u8>>,
+    width: u32,
+    height: u32,
+    radius: u32,
+) -> Arc<RenderImage> {
     let small_width = (width / 2).max(1);
     let small_height = (height / 2).max(1);
     let small = image::imageops::resize(
-        &FrameView(frame),
+        view,
         small_width,
         small_height,
         image::imageops::FilterType::Triangle,
@@ -193,7 +254,8 @@ pub fn save_png(frame: &RgbaFrame) -> Result<PathBuf, std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::{
-        blurred_image, cropped_rgba, image_pixel, image_size, render_image, render_image_ref,
+        blurred_image, blurred_image_from_render, cropped_rgba, image_pixel, image_size,
+        render_image, render_image_ref,
     };
     use core_types::{PhysicalRect, PhysicalSize, RgbaFrame};
 
@@ -240,6 +302,7 @@ mod tests {
     #[test]
     fn blurred_image_matches_the_full_copy_pipeline() {
         let frame = checker_frame(8, 6);
+        let image = render_image_ref(&frame);
         for radius in [8, 16, 24, 32] {
             let expected_small = image::imageops::resize(
                 &image::RgbaImage::from_raw(8, 6, frame.pixels().to_vec()).unwrap(),
@@ -257,6 +320,11 @@ mod tests {
                 actual.as_bytes(0),
                 Some(expected.as_slice()),
                 "radius {radius}"
+            );
+            assert_eq!(
+                blurred_image_from_render(&image, radius).as_bytes(0),
+                actual.as_bytes(0),
+                "render-image radius {radius}"
             );
         }
     }

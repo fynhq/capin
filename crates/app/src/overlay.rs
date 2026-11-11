@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use core_capture::{
-    CaptureTarget, MonitorInfo, SelectionAction, SelectionOutcome, SelectionSession, WindowInfo,
-    platform_backend,
+    CaptureBackend, CaptureError, CaptureTarget, MonitorInfo, SelectionAction, SelectionOutcome,
+    SelectionSession, WindowInfo, platform_backend,
 };
 use core_types::{
     CaptureRegion, MonitorId, PhysicalPoint, PhysicalRect, PhysicalSize, RgbaFrame, WindowId,
@@ -17,7 +17,7 @@ use platform_window::{WindowStyle, apply as apply_window_style, system_accent_he
 
 use crate::{
     chrome_theme::ChromeTheme,
-    editor::{EditorView, InlineCapture, Tool, tooltip_view},
+    editor::{EditorView, FullCanvasInit, InlineCapture, Tool, tooltip_view},
     effects::RegionEffects,
     i18n::{Language, t},
     icons, image_util,
@@ -358,6 +358,7 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
     // frames up front keeps each overlay bound to its own monitor.
     let mut captures: Vec<(MonitorInfo, Arc<RenderImage>, PhysicalSize)> =
         Vec::with_capacity(monitors.len());
+    let capture_cursor = settings_state::get().capture_cursor;
     for monitor in monitors {
         if let Some((kept, _, _)) = captures
             .iter()
@@ -384,7 +385,7 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
             monitor.scale.get(),
             monitor.is_primary
         );
-        let mut frame = match backend.capture(CaptureTarget::Monitor(monitor.id)) {
+        let mut frame = match capture_monitor(&mut *backend, monitor.id, capture_cursor) {
             Ok(frame) => frame,
             Err(error) => {
                 log_error!(
@@ -413,7 +414,7 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
                 frame.height(),
                 monitor.bounds
             );
-            frame = match backend.capture(CaptureTarget::Monitor(monitor.id)) {
+            frame = match capture_monitor(&mut *backend, monitor.id, capture_cursor) {
                 Ok(frame) => frame,
                 Err(error) => {
                     log_error!(
@@ -631,6 +632,19 @@ fn logical_bounds(monitor: &MonitorInfo) -> Bounds<Pixels> {
         ),
     };
     crate::display::window_bounds_on_monitor(monitor, bounds)
+}
+
+fn capture_monitor(
+    backend: &mut dyn CaptureBackend,
+    id: MonitorId,
+    with_cursor: bool,
+) -> Result<RgbaFrame, CaptureError> {
+    let target = CaptureTarget::Monitor(id);
+    if with_cursor {
+        backend.capture_with_cursor(target)
+    } else {
+        backend.capture(target)
+    }
 }
 
 /// A monitor capture must have exactly the monitor's physical size. A stale or
@@ -1672,31 +1686,60 @@ impl OverlayView {
         let Some(selected) = self.selected.clone() else {
             return;
         };
-        let frame = match self.capture_selected_raw() {
-            Ok(frame) => frame,
-            Err(error) => {
-                self.set_notice(error, cx);
+        let region = self.selection_region(&selected);
+        let scale = self.effective_scale();
+        let full_monitor = matches!(
+            selected.target,
+            CaptureTarget::Region(_) | CaptureTarget::Monitor(_)
+        );
+        let mut full_canvas = None;
+        let frame = if full_monitor {
+            let Some(cache) = image_util::cropped_rgba(&self.image, selected.rect) else {
+                self.set_notice("empty selection".to_owned(), cx);
                 return;
+            };
+            full_canvas = Some(FullCanvasInit {
+                image: self.image.clone(),
+                image_size: self.image_size,
+                adjustable: matches!(selected.target, CaptureTarget::Region(_)),
+            });
+            Arc::new(cache)
+        } else {
+            match self.capture_selected_raw() {
+                Ok(frame) => Arc::new(frame),
+                Err(error) => {
+                    self.set_notice(error, cx);
+                    return;
+                }
             }
         };
-        let region = self.selection_region(&selected);
         log_info!(
             "overlay",
             "opening inline editor for {}x{} region",
             frame.width(),
             frame.height()
         );
-        let scale = self.effective_scale();
-        let center_x = (region.rect.origin.x as f32 + region.rect.size.width as f32 / 2.0) / scale;
-        let center_y = (region.rect.origin.y as f32 + region.rect.size.height as f32 / 2.0) / scale;
-        let image_width = frame.width() as f32 / scale;
-        let image_height = frame.height() as f32 / scale;
-        let editor_rect = Bounds {
-            origin: point(
-                px(center_x - image_width / 2.0),
-                px(center_y - image_height / 2.0),
-            ),
-            size: size(px(image_width), px(image_height)),
+        let editor_rect = if full_monitor {
+            // The full monitor image fills the overlay window; the selection
+            // frame lives inside the editor instead of sizing its image.
+            Bounds {
+                origin: point(px(0.0), px(0.0)),
+                size: self.window_size,
+            }
+        } else {
+            let center_x =
+                (region.rect.origin.x as f32 + region.rect.size.width as f32 / 2.0) / scale;
+            let center_y =
+                (region.rect.origin.y as f32 + region.rect.size.height as f32 / 2.0) / scale;
+            let image_width = frame.width() as f32 / scale;
+            let image_height = frame.height() as f32 / scale;
+            Bounds {
+                origin: point(
+                    px(center_x - image_width / 2.0),
+                    px(center_y - image_height / 2.0),
+                ),
+                size: size(px(image_width), px(image_height)),
+            }
         };
         let monitor_origin = self.session.monitor_bounds().origin;
         let screen_origin = point(
@@ -1714,13 +1757,10 @@ impl OverlayView {
         self.editing_rect = Some(editor_rect);
         self.selected = None;
         self.session.cancel();
-        // Region captures keep the frozen monitor image so the editor can
-        // re-crop when the user drags the image edges. The BGRA render image is
-        // shared instead of cloning a second RGBA monitor frame; window and
-        // monitor captures do not need it.
-        let region_source =
-            matches!(selected.target, CaptureTarget::Region(_)).then(|| self.image.clone());
-        let frame = Arc::new(frame);
+        // Cropped region editors share the frozen monitor image for edge
+        // resizing; full-canvas editors already keep it as their display image.
+        let region_source = (!full_monitor && matches!(selected.target, CaptureTarget::Region(_)))
+            .then(|| self.image.clone());
 
         let handles = cx.windows();
         let current = window.window_handle();
@@ -1743,9 +1783,16 @@ impl OverlayView {
                             false,
                             None,
                             inline_capture.effects,
+                            full_canvas,
                             cx,
                         )
                     });
+                    if full_monitor {
+                        // The editor paints the frozen monitor itself; drop the
+                        // overlay's extra reference so one full-size CPU copy
+                        // remains and F5 can safely release the old texture.
+                        this.image = image_util::transparent_image();
+                    }
                     this.editor = Some(editor.clone());
                     this.editing_rect = Some(editor_rect);
                     cx.notify();
