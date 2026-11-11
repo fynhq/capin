@@ -43,6 +43,10 @@ pub enum StitchError {
     HeightLimit(u32),
     #[error("stitched image would exceed the {0}-byte memory budget")]
     MemoryLimit(usize),
+    #[error("could not allocate {0} bytes for the stitched image")]
+    AllocationFailed(usize),
+    #[error("stitched image dimensions overflow address space")]
+    SizeOverflow,
     #[error("no vertical overlap was found between frames")]
     NoOverlap,
     #[error(transparent)]
@@ -107,6 +111,7 @@ impl Stitcher {
             if frame.height() > self.height_limit() {
                 return Err(self.limit_error());
             }
+            self.reserve_rows(frame.height() as usize)?;
             self.pixels.extend_from_slice(frame.pixels());
             self.height = frame.height();
             self.frames = 1;
@@ -135,6 +140,7 @@ impl Stitcher {
         if room < appended {
             return Err(self.limit_error());
         }
+        self.reserve_rows(appended as usize)?;
         let start = (inset + overlap) as usize * self.width as usize * 4;
         let end = start + appended as usize * self.width as usize * 4;
         self.pixels.extend_from_slice(&frame.pixels()[start..end]);
@@ -147,6 +153,59 @@ impl Stitcher {
             total_height: self.height,
             frames: self.frames,
         })
+    }
+
+    /// Starts a session from an owned first frame without copying it.
+    ///
+    /// Later frames still go through [`Self::push`]; only the first frame can
+    /// donate its buffer to the stitched image.
+    pub fn push_owned(&mut self, frame: RgbaFrame) -> Result<AppendReport, StitchError> {
+        if self.frames != 0 {
+            return self.push(&frame);
+        }
+        if frame.width() != self.width {
+            return Err(StitchError::WidthMismatch {
+                expected: self.width,
+                frame: frame.width(),
+            });
+        }
+        if frame.height() == 0 {
+            return Err(StitchError::EmptyFrame);
+        }
+        if frame.height() > self.height_limit() {
+            return Err(self.limit_error());
+        }
+        self.height = frame.height();
+        self.frames = 1;
+        self.pixels = frame.into_packed_pixels();
+        Ok(AppendReport {
+            overlap_rows: 0,
+            trimmed_top_rows: 0,
+            appended_rows: self.height,
+            total_height: self.height,
+            frames: self.frames,
+        })
+    }
+
+    /// Grows the stitched buffer geometrically but never past the configured
+    /// byte budget. `extend_from_slice` alone may double the capacity, which
+    /// turned a 256 MiB cap into a 512 MiB allocation on wide captures.
+    fn reserve_rows(&mut self, rows: usize) -> Result<(), StitchError> {
+        let row_bytes = (self.width as usize).saturating_mul(4).max(1);
+        let needed = self
+            .pixels
+            .len()
+            .checked_add(rows.saturating_mul(row_bytes))
+            .ok_or(StitchError::SizeOverflow)?;
+        if needed <= self.pixels.capacity() {
+            return Ok(());
+        }
+        let limit = self.height_limit() as usize * row_bytes;
+        let grown = needed.saturating_add(needed / 4);
+        let target = grown.min(limit).max(needed);
+        self.pixels
+            .try_reserve_exact(target - self.pixels.len())
+            .map_err(|_| StitchError::AllocationFailed(target))
     }
 
     /// Consumes the accumulated pixels without cloning the full stitched image.
@@ -515,5 +574,42 @@ mod tests {
         stitches.push(&slice_rows(&original, 0, 60)).unwrap();
         let result = stitches.push(&slice_rows(&original, 30, 90));
         assert!(matches!(result, Err(StitchError::MemoryLimit(_))));
+    }
+
+    #[test]
+    fn owned_first_frame_donates_its_buffer() {
+        let frame = patterned_frame(40, 100, 13);
+        let pointer = frame.pixels().as_ptr();
+        let mut stitches = stitcher(40);
+        let report = stitches.push_owned(frame).unwrap();
+        assert_eq!(report.appended_rows, 100);
+        assert_eq!(stitches.height(), 100);
+        assert_eq!(stitches.pixels.as_ptr(), pointer);
+    }
+
+    #[test]
+    fn capacity_never_exceeds_the_byte_budget() {
+        let width = 32u32;
+        let row_bytes = width as usize * 4;
+        let max_bytes = row_bytes * 500;
+        let mut stitches = Stitcher::new(
+            width,
+            StitchConfig {
+                max_height: 10_000,
+                max_bytes,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let original = patterned_frame(width, 400, 41);
+        for (start, end) in [(0, 120), (90, 210), (180, 300), (270, 390)] {
+            stitches.push(&slice_rows(&original, start, end)).unwrap();
+            assert!(
+                stitches.pixels.capacity() <= max_bytes,
+                "capacity {} exceeds budget {max_bytes}",
+                stitches.pixels.capacity()
+            );
+        }
+        assert!(stitches.finish().is_ok());
     }
 }

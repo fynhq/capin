@@ -73,6 +73,27 @@ impl RgbaFrame {
         &self.pixels
     }
 
+    /// Takes the owned buffer without copying.
+    pub fn into_pixels(self) -> Vec<u8> {
+        self.pixels
+    }
+
+    /// Takes the owned buffer and repacks padded rows to `width * 4` bytes.
+    ///
+    /// Tightly packed frames move their buffer; padded frames compact it once.
+    pub fn into_packed_pixels(self) -> Vec<u8> {
+        if self.stride == self.width as usize * BYTES_PER_PIXEL {
+            return self.pixels;
+        }
+        let row_bytes = self.width as usize * BYTES_PER_PIXEL;
+        let mut packed = Vec::with_capacity(row_bytes * self.height as usize);
+        for y in 0..self.height as usize {
+            let start = y * self.stride;
+            packed.extend_from_slice(&self.pixels[start..start + row_bytes]);
+        }
+        packed
+    }
+
     pub fn row(&self, y: u32) -> Option<&[u8]> {
         if y >= self.height {
             return None;
@@ -205,5 +226,37 @@ mod tests {
         let text = format!("{frame:?}");
         assert!(text.contains("width: 1"));
         assert!(!text.contains("9, 9, 9, 9"));
+    }
+
+    #[test]
+    fn into_pixels_moves_the_buffer() {
+        let pixels = vec![1, 2, 3, 4];
+        let pointer = pixels.as_ptr();
+        let frame = RgbaFrame::from_pixels(1, 1, pixels).unwrap();
+        let moved = frame.into_pixels();
+        assert_eq!(moved, vec![1, 2, 3, 4]);
+        assert_eq!(moved.as_ptr(), pointer);
+    }
+
+    #[test]
+    fn into_packed_pixels_compacts_padded_rows() {
+        let frame = RgbaFrame::new(
+            1,
+            2,
+            8,
+            vec![1, 2, 3, 4, 0, 0, 0, 0, 5, 6, 7, 8, 0, 0, 0, 0],
+        )
+        .unwrap();
+        assert_eq!(frame.into_packed_pixels(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn into_packed_pixels_leaves_tight_rows_untouched() {
+        let pixels = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let pointer = pixels.as_ptr();
+        let frame = RgbaFrame::from_pixels(2, 1, pixels).unwrap();
+        let packed = frame.into_packed_pixels();
+        assert_eq!(packed, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(packed.as_ptr(), pointer);
     }
 }

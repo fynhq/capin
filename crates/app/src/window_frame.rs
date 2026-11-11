@@ -94,8 +94,8 @@ fn trim_capture_fringe(frame: RgbaFrame) -> RgbaFrame {
         return frame;
     }
     frame
-        .cropped(PhysicalRect::new(1, 1, width - 2, height - 2))
-        .unwrap_or(frame)
+        .into_cropped(PhysicalRect::new(1, 1, width - 2, height - 2))
+        .expect("trimmed capture keeps its interior")
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

@@ -268,9 +268,11 @@ fn draw_cursor_arrow(frame: RgbaFrame, x: i32, y: i32, scale: f32) -> RgbaFrame 
         .map(|(_, y)| *y)
         .fold(f32::NEG_INFINITY, f32::max)
         .ceil() as i32;
-    let mut pixels = frame.pixels().to_vec();
-    let width = frame.width() as i32;
-    let height = frame.height() as i32;
+    let frame_width = frame.width();
+    let frame_height = frame.height();
+    let mut pixels = frame.into_packed_pixels();
+    let width = frame_width as i32;
+    let height = frame_height as i32;
     for py in min_y.max(0)..=max_y.min(height - 1) {
         for px in min_x.max(0)..=max_x.min(width - 1) {
             if !point_in_polygon(px as f32 + 0.5, py as f32 + 0.5, &points) {
@@ -296,7 +298,8 @@ fn draw_cursor_arrow(frame: RgbaFrame, x: i32, y: i32, scale: f32) -> RgbaFrame 
             }
         }
     }
-    RgbaFrame::from_pixels(frame.width(), frame.height(), pixels).unwrap_or(frame)
+    RgbaFrame::from_pixels(frame_width, frame_height, pixels)
+        .expect("cursor overlay keeps valid dimensions")
 }
 
 fn point_in_polygon(x: f32, y: f32, points: &[(f32, f32)]) -> bool {

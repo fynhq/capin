@@ -25,7 +25,7 @@ pub fn open_session(region: CaptureRegion, first_frame: RgbaFrame, cx: &mut App)
             return;
         }
     };
-    if let Err(error) = stitcher.push(&first_frame) {
+    if let Err(error) = stitcher.push_owned(first_frame) {
         log_error!("scroll", "failed to start scroll capture: {error}");
         return;
     }

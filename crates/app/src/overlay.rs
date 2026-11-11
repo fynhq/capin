@@ -8,7 +8,9 @@ use core_capture::{
     CaptureTarget, MonitorInfo, SelectionAction, SelectionOutcome, SelectionSession, WindowInfo,
     platform_backend,
 };
-use core_types::{CaptureRegion, MonitorId, PhysicalPoint, PhysicalRect, RgbaFrame, WindowId};
+use core_types::{
+    CaptureRegion, MonitorId, PhysicalPoint, PhysicalRect, PhysicalSize, RgbaFrame, WindowId,
+};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use platform_window::{WindowStyle, apply as apply_window_style, system_accent_hex};
@@ -354,11 +356,12 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
     // when mixed-DPI placement lets it spill across the display boundary; that
     // made the second display look like a copy of the first one. Capturing all
     // frames up front keeps each overlay bound to its own monitor.
-    let mut captures: Vec<(MonitorInfo, RgbaFrame)> = Vec::with_capacity(monitors.len());
+    let mut captures: Vec<(MonitorInfo, Arc<RenderImage>, PhysicalSize)> =
+        Vec::with_capacity(monitors.len());
     for monitor in monitors {
-        if let Some((kept, _)) = captures
+        if let Some((kept, _, _)) = captures
             .iter()
-            .find(|(kept, _)| kept.bounds == monitor.bounds)
+            .find(|(kept, _, _)| kept.bounds == monitor.bounds)
         {
             // Clone mode exposes both physical displays at identical desktop
             // coordinates. One overlay already covers the whole desktop area,
@@ -440,16 +443,15 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
             frame.width(),
             frame.height()
         );
-        captures.push((monitor, frame));
+        let image_size = PhysicalSize::new(frame.width(), frame.height());
+        captures.push((monitor, image_util::render_image(frame), image_size));
     }
 
     let mut opened = 0usize;
-    for (monitor, frame) in captures {
+    for (monitor, image, image_size) in captures {
         let window_bounds = logical_bounds(&monitor);
         let expected_size = window_bounds.size;
         let expected_scale = monitor.scale.get();
-        let frame = Arc::new(frame);
-        let image = image_util::render_image(&frame);
         let options = overlay_options(monitor.id, window_bounds);
         let placement = monitor.bounds;
         let placement_scale = monitor.scale;
@@ -529,7 +531,7 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
                     session,
                     native_id,
                     image,
-                    frame,
+                    image_size,
                     scale,
                     window_size,
                     accent,
@@ -651,10 +653,10 @@ struct OverlayView {
     session: SelectionSession,
     native_id: Option<u64>,
     image: Arc<RenderImage>,
-    /// The raw frame is only needed while the selection toolbar is active.
-    /// Once the inline editor owns the captured pixels this is cleared so a
-    /// 4K edit does not keep two full CPU copies alive.
-    frame: Option<Arc<RgbaFrame>>,
+    /// Pixel size of the frozen frame. The RGBA source is dropped after the
+    /// BGRA render image is built, so the overlay keeps one full-size CPU
+    /// copy instead of two.
+    image_size: PhysicalSize,
     scale: f32,
     window_size: Size<Pixels>,
     cursor: Option<PhysicalPoint>,
@@ -702,7 +704,7 @@ impl OverlayView {
         mut session: SelectionSession,
         native_id: Option<u64>,
         image: Arc<RenderImage>,
-        frame: Arc<RgbaFrame>,
+        image_size: PhysicalSize,
         scale: f32,
         window_size: Size<Pixels>,
         accent: Rgba,
@@ -728,7 +730,7 @@ impl OverlayView {
             session,
             native_id,
             image,
-            frame: Some(frame),
+            image_size,
             scale,
             window_size,
             cursor: None,
@@ -779,13 +781,8 @@ impl OverlayView {
     /// selection overlays aligned with the image if a platform clamps the
     /// window or applies a different DPI than the monitor reports.
     fn frame_ratio(&self) -> (f32, f32) {
-        let monitor = self.session.monitor_bounds();
-        let (frame_width, frame_height) = self
-            .frame
-            .as_ref()
-            .map_or((monitor.size.width, monitor.size.height), |frame| {
-                (frame.width(), frame.height())
-            });
+        let frame_width = self.image_size.width;
+        let frame_height = self.image_size.height;
         let window_width = f32::from(self.window_size.width).max(1.0);
         let window_height = f32::from(self.window_size.height).max(1.0);
         (
@@ -945,9 +942,7 @@ impl OverlayView {
         if local_x < 0 || local_y < 0 {
             return None;
         }
-        self.frame
-            .as_ref()?
-            .pixel(local_x as u32, local_y as u32)
+        image_util::image_pixel(&self.image, local_x as u32, local_y as u32)
             .map(|[red, green, blue, _]| (red, green, blue))
     }
 
@@ -1084,14 +1079,10 @@ impl OverlayView {
         {
             return;
         }
-        let Some(frame) = self.frame.as_ref() else {
-            self.clear_magnifier(window);
-            return;
-        };
         let monitor = self.session.monitor_bounds();
         let output_size = (MAGNIFIER_SIZE as f32 * window.scale_factor().max(0.1)).round() as u32;
         let image = image_util::magnifier_image(
-            frame,
+            &self.image,
             point.x - monitor.origin.x,
             point.y - monitor.origin.y,
             MAGNIFIER_SOURCE,
@@ -1575,9 +1566,7 @@ impl OverlayView {
                 let frozen = {
                     #[cfg(target_os = "macos")]
                     {
-                        !settings_state::get().capture_cursor
-                            && self.window_is_fully_visible(id)
-                            && self.frame.is_some()
+                        !settings_state::get().capture_cursor && self.window_is_fully_visible(id)
                     }
                     #[cfg(not(target_os = "macos"))]
                     {
@@ -1627,10 +1616,7 @@ impl OverlayView {
     }
 
     fn crop_selected_frame(&self, selected: &Selected) -> Result<RgbaFrame, String> {
-        self.frame
-            .as_ref()
-            .ok_or_else(|| "the capture frame is no longer available".to_owned())?
-            .cropped(selected.rect)
+        image_util::cropped_rgba(&self.image, selected.rect)
             .ok_or_else(|| "empty selection".to_owned())
     }
 
@@ -1728,13 +1714,12 @@ impl OverlayView {
         self.editing_rect = Some(editor_rect);
         self.selected = None;
         self.session.cancel();
-        // Region captures keep the frozen monitor frame so the editor can
-        // re-crop when the user drags the image edges. Window/monitor captures
-        // do not need it and release the full frame as before.
-        let region_source = matches!(selected.target, CaptureTarget::Region(_))
-            .then(|| self.frame.clone())
-            .flatten();
-        self.frame = None;
+        // Region captures keep the frozen monitor image so the editor can
+        // re-crop when the user drags the image edges. The BGRA render image is
+        // shared instead of cloning a second RGBA monitor frame; window and
+        // monitor captures do not need it.
+        let region_source =
+            matches!(selected.target, CaptureTarget::Region(_)).then(|| self.image.clone());
         let frame = Arc::new(frame);
 
         let handles = cx.windows();
@@ -1882,10 +1867,11 @@ impl OverlayView {
             }
         };
         let hash = crate::capture_history::hash_frame(&output);
-        match image_util::copy_png(&output, cx) {
+        match image_util::encode_png(&output) {
             Ok(bytes) => {
                 log_info!("overlay", "selection copied to clipboard");
                 crate::capture_history::record_png_bytes(&bytes, hash);
+                image_util::copy_png_bytes(bytes, cx);
                 self.close_overlays(cx);
             }
             Err(error) => self.set_notice(error.to_string(), cx),
@@ -1996,31 +1982,20 @@ impl OverlayView {
                 return;
             }
         };
-        // F5 usually refreshes a mostly static desktop. Reusing the current
-        // atlas texture when the pixels did not change avoids uploading and
-        // retiring one full-screen texture per press.
-        let same_frame = self.frame.as_ref().is_some_and(|current| {
-            current.width() == frame.width()
-                && current.height() == frame.height()
-                && crate::capture_history::hash_frame(current)
-                    == crate::capture_history::hash_frame(&frame)
-        });
-        if !same_frame {
-            let image = image_util::render_image(&frame);
-            let old_image = std::mem::replace(&mut self.image, image);
-            // Drop the previous full-screen atlas entry through the window
-            // that owns it. Deferring App::drop_image let several refreshes
-            // pile up before the entries were reclaimed.
-            if let Err(error) = window.drop_image(old_image) {
-                log_warn!("overlay", "failed to release refreshed frame: {error}");
-            }
+        self.image_size = PhysicalSize::new(frame.width(), frame.height());
+        let image = image_util::render_image(frame);
+        let old_image = std::mem::replace(&mut self.image, image);
+        // Drop the previous full-screen atlas entry through the window that
+        // owns it. Deferring App::drop_image let several refreshes pile up
+        // before the entries were reclaimed.
+        if let Err(error) = window.drop_image(old_image) {
+            log_warn!("overlay", "failed to release refreshed frame: {error}");
         }
         if let Some(magnifier) = self.magnifier.take()
             && let Err(error) = window.drop_image(magnifier.image)
         {
             log_warn!("overlay", "failed to release magnifier frame: {error}");
         }
-        self.frame = Some(Arc::new(frame));
         self.element_cache.clear();
         self.element_window = None;
         self.element_pending = None;

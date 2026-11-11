@@ -721,10 +721,12 @@ pub(crate) struct EditorView {
     blur_images: [Option<Arc<RenderImage>>; BLUR_RADII.len()],
     images_released: bool,
     frame: Arc<RgbaFrame>,
-    /// Frozen monitor frame behind an inline screenshot editor. Present only
+    /// Frozen monitor image behind an inline screenshot editor. Present only
     /// for plain region captures, where the crop can be widened or shrunk
-    /// again while no annotation object is selected.
-    region_source: Option<Arc<RgbaFrame>>,
+    /// again while no annotation object is selected. The BGRA render image is
+    /// shared with the overlay, so widening a selection does not keep a second
+    /// full RGBA monitor frame alive.
+    region_source: Option<Arc<RenderImage>>,
     region_drag: Option<RegionAdjustDraft>,
     pin_target: Option<u64>,
     document: AnnotationDocument,
@@ -791,7 +793,7 @@ pub(crate) struct EditorView {
 impl EditorView {
     fn new(frame: Arc<RgbaFrame>, pin_target: Option<u64>, cx: &mut Context<Self>) -> Self {
         let image_size = PhysicalSize::new(frame.width(), frame.height());
-        let image = image_util::render_image(&frame);
+        let image = image_util::render_image_ref(&frame);
         // Blur previews are built lazily: most captures never use the blur
         // tool, and eagerly resizing four full frames cost startup CPU.
         let blur_images: [Option<Arc<RenderImage>>; BLUR_RADII.len()] =
@@ -922,7 +924,7 @@ impl EditorView {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_inline(
         frame: Arc<RgbaFrame>,
-        region_source: Option<Arc<RgbaFrame>>,
+        region_source: Option<Arc<RenderImage>>,
         image_rect: Bounds<Pixels>,
         screen_origin: Point<Pixels>,
         initial_tool: Tool,
@@ -1462,7 +1464,7 @@ impl EditorView {
     /// the atlas until dropped, so every canvas replacement has to release
     /// the previous set explicitly.
     fn refresh_frame_images(&mut self, cx: &mut Context<Self>) {
-        let image = image_util::render_image(&self.frame);
+        let image = image_util::render_image_ref(&self.frame);
         let old_image = std::mem::replace(&mut self.image, image);
         let old_blur_images =
             std::mem::replace(&mut self.blur_images, std::array::from_fn(|_| None));
@@ -1633,7 +1635,7 @@ impl EditorView {
             (f32::from(position.x) * scale).round() as i32,
             (f32::from(position.y) * scale).round() as i32,
         );
-        let image_size = PhysicalSize::new(source.width(), source.height());
+        let image_size = image_util::image_size(&source);
         let rect = resize_rect(
             draft.original,
             draft.handle,
@@ -1667,7 +1669,7 @@ impl EditorView {
             self.restore_region_image_rect(scale, cx);
             return;
         }
-        let Some(cropped) = source.cropped(draft.current) else {
+        let Some(cropped) = image_util::cropped_rgba(&source, draft.current) else {
             self.restore_region_image_rect(scale, cx);
             return;
         };
@@ -4472,7 +4474,7 @@ impl EditorView {
             && let Ok(source) = core_capture::platform_backend()
                 .capture(CaptureTarget::Monitor(capture.region.monitor))
         {
-            self.region_source = Some(Arc::new(source));
+            self.region_source = Some(image_util::render_image(source));
         }
         let image_size = PhysicalSize::new(frame.width(), frame.height());
         let size_changed = image_size != self.image_size;
@@ -4520,8 +4522,20 @@ impl EditorView {
             return;
         };
         self.commit_text(cx);
-        let first_frame =
-            rasterize(&self.document, &self.frame).unwrap_or_else(|_| self.frame.as_ref().clone());
+        let first_frame = match rasterize(&self.document, &self.frame) {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.show_status(
+                    format!(
+                        "{}{}",
+                        t(settings_state::get().language, "editor.export_failed"),
+                        error
+                    ),
+                    cx,
+                );
+                return;
+            }
+        };
         let handles = cx.windows();
         cx.defer(move |cx| {
             crate::windows::close_capture_auxiliary(cx, handles);
@@ -4600,11 +4614,11 @@ impl EditorView {
                     self.release_images(cx);
                 }
                 let handles = cx.windows();
-                let edit_state = crate::pin::PinEditState {
-                    base: self.frame.clone(),
-                    document: self.document.clone(),
-                    effects: self.stored_region_effects(),
-                };
+                let edit_state = crate::pin::PinEditState::new(
+                    self.frame.clone(),
+                    self.document.clone(),
+                    self.stored_region_effects(),
+                );
                 // Pin windows must not be created inside the toolbar's input
                 // callback; close the editor first and open the pin next turn.
                 cx.defer(move |cx| {
@@ -4658,12 +4672,13 @@ impl EditorView {
                 let hash = crate::capture_history::hash_frame(&output);
                 let record_history = self.pin_target.is_none();
                 if copy_only || settings_state::get().copy_to_clipboard {
-                    match image_util::copy_png(&output, cx) {
+                    match image_util::encode_png(&output) {
                         Ok(bytes) => {
                             copy_ok = true;
                             if record_history {
                                 crate::capture_history::record_png_bytes(&bytes, hash);
                             }
+                            image_util::copy_png_bytes(bytes, cx);
                             messages.push(t(language, "editor.copied").to_owned());
                         }
                         Err(error) => {
@@ -4690,11 +4705,11 @@ impl EditorView {
                     }
                 }
                 if !copy_only && let Some(pin_id) = self.pin_target {
-                    let edit_state = crate::pin::PinEditState {
-                        base: self.frame.clone(),
-                        document: self.document.clone(),
-                        effects: self.stored_region_effects(),
-                    };
+                    let edit_state = crate::pin::PinEditState::new(
+                        self.frame.clone(),
+                        self.document.clone(),
+                        self.stored_region_effects(),
+                    );
                     if crate::pin::replace_image_with_edit_state(pin_id, output, edit_state, cx) {
                         pin_ok = true;
                         messages.push(t(language, "editor.pin_updated").to_owned());
@@ -6201,9 +6216,12 @@ pub fn open_pin_editor_overlay(
     edit_state: Option<crate::pin::PinEditState>,
     cx: &mut App,
 ) -> bool {
-    let (frame, document, effects) = match edit_state {
-        Some(state) => (state.base, Some(state.document), state.effects),
-        None => (frame, None, RegionEffects::default()),
+    // The caller already resolved the unannotated base (or the flattened pin
+    // when a compact base could not be decoded); only the vector document and
+    // effects come from the edit state here.
+    let (document, effects) = match edit_state {
+        Some(state) => (Some(state.document), state.effects),
+        None => (None, RegionEffects::default()),
     };
     let center_x = f32::from(pin_bounds.origin.x) + f32::from(pin_bounds.size.width) / 2.0;
     let center_y = f32::from(pin_bounds.origin.y) + f32::from(pin_bounds.size.height) / 2.0;

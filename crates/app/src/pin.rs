@@ -161,7 +161,7 @@ impl PinContent {
 
     fn from_frame_shared(frame: Arc<RgbaFrame>, hash: u64) -> Self {
         let size = PhysicalSize::new(frame.width(), frame.height());
-        let image = image_util::render_image(&frame);
+        let image = image_util::render_image_ref(&frame);
         Self::Image {
             frame: Some(frame),
             image,
@@ -303,11 +303,82 @@ enum PinKind {
 
 /// Vector annotations kept alongside a pinned image so reopening the pin
 /// editor does not force the user to edit an already-rasterized image.
+///
+/// Large bases are stored as their already-encoded PNG bytes. A handful of
+/// pinned 4K screenshots otherwise keep a full RGBA copy per pin alive for the
+/// whole session; the editor decodes the base again only when the user opens
+/// it. Small bases stay as frames because decoding them every time would cost
+/// more than they save.
 #[derive(Clone)]
 pub(crate) struct PinEditState {
-    pub base: Arc<RgbaFrame>,
+    base: PinBase,
     pub document: AnnotationDocument,
     pub effects: crate::effects::RegionEffects,
+}
+
+#[derive(Clone)]
+enum PinBase {
+    Frame(Arc<RgbaFrame>),
+    Encoded {
+        bytes: Arc<[u8]>,
+        size: PhysicalSize,
+    },
+}
+
+/// Bases above this size are kept compressed. 8 MiB covers 1080p screenshots,
+/// whose RGBA buffers are 8.3 MiB, while small crops remain uncompressed.
+const PIN_BASE_KEEP_RAW_BYTES: usize = 8 * 1024 * 1024;
+
+impl PinEditState {
+    pub(crate) fn new(
+        base: Arc<RgbaFrame>,
+        document: AnnotationDocument,
+        effects: crate::effects::RegionEffects,
+    ) -> Self {
+        Self {
+            base: PinBase::new(base),
+            document,
+            effects,
+        }
+    }
+
+    /// Materializes the unannotated base for the editor. `None` means the
+    /// encoded base could not be decoded; callers fall back to the flattened
+    /// pin image.
+    pub(crate) fn base_frame(&self) -> Option<Arc<RgbaFrame>> {
+        self.base.frame()
+    }
+}
+
+impl PinBase {
+    fn new(frame: Arc<RgbaFrame>) -> Self {
+        let raw_bytes = frame.width() as usize * frame.height() as usize * 4;
+        if raw_bytes > PIN_BASE_KEEP_RAW_BYTES
+            && let Ok(bytes) = crate::image_util::encode_png(&frame)
+            && bytes.len() < raw_bytes
+        {
+            return Self::Encoded {
+                bytes: bytes.into(),
+                size: PhysicalSize::new(frame.width(), frame.height()),
+            };
+        }
+        Self::Frame(frame)
+    }
+
+    fn frame(&self) -> Option<Arc<RgbaFrame>> {
+        match self {
+            Self::Frame(frame) => Some(frame.clone()),
+            Self::Encoded { bytes, size } => {
+                let image = image::load_from_memory(bytes).ok()?.into_rgba8();
+                if image.dimensions() != (size.width, size.height) {
+                    return None;
+                }
+                let frame =
+                    RgbaFrame::from_pixels(size.width, size.height, image.into_raw()).ok()?;
+                Some(Arc::new(frame))
+            }
+        }
+    }
 }
 
 struct PinState {
@@ -675,7 +746,6 @@ fn open_pin_inner(
     let kind = content.kind();
     let content_hash = content.hash();
     let had_existing_image = existing_image.is_some();
-    let initial_ocr_path = existing_image.clone();
     let image_path = if let Some(path) = existing_image {
         Some(path)
     } else if let Some(frame) = content.frame() {
@@ -683,6 +753,9 @@ fn open_pin_inner(
     } else {
         None
     };
+    // OCR reads the already persisted PNG instead of pinning a full-frame Arc
+    // for every new pin; the frame is released as soon as the window exists.
+    let initial_ocr_path = image_path.clone();
     let display_id = display_id.or_else(|| display_for_bounds(cx, bounds));
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -2008,7 +2081,7 @@ impl PinView {
         if let Some(path) = self.persisted_path()
             && let Ok(bytes) = std::fs::read(path)
         {
-            image_util::copy_png_bytes(&bytes, cx);
+            image_util::copy_png_bytes(bytes, cx);
             let language = settings_state::get().language;
             self.show_notice(t(language, "pin.copied").to_owned(), cx);
             return;
@@ -2016,7 +2089,8 @@ impl PinView {
         let Some(frame) = self.frame_for_action() else {
             return;
         };
-        if image_util::copy_png(&frame, cx).is_ok() {
+        if let Ok(bytes) = image_util::encode_png(&frame) {
+            image_util::copy_png_bytes(bytes, cx);
             let language = settings_state::get().language;
             self.show_notice(t(language, "pin.copied").to_owned(), cx);
         }
@@ -2051,11 +2125,15 @@ impl PinView {
                 .get(&self.id)
                 .and_then(|state| state.edit_state.clone())
         });
-        let Some(frame) = edit_state
-            .as_ref()
-            .map(|state| state.base.clone())
-            .or_else(|| self.frame_for_action())
-        else {
+        let (frame, edit_state) = match edit_state {
+            Some(state) => match state.base_frame() {
+                Some(base) => (Some(base), Some(state)),
+                // A corrupted compact base falls back to the flattened pin.
+                None => (self.frame_for_action(), None),
+            },
+            None => (self.frame_for_action(), None),
+        };
+        let Some(frame) = frame else {
             return;
         };
         let bounds = PINS.with(|pins| pins.borrow().get(&self.id).map(|state| state.bounds));
@@ -2816,7 +2894,11 @@ fn ensure_visible(cx: &App, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
 
 #[cfg(test)]
 mod tests {
-    use super::text_pin_size;
+    use super::{PinBase, PinEditState, text_pin_size};
+    use crate::effects::RegionEffects;
+    use core_annotate::AnnotationDocument;
+    use core_types::{PhysicalSize, RgbaFrame};
+    use std::sync::Arc;
 
     #[test]
     fn text_pins_hug_short_content() {
@@ -2836,5 +2918,32 @@ mod tests {
         let (width, height) = text_pin_size(&"wide ".repeat(80));
         assert!(width <= super::CARD_WIDTH);
         assert!(height > 48.0);
+    }
+
+    #[test]
+    fn small_edit_bases_stay_in_memory() {
+        let frame = Arc::new(RgbaFrame::from_pixels(16, 16, vec![7; 16 * 16 * 4]).unwrap());
+        let state = PinEditState::new(
+            frame,
+            AnnotationDocument::new(PhysicalSize::new(16, 16)),
+            RegionEffects::default(),
+        );
+        assert!(matches!(state.base, PinBase::Frame(_)));
+    }
+
+    #[test]
+    fn large_edit_bases_are_compressed_and_round_trip() {
+        let width = 2049;
+        let height = 1024;
+        let pixels = vec![0x5A; width as usize * height as usize * 4];
+        let frame = Arc::new(RgbaFrame::from_pixels(width, height, pixels).unwrap());
+        let state = PinEditState::new(
+            frame.clone(),
+            AnnotationDocument::new(PhysicalSize::new(width, height)),
+            RegionEffects::default(),
+        );
+        assert!(matches!(state.base, PinBase::Encoded { .. }));
+        let decoded = state.base_frame().expect("compressed base decodes");
+        assert_eq!(decoded.pixels(), frame.pixels());
     }
 }

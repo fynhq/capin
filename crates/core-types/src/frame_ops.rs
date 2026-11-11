@@ -21,6 +21,35 @@ impl RgbaFrame {
         Self::from_pixels(width as u32, overlap.size.height, pixels).ok()
     }
 
+    /// Crops an owned frame, reusing its buffer when the rows are tightly
+    /// packed. This avoids allocating a second full image for the common
+    /// one-pixel border trim and similar whole-width crops.
+    pub fn into_cropped(self, rect: PhysicalRect) -> Option<Self> {
+        let frame_width = self.width();
+        let frame_height = self.height();
+        let stride = self.stride();
+        let bounds = PhysicalRect::new(0, 0, frame_width, frame_height);
+        let overlap = bounds.intersection(rect)?;
+        if overlap == bounds {
+            return Some(self);
+        }
+        if stride != frame_width as usize * 4 {
+            return self.cropped(overlap);
+        }
+        let width = overlap.size.width as usize;
+        let height = overlap.size.height as usize;
+        let top = overlap.origin.y as usize;
+        let left = overlap.origin.x as usize;
+        let row_bytes = width * 4;
+        let mut pixels = self.into_pixels();
+        for y in 0..height {
+            let source = (top + y) * stride + left * 4;
+            pixels.copy_within(source..source + row_bytes, y * row_bytes);
+        }
+        pixels.truncate(row_bytes * height);
+        Self::from_pixels(width as u32, height as u32, pixels).ok()
+    }
+
     /// Rotates the frame 90 degrees clockwise. Padded input rows are handled
     /// correctly; the result is tightly packed.
     pub fn rotated_cw(&self) -> Self {
@@ -104,6 +133,41 @@ mod tests {
         );
         assert_eq!(cropped.pixel(0, 0), Some([5, 6, 7, 8]));
         assert_eq!(cropped.pixel(0, 1), Some([13, 14, 15, 16]));
+    }
+
+    #[test]
+    fn into_cropped_matches_borrowed_crop() {
+        let pixels = (0..24).collect::<Vec<u8>>();
+        let source = RgbaFrame::from_pixels(3, 2, pixels).unwrap();
+        for rect in [
+            PhysicalRect::new(0, 0, 3, 2),
+            PhysicalRect::new(1, 0, 2, 2),
+            PhysicalRect::new(0, 1, 3, 1),
+            PhysicalRect::new(-1, -1, 2, 2),
+            PhysicalRect::new(2, 0, 5, 5),
+        ] {
+            let borrowed = source.cropped(rect);
+            let owned = source.clone().into_cropped(rect);
+            assert_eq!(owned, borrowed, "crop mismatch for {rect:?}");
+        }
+        assert!(source.into_cropped(PhysicalRect::new(3, 2, 1, 1)).is_none());
+    }
+
+    #[test]
+    fn into_cropped_falls_back_for_padded_rows() {
+        let frame = RgbaFrame::new(
+            2,
+            2,
+            12,
+            vec![
+                1, 2, 3, 4, 5, 6, 7, 8, 99, 99, 99, 99, 9, 10, 11, 12, 13, 14, 15, 16, 99, 99, 99,
+                99,
+            ],
+        )
+        .unwrap();
+        let expected = frame.cropped(PhysicalRect::new(1, 0, 1, 2)).unwrap();
+        let cropped = frame.into_cropped(PhysicalRect::new(1, 0, 1, 2)).unwrap();
+        assert_eq!(cropped, expected);
     }
 
     #[test]

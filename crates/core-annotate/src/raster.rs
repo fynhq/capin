@@ -37,6 +37,12 @@ pub fn rasterize(
         return Err(RasterError::SizeMismatch { expected, actual });
     }
 
+    // Plain screenshots have no objects. Returning the frame directly avoids
+    // building and premultiplying a full pixmap only to copy the pixels back.
+    if document.objects().is_empty() {
+        return Ok(frame.clone());
+    }
+
     let mut pixels = frame.pixels().to_vec();
     premultiply(&mut pixels);
     let size = IntSize::from_wh(expected.width, expected.height).ok_or(RasterError::Pixmap)?;
@@ -117,7 +123,7 @@ pub fn rasterize(
         }
     }
 
-    let mut pixels = pixmap.data().to_vec();
+    let mut pixels = pixmap.take();
     unpremultiply(&mut pixels);
     Ok(RgbaFrame::from_pixels(
         expected.width,
@@ -746,10 +752,10 @@ mod tests {
 
     #[test]
     fn no_annotations_preserves_pixels() {
-        let frame = black_frame(20, 20);
-        let document = document(20, 20);
+        let frame = RgbaFrame::from_pixels(4, 2, (0..32).collect()).unwrap();
+        let document = document(4, 2);
         let output = rasterize(&document, &frame).unwrap();
-        assert_eq!(pixel(&output, 5, 5), [0, 0, 0, 255]);
+        assert_eq!(output.pixels(), frame.pixels());
     }
 
     #[test]
