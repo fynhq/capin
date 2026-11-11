@@ -927,6 +927,10 @@ mod tests {
             center[0] > 80 && center[1] > 80 && center[3] == 255,
             "highlighter box should tint the background: {center:?}"
         );
+        assert_eq!(
+            center[2], 0,
+            "the highlighter must not mix white into its color: {center:?}"
+        );
         assert_eq!(pixel(&output, 2, 2), [0, 0, 0, 255]);
     }
 

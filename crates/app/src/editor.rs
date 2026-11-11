@@ -1852,7 +1852,7 @@ impl EditorView {
             _ => {}
         }
         if self.tool == Tool::Highlighter {
-            style.color = (style.color & 0xFFFFFF00) | 0x80;
+            style.color = (style.color & 0xFFFFFF00) | core_annotate::HIGHLIGHTER_ALPHA;
             style.stroke_width = 12.0;
         }
         style.filled = self.tool == Tool::Rect
@@ -2096,9 +2096,8 @@ impl EditorView {
         let tool = self.palette_color_tool();
         // Keep the alpha the selected object already renders with. Reading
         // `self.style` here was wrong right after drawing: the draft uses
-        // `effective_style` (highlighter alpha 0x80) but `self.style` still
-        // holds the opaque palette color, so the first color switch turned a
-        // highlighter box fully opaque.
+        // `effective_style` but `self.style` still holds the opaque palette
+        // color, so the first color switch turned a highlighter box opaque.
         let alpha = self
             .document
             .selected()
@@ -2106,7 +2105,7 @@ impl EditorView {
             .map(|annotation| annotation.style.color & 0xFF)
             .unwrap_or_else(|| {
                 if tool == AnnotationColorTool::Highlighter {
-                    0x80
+                    core_annotate::HIGHLIGHTER_ALPHA
                 } else {
                     self.style.color & 0xFF
                 }
@@ -4881,13 +4880,13 @@ impl Render for EditorView {
         let effects_active = self.region_effects_active();
         let inline = self.inline.is_some();
         let image_cursor = if self.move_draft.is_some() {
-            CursorStyle::ClosedHand
+            crate::ui::closed_hand_cursor()
         } else {
             match self.selection_hover {
                 SelectionHover::Handle(handle) => handle_cursor(handle),
                 // Any annotation under the pointer can be selected and moved,
                 // even while a drawing tool is active.
-                SelectionHover::Body => CursorStyle::OpenHand,
+                SelectionHover::Body => crate::ui::open_hand_cursor(),
                 SelectionHover::None if self.tool == Tool::Select => CursorStyle::Arrow,
                 SelectionHover::None => CursorStyle::Crosshair,
             }
@@ -6170,26 +6169,27 @@ fn hit_resize_handle(shape: &Shape, point: PhysicalPoint, tolerance: f32) -> Opt
         .map(|(handle, _)| handle)
 }
 
+/// Half-size of the painted selection handle in logical points. The hit area
+/// must match it, otherwise the visible outer half of a handle starts a move
+/// instead of a resize.
+const SELECTION_HANDLE_HALF: f32 = 5.5;
+
 /// Resolves a resize handle without stealing drags from the object body.
 ///
-/// The tolerance is in logical points. Clicks deep inside a closed shape are
-/// body drags even when the object is small; otherwise a Retina capture made
-/// short annotations impossible to move because every interior point sat
-/// within the handle radius.
+/// Handles win inside their painted square even when that square overlaps the
+/// shape border; only a deeper interior point starts a body drag. Very thin
+/// shapes keep the body-first rule so moving them stays possible.
 fn annotation_handle_at(shape: &Shape, point: PhysicalPoint, scale: f32) -> Option<ResizeHandle> {
     let scale = scale.max(0.01);
-    let tolerance_pt = if matches!(shape, Shape::Arrow { .. } | Shape::Polyline { .. }) {
-        4.0
-    } else {
-        let bounds = shape.bounds();
-        let min_pt = (bounds.size.width.min(bounds.size.height) as f32) * scale;
-        (min_pt * 0.35).clamp(1.5, 4.0)
-    };
-    let body_inset = 2.5 / scale;
-    if closed_shape_contains(shape, point, body_inset) {
+    let bounds = shape.bounds();
+    let min_pt = (bounds.size.width.min(bounds.size.height) as f32) * scale;
+    if !matches!(shape, Shape::Arrow { .. } | Shape::Polyline { .. })
+        && min_pt < SELECTION_HANDLE_HALF * 4.0
+        && closed_shape_contains(shape, point, 1.0 / scale)
+    {
         return None;
     }
-    hit_resize_handle(shape, point, tolerance_pt / scale)
+    hit_resize_handle(shape, point, SELECTION_HANDLE_HALF / scale)
 }
 
 fn closed_shape_contains(shape: &Shape, point: PhysicalPoint, inset: f32) -> bool {
@@ -6407,7 +6407,7 @@ fn paint_selection(
     let draw_handle = |window: &mut Window, handle_pos: PhysicalPoint| {
         let center = to_point(handle_pos.x as f32, handle_pos.y as f32);
         for (half, color) in [
-            (px(5.5), rgba((accent_hex << 8) | 0xFF)),
+            (px(SELECTION_HANDLE_HALF), rgba((accent_hex << 8) | 0xFF)),
             (px(3.0), rgb(0xFFFFFF)),
         ] {
             let mut builder = PathBuilder::fill();
@@ -6681,6 +6681,21 @@ mod tests {
         assert!(
             super::annotation_handle_at(&shape, PhysicalPoint::new(0, 0), 0.5).is_some(),
             "the painted corner remains a resize handle"
+        );
+    }
+
+    #[test]
+    fn large_annotation_handles_cover_their_painted_square() {
+        let shape = super::Shape::Rect(core_types::PhysicalRect::new(0, 0, 200, 100));
+        assert_eq!(
+            super::annotation_handle_at(&shape, PhysicalPoint::new(5, 5), 0.5),
+            Some(super::ResizeHandle::Nw),
+            "a point inside the painted handle still resizes"
+        );
+        assert_eq!(
+            super::annotation_handle_at(&shape, PhysicalPoint::new(40, 40), 0.5),
+            None,
+            "a point away from the handles drags the body"
         );
     }
 

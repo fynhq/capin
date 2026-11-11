@@ -5,8 +5,8 @@ mod outline;
 mod raster;
 
 pub use document::{
-    Annotation, AnnotationDocument, AnnotationId, AnnotationStyle, Shape, TextAlignment,
-    highlighter_color,
+    Annotation, AnnotationDocument, AnnotationId, AnnotationStyle, HIGHLIGHTER_ALPHA, Shape,
+    TextAlignment, highlighter_color,
 };
 pub use outline::{OutlinePoint, stroke_outline};
 pub use raster::{RasterError, badge_foreground, measure_text_height, rasterize};

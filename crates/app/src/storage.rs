@@ -1,7 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use core_types::RgbaFrame;
 
@@ -220,28 +219,32 @@ fn create_unique_file(
     ))
 }
 
-pub fn recording_path() -> Result<PathBuf, std::io::Error> {
+/// Builds the output path for a recording using the shared filename template.
+/// `{width}`/`{height}` expand to the recording target's physical pixels.
+pub fn recording_path(width: u32, height: u32) -> Result<PathBuf, std::io::Error> {
     let directory = recording_dir();
     ensure_directory(&directory)?;
-    Ok(unique_path(&directory, "capin-recording", "mp4"))
+    let template = settings_state::get().filename_template.clone();
+    let stem = render_filename(&template, width, height);
+    for suffix in 0..10_000u32 {
+        let name = if suffix == 0 {
+            format!("{stem}.mp4")
+        } else {
+            format!("{stem}_{suffix}.mp4")
+        };
+        let path = directory.join(name);
+        if !path.exists() {
+            return Ok(path);
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "filename template produced too many collisions",
+    ))
 }
 
 fn fallback_dir(name: &str) -> PathBuf {
     std::env::temp_dir().join(APP_FOLDER).join(name)
-}
-
-fn unique_path(directory: &Path, prefix: &str, extension: &str) -> PathBuf {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or_default();
-    let mut path = directory.join(format!("{prefix}-{millis}.{extension}"));
-    let mut suffix = 1u32;
-    while path.exists() {
-        path = directory.join(format!("{prefix}-{millis}-{suffix}.{extension}"));
-        suffix += 1;
-    }
-    path
 }
 
 #[cfg(test)]

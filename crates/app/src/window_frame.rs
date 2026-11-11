@@ -1,19 +1,15 @@
-use core_compose::{Background, Border, Shadow, WindowCanvas, compose_window};
+use core_compose::{Background, Border, WindowCanvas, compose_window};
 use core_types::{RgbaFrame, WindowId};
 
 use crate::logging::log_error;
 use crate::settings_state::{self, AppSettings, WindowBackground};
 
-const LIGHT_CANVAS: [u8; 4] = [0xF5, 0xF5, 0xF7, 0xFF];
-const DARK_CANVAS: [u8; 4] = [0x1C, 0x1C, 0x1E, 0xFF];
-const SHADOW_OFFSET: f32 = 6.0;
-const SHADOW_BLUR: f32 = 16.0;
-const SHADOW_OPACITY: f32 = 0.35;
+const WHITE_CANVAS: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
 
 /// Composes a window capture with the fixed window styling: the system corner
-/// radius, a system-style drop shadow, the configured background and at least
-/// 24 logical pixels of padding. macOS captures already carry the native
-/// window shadow, so only the padding and background are added there.
+/// radius, the configured background and the padding. No synthetic drop shadow
+/// is added; the padding stays transparent (or white), so a pin shows only the
+/// window itself. Region effects keep their own optional shadow.
 pub fn compose_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> RgbaFrame {
     let settings = settings_state::get();
     let scale = scale.max(0.1);
@@ -22,11 +18,7 @@ pub fn compose_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> Rgb
             .round()
             .clamp(0.0, 2048.0) as u32,
         corner_radius: core_capture::window_corner_radius(id, scale),
-        shadow: (!platform_window::window_capture_includes_native_shadow()).then_some(Shadow {
-            offset_y: (SHADOW_OFFSET * scale).round() as i32,
-            blur_radius: (SHADOW_BLUR * scale).round() as u32,
-            opacity: SHADOW_OPACITY,
-        }),
+        shadow: None,
         background: background(&settings),
         border: system_border(scale),
     };
@@ -67,15 +59,6 @@ fn system_border(_scale: f32) -> Option<Border> {
 fn background(settings: &AppSettings) -> Background {
     match settings.window_background {
         WindowBackground::Transparent => Background::Transparent,
-        WindowBackground::System => {
-            let light = platform_window::system_uses_light_theme().unwrap_or(true);
-            Background::Solid(if light {
-                [0xFF, 0xFF, 0xFF, 0xFF]
-            } else {
-                [0x00, 0x00, 0x00, 0xFF]
-            })
-        }
-        WindowBackground::Light => Background::Solid(LIGHT_CANVAS),
-        WindowBackground::Dark => Background::Solid(DARK_CANVAS),
+        WindowBackground::White => Background::Solid(WHITE_CANVAS),
     }
 }

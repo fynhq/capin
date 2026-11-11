@@ -392,16 +392,10 @@ pub fn pin_last(cx: &mut App) {
             pin_image(frame, cx);
             return;
         }
-        if pin_history_step(cx) {
-            return;
-        }
-        if let Some(current) = LAST_PIN_TRIGGER.with(|slot| slot.get())
-            && let Some(current) = crate::capture_history::find(current)
-        {
-            pin_image(current, cx);
-            return;
-        }
-        pin_image(frame, cx);
+        // The sequence is already walking the history. Even when it is
+        // exhausted, reopening the clipboard image would show the image the
+        // user just dismissed.
+        pin_history_step(cx);
         return;
     }
 
@@ -422,7 +416,8 @@ pub fn pin_last(cx: &mut App) {
         return;
     }
 
-    if LAST_PIN_TRIGGER.with(|slot| slot.get()).is_some() && pin_history_step(cx) {
+    if LAST_PIN_TRIGGER.with(|slot| slot.get()).is_some() {
+        pin_history_step(cx);
         return;
     }
     if let Some(frame) = crate::capture_history::latest() {
@@ -432,9 +427,10 @@ pub fn pin_last(cx: &mut App) {
     }
 }
 
-/// Pins the next older screenshot in history, or reports that the history has
-/// no other image to show. Respects the flash-current repeat preference while
-/// that pin is still on screen.
+/// Pins the next older screenshot in history. Respects the flash-current
+/// repeat preference while that pin is still on screen. Reaching the oldest
+/// entry consumes the shortcut without reopening anything, so a walk never
+/// shows an image twice.
 fn pin_history_step(cx: &mut App) -> bool {
     let Some(current) = LAST_PIN_TRIGGER.with(|slot| slot.get()) else {
         return false;
@@ -445,11 +441,14 @@ fn pin_history_step(cx: &mut App) -> bool {
         return true;
     }
     let Some(frame) = crate::capture_history::cycle(current) else {
-        return false;
+        log_info!("pin", "screenshot history has no older entry");
+        return true;
     };
     let hash = crate::capture_history::hash_frame(&frame);
     LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
-    open_pin_content(PinContent::from_frame_with_hash(frame, hash), cx);
+    if !flash_existing_pin(hash, cx) {
+        open_pin_content(PinContent::from_frame_with_hash(frame, hash), cx);
+    }
     true
 }
 
@@ -469,10 +468,14 @@ fn pin_image(frame: RgbaFrame, cx: &mut App) {
             && crate::capture_history::contains(hash)
             && let Some(history_frame) = crate::capture_history::cycle(hash)
         {
-            open_pin_content(PinContent::from_frame(history_frame), cx);
-            // Keep the trigger hash stable so another press advances the
-            // history cursor instead of pinning the source again.
-            LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
+            let history_hash = crate::capture_history::hash_frame(&history_frame);
+            LAST_PIN_TRIGGER.with(|slot| slot.set(Some(history_hash)));
+            if !flash_existing_pin(history_hash, cx) {
+                open_pin_content(
+                    PinContent::from_frame_with_hash(history_frame, history_hash),
+                    cx,
+                );
+            }
             return;
         }
         // Flash an on-screen pin with the same image. When every matching pin
@@ -1681,7 +1684,10 @@ impl PinView {
         self.zoom_target = target.clamp(0.15, 4.0);
         let language = settings_state::get().language;
         let percent = (self.zoom_target * 100.0).round() as i32;
-        if cx.reduce_motion() {
+        // Animating a native window resize on Windows presents the stretched
+        // old frame before the new image, which reads as the border moving
+        // first. One resize per wheel notch keeps both together.
+        if cx.reduce_motion() || cfg!(target_os = "windows") {
             self.zoom_center = None;
             let target = self.zoom_target;
             self.apply_zoom(target, window, cx);
@@ -2067,9 +2073,9 @@ impl Render for PinView {
             .children(text_layers)
             .children(flash);
         let cursor = match &self.content {
-            PinContent::Image { .. } if self.drag.is_some() => CursorStyle::ClosedHand,
+            PinContent::Image { .. } if self.drag.is_some() => crate::ui::closed_hand_cursor(),
             PinContent::Image { .. } if self.hover_text => CursorStyle::IBeam,
-            PinContent::Image { .. } => CursorStyle::OpenHand,
+            PinContent::Image { .. } => crate::ui::open_hand_cursor(),
             PinContent::Text(_) => CursorStyle::IBeam,
         };
         let root = div()
@@ -2202,14 +2208,41 @@ impl Render for PinView {
                 }
             }))
             .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
-                let delta = match event.delta {
-                    ScrollDelta::Lines(delta) => delta.y,
-                    ScrollDelta::Pixels(delta) => f32::from(delta.y) / 20.0,
+                let lines = matches!(event.delta, ScrollDelta::Lines(_));
+                let (delta_x, delta_y) = match event.delta {
+                    ScrollDelta::Lines(delta) => (delta.x, delta.y),
+                    ScrollDelta::Pixels(delta) => {
+                        (f32::from(delta.x) / 20.0, f32::from(delta.y) / 20.0)
+                    }
+                };
+                // Windows translates Shift+wheel into a horizontal scroll with
+                // a zero vertical delta, so opacity adjustments must read X.
+                let primary = if delta_y.abs() > f32::EPSILON {
+                    delta_y
+                } else {
+                    delta_x
                 };
                 if event.modifiers.shift || this.content.image_size().is_none() {
-                    this.set_opacity(this.opacity - delta * 0.05, cx);
+                    let step = if lines {
+                        primary.signum() * 0.05
+                    } else {
+                        primary * 0.05
+                    };
+                    if step != 0.0 {
+                        this.set_opacity(this.opacity - step, cx);
+                    }
                 } else {
-                    this.zoom_toward(this.zoom_target + delta * 0.1, window, cx);
+                    // One wheel event is one notch. Windows reports the
+                    // system's scroll-lines setting (three by default), which
+                    // made a single notch jump the zoom by 30%.
+                    let step = if lines {
+                        delta_y.signum() * 0.10
+                    } else {
+                        delta_y * 0.10
+                    };
+                    if step != 0.0 {
+                        this.zoom_toward(this.zoom_target + step, window, cx);
+                    }
                 }
             }))
             .child(content);
@@ -2296,7 +2329,9 @@ impl Render for PinView {
 struct PinMenuView {
     pin_id: u64,
     items: Vec<(PinMenuAction, String)>,
-    selected: usize,
+    /// Keyboard highlight. `None` until an arrow key is pressed so opening
+    /// the menu never paints a selected row.
+    selected: Option<usize>,
     focus_handle: FocusHandle,
     _blur_subscription: Option<gpui_kit::Subscription>,
 }
@@ -2327,17 +2362,23 @@ impl Render for PinMenuView {
                         cx.stop_propagation();
                     }
                     "up" => {
-                        this.selected = this.selected.saturating_sub(1);
+                        this.selected = Some(match this.selected {
+                            Some(index) => index.saturating_sub(1),
+                            None => actions.len().saturating_sub(1),
+                        });
                         cx.notify();
                         cx.stop_propagation();
                     }
                     "down" => {
-                        this.selected = (this.selected + 1).min(actions.len().saturating_sub(1));
+                        this.selected = Some(match this.selected {
+                            Some(index) => (index + 1).min(actions.len().saturating_sub(1)),
+                            None => 0,
+                        });
                         cx.notify();
                         cx.stop_propagation();
                     }
                     "enter" => {
-                        let action = actions.get(this.selected).copied();
+                        let action = this.selected.and_then(|index| actions.get(index).copied());
                         if let Some(action) = action {
                             forget_pin_menu();
                             window.remove_window();
@@ -2351,7 +2392,7 @@ impl Render for PinMenuView {
         for (index, (action, label)) in self.items.iter().enumerate() {
             let action = *action;
             let label = label.clone();
-            let selected = index == self.selected;
+            let selected = self.selected == Some(index);
             if index > 0 && action.separated() {
                 menu = menu.child(
                     div()
@@ -2480,7 +2521,7 @@ fn open_pin_menu(
         let view = cx.new(|cx| PinMenuView {
             pin_id,
             items,
-            selected: 0,
+            selected: None,
             focus_handle: cx.focus_handle(),
             _blur_subscription: None,
         });

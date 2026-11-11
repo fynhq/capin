@@ -102,29 +102,25 @@ impl AnnotationColorTool {
 pub enum WindowBackground {
     #[default]
     Transparent,
-    System,
-    Light,
-    Dark,
+    White,
 }
 
 impl WindowBackground {
-    pub const ALL: [Self; 4] = [Self::Transparent, Self::System, Self::Light, Self::Dark];
+    pub const ALL: [Self; 2] = [Self::Transparent, Self::White];
 
     pub const fn code(self) -> &'static str {
         match self {
             Self::Transparent => "transparent",
-            Self::System => "system",
-            Self::Light => "light",
-            Self::Dark => "dark",
+            Self::White => "white",
         }
     }
 
     pub fn from_code(code: &str) -> Option<Self> {
         match code {
             "transparent" => Some(Self::Transparent),
-            "system" => Some(Self::System),
-            "light" => Some(Self::Light),
-            "dark" => Some(Self::Dark),
+            // Files written before the option set was reduced to two still
+            // hold an explicit non-transparent choice; keep its intent.
+            "white" | "system" | "light" | "dark" => Some(Self::White),
             _ => None,
         }
     }
@@ -771,7 +767,12 @@ mod tests {
 
         assert_eq!(
             parse("window_background=system\n").window_background,
-            WindowBackground::System
+            WindowBackground::White,
+            "legacy non-transparent choices stay non-transparent"
+        );
+        assert_eq!(
+            parse("window_background=white\n").window_background,
+            WindowBackground::White
         );
         assert_eq!(
             parse("window_padding=48\n").window_padding,

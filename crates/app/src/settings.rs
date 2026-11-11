@@ -377,9 +377,9 @@ struct Theme {
     border: Rgba,
     accent: Rgba,
     accent_text: Rgba,
-    /// Subtle accent wash behind the selected dropdown row, matching the
-    /// native component list highlight.
-    selected_accent: Rgba,
+    /// Neutral fill behind the selected dropdown option and its hover row.
+    option_selected: Rgba,
+    option_hover: Rgba,
     hover: Rgba,
     selected: Rgba,
     control: Rgba,
@@ -430,7 +430,8 @@ impl Theme {
             border: palette.border,
             accent: rgb(accent_hex),
             accent_text: accent_text_color(accent_hex),
-            selected_accent: rgba(((accent_hex & 0x00FF_FFFF) << 8) | 0x1A),
+            option_selected: rgb(if dark { 0x262626 } else { 0xF5F5F5 }),
+            option_hover: rgb(if dark { 0x282828 } else { 0xF6F6F6 }),
             hover: palette.hover,
             selected: palette.selected,
             control: palette.control,
@@ -1804,33 +1805,37 @@ impl SettingsView {
             .rounded(px(6.0))
             .bg(theme.popover)
             .shadow(vec![
-                BoxShadow::new(px(0.0), px(0.0), Hsla::from(theme.border)).spread_radius(px(1.0)),
-                BoxShadow::new(px(0.0), px(4.0), Hsla::from(rgba(0x0000001F)))
+                BoxShadow::new(
+                    px(0.0),
+                    px(0.0),
+                    Hsla::from(rgba((u32::from(theme.text) & 0xFFFFFF00) | 0x1A)),
+                )
+                .spread_radius(px(1.0)),
+                BoxShadow::new(px(0.0), px(4.0), Hsla::from(rgba(0x0000001A)))
                     .blur_radius(px(3.0))
                     .spread_radius(px(-1.0)),
-                BoxShadow::new(px(0.0), px(2.0), Hsla::from(rgba(0x00000014)))
+                BoxShadow::new(px(0.0), px(2.0), Hsla::from(rgba(0x0000001A)))
                     .blur_radius(px(2.0))
                     .spread_radius(px(-2.0)),
             ])
             .flex()
             .flex_col()
-            .gap(px(1.0))
             .occlude();
         for (index, (label, value, selected)) in entries.into_iter().enumerate() {
-            let selected_bg = theme.selected_accent;
-            let check = theme.muted;
+            let selected_bg = theme.option_selected;
+            let check = theme.text;
             let text = theme.text;
-            let hover = theme.hover;
+            let hover = theme.option_hover;
             popup = popup.child(
                 div()
                     .id(("settings-select-item", index))
                     .h(px(item_height))
-                    .px(px(8.0))
+                    .px(px(7.0))
                     .rounded(px(6.0))
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(6.0))
+                    .gap(px(4.0))
                     .text_size(px(layout::CONTROL_TEXT))
                     .when(selected, |item| item.bg(selected_bg).text_color(text))
                     .when(!selected, |item| {
@@ -1842,26 +1847,20 @@ impl SettingsView {
                     }))
                     .child(div().flex_1().min_w(px(0.0)).child(label))
                     .child(div().w(px(12.0)).flex_shrink_0().when(selected, |slot| {
-                        slot.child(icons::icon(icons::CHECK, 14.0, check))
+                        slot.child(icons::icon(icons::CHECK, 12.0, check))
                     })),
             );
         }
-        let spring = SpringAnimation::new(SpringConfig::new(900.0, 52.0, 1.0))
-            .to(1.0f32)
-            .from(0.0);
         let base_top = y;
         Some(
-            popup
-                .with_spring(
-                    SharedString::from(format!("settings-select-popup-{}", menu.kind as u8)),
-                    spring,
-                    move |popup, progress| {
-                        popup
-                            .top(px(base_top + (1.0 - progress.clamp(0.0, 1.0)) * 5.0))
-                            .opacity(progress.clamp(0.0, 1.0))
-                    },
-                )
-                .into_any_element(),
+            crate::ui::enter_slide_fade(
+                popup,
+                SharedString::from(format!("settings-select-popup-{}", menu.kind as u8)),
+                base_top,
+                -8.0,
+                Duration::from_millis(150),
+            )
+            .into_any_element(),
         )
     }
     fn save_location_row(&self, target: SaveTarget, theme: &Theme, cx: &mut Context<Self>) -> Div {
@@ -3330,9 +3329,7 @@ fn input_editor_style(theme: &Theme) -> InputEditorStyle {
 fn background_label_key(background: WindowBackground) -> &'static str {
     match background {
         WindowBackground::Transparent => "window_background.transparent",
-        WindowBackground::System => "window_background.system",
-        WindowBackground::Light => "window_background.light",
-        WindowBackground::Dark => "window_background.dark",
+        WindowBackground::White => "window_background.white",
     }
 }
 

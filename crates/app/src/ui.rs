@@ -131,6 +131,32 @@ fn ease_out_cubic(delta: f32) -> f32 {
     1.0 - (1.0 - delta).powi(3)
 }
 
+/// Grab cursor for a movable object. gpui's Windows backend maps
+/// `OpenHand`/`ClosedHand` to the plain arrow, so Windows uses the pointing
+/// hand that the backend does implement.
+pub fn open_hand_cursor() -> CursorStyle {
+    #[cfg(target_os = "windows")]
+    {
+        CursorStyle::PointingHand
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        CursorStyle::OpenHand
+    }
+}
+
+/// Dragging variant of [`open_hand_cursor`], with the same Windows fallback.
+pub fn closed_hand_cursor() -> CursorStyle {
+    #[cfg(target_os = "windows")]
+    {
+        CursorStyle::PointingHand
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        CursorStyle::ClosedHand
+    }
+}
+
 /// Fades and slightly slides a transient surface in. Only the entrance is
 /// animated; conditional panels disappear immediately so dismissing a menu
 /// never feels delayed.

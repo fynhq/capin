@@ -45,7 +45,10 @@ pub(crate) fn handle_shortcut(shortcut: RecordShortcut, cx: &mut App) {
 pub fn start(target: CaptureTarget, cx: &mut App) {
     log_info!("record", "recording requested for {:?}", target);
     let settings = settings_state::get();
-    let output = match crate::storage::recording_path() {
+    let (width, height) = platform_record::target_dimensions(target)
+        .map(|size| (size.width, size.height))
+        .unwrap_or((0, 0));
+    let output = match crate::storage::recording_path(width, height) {
         Ok(path) => path,
         Err(error) => {
             log_error!("record", "failed to prepare the recording output: {error}");

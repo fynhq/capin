@@ -1140,8 +1140,9 @@ impl OverlayView {
         };
         let text = self.color_text(red, green, blue);
         cx.write_to_clipboard(ClipboardItem::new_string(text));
-        let language = settings_state::get().language;
-        self.set_notice(t(language, "overlay.color_copied").to_owned(), cx);
+        // The color is the only thing this mode was opened for; leaving the
+        // frozen desktop up would make the user dismiss it by hand.
+        self.close_overlays(cx);
     }
 
     fn cycle_aspect(&mut self, cx: &mut Context<Self>) {
@@ -1832,7 +1833,7 @@ impl OverlayView {
                     selected.effects_open = false;
                     selected.hints_open = false;
                 }
-                self.cursor_style = CursorStyle::ClosedHand;
+                self.cursor_style = crate::ui::closed_hand_cursor();
                 cx.notify();
                 return;
             }
@@ -1992,7 +1993,7 @@ impl OverlayView {
         cx.defer(move |cx| crate::record::start(selected.target, cx));
     }
 
-    fn refresh_frame(&mut self, cx: &mut Context<Self>) {
+    fn refresh_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut backend = platform_backend();
         let monitor = self.session.monitor();
         let frame = match backend.capture(CaptureTarget::Monitor(monitor)) {
@@ -2004,18 +2005,17 @@ impl OverlayView {
         };
         let image = image_util::render_image(&frame);
         let old_image = std::mem::replace(&mut self.image, image);
-        // The update runs while the window is out of `App.windows`; defer the
-        // atlas drops until it is back, otherwise F5 leaks or races the
-        // renderer that still references the previous full-screen texture.
-        let mut dropped = vec![old_image];
-        if let Some(magnifier) = self.magnifier.take() {
-            dropped.push(magnifier.image);
+        // Drop the previous full-screen atlas entry through the window that
+        // owns it. Deferring App::drop_image let several refreshes pile up
+        // before the entries were reclaimed.
+        if let Err(error) = window.drop_image(old_image) {
+            log_warn!("overlay", "failed to release refreshed frame: {error}");
         }
-        cx.defer(move |cx| {
-            for image in dropped {
-                cx.drop_image(image, None);
-            }
-        });
+        if let Some(magnifier) = self.magnifier.take()
+            && let Err(error) = window.drop_image(magnifier.image)
+        {
+            log_warn!("overlay", "failed to release magnifier frame: {error}");
+        }
         self.frame = Some(Arc::new(frame));
         self.element_cache.clear();
         self.element_window = None;
@@ -2581,7 +2581,7 @@ impl OverlayView {
                 .hover(|style| style.bg(self.chrome.hover))
                 .active(|style| style.opacity(0.85))
                 .cursor_pointer()
-                .on_click(cx.listener(|this, _, _, cx| this.refresh_frame(cx)))
+                .on_click(cx.listener(|this, _, window, cx| this.refresh_frame(window, cx)))
                 .child(icons::icon(icons::REFRESH, 14.0, self.chrome.icon)),
         );
 
@@ -3477,7 +3477,7 @@ impl OverlayView {
                         return;
                     }
                     if key == "f5" {
-                        this.refresh_frame(cx);
+                        this.refresh_frame(window, cx);
                         return;
                     }
                     if key == "f1" {
@@ -3537,7 +3537,7 @@ impl OverlayView {
                         this.session.set_hovered_element(None);
                         cx.notify();
                     } else if key == "f5" {
-                        this.refresh_frame(cx);
+                        this.refresh_frame(window, cx);
                     }
                 }
                 let _ = window;
@@ -3570,7 +3570,7 @@ impl OverlayView {
                     .as_ref()
                     .is_some_and(|selected| selected.drag.is_some())
                 {
-                    this.cursor_style = CursorStyle::ClosedHand;
+                    this.cursor_style = crate::ui::closed_hand_cursor();
                     if event.pressed_button.is_none() {
                         this.finish_region_drag(cx);
                     } else {
@@ -3592,7 +3592,7 @@ impl OverlayView {
                     {
                         overlay_handle_cursor(handle)
                     } else if inside {
-                        CursorStyle::OpenHand
+                        crate::ui::open_hand_cursor()
                     } else {
                         CursorStyle::Crosshair
                     };

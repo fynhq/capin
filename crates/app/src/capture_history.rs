@@ -1,4 +1,5 @@
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -20,8 +21,6 @@ struct HistoryEntry {
 
 thread_local! {
     static ENTRIES: RefCell<Option<Vec<HistoryEntry>>> = const { RefCell::new(None) };
-    static CURSOR: Cell<usize> = const { Cell::new(0) };
-    static LAST_HASH: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
 /// Records an already encoded PNG. Copying a screenshot to the clipboard
@@ -44,12 +43,11 @@ fn record_png(hash: u64, write: impl FnOnce(&Path) -> bool) -> bool {
     let now = now_millis();
     let mut entries = entries();
     if let Some(first) = entries.first_mut().filter(|entry| entry.hash == hash) {
-        // Re-pinning the newest image refreshes its age instead of creating a
-        // duplicate entry.
+        // Re-exporting the newest image refreshes its age instead of creating
+        // a duplicate entry.
         first.created_at = now;
         write_entries(&directory, &entries);
         ENTRIES.with(|slot| *slot.borrow_mut() = Some(entries));
-        reset_cursor(hash);
         return true;
     }
 
@@ -63,6 +61,16 @@ fn record_png(hash: u64, write: impl FnOnce(&Path) -> bool) -> bool {
     else {
         return false;
     };
+
+    // The same screenshot can be copied, saved, and pinned again after other
+    // captures in between. Move the older copy to the front instead of
+    // leaving a second entry that the pin shortcut would show twice.
+    if let Some(index) = entries.iter().position(|entry| entry.hash == hash) {
+        let duplicate = entries.remove(index);
+        if let Some(name) = Path::new(&duplicate.file).file_name() {
+            let _ = std::fs::remove_file(directory.join(name));
+        }
+    }
     entries.insert(
         0,
         HistoryEntry {
@@ -74,61 +82,45 @@ fn record_png(hash: u64, write: impl FnOnce(&Path) -> bool) -> bool {
     prune(&mut entries, &directory, now);
     write_entries(&directory, &entries);
     ENTRIES.with(|slot| *slot.borrow_mut() = Some(entries));
-    reset_cursor(hash);
     true
 }
 
 /// Returns the next older screenshot after the one matching `hash`.
 ///
-/// The pin shortcut calls this after a pin is closed, so the walk must keep
-/// going even when the previous image is no longer on screen. If `hash` does
-/// not belong to the history (for example a clipboard-only pin), the walk
-/// starts at the newest screenshot instead of skipping it.
+/// The walk follows manifest order and stops at the oldest entry; it never
+/// wraps back to the newest, so one sequence cannot show an image twice. If
+/// `hash` does not belong to the history (for example a clipboard-only pin),
+/// the walk starts at the newest screenshot.
 pub fn cycle(hash: u64) -> Option<RgbaFrame> {
     let entries = entries();
     if entries.is_empty() {
         return None;
     }
     let directory = history_dir()?;
-    let same_source = LAST_HASH.with(|last| last.get()) == Some(hash);
-    let start = if same_source {
-        CURSOR.with(|cursor| cursor.get())
-    } else {
-        // Start before the first entry when the hash is unknown so the first
-        // candidate below is the newest screenshot.
-        entries
-            .iter()
-            .position(|entry| entry.hash == hash)
-            .unwrap_or(entries.len().saturating_sub(1))
-    };
-
-    for step in 1..=entries.len() {
-        let cursor = (start + step) % entries.len();
-        if entries[cursor].hash == hash {
-            continue;
-        }
-        if let Some(frame) = load_entry(&directory, &entries[cursor]) {
-            CURSOR.with(|slot| slot.set(cursor));
-            LAST_HASH.with(|last| last.set(Some(hash)));
+    let mut index = older_index(&entries, hash);
+    while let Some(entry) = entries.get(index) {
+        if entry.hash != hash
+            && let Some(frame) = load_entry(&directory, entry)
+        {
             return Some(frame);
         }
+        index += 1;
     }
     None
+}
+
+/// First manifest position a walk may show: one past `hash`, or the newest
+/// entry when the source is not in the history.
+fn older_index(entries: &[HistoryEntry], hash: u64) -> usize {
+    match entries.iter().position(|entry| entry.hash == hash) {
+        Some(index) => index + 1,
+        None => 0,
+    }
 }
 
 /// Whether `hash` belongs to a screenshot in the current history.
 pub fn contains(hash: u64) -> bool {
     entries().iter().any(|entry| entry.hash == hash)
-}
-
-/// Loads the history entry with `hash`. Used when the pin shortcut needs to
-/// reopen the image it was already showing after a history walk ends.
-pub fn find(hash: u64) -> Option<RgbaFrame> {
-    let directory = history_dir()?;
-    entries()
-        .iter()
-        .find(|entry| entry.hash == hash)
-        .and_then(|entry| load_entry(&directory, entry))
 }
 
 /// Loads the newest exported screenshot. The pin shortcut falls back to this
@@ -151,11 +143,6 @@ pub fn hash_frame(frame: &RgbaFrame) -> u64 {
     hash ^= u64::from(frame.width()) << 32;
     hash ^= u64::from(frame.height());
     hash
-}
-
-fn reset_cursor(hash: u64) {
-    CURSOR.with(|cursor| cursor.set(0));
-    LAST_HASH.with(|last| last.set(Some(hash)));
 }
 
 fn entries() -> Vec<HistoryEntry> {
@@ -190,6 +177,7 @@ fn load_entries() -> Vec<HistoryEntry> {
 fn prune(entries: &mut Vec<HistoryEntry>, directory: &Path, now: u64) {
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.created_at));
     let mut kept = Vec::with_capacity(entries.len().min(HISTORY_LIMIT));
+    let mut seen = HashSet::with_capacity(entries.len());
     for entry in entries.drain(..) {
         let Some(file) = Path::new(&entry.file).file_name() else {
             continue;
@@ -198,6 +186,7 @@ fn prune(entries: &mut Vec<HistoryEntry>, directory: &Path, now: u64) {
         if kept.len() >= HISTORY_LIMIT
             || entry.created_at.saturating_add(HISTORY_TTL_MS) < now
             || !path.exists()
+            || !seen.insert(entry.hash)
         {
             let _ = std::fs::remove_file(path);
             continue;
@@ -295,5 +284,90 @@ mod tests {
             HISTORY_LIMIT as u64 + 3
         );
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn prune_drops_older_duplicate_hashes() {
+        let directory = std::env::temp_dir().join(format!(
+            "capin-history-dedupe-test-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut entries = Vec::new();
+        for (index, hash) in [(1u64, 7u64), (2, 8), (3, 7), (4, 9)] {
+            let file = format!("history-{index}.png");
+            std::fs::write(directory.join(&file), b"x").unwrap();
+            entries.push(HistoryEntry {
+                file,
+                created_at: index,
+                hash,
+            });
+        }
+        prune(&mut entries, &directory, 100);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(
+            entries.iter().map(|entry| entry.hash).collect::<Vec<_>>(),
+            vec![9, 8, 7]
+        );
+        assert!(!directory.join("history-1.png").exists());
+        assert!(directory.join("history-3.png").exists());
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn history_walk_advances_forward_and_stops_at_the_oldest() {
+        let entries = vec![
+            HistoryEntry {
+                file: "new.png".to_owned(),
+                created_at: 3,
+                hash: 30,
+            },
+            HistoryEntry {
+                file: "mid.png".to_owned(),
+                created_at: 2,
+                hash: 20,
+            },
+            HistoryEntry {
+                file: "old.png".to_owned(),
+                created_at: 1,
+                hash: 10,
+            },
+        ];
+        assert_eq!(older_index(&entries, 30), 1);
+        assert_eq!(older_index(&entries, 20), 2);
+        assert_eq!(older_index(&entries, 10), 3);
+        assert_eq!(
+            older_index(&entries, 99),
+            0,
+            "an unknown source starts at the newest screenshot"
+        );
+    }
+
+    #[test]
+    fn next_walk_position_never_repeats_a_hash() {
+        let entries = vec![
+            HistoryEntry {
+                file: "a.png".to_owned(),
+                created_at: 3,
+                hash: 1,
+            },
+            HistoryEntry {
+                file: "b.png".to_owned(),
+                created_at: 2,
+                hash: 2,
+            },
+            HistoryEntry {
+                file: "c.png".to_owned(),
+                created_at: 1,
+                hash: 3,
+            },
+        ];
+        let mut index = older_index(&entries, 1);
+        assert_eq!(index, 1);
+        index = older_index(&entries, entries[index].hash);
+        assert_eq!(index, 2);
+        index = older_index(&entries, entries[index].hash);
+        assert_eq!(index, entries.len());
     }
 }

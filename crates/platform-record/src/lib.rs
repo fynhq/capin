@@ -225,8 +225,19 @@ impl Drop for Recorder {
     }
 }
 
+/// Physical pixel dimensions a target will be recorded at. Callers that need
+/// the size before starting (for filename templates) use this instead of
+/// duplicating the target lookup.
+pub fn target_dimensions(target: CaptureTarget) -> Result<PhysicalSize, RecorderError> {
+    resolve_target_dimensions(target)
+}
+
 fn resolve_dimensions(config: &RecordConfig) -> Result<PhysicalSize, RecorderError> {
-    match config.target {
+    resolve_target_dimensions(config.target)
+}
+
+fn resolve_target_dimensions(target: CaptureTarget) -> Result<PhysicalSize, RecorderError> {
+    match target {
         CaptureTarget::Region(region) => Ok(region.rect.size),
         CaptureTarget::Monitor(id) => {
             let monitors = platform_backend()
