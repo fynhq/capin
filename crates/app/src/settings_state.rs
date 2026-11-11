@@ -182,6 +182,10 @@ pub struct AppSettings {
     pub window_background: WindowBackground,
     pub window_padding: u32,
     pub capture_cursor: bool,
+    /// Region capture corner radius in logical pixels; persists across captures.
+    pub region_corner_radius: u32,
+    /// Draws the composed drop shadow around region captures.
+    pub region_shadow: bool,
     /// Shared color used when `annotation_uniform_color` is enabled.
     pub annotation_color: u32,
     /// Per-tool colors used when `annotation_uniform_color` is disabled.
@@ -252,6 +256,8 @@ impl Default for AppSettings {
             window_background: WindowBackground::Transparent,
             window_padding: DEFAULT_WINDOW_PADDING,
             capture_cursor: false,
+            region_corner_radius: 0,
+            region_shadow: false,
             annotation_color: DEFAULT_ANNOTATION_COLOR,
             annotation_colors: [DEFAULT_ANNOTATION_COLOR; ANNOTATION_COLOR_TOOL_COUNT],
             annotation_uniform_color: true,
@@ -383,6 +389,14 @@ fn parse(text: &str) -> AppSettings {
                 }
             }
             "capture_cursor" => settings.capture_cursor = value != "false",
+            "region_corner_radius" => {
+                if let Ok(radius) = value.parse::<u32>()
+                    && [0, 8, 16, 24].contains(&radius)
+                {
+                    settings.region_corner_radius = radius;
+                }
+            }
+            "region_shadow" => settings.region_shadow = value == "true",
             "annotation_color" => {
                 if let Some(color) = parse_rgba(value) {
                     settings.annotation_color = color;
@@ -554,7 +568,7 @@ fn serialize(settings: &AppSettings) -> String {
         .map(|path| path.display().to_string())
         .unwrap_or_default();
     let mut text = format!(
-        "language={}\nauto_start={}\nauto_start_explicit={}\ncopy_to_clipboard={}\nrecord_cursor={}\ncapture_hotkey={}\npin_hotkey={}\nscreenshot_dir={}\nrecording_dir={}\nfilename_template={}\nwindow_background={}\nwindow_padding={}\ncapture_cursor={}\nannotation_color={:08x}\npin_text_ocr={}\npin_qr={}\n",
+        "language={}\nauto_start={}\nauto_start_explicit={}\ncopy_to_clipboard={}\nrecord_cursor={}\ncapture_hotkey={}\npin_hotkey={}\nscreenshot_dir={}\nrecording_dir={}\nfilename_template={}\nwindow_background={}\nwindow_padding={}\ncapture_cursor={}\nregion_corner_radius={}\nregion_shadow={}\nannotation_color={:08x}\npin_text_ocr={}\npin_qr={}\n",
         settings.language.code(),
         settings.auto_start,
         settings.auto_start_explicit,
@@ -568,6 +582,8 @@ fn serialize(settings: &AppSettings) -> String {
         settings.window_background.code(),
         settings.window_padding,
         settings.capture_cursor,
+        settings.region_corner_radius,
+        settings.region_shadow,
         settings.annotation_color,
         settings.pin_text_ocr,
         settings.pin_qr,
@@ -757,6 +773,21 @@ mod tests {
         settings.apply_annotation_color(AnnotationColorTool::Text, 0x0A84FFFF);
 
         assert_eq!(parse(&serialize(&settings)), settings);
+    }
+
+    #[test]
+    fn region_effects_default_and_round_trip() {
+        let defaults = AppSettings::default();
+        assert_eq!(defaults.region_corner_radius, 0);
+        assert!(!defaults.region_shadow);
+
+        let settings = parse("region_corner_radius=16\nregion_shadow=true\n");
+        assert_eq!(settings.region_corner_radius, 16);
+        assert!(settings.region_shadow);
+        assert_eq!(parse(&serialize(&settings)), settings);
+
+        let invalid = parse("region_corner_radius=10\n");
+        assert_eq!(invalid.region_corner_radius, 0);
     }
 
     #[test]

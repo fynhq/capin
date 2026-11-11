@@ -3537,7 +3537,7 @@ impl EditorView {
                     this.commit_text(cx);
                     this.delete_selected_annotation(cx);
                 }))
-                .child(icons::icon(icons::TRASH, 18.0, muted))
+                .child(icons::icon(icons::TRASH, 18.0, text))
                 .into_any_element()
         } else {
             div()
@@ -4071,6 +4071,9 @@ impl EditorView {
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.effects.corner_radius = radius;
+                        settings_state::update(|settings| {
+                            settings.region_corner_radius = radius;
+                        });
                         cx.notify();
                     }))
                     .child(label),
@@ -4127,6 +4130,8 @@ impl EditorView {
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.effects.shadow = !this.effects.shadow;
+                        let shadow = this.effects.shadow;
+                        settings_state::update(|settings| settings.region_shadow = shadow);
                         cx.notify();
                     }))
                     .child(t(language, "overlay.effects_shadow"))
@@ -4408,10 +4413,14 @@ impl EditorView {
                 // Window captures already include their composed edge shadow.
                 // Region captures only bake one when the shadow effect is on;
                 // long-capture results never do, so those pins use the native
-                // window shadow instead.
+                // window shadow instead. Rounded frames without a composed
+                // shadow skip the native one: a rectangular DWM shadow around
+                // transparent corners reads as square.
                 let native_shadow = inline_host.is_some_and(|inline| match inline.capture {
                     Some(capture) => {
-                        matches!(capture.target, CaptureTarget::Region(_)) && !self.effects.shadow
+                        matches!(capture.target, CaptureTarget::Region(_))
+                            && !self.effects.shadow
+                            && self.effects.corner_radius == 0
                     }
                     None => self.pin_target.is_none(),
                 });
@@ -5041,7 +5050,14 @@ impl Render for EditorView {
         let outside_backdrop = inline.then(|| {
             div().absolute().inset_0().on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    // The image layer blocks this layer for clicks on the
+                    // image; keep the bounds check as a safeguard for the
+                    // first frame after the image rect changes.
+                    if this.image_view_rect(window).contains(&event.position) {
+                        cx.stop_propagation();
+                        return;
+                    }
                     if this.document.selected().is_some()
                         || this.more_open
                         || this.effects_open
@@ -5070,6 +5086,10 @@ impl Render for EditorView {
                 0.0
             }))
             .overflow_hidden()
+            // Block the inline backdrop behind the image: without this the
+            // same click selected an object and then reached the backdrop,
+            // which immediately cleared the selection again.
+            .occlude()
             .child(
                 img(self.image.clone())
                     .absolute()
@@ -5582,15 +5602,25 @@ impl Render for EditorView {
                         return;
                     }
                     if this.document.selected().is_some()
+                        || this.tool != Tool::Select
                         || this.more_open
                         || this.effects_open
                         || this.hints_visible
                     {
+                        // Outside an in-progress annotation, right click leaves
+                        // annotation mode like Escape: drop the selection,
+                        // return to Select, and close the tool options bar.
                         this.select_annotation(None);
+                        this.tool = Tool::Select;
+                        this.draft = None;
+                        this.move_draft = None;
+                        this.resize_draft = None;
+                        this.pan_draft = None;
                         this.more_open = false;
                         this.effects_open = false;
                         this.hints_visible = false;
                         this.selection_hover = SelectionHover::None;
+                        this.status = None;
                         cx.notify();
                     }
                 }),

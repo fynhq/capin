@@ -63,6 +63,24 @@ pub(super) fn place_on_monitor(
     window: &impl HasWindowHandle,
     bounds: core_types::PhysicalRect,
 ) -> Result<(), PlatformWindowError> {
+    place_on_monitor_impl(window, bounds, true)
+}
+
+/// Resizes without `SWP_FRAMECHANGED`: pins animate their size, and forcing a
+/// non-client recalculation made DWM present the new frame before GPUI's next
+/// paint, so the border moved ahead of the image.
+pub(super) fn place_on_monitor_deferred(
+    window: &impl HasWindowHandle,
+    bounds: core_types::PhysicalRect,
+) -> Result<(), PlatformWindowError> {
+    place_on_monitor_impl(window, bounds, false)
+}
+
+fn place_on_monitor_impl(
+    window: &impl HasWindowHandle,
+    bounds: core_types::PhysicalRect,
+    frame_changed: bool,
+) -> Result<(), PlatformWindowError> {
     let handle = window.window_handle()?;
     let RawWindowHandle::Win32(win32) = handle.as_raw() else {
         return Err(PlatformWindowError::NotWin32);
@@ -88,6 +106,10 @@ pub(super) fn place_on_monitor(
             operation: "SetWindowPos",
             message: "window height exceeds i32".to_owned(),
         })?;
+    let mut flags = SWP_NOZORDER | SWP_NOACTIVATE;
+    if frame_changed {
+        flags |= SWP_FRAMECHANGED;
+    }
     // SAFETY: hwnd belongs to a live window created by the caller. The
     // rectangle is in physical pixels because the process is PerMonitorV2.
     unsafe {
@@ -98,7 +120,7 @@ pub(super) fn place_on_monitor(
             bounds.origin.y - inset_top,
             width,
             height,
-            SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            flags,
         )
     }
     .map_err(|error| platform_error("SetWindowPos", error))

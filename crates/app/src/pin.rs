@@ -1548,26 +1548,39 @@ impl PinView {
     fn selected_text(&self) -> Option<String> {
         let lines = self.text_lines()?;
         let (start, end) = self.selection_range()?;
+        let block_right = lines
+            .iter()
+            .map(|line| line.rect.origin.x + line.rect.size.width as i32)
+            .max()
+            .unwrap_or(0);
         let mut text = String::new();
         let mut base = 0usize;
-        let mut first_line = true;
+        let mut previous: Option<(&platform_ocr::OcrLine, bool)> = None;
         for line in lines {
             let length = line.chars.len();
             if end < base || start >= base + length {
                 base += length;
                 continue;
             }
-            if !first_line {
-                text.push('\n');
-            }
             let from = start.saturating_sub(base).min(length);
             let to = (end.saturating_sub(base) + 1).min(length);
+            let full_line = to == length;
+            let separator = match previous {
+                // Only a fully selected line can be reflowed into the next
+                // one; partial selections keep an explicit line break.
+                Some((previous_line, true)) if from == 0 => {
+                    platform_ocr::line_join_separator(previous_line, line, block_right)
+                }
+                Some(_) => "\n",
+                None => "",
+            };
+            text.push_str(separator);
             if let Some(chars) = line.chars.get(from..to) {
                 for ch in chars {
                     text.push(ch.ch);
                 }
             }
-            first_line = false;
+            previous = Some((line, full_line));
             base += length;
         }
         Some(text.trim_end().to_owned())
@@ -1706,10 +1719,12 @@ impl PinView {
             (width * scale).round().max(1.0) as u32,
             (height * scale).round().max(1.0) as u32,
         );
+        // Update the content scale before moving the native frame so a
+        // repaint driven by the resize already draws the new image.
+        self.zoom = zoom;
         if place_on_monitor_deferred(&*window, physical, dpi).is_err() {
             window.resize(size(px(width), px(height)));
         }
-        self.zoom = zoom;
         update_bounds_state(
             self.id,
             Bounds {
@@ -1748,7 +1763,9 @@ impl PinView {
         let percent = (self.zoom_target * 100.0).round() as i32;
         // Animating a native window resize on Windows presents the stretched
         // old frame before the new image, which reads as the border moving
-        // first. One resize per wheel notch keeps both together.
+        // first. One resize per wheel notch keeps both together; the body is
+        // also sized from the zoom target so it never waits for the native
+        // frame to catch up.
         if cx.reduce_motion() || cfg!(target_os = "windows") {
             self.zoom_center = None;
             let target = self.zoom_target;
@@ -2064,9 +2081,17 @@ impl PinView {
 
     fn body(&self, theme: &PinTheme, _language: Language) -> Div {
         match &self.content {
-            PinContent::Image { image, .. } => div()
-                .size_full()
-                .child(img(image.clone()).size_full().object_fit(ObjectFit::Fill)),
+            PinContent::Image { image, .. } => {
+                // Size the image from the zoom target instead of the window:
+                // the native frame can reach its new size one frame before
+                // GPUI relayouts, which made the image visibly trail the
+                // border during wheel zoom.
+                let (width, height) = self.content.size(self.zoom.max(0.1));
+                div()
+                    .w(px(width))
+                    .h(px(height))
+                    .child(img(image.clone()).size_full().object_fit(ObjectFit::Fill))
+            }
             PinContent::Text(text) => div()
                 .size_full()
                 .p(px(12.0))
@@ -2150,7 +2175,23 @@ impl Render for PinView {
                 let command =
                     event.keystroke.modifiers.platform || event.keystroke.modifiers.control;
                 if command && key == "c" {
-                    this.copy_selected_text(cx);
+                    if this
+                        .selection_range()
+                        .is_some_and(|(start, end)| end > start)
+                    {
+                        this.copy_selected_text(cx);
+                    } else if matches!(&this.content, PinContent::Image { .. }) {
+                        this.copy_image(cx);
+                    } else {
+                        this.copy_content(cx);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
+                if command && key == "s" {
+                    if matches!(&this.content, PinContent::Image { .. }) {
+                        this.save_image(cx);
+                    }
                     cx.stop_propagation();
                     return;
                 }

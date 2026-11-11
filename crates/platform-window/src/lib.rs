@@ -366,6 +366,8 @@ pub fn place_on_monitor(
 /// `setFrame:display:YES` flushes the previous backing store before GPUI has
 /// laid out the new size, which made a pin's frame jump ahead of the image.
 /// Leaving the redraw to the next render pass keeps both in one presentation.
+/// Windows skips `SWP_FRAMECHANGED` for the same reason: forcing a non-client
+/// recalculation presented the new frame before the next paint.
 pub fn place_on_monitor_deferred(
     window: &impl HasWindowHandle,
     bounds: core_types::PhysicalRect,
@@ -374,7 +376,7 @@ pub fn place_on_monitor_deferred(
     #[cfg(target_os = "windows")]
     {
         let _ = scale;
-        windows::place_on_monitor(window, bounds)
+        windows::place_on_monitor_deferred(window, bounds)
     }
     #[cfg(target_os = "macos")]
     {

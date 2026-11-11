@@ -102,15 +102,11 @@ pub fn recognize_shared(frame: Arc<RgbaFrame>, options: OcrOptions) -> OcrOutput
         };
     }
     match platform::recognize_text(frame) {
-        Ok(lines) => {
-            let text = lines
-                .iter()
-                .map(|line| line.text.as_str())
-                .collect::<Vec<_>>()
-                .join(
-                    "
-",
-                );
+        Ok(mut lines) => {
+            for line in &mut lines {
+                normalize_latin_punctuation(line);
+            }
+            let text = join_ocr_lines(&lines);
             OcrOutput {
                 text,
                 lines,
@@ -125,6 +121,174 @@ pub fn recognize_shared(frame: Arc<RgbaFrame>, options: OcrOptions) -> OcrOutput
             error: Some(error.to_string()),
         },
     }
+}
+
+/// Windows OCR often returns full-width punctuation for Latin text (a
+/// U+FF0C comma instead of `,`, for example) because the active recognizer is
+/// the CJK model. Lines without CJK content are mapped back to ASCII forms so
+/// copied commands, code and URLs stay usable. Mixed or CJK lines keep their
+/// original punctuation.
+fn normalize_latin_punctuation(line: &mut OcrLine) {
+    if line.text.chars().any(is_cjk) {
+        return;
+    }
+    line.text = line.text.chars().map(normalize_latin_char).collect();
+    for item in &mut line.chars {
+        item.ch = normalize_latin_char(item.ch);
+    }
+}
+
+fn normalize_latin_char(ch: char) -> char {
+    let code = ch as u32;
+    if (0xFF01..=0xFF5E).contains(&code) {
+        // Full-width ASCII block maps one-to-one onto U+0021..U+007E.
+        return char::from_u32(code - 0xFEE0).unwrap_or(ch);
+    }
+    match ch {
+        '\u{3000}' => ' ',
+        '\u{3002}' => '.',
+        '\u{3001}' => ',',
+        _ => ch,
+    }
+}
+
+fn is_cjk(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3040..=0x30FF   // kana
+            | 0x3400..=0x4DBF // CJK extension A
+            | 0x4E00..=0x9FFF // CJK unified ideographs
+            | 0xAC00..=0xD7AF // hangul syllables
+            | 0xF900..=0xFAFF // CJK compatibility ideographs
+    )
+}
+
+/// Joins recognized lines back into one text, treating lines that a paragraph
+/// wrapped as a soft join instead of a newline. The decision uses sentence
+/// punctuation, list markers, vertical gaps, paragraph indentation and short
+/// paragraph-ending lines, which covers UI text and prose without merging
+/// unrelated rows.
+pub fn join_ocr_lines(lines: &[OcrLine]) -> String {
+    let Some((first, rest)) = lines.split_first() else {
+        return String::new();
+    };
+    let max_right = lines
+        .iter()
+        .map(|line| line.rect.origin.x + line.rect.size.width as i32)
+        .max()
+        .unwrap_or(0);
+    let mut text = first.text.clone();
+    let mut previous = first;
+    for next in rest {
+        let separator = line_join_separator(previous, next, max_right);
+        if separator == " "
+            && text.ends_with('-')
+            && next
+                .text
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_lowercase())
+        {
+            // A word split across a wrap keeps no space or hyphen.
+            text.pop();
+        } else {
+            text.push_str(separator);
+        }
+        text.push_str(&next.text);
+        previous = next;
+    }
+    text
+}
+
+/// Separator for two adjacent recognized lines. `block_right` is the right
+/// edge of the widest line in the block, used to spot paragraph-ending short
+/// lines. Returns `"\n"` for hard breaks, `" "` for wrapped Latin text and
+/// `""` for wrapped CJK text.
+pub fn line_join_separator(previous: &OcrLine, next: &OcrLine, block_right: i32) -> &'static str {
+    let previous_text = previous.text.trim_end();
+    let next_text = next.text.trim_start();
+    if previous_text.is_empty() || next_text.is_empty() {
+        return "\n";
+    }
+    let height = previous.rect.size.height.max(next.rect.size.height).max(1) as f32;
+    let gap = next.rect.origin.y as f32
+        - (previous.rect.origin.y + previous.rect.size.height as i32) as f32;
+    let previous_right = previous.rect.origin.x + previous.rect.size.width as i32;
+    let indent = next.rect.origin.x - previous.rect.origin.x;
+
+    if gap > height * 0.6
+        || ends_sentence(previous_text)
+        || starts_list_item(next_text)
+        || indent as f32 > height * 0.8
+        || (previous_right as f32) < block_right as f32 - height * 2.0
+    {
+        return "\n";
+    }
+
+    let last = previous_text.chars().next_back();
+    let first = next_text.chars().next();
+    match (last, first) {
+        (Some(last), Some(first)) if last.is_ascii() && first.is_ascii() => {
+            if !needs_join_space(last, first) {
+                ""
+            } else {
+                " "
+            }
+        }
+        _ => "",
+    }
+}
+
+fn ends_sentence(text: &str) -> bool {
+    let mut chars = text.chars().rev();
+    let Some(last) = chars.next() else {
+        return false;
+    };
+    if is_sentence_end(last) {
+        return true;
+    }
+    if matches!(
+        last,
+        '"' | '\'' | ')' | ']' | '}' | '\u{201D}' | '\u{2019}' | '\u{FF09}' | '\u{3011}'
+    ) {
+        return chars.next().is_some_and(is_sentence_end);
+    }
+    false
+}
+
+fn is_sentence_end(ch: char) -> bool {
+    matches!(
+        ch,
+        '.' | '!' | '?' | '\u{2026}' | '\u{3002}' | '\u{FF01}' | '\u{FF1F}'
+    )
+}
+
+fn starts_list_item(text: &str) -> bool {
+    let text = text.trim_start();
+    let Some(first) = text.chars().next() else {
+        return false;
+    };
+    if matches!(first, '•' | '·' | '●' | '○' | '▪' | '▫' | '*' | '–' | '—') {
+        return true;
+    }
+    if first.is_ascii_digit() {
+        let mut rest = text.chars().skip_while(|ch| ch.is_ascii_digit());
+        return matches!(rest.next(), Some('.' | ')' | '\u{3001}' | '\u{FF09}'));
+    }
+    first == '-' && text.chars().nth(1).is_some_and(char::is_whitespace)
+}
+
+fn needs_join_space(previous: char, next: char) -> bool {
+    if !previous.is_ascii() || !next.is_ascii() {
+        return false;
+    }
+    if matches!(previous, '(' | '[' | '{' | '"' | '\'') {
+        return false;
+    }
+    !matches!(
+        next,
+        ')' | ']' | '}' | ',' | '.' | ';' | ':' | '?' | '!' | '%' | '"' | '\''
+    )
 }
 
 #[allow(dead_code)] // platform backends only
@@ -345,6 +509,94 @@ mod tests {
         .unwrap();
         assert_eq!(line.text, "Hello, world");
         assert_eq!(line.chars.iter().filter(|ch| ch.ch == ' ').count(), 1);
+    }
+
+    #[test]
+    fn latin_lines_normalize_full_width_punctuation() {
+        let mut line = build_line(
+            "Hello\u{FF0C}world\u{3002}".to_owned(),
+            PhysicalRect::new(0, 0, 200, 20),
+        );
+        normalize_latin_punctuation(&mut line);
+        assert_eq!(line.text, "Hello,world.");
+        assert_eq!(
+            line.chars.iter().map(|ch| ch.ch).collect::<String>(),
+            "Hello,world."
+        );
+
+        let mut cjk = build_line(
+            "\u{4F60}\u{597D}\u{FF0C}\u{4E16}\u{754C}".to_owned(),
+            PhysicalRect::new(0, 0, 200, 20),
+        );
+        normalize_latin_punctuation(&mut cjk);
+        assert_eq!(cjk.text, "\u{4F60}\u{597D}\u{FF0C}\u{4E16}\u{754C}");
+    }
+
+    #[test]
+    fn wrapped_latin_lines_join_with_a_space() {
+        let lines = vec![
+            build_line(
+                "The quick brown fox".to_owned(),
+                PhysicalRect::new(0, 0, 190, 20),
+            ),
+            build_line(
+                "jumps over the dog".to_owned(),
+                PhysicalRect::new(0, 22, 160, 20),
+            ),
+        ];
+        assert_eq!(
+            join_ocr_lines(&lines),
+            "The quick brown fox jumps over the dog"
+        );
+    }
+
+    #[test]
+    fn sentence_ends_and_list_markers_keep_hard_breaks() {
+        let lines = vec![
+            build_line(
+                "First sentence.".to_owned(),
+                PhysicalRect::new(0, 0, 190, 20),
+            ),
+            build_line(
+                "Second sentence".to_owned(),
+                PhysicalRect::new(0, 22, 140, 20),
+            ),
+            build_line(
+                "\u{2022} bullet".to_owned(),
+                PhysicalRect::new(0, 44, 80, 20),
+            ),
+        ];
+        assert_eq!(
+            join_ocr_lines(&lines),
+            "First sentence.\nSecond sentence\n\u{2022} bullet"
+        );
+    }
+
+    #[test]
+    fn wrapped_cjk_lines_join_without_spaces() {
+        let lines = vec![
+            build_line(
+                "\u{622A}\u{56FE}\u{5DE5}\u{5177}".to_owned(),
+                PhysicalRect::new(0, 0, 160, 20),
+            ),
+            build_line(
+                "\u{5E94}\u{7528}\u{7A0B}\u{5E8F}".to_owned(),
+                PhysicalRect::new(0, 22, 160, 20),
+            ),
+        ];
+        assert_eq!(
+            join_ocr_lines(&lines),
+            "\u{622A}\u{56FE}\u{5DE5}\u{5177}\u{5E94}\u{7528}\u{7A0B}\u{5E8F}"
+        );
+    }
+
+    #[test]
+    fn wrapped_hyphenation_drops_the_hyphen() {
+        let lines = vec![
+            build_line("inter-".to_owned(), PhysicalRect::new(0, 0, 190, 20)),
+            build_line("national".to_owned(), PhysicalRect::new(0, 22, 190, 20)),
+        ];
+        assert_eq!(join_ocr_lines(&lines), "international");
     }
 
     #[test]

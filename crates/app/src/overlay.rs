@@ -723,6 +723,7 @@ impl OverlayView {
             }
         })
         .detach();
+        let settings = settings_state::get();
         Self {
             session,
             native_id,
@@ -757,7 +758,10 @@ impl OverlayView {
             editor: None,
             editing_rect: None,
             selected: None,
-            effects: RegionEffects::default(),
+            effects: RegionEffects {
+                corner_radius: settings.region_corner_radius,
+                shadow: settings.region_shadow,
+            },
         }
     }
 
@@ -1934,8 +1938,9 @@ impl OverlayView {
         };
         log_info!("overlay", "selection pinned");
         let hash = crate::capture_history::hash_frame(&output);
-        let native_shadow =
-            matches!(selected.target, CaptureTarget::Region(_)) && !self.effects.shadow;
+        let native_shadow = matches!(selected.target, CaptureTarget::Region(_))
+            && !self.effects.shadow
+            && self.effects.corner_radius == 0;
         let monitor = self.session.monitor();
         let handles = cx.windows();
         // Opening the pin window inside this input callback would re-enter
@@ -2644,6 +2649,9 @@ impl OverlayView {
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.effects.corner_radius = radius;
+                        settings_state::update(|settings| {
+                            settings.region_corner_radius = radius;
+                        });
                         cx.notify();
                     }))
                     .child(label),
@@ -2701,6 +2709,8 @@ impl OverlayView {
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.effects.shadow = !this.effects.shadow;
+                        let shadow = this.effects.shadow;
+                        settings_state::update(|settings| settings.region_shadow = shadow);
                         cx.notify();
                     }))
                     .child(t(language, "overlay.effects_shadow"))
