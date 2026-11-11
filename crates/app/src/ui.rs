@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+#[cfg(any(target_os = "windows", test))]
 use core_types::PhysicalRect;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -30,6 +31,7 @@ pub fn centered_bounds(cx: &App, width: f32, height: f32) -> Bounds<Pixels> {
 /// Converts logical window bounds into the physical rectangle used to
 /// re-place a popup client area. Origins round to the nearest physical pixel;
 /// sizes round up so fractional scaling never clips the content.
+#[cfg(any(target_os = "windows", test))]
 pub fn physical_window_rect(bounds: Bounds<Pixels>, scale: f32) -> PhysicalRect {
     let scale = scale.max(0.1);
     PhysicalRect::new(
