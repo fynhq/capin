@@ -644,25 +644,6 @@ fn open_pin_content_at(
     )
 }
 
-fn align_client_to_bounds(window: &Window, bounds: Bounds<Pixels>) {
-    #[cfg(target_os = "windows")]
-    {
-        let scale = window.scale_factor().max(0.1);
-        let physical = PhysicalRect::new(
-            (f32::from(bounds.origin.x) * scale).round() as i32,
-            (f32::from(bounds.origin.y) * scale).round() as i32,
-            (f32::from(bounds.size.width) * scale).ceil().max(1.0) as u32,
-            (f32::from(bounds.size.height) * scale).ceil().max(1.0) as u32,
-        );
-        let dpi = DpiScale::new(scale).unwrap_or_default();
-        let _ = place_on_monitor_deferred(window, physical, dpi);
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = (window, bounds);
-    }
-}
-
 fn default_bounds(cx: &App, width: f32, height: f32) -> Bounds<Pixels> {
     let mut bounds = centered_bounds(cx, width, height);
     let cascade = PIN_CASCADE.with(|index| {
@@ -739,7 +720,7 @@ fn open_pin_inner(
         // the window. The frame sits on the left, right and bottom only, so
         // that split lifts the client area a few pixels above the requested
         // rect. Re-place the client area once the native frame is final.
-        align_client_to_bounds(&*window, bounds);
+        crate::ui::align_client_to_bounds(&*window, bounds);
         if click_through {
             let _ = set_click_through(&*window, true);
         }
@@ -759,7 +740,9 @@ fn open_pin_inner(
         });
         // The DWM frame settles one turn after the shadow policy changes;
         // repeat the client alignment once the window has laid out.
-        window.defer(cx, move |window, _| align_client_to_bounds(window, bounds));
+        window.defer(cx, move |window, _| {
+            crate::ui::align_client_to_bounds(window, bounds)
+        });
         view
     }) {
         Ok((window, entity)) => {

@@ -926,7 +926,7 @@ impl OverlayView {
                 builder.line_to(point(px(width), px(height)));
                 builder.line_to(point(px(0.0), px(height)));
                 builder.close();
-                push_rounded_rect(&mut builder, hole, radius);
+                crate::ui::push_rounded_rect(&mut builder, hole, radius);
                 if let Ok(path) = builder.build() {
                     window.paint_path(path, rgba(DIM));
                 }
@@ -4009,35 +4009,6 @@ fn border(rect: Bounds<Pixels>, color: Rgba, radius: f32) -> Div {
         .rounded(px(radius.max(0.0)))
         .border_3()
         .border_color(color)
-}
-
-fn push_rounded_rect(builder: &mut PathBuilder, rect: Bounds<Pixels>, radius: f32) {
-    let left = f32::from(rect.origin.x);
-    let top = f32::from(rect.origin.y);
-    let width = f32::from(rect.size.width);
-    let height = f32::from(rect.size.height);
-    let radius = radius.clamp(0.0, width.min(height) / 2.0);
-    let right = left + width;
-    let bottom = top + height;
-    builder.move_to(point(px(left + radius), px(top)));
-    builder.line_to(point(px(right - radius), px(top)));
-    builder.curve_to(
-        point(px(right), px(top + radius)),
-        point(px(right), px(top)),
-    );
-    builder.line_to(point(px(right), px(bottom - radius)));
-    builder.curve_to(
-        point(px(right - radius), px(bottom)),
-        point(px(right), px(bottom)),
-    );
-    builder.line_to(point(px(left + radius), px(bottom)));
-    builder.curve_to(
-        point(px(left), px(bottom - radius)),
-        point(px(left), px(bottom)),
-    );
-    builder.line_to(point(px(left), px(top + radius)));
-    builder.curve_to(point(px(left + radius), px(top)), point(px(left), px(top)));
-    builder.close();
 }
 
 fn element_border(rect: Bounds<Pixels>) -> Div {

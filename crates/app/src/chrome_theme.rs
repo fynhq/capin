@@ -249,7 +249,7 @@ impl ChromeTheme {
     }
 }
 
-fn accent_text_color(hex: u32) -> Rgba {
+pub(crate) fn accent_text_color(hex: u32) -> Rgba {
     #[cfg(target_os = "macos")]
     {
         let _ = hex;

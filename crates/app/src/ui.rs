@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use core_types::PhysicalRect;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -24,6 +25,67 @@ pub fn centered_bounds(cx: &App, width: f32, height: f32) -> Bounds<Pixels> {
             size: size(px(width), px(height)),
         },
     }
+}
+
+/// Converts logical window bounds into the physical rectangle used to
+/// re-place a popup client area. Origins round to the nearest physical pixel;
+/// sizes round up so fractional scaling never clips the content.
+pub fn physical_window_rect(bounds: Bounds<Pixels>, scale: f32) -> PhysicalRect {
+    let scale = scale.max(0.1);
+    PhysicalRect::new(
+        (f32::from(bounds.origin.x) * scale).round() as i32,
+        (f32::from(bounds.origin.y) * scale).round() as i32,
+        (f32::from(bounds.size.width) * scale).ceil().max(1.0) as u32,
+        (f32::from(bounds.size.height) * scale).ceil().max(1.0) as u32,
+    )
+}
+
+/// Re-places a popup's client area on Windows after GPUI has applied its own
+/// frame offset. Other platforms place the window in display-local points and
+/// do not need the correction.
+pub fn align_client_to_bounds(window: &Window, bounds: Bounds<Pixels>) {
+    #[cfg(target_os = "windows")]
+    {
+        let scale = window.scale_factor().max(0.1);
+        let physical = physical_window_rect(bounds, scale);
+        let dpi = core_types::DpiScale::new(scale).unwrap_or_default();
+        let _ = platform_window::place_on_monitor_deferred(window, physical, dpi);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (window, bounds);
+    }
+}
+
+/// Appends a rounded-rectangle path to `builder`, clamping the radius to half
+/// the shorter side.
+pub fn push_rounded_rect(builder: &mut PathBuilder, rect: Bounds<Pixels>, radius: f32) {
+    let left = f32::from(rect.origin.x);
+    let top = f32::from(rect.origin.y);
+    let width = f32::from(rect.size.width);
+    let height = f32::from(rect.size.height);
+    let radius = radius.clamp(0.0, width.min(height) / 2.0);
+    let right = left + width;
+    let bottom = top + height;
+    builder.move_to(point(px(left + radius), px(top)));
+    builder.line_to(point(px(right - radius), px(top)));
+    builder.curve_to(
+        point(px(right), px(top + radius)),
+        point(px(right), px(top)),
+    );
+    builder.line_to(point(px(right), px(bottom - radius)));
+    builder.curve_to(
+        point(px(right - radius), px(bottom)),
+        point(px(right), px(bottom)),
+    );
+    builder.line_to(point(px(left + radius), px(bottom)));
+    builder.curve_to(
+        point(px(left), px(bottom - radius)),
+        point(px(left), px(bottom)),
+    );
+    builder.line_to(point(px(left), px(top + radius)));
+    builder.curve_to(point(px(left + radius), px(top)), point(px(left), px(top)));
+    builder.close();
 }
 
 /// Places a popover beside its anchor without covering the anchor or another
@@ -216,4 +278,35 @@ pub fn hue_rgb(hue: f32) -> u32 {
     let offset = value - chroma;
     let channel = |value: f32| ((value + offset) * 255.0).round().clamp(0.0, 255.0) as u32;
     (channel(red) << 16) | (channel(green) << 8) | channel(blue)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::physical_window_rect;
+    use core_types::PhysicalRect;
+    use gpui_kit::{Bounds, point, px, size};
+
+    #[test]
+    fn physical_window_rect_rounds_origins_and_ceils_sizes() {
+        let bounds = Bounds {
+            origin: point(px(10.0), px(20.6)),
+            size: size(px(100.2), px(50.1)),
+        };
+        assert_eq!(
+            physical_window_rect(bounds, 1.25),
+            PhysicalRect::new(13, 26, 126, 63)
+        );
+    }
+
+    #[test]
+    fn physical_window_rect_keeps_a_minimum_pixel() {
+        let bounds = Bounds {
+            origin: point(px(0.0), px(0.0)),
+            size: size(px(0.0), px(0.0)),
+        };
+        assert_eq!(
+            physical_window_rect(bounds, 1.0),
+            PhysicalRect::new(0, 0, 1, 1)
+        );
+    }
 }

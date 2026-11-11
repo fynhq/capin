@@ -8,6 +8,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use platform_window::{AutostartState, set_autostart, system_accent_hex};
 
+use crate::chrome_theme::accent_text_color;
 use crate::i18n::{Language, t};
 use crate::icons;
 use crate::logging::{log_error, log_info};
@@ -444,44 +445,6 @@ impl Theme {
             hairline: 1.0 / scale_factor.max(1.0),
         }
     }
-}
-
-/// Label color on the system accent. macOS keeps white-on-accent like the
-/// system controls; Windows switches to a dark label on bright
-/// accents (gold, lime) so the text stays readable.
-fn accent_text_color(hex: u32) -> Rgba {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = hex;
-        rgb(0xFFFFFF)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        if prefers_dark_foreground(hex) {
-            rgb(0x1A1A1A)
-        } else {
-            rgb(0xFFFFFF)
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn prefers_dark_foreground(hex: u32) -> bool {
-    fn linearize(channel: u8) -> f64 {
-        let value = f64::from(channel) / 255.0;
-        if value <= 0.040_45 {
-            value / 12.92
-        } else {
-            ((value + 0.055) / 1.055).powf(2.4)
-        }
-    }
-    let r = linearize(((hex >> 16) & 0xFF) as u8);
-    let g = linearize(((hex >> 8) & 0xFF) as u8);
-    let b = linearize((hex & 0xFF) as u8);
-    let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    let dark = (luminance + 0.05) / 0.05;
-    let light = 1.05 / (luminance + 0.05);
-    dark > light * 1.15
 }
 
 #[cfg(target_os = "windows")]

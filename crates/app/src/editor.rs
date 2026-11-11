@@ -6324,25 +6324,6 @@ fn fit_long_capture_rect(frame: &RgbaFrame, bounds: Bounds<Pixels>) -> Bounds<Pi
     }
 }
 
-fn align_client_to_bounds(window: &Window, bounds: Bounds<Pixels>) {
-    #[cfg(target_os = "windows")]
-    {
-        let scale = window.scale_factor().max(0.1);
-        let physical = core_types::PhysicalRect::new(
-            (f32::from(bounds.origin.x) * scale).round() as i32,
-            (f32::from(bounds.origin.y) * scale).round() as i32,
-            (f32::from(bounds.size.width) * scale).round().max(1.0) as u32,
-            (f32::from(bounds.size.height) * scale).round().max(1.0) as u32,
-        );
-        let dpi = core_types::DpiScale::new(scale).unwrap_or_default();
-        let _ = platform_window::place_on_monitor_deferred(window, physical, dpi);
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = (window, bounds);
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn open_inline_editor_window(
     frame: Arc<RgbaFrame>,
@@ -6383,7 +6364,7 @@ fn open_inline_editor_window(
         // The popup frame is only on the left, right and bottom, but GPUI
         // splits its height evenly when placing the window. Align the client
         // area so annotations land on the pixels they were drawn over.
-        align_client_to_bounds(&*window, window_bounds);
+        crate::ui::align_client_to_bounds(&*window, window_bounds);
         let editor = cx.new(|cx| {
             EditorView::new_inline(
                 frame,
@@ -6406,7 +6387,7 @@ fn open_inline_editor_window(
             this.watch_close(window, cx);
         });
         window.defer(cx, move |window, cx| {
-            align_client_to_bounds(window, window_bounds);
+            crate::ui::align_client_to_bounds(window, window_bounds);
             window.focus(&focus, cx);
             window.activate_window();
         });
@@ -6727,35 +6708,6 @@ fn resize_shape(
     }
 }
 
-fn push_rounded_rect(builder: &mut PathBuilder, rect: Bounds<Pixels>, radius: f32) {
-    let left = f32::from(rect.origin.x);
-    let top = f32::from(rect.origin.y);
-    let width = f32::from(rect.size.width);
-    let height = f32::from(rect.size.height);
-    let radius = radius.clamp(0.0, width.min(height) / 2.0);
-    let right = left + width;
-    let bottom = top + height;
-    builder.move_to(point(px(left + radius), px(top)));
-    builder.line_to(point(px(right - radius), px(top)));
-    builder.curve_to(
-        point(px(right), px(top + radius)),
-        point(px(right), px(top)),
-    );
-    builder.line_to(point(px(right), px(bottom - radius)));
-    builder.curve_to(
-        point(px(right - radius), px(bottom)),
-        point(px(right), px(bottom)),
-    );
-    builder.line_to(point(px(left + radius), px(bottom)));
-    builder.curve_to(
-        point(px(left), px(bottom - radius)),
-        point(px(left), px(bottom)),
-    );
-    builder.line_to(point(px(left), px(top + radius)));
-    builder.curve_to(point(px(left + radius), px(top)), point(px(left), px(top)));
-    builder.close();
-}
-
 fn paint_crop_overlay(
     window: &mut Window,
     bounds: Bounds<Pixels>,
@@ -6985,7 +6937,7 @@ fn paint_spotlight(
         origin: point(px(hole_left), px(hole_top)),
         size: size(px(hole_right - hole_left), px(hole_bottom - hole_top)),
     };
-    push_rounded_rect(&mut builder, hole, radius);
+    crate::ui::push_rounded_rect(&mut builder, hole, radius);
     if let Ok(path) = builder.build() {
         window.paint_path(path, rgba(u32::from(alpha)));
     }
