@@ -308,7 +308,8 @@ mod tests {
         assert_eq!(entries.len(), 3);
         assert_eq!(
             entries.iter().map(|entry| entry.hash).collect::<Vec<_>>(),
-            vec![9, 8, 7]
+            vec![9, 7, 8],
+            "the newer copy of hash 7 stays ahead of hash 8"
         );
         assert!(!directory.join("history-1.png").exists());
         assert!(directory.join("history-3.png").exists());
