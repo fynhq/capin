@@ -30,6 +30,9 @@ const FALLBACK_HOVER_ACCENT: u32 = 0x4c9aff;
 /// Element hover uses a warm second accent so it reads differently from the
 /// window hover that shares the system accent.
 const ELEMENT_HOVER: u32 = 0xffb020;
+/// The whole-screen hover preview uses green so it is distinct from window
+/// and element targets. Actual selections keep their existing accent color.
+const SCREEN_SELECTION: u32 = 0x34c759;
 const MAGNIFIER_SIZE: u32 = 144;
 /// Source pixels shown in the magnifier. An odd count keeps the sampled pixel
 /// exactly in the centre; nine pixels over 144 points gives 16-point blocks,
@@ -1931,6 +1934,8 @@ impl OverlayView {
         };
         log_info!("overlay", "selection pinned");
         let hash = crate::capture_history::hash_frame(&output);
+        let native_shadow =
+            matches!(selected.target, CaptureTarget::Region(_)) && !self.effects.shadow;
         let monitor = self.session.monitor();
         let handles = cx.windows();
         // Opening the pin window inside this input callback would re-enter
@@ -1944,6 +1949,7 @@ impl OverlayView {
                 1.0 / scale,
                 hash,
                 Some(monitor),
+                native_shadow,
                 cx,
             );
         });
@@ -1985,13 +1991,24 @@ impl OverlayView {
                 return;
             }
         };
-        let image = image_util::render_image(&frame);
-        let old_image = std::mem::replace(&mut self.image, image);
-        // Drop the previous full-screen atlas entry through the window that
-        // owns it. Deferring App::drop_image let several refreshes pile up
-        // before the entries were reclaimed.
-        if let Err(error) = window.drop_image(old_image) {
-            log_warn!("overlay", "failed to release refreshed frame: {error}");
+        // F5 usually refreshes a mostly static desktop. Reusing the current
+        // atlas texture when the pixels did not change avoids uploading and
+        // retiring one full-screen texture per press.
+        let same_frame = self.frame.as_ref().is_some_and(|current| {
+            current.width() == frame.width()
+                && current.height() == frame.height()
+                && crate::capture_history::hash_frame(current)
+                    == crate::capture_history::hash_frame(&frame)
+        });
+        if !same_frame {
+            let image = image_util::render_image(&frame);
+            let old_image = std::mem::replace(&mut self.image, image);
+            // Drop the previous full-screen atlas entry through the window
+            // that owns it. Deferring App::drop_image let several refreshes
+            // pile up before the entries were reclaimed.
+            if let Err(error) = window.drop_image(old_image) {
+                log_warn!("overlay", "failed to release refreshed frame: {error}");
+            }
         }
         if let Some(magnifier) = self.magnifier.take()
             && let Err(error) = window.drop_image(magnifier.image)
@@ -3289,6 +3306,7 @@ impl OverlayView {
                 )
         });
 
+        let screen_color = rgba((SCREEN_SELECTION << 8) | 0xFF);
         let mut layers = self.dim_layers_rounded(hole, self.selection_effects_radius());
         if let Some(rect) = selected_bounds {
             layers.push(
@@ -3301,7 +3319,7 @@ impl OverlayView {
         } else if let Some(rect) = hovered_window {
             layers.push(border(rect, self.accent, 0.0).into_any_element());
         } else if let Some(rect) = screen_bounds {
-            layers.push(screen_border(rect, self.chrome.accent).into_any_element());
+            layers.push(screen_border(rect, screen_color).into_any_element());
         }
 
         if self.mode == OverlayMode::Capture
@@ -3459,7 +3477,9 @@ impl OverlayView {
                         return;
                     }
                     if key == "f5" {
-                        this.refresh_frame(window, cx);
+                        if !event.is_held {
+                            this.refresh_frame(window, cx);
+                        }
                         return;
                     }
                     if key == "f1" {
@@ -3518,7 +3538,7 @@ impl OverlayView {
                         this.element_level = 0;
                         this.session.set_hovered_element(None);
                         cx.notify();
-                    } else if key == "f5" {
+                    } else if key == "f5" && !event.is_held {
                         this.refresh_frame(window, cx);
                     }
                 }

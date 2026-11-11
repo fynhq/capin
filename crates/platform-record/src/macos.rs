@@ -671,6 +671,8 @@ fn encode_loop(
             return Err("no frames were captured before the recording stopped".to_owned());
         };
         writer.finish(final_pts)?;
+        crate::mp4::inject_metadata(temp)
+            .map_err(|error| format!("failed to finalize the recording: {error}"))?;
         std::fs::rename(temp, final_output)
             .map_err(|error| format!("failed to publish the recording: {error}"))
     })();

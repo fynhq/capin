@@ -42,8 +42,7 @@ pub fn compose_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> Rgb
 /// macOS window screenshots carry a one-point hairline around the window.
 /// ScreenCaptureKit's desktop-independent window image exposes only the
 /// window's content, so the system outline has to be painted back on the
-/// composed frame. Windows keeps its own DWM frame out of the capture and has
-/// no equivalent hairline.
+/// composed frame.
 #[cfg(target_os = "macos")]
 fn system_border(scale: f32) -> Option<Border> {
     let width = (scale.max(0.1)).round().max(1.0) as u32;
@@ -58,7 +57,23 @@ fn system_border(scale: f32) -> Option<Border> {
     })
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows Graphics Capture returns the window's own dark edge fringe. The
+/// system paints a light inactive hairline (#B6B6B6 in light mode), so replace
+/// that fringe instead of baking a darker border into the screenshot.
+#[cfg(target_os = "windows")]
+fn system_border(_scale: f32) -> Option<Border> {
+    let light = platform_window::system_uses_light_theme().unwrap_or(true);
+    Some(Border {
+        width: 1,
+        color: if light {
+            [0xB6, 0xB6, 0xB6, 0xFF]
+        } else {
+            [0x4C, 0x4C, 0x4C, 0xFF]
+        },
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn system_border(_scale: f32) -> Option<Border> {
     None
 }

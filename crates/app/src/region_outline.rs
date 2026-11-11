@@ -11,15 +11,22 @@ const BORDER_WIDTH: f32 = 3.0;
 const BORDER_COLOR: u32 = 0xFF3B30;
 
 thread_local! {
-    static OUTLINE: std::cell::RefCell<Option<AnyWindowHandle>> =
+    static OUTLINE: std::cell::RefCell<Option<(AnyWindowHandle, Entity<RegionOutline>)>> =
         const { std::cell::RefCell::new(None) };
 }
 
 pub fn close(cx: &mut App) {
-    let handle = OUTLINE.with(|slot| slot.borrow_mut().take());
-    if let Some(handle) = handle {
-        let _ = handle.update(cx, |_, window, _| window.remove_window());
-    }
+    let entry = OUTLINE.with(|slot| slot.borrow_mut().take());
+    let Some((handle, view)) = entry else {
+        return;
+    };
+    // Native window teardown is asynchronous on Windows; hide the border now
+    // so stopping or leaving the completion prompt removes the frame at once.
+    view.update(cx, |this, cx| {
+        this.visible = false;
+        cx.notify();
+    });
+    let _ = handle.update(cx, |_, window, _| window.remove_window());
 }
 
 pub fn open(target: CaptureTarget, cx: &mut App) {
@@ -66,8 +73,8 @@ pub fn open(target: CaptureTarget, cx: &mut App) {
         let _ = platform_window::set_click_through(&*window, true);
         cx.new(|_| RegionOutline { visible })
     }) {
-        Ok((handle, _)) => {
-            OUTLINE.with(|slot| *slot.borrow_mut() = Some(handle));
+        Ok((handle, view)) => {
+            OUTLINE.with(|slot| *slot.borrow_mut() = Some((handle, view)));
         }
         Err(error) => {
             crate::logging::log_error!("outline", "failed to open region outline: {error}")

@@ -496,6 +496,13 @@ impl Drop for Recorder {
             let _ = std::fs::remove_file(&self.flags.output);
             return;
         }
+        if let Err(error) = crate::mp4::inject_metadata(&self.flags.output) {
+            self.flags
+                .shared
+                .fail(format!("failed to finalize the recording: {error}"));
+            let _ = std::fs::remove_file(&self.flags.output);
+            return;
+        }
 
         if let Err(error) = std::fs::rename(&self.flags.output, &self.flags.final_output) {
             self.flags

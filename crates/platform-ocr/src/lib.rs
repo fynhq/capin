@@ -190,6 +190,11 @@ pub(crate) fn build_line_from_words(words: &[(String, PhysicalRect)]) -> Option<
 
 #[allow(dead_code)] // Windows backend only
 fn needs_space(previous: char, next: char) -> bool {
+    // Windows OCR can split a long number into word boxes. Inserting a space
+    // between two digit runs turns one value into two, so keep digits joined.
+    if previous.is_ascii_digit() && next.is_ascii_digit() {
+        return false;
+    }
     let latin = |ch: char| ch.is_ascii_alphanumeric() || ch.is_ascii_punctuation();
     if !latin(previous) || !latin(next) {
         return false;

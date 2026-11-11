@@ -6,9 +6,9 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::POINT as ScreenPoint;
 use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{
-    DWM_WINDOW_CORNER_PREFERENCE, DWMNCRENDERINGPOLICY, DWMNCRP_DISABLED, DWMWA_BORDER_COLOR,
-    DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
-    DwmSetWindowAttribute,
+    DWM_WINDOW_CORNER_PREFERENCE, DWMNCRENDERINGPOLICY, DWMNCRP_DISABLED, DWMNCRP_ENABLED,
+    DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWCP_DONOTROUND, DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
     ClientToScreen, GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO,
@@ -372,6 +372,38 @@ pub(super) fn disable_native_shadow(window: &impl HasWindowHandle) {
     let policy = DWMNCRP_DISABLED;
     // SAFETY: hwnd is live and the policy pointer outlives the call. DWM keeps
     // the client surface; only non-client frame and shadow rendering stop.
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_NCRENDERING_POLICY,
+            &policy as *const _ as *const c_void,
+            size_of::<DWMNCRENDERINGPOLICY>() as u32,
+        );
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// Restores DWM's non-client rendering so a transparent borderless pin gets
+/// the same outer shadow as a normal top-level window. `hide_native_border`
+/// keeps the frame itself invisible.
+pub(super) fn enable_native_shadow(window: &impl HasWindowHandle) {
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = HWND(win32.hwnd.get() as *mut c_void);
+    let policy = DWMNCRP_ENABLED;
+    // SAFETY: hwnd is live and the policy pointer outlives the call.
     unsafe {
         let _ = DwmSetWindowAttribute(
             hwnd,

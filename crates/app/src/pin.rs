@@ -9,8 +9,8 @@ use core_types::{DpiScale, PhysicalRect, PhysicalSize, RgbaFrame};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use platform_window::{
-    WindowStyle, apply as apply_window_style, disable_native_shadow, hide_native_border,
-    place_on_monitor_deferred, set_click_through, system_accent_hex,
+    WindowStyle, apply as apply_window_style, disable_native_shadow, enable_native_shadow,
+    hide_native_border, place_on_monitor_deferred, set_click_through, system_accent_hex,
 };
 use serde::{Deserialize, Serialize};
 
@@ -48,6 +48,10 @@ thread_local! {
     static PIN_MENU: RefCell<Option<AnyWindowHandle>> = const { RefCell::new(None) };
     static MANIFEST_REVISION: Cell<u64> = const { Cell::new(0) };
     static LAST_PIN_TRIGGER: Cell<Option<u64>> = const { Cell::new(None) };
+    /// Native-shadow choice of the pin that set `LAST_PIN_TRIGGER`, so the
+    /// first shortcut press after Esc reopens the same image with the same
+    /// floating edge.
+    static LAST_PIN_SHADOW: Cell<bool> = const { Cell::new(false) };
     /// Signature of the clipboard image seen when the current pin sequence
     /// started. A changed clipboard starts a fresh sequence; an unchanged one
     /// keeps walking the screenshot history even after the previous pin was
@@ -318,6 +322,9 @@ struct PinState {
     opacity: f32,
     zoom: f32,
     click_through: bool,
+    /// Region and long-capture pins have no composed edge shadow, so the
+    /// window itself supplies one. Window captures already bake it in.
+    native_shadow: bool,
     /// Present after the pin has been edited in this session. Rotating or
     /// replacing the image from another source clears it.
     edit_state: Option<PinEditState>,
@@ -337,6 +344,8 @@ struct PersistedPin {
     zoom: f32,
     #[serde(default)]
     click_through: bool,
+    #[serde(default)]
+    shadow: bool,
 }
 
 pub fn pin_last(cx: &mut App) {
@@ -435,6 +444,21 @@ fn pin_history_step(cx: &mut App) -> bool {
     let Some(current) = LAST_PIN_TRIGGER.with(|slot| slot.get()) else {
         return false;
     };
+    // The pin may have just been dismissed with Esc. Reopen that same image
+    // first; only the next press walks to an older history entry.
+    let live = PINS.with(|pins| {
+        pins.borrow()
+            .values()
+            .any(|state| state.content_hash == Some(current))
+    });
+    if !live && let Some(frame) = crate::capture_history::find(current) {
+        open_pin_content_with_shadow(
+            PinContent::from_frame_with_hash(frame, current),
+            LAST_PIN_SHADOW.with(|slot| slot.get()),
+            cx,
+        );
+        return true;
+    }
     if settings_state::get().repeat_pin == settings_state::RepeatPinBehavior::FlashCurrent
         && flash_existing_pin(current, cx)
     {
@@ -503,13 +527,18 @@ fn flash_existing_pin(hash: u64, cx: &mut App) -> bool {
     true
 }
 
-pub fn open_frame_with_hash(frame: RgbaFrame, hash: u64, cx: &mut App) -> Option<u64> {
+pub fn open_frame_with_hash(
+    frame: RgbaFrame,
+    hash: u64,
+    native_shadow: bool,
+    cx: &mut App,
+) -> Option<u64> {
     LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
     let content = PinContent::from_frame_with_hash(frame, hash);
     let zoom = content.preferred_zoom();
     let (width, height) = content.size(zoom);
     let bounds = default_bounds(cx, width, height);
-    open_pin_content_at(content, bounds, zoom, true, None, cx)
+    open_pin_content_at(content, bounds, zoom, true, None, native_shadow, cx)
 }
 
 /// Pins a capture at a screen rectangle using a hash already computed by the
@@ -523,6 +552,7 @@ pub fn open_frame_at_with_hash(
     zoom: f32,
     hash: u64,
     monitor: Option<core_types::MonitorId>,
+    native_shadow: bool,
     cx: &mut App,
 ) -> Option<u64> {
     LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
@@ -545,6 +575,7 @@ pub fn open_frame_at_with_hash(
         zoom,
         true,
         display_id,
+        native_shadow,
         cx,
     )
 }
@@ -555,21 +586,38 @@ fn open_image_pin(frame: RgbaFrame, hash: u64, cx: &mut App) {
 }
 
 fn open_pin_content(content: PinContent, cx: &mut App) {
+    open_pin_content_with_shadow(content, false, cx);
+}
+
+fn open_pin_content_with_shadow(content: PinContent, native_shadow: bool, cx: &mut App) {
     let zoom = content.preferred_zoom();
     let (width, height) = content.size(zoom);
     log_info!("pin", "opening pin {}x{}", width.round(), height.round());
     let bounds = default_bounds(cx, width, height);
     open_pin_inner(
-        content, None, bounds, zoom, 1.0, false, None, true, false, None, cx,
+        content,
+        None,
+        bounds,
+        zoom,
+        1.0,
+        false,
+        None,
+        true,
+        false,
+        native_shadow,
+        None,
+        cx,
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn open_pin_content_at(
     content: PinContent,
     bounds: Bounds<Pixels>,
     zoom: f32,
     record_history: bool,
     display_id: Option<DisplayId>,
+    native_shadow: bool,
     cx: &mut App,
 ) -> Option<u64> {
     let zoom = zoom.clamp(0.1, 4.0);
@@ -590,6 +638,7 @@ fn open_pin_content_at(
         None,
         true,
         record_history,
+        native_shadow,
         display_id,
         cx,
     )
@@ -617,10 +666,12 @@ fn open_pin_inner(
     existing_image: Option<PathBuf>,
     persist: bool,
     record_history: bool,
+    native_shadow: bool,
     display_id: Option<DisplayId>,
     cx: &mut App,
 ) -> Option<u64> {
     let id = id.unwrap_or_else(next_pin_id);
+    LAST_PIN_SHADOW.with(|slot| slot.set(native_shadow));
     let kind = content.kind();
     let content_hash = content.hash();
     let had_existing_image = existing_image.is_some();
@@ -654,10 +705,14 @@ fn open_pin_inner(
             log_error!("pin", "failed to style pin window: {error}");
         }
         hide_native_border(&*window);
-        // A pin owns every pixel it displays: the captured window's edge
-        // shadow is baked into the image, so a second system shadow around the
-        // pin window is wrong.
-        disable_native_shadow(&*window);
+        // Window captures bake their edge shadow into the image and must not
+        // get a second system shadow. Region and long-capture pins have no
+        // composed shadow, so the window supplies the floating edge.
+        if native_shadow {
+            enable_native_shadow(&*window);
+        } else {
+            disable_native_shadow(&*window);
+        }
         if click_through {
             let _ = set_click_through(&*window, true);
         }
@@ -696,6 +751,7 @@ fn open_pin_inner(
                 opacity,
                 zoom,
                 click_through,
+                native_shadow,
                 edit_state: None,
             };
             PINS.with(|pins| {
@@ -798,6 +854,7 @@ pub fn restore(cx: &mut App) {
             existing_image,
             false,
             false,
+            entry.shadow,
             None,
             cx,
         );
@@ -1127,6 +1184,7 @@ fn save_manifest() {
                     opacity: state.opacity,
                     zoom: state.zoom,
                     click_through: state.click_through,
+                    shadow: state.native_shadow,
                 })
             })
             .collect();
@@ -2101,8 +2159,23 @@ impl Render for PinView {
                     return;
                 }
                 if key == "escape" {
-                    let id = this.id;
-                    cx.defer(move |cx| crate::pin::close_pin(id, cx));
+                    if this.click_through {
+                        let id = this.id;
+                        this.click_through = false;
+                        let window_handle =
+                            PINS.with(|pins| pins.borrow().get(&id).map(|state| state.window));
+                        if let Some(handle) = window_handle {
+                            let _ = handle.update(cx, |_, window, _| {
+                                let _ = set_click_through(&*window, false);
+                            });
+                        }
+                        set_state_click_through(id, false);
+                        crate::tray::refresh_menu();
+                        cx.notify();
+                    } else {
+                        let id = this.id;
+                        cx.defer(move |cx| crate::pin::close_pin(id, cx));
+                    }
                     cx.stop_propagation();
                 }
             }))
@@ -2434,6 +2507,10 @@ impl Render for PinMenuView {
         }
         crate::ui::enter_fade(menu, "pin-menu-enter", Duration::from_millis(90))
     }
+}
+
+pub(crate) fn is_pin_menu_open() -> bool {
+    PIN_MENU.with(|slot| slot.borrow().is_some())
 }
 
 fn forget_pin_menu() {

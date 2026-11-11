@@ -21,20 +21,28 @@ fn recognize_on_thread(frame: &RgbaFrame) -> Result<Vec<OcrLine>, OcrError> {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
 
-    // Windows OCR misreads small UI text (0/l/1, e/0) at native scale. Text
-    // crops are often only a few hundred pixels wide, so scale them up before
-    // recognition and map the returned boxes back to the original pixels.
-    let upscale = ocr_upscale(frame.width(), frame.height());
+    let engine = OcrEngine::TryCreateFromUserProfileLanguages()
+        .map_err(platform_error("TryCreateFromUserProfileLanguages"))?;
+    // Windows OCR misreads small UI text (0/l/1, e/0, 5/6) at native scale.
+    // Text crops are often only a few hundred pixels wide, so scale them up
+    // before recognition and map the returned boxes back to the original
+    // pixels. Keep the result inside the engine's maximum bitmap dimension.
+    let upscale = ocr_upscale(
+        frame.width(),
+        frame.height(),
+        OcrEngine::MaxImageDimension().unwrap_or(0),
+    );
     let (bgra, width, height) = ocr_bitmap(frame, upscale);
-    let scale_back = 1.0 / upscale;
+    // Map boxes back with the actual bitmap ratio, not the nominal factor:
+    // rounding the upscaled dimensions would otherwise shift every box.
+    let scale_x = frame.width() as f32 / width.max(1) as f32;
+    let scale_y = frame.height() as f32 / height.max(1) as f32;
 
     let buffer = CryptographicBuffer::CreateFromByteArray(&bgra)
         .map_err(platform_error("CreateFromByteArray"))?;
     let bitmap =
         SoftwareBitmap::CreateCopyFromBuffer(&buffer, BitmapPixelFormat::Bgra8, width, height)
             .map_err(platform_error("CreateCopyFromBuffer"))?;
-    let engine = OcrEngine::TryCreateFromUserProfileLanguages()
-        .map_err(platform_error("TryCreateFromUserProfileLanguages"))?;
     let operation = engine
         .RecognizeAsync(&bitmap)
         .map_err(platform_error("RecognizeAsync"))?;
@@ -64,10 +72,10 @@ fn recognize_on_thread(frame: &RgbaFrame) -> Result<Vec<OcrLine>, OcrError> {
                 .Text()
                 .map_err(platform_error("OcrWord.Text"))?
                 .to_string();
-            let (left, top) = (rect.X * scale_back, rect.Y * scale_back);
+            let (left, top) = (rect.X * scale_x, rect.Y * scale_y);
             let (right, bottom) = (
-                (rect.X + rect.Width) * scale_back,
-                (rect.Y + rect.Height) * scale_back,
+                (rect.X + rect.Width) * scale_x,
+                (rect.Y + rect.Height) * scale_y,
             );
             bounds = Some(match bounds {
                 Some((x0, y0, x1, y1)) => {
@@ -100,21 +108,31 @@ fn recognize_on_thread(frame: &RgbaFrame) -> Result<Vec<OcrLine>, OcrError> {
     Ok(result)
 }
 
-/// Picks an integer upscale factor for OCR. Full-screen 4K captures are left
+/// Picks an integer upscale factor for OCR. Full-screen captures are left
 /// alone; smaller crops gain enough stroke detail for Windows OCR to separate
-/// characters such as `0` from `e` and `l` from `1`.
-fn ocr_upscale(width: u32, height: u32) -> f32 {
+/// characters such as `0` from `e`, `l` from `1`, and `5` from `6`. When the
+/// engine reports a maximum bitmap dimension, the factor is lowered so the
+/// upscaled bitmap still fits.
+fn ocr_upscale(width: u32, height: u32, max_dimension: u32) -> f32 {
     let pixels = u64::from(width).saturating_mul(u64::from(height));
     if pixels == 0 {
         return 1.0;
     }
-    if pixels <= 600_000 {
+    let preferred = if pixels <= 300_000 {
+        4.0
+    } else if pixels <= 1_200_000 {
         3.0
-    } else if pixels <= 2_500_000 {
+    } else if pixels <= 4_000_000 {
         2.0
     } else {
         1.0
+    };
+    if max_dimension == 0 || width == 0 || height == 0 {
+        return preferred;
     }
+    let fit = (max_dimension as f32 / width.max(1) as f32)
+        .min(max_dimension as f32 / height.max(1) as f32);
+    preferred.min(fit).max(1.0)
 }
 
 /// Returns BGRA bytes plus the bitmap dimensions after the upscale pass.
@@ -156,9 +174,16 @@ mod tests {
 
     #[test]
     fn small_text_crops_are_upscaled() {
-        assert_eq!(ocr_upscale(846, 62), 3.0);
-        assert_eq!(ocr_upscale(1323, 1020), 2.0);
-        assert_eq!(ocr_upscale(3840, 2160), 1.0);
-        assert_eq!(ocr_upscale(0, 0), 1.0);
+        assert_eq!(ocr_upscale(846, 62, 0), 4.0);
+        assert_eq!(ocr_upscale(1323, 1020, 0), 3.0);
+        assert_eq!(ocr_upscale(3840, 2160, 0), 1.0);
+        assert_eq!(ocr_upscale(0, 0, 0), 1.0);
+    }
+
+    #[test]
+    fn upscale_respects_engine_maximum_dimension() {
+        let fitted = ocr_upscale(846, 62, 2000);
+        assert!((fitted - 2000.0 / 846.0).abs() < 0.001);
+        assert_eq!(ocr_upscale(9000, 5000, 10000), 1.0);
     }
 }

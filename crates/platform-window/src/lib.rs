@@ -191,7 +191,11 @@ pub fn cursor_screen_position() -> Option<(i32, i32)> {
     {
         windows::cursor_screen_position()
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        macos::cursor_screen_position()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         None
     }
@@ -267,6 +271,25 @@ pub fn disable_native_shadow(window: &impl HasWindowHandle) {
         windows::disable_native_shadow(window);
     }
     #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+    }
+}
+
+/// Restores the platform-drawn outer shadow for a borderless surface. Images
+/// without a composed edge shadow (region captures and long-capture results)
+/// use this so a pinned screenshot still reads as a floating object. No-op on
+/// platforms without a native window shadow.
+pub fn enable_native_shadow(window: &impl HasWindowHandle) {
+    #[cfg(target_os = "windows")]
+    {
+        windows::enable_native_shadow(window);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::enable_native_shadow(window);
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         let _ = window;
     }

@@ -202,6 +202,7 @@ impl RecordBar {
         cx.on_release(|_, cx| {
             crate::hotkey::set_recording_shortcuts(false);
             RECORD_BAR.with(|slot| *slot.borrow_mut() = None);
+            crate::record_spotlight::close(cx);
             crate::region_outline::close(cx);
         })
         .detach();
@@ -259,6 +260,9 @@ impl RecordBar {
                 self.recorder = Some(recorder);
                 self.started.get_or_insert_with(Instant::now);
                 self.status = None;
+                if let Some(highlight) = self.config.cursor_highlight {
+                    crate::record_spotlight::open(self.config.target, highlight.color, cx);
+                }
             }
             Err(error) => {
                 self.completed = true;
@@ -329,6 +333,7 @@ impl RecordBar {
         if let Some(directory) = self.output.parent() {
             cx.open_with_system(directory);
         }
+        self.close(cx);
     }
 
     fn elapsed(&self) -> Duration {
@@ -375,6 +380,7 @@ impl RecordBar {
         };
         self.stopping = true;
         recorder.stop();
+        crate::record_spotlight::close(cx);
         self.status = Some(t(self.language, "record.saving").to_owned());
         cx.notify();
     }
@@ -382,7 +388,10 @@ impl RecordBar {
     fn close(&mut self, cx: &mut Context<Self>) {
         crate::hotkey::set_recording_shortcuts(false);
         RECORD_BAR.with(|slot| *slot.borrow_mut() = None);
+        crate::record_spotlight::close(cx);
         crate::region_outline::close(cx);
+        self.closing = true;
+        cx.notify();
         let handle = self.window_handle;
         cx.defer(move |cx| {
             let _ = handle.update(cx, |_, window, _| window.remove_window());

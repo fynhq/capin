@@ -123,6 +123,17 @@ pub fn contains(hash: u64) -> bool {
     entries().iter().any(|entry| entry.hash == hash)
 }
 
+/// Loads the history entry matching `hash`. Used to reopen a pin that was just
+/// closed without advancing the history walk.
+pub fn find(hash: u64) -> Option<RgbaFrame> {
+    let entries = entries();
+    let directory = history_dir()?;
+    entries
+        .iter()
+        .find(|entry| entry.hash == hash)
+        .and_then(|entry| load_entry(&directory, entry))
+}
+
 /// Loads the newest exported screenshot. The pin shortcut falls back to this
 /// instead of keeping a full decoded frame in memory for the whole session.
 pub fn latest() -> Option<RgbaFrame> {

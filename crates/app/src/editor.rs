@@ -24,7 +24,7 @@ use crate::settings_state::AnnotationColorTool;
 use crate::{i18n::t, icons, image_util, settings_state};
 
 const COMPACT_TOOLBAR_HEIGHT: f32 = 40.0;
-const COMPACT_TOOLBAR_WIDTH: f32 = 700.0;
+const COMPACT_TOOLBAR_WIDTH: f32 = 560.0;
 const OPTIONS_PANEL_HEIGHT: f32 = 46.0;
 const INFO_BAR_HEIGHT: f32 = 28.0;
 const INFO_BAR_WIDTH: f32 = 360.0;
@@ -283,6 +283,42 @@ pub(crate) fn release_images_for_windows(
             .borrow_mut()
             .retain(|(weak, _)| weak.upgrade().is_some());
     });
+}
+
+/// Pins the standalone inline editor (long capture) that owns the pin
+/// shortcut. Overlay editors are handled by `overlay::pin_current` first;
+/// pin editors have nothing new to pin.
+pub(crate) fn has_open_editors() -> bool {
+    EDITOR_VIEWS.with(|views| {
+        views
+            .borrow()
+            .iter()
+            .any(|(view, _)| view.upgrade().is_some())
+    })
+}
+
+pub(crate) fn pin_current(cx: &mut App) -> bool {
+    let views: Vec<Entity<EditorView>> = EDITOR_VIEWS.with(|views| {
+        let mut views = views.borrow_mut();
+        views.retain(|(weak, _)| weak.upgrade().is_some());
+        views
+            .iter()
+            .filter_map(|(weak, _)| weak.upgrade())
+            .collect()
+    });
+    for view in views.into_iter().rev() {
+        let handled = view.update(cx, |editor, cx| {
+            if editor.pin_target.is_some() {
+                return false;
+            }
+            editor.pin(cx);
+            true
+        });
+        if handled {
+            return true;
+        }
+    }
+    false
 }
 
 struct EditorSnapshot {
@@ -2394,11 +2430,14 @@ impl EditorView {
 
     fn delete_selected_annotation(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(id) = self.document.selected() else {
+            log_info!("editor", "delete requested without a selected annotation");
             return false;
         };
         if !self.document.remove(id) {
+            log_info!("editor", "delete failed for annotation {id:?}");
             return false;
         }
+        log_info!("editor", "deleted annotation {id:?}");
         self.status =
             Some(t(settings_state::get().language, "editor.annotation_deleted").to_owned());
         cx.notify();
@@ -3665,7 +3704,7 @@ impl EditorView {
                     .absolute()
                     .left(options_rect.origin.x)
                     .top(options_rect.origin.y)
-                    .w(options_rect.size.width)
+                    .max_w(options_rect.size.width)
                     .h(options_rect.size.height)
                     .px(px(10.0))
                     .flex()
@@ -3826,10 +3865,10 @@ impl EditorView {
                     .flex_row()
                     .items_center()
                     .gap(px(1.0))
-                    .children(capture_actions)
                     .children(pin)
                     .child(copy)
                     .child(save)
+                    .children(capture_actions)
                     .children(more)
                     .child(close),
             );
@@ -4366,6 +4405,16 @@ impl EditorView {
                 let monitor = inline_host
                     .and_then(|inline| inline.capture)
                     .map(|capture| capture.region.monitor);
+                // Window captures already include their composed edge shadow.
+                // Region captures only bake one when the shadow effect is on;
+                // long-capture results never do, so those pins use the native
+                // window shadow instead.
+                let native_shadow = inline_host.is_some_and(|inline| match inline.capture {
+                    Some(capture) => {
+                        matches!(capture.target, CaptureTarget::Region(_)) && !self.effects.shadow
+                    }
+                    None => self.pin_target.is_none(),
+                });
                 if inline_host.is_some() {
                     self.release_images(cx);
                 }
@@ -4382,9 +4431,17 @@ impl EditorView {
                         crate::windows::close_capture_auxiliary(cx, handles);
                     }
                     let id = if let Some((bounds, zoom)) = placement {
-                        crate::pin::open_frame_at_with_hash(output, bounds, zoom, hash, monitor, cx)
+                        crate::pin::open_frame_at_with_hash(
+                            output,
+                            bounds,
+                            zoom,
+                            hash,
+                            monitor,
+                            native_shadow,
+                            cx,
+                        )
                     } else {
-                        crate::pin::open_frame_with_hash(output, hash, cx)
+                        crate::pin::open_frame_with_hash(output, hash, native_shadow, cx)
                     };
                     if let Some(id) = id {
                         crate::pin::set_edit_state(id, edit_state);
@@ -5277,17 +5334,11 @@ impl Render for EditorView {
                 let Some(point) = this.to_image_point(event.position, window) else {
                     return;
                 };
-                // Transforms commit on every move. A platform may swallow the
-                // mouse-up (toolbar overlap, native drag, window boundary);
-                // waiting for it left annotations looking like they snapped
-                // back on release.
+                // Transforms commit on every move and end on mouse-up or
+                // mouse-exit. Do not cancel on `pressed_button == None`: some
+                // Windows move events omit the button state, which made a
+                // selected object impossible to drag.
                 if this.move_draft.is_some() || this.resize_draft.is_some() {
-                    if event.pressed_button.is_none() {
-                        this.move_draft = None;
-                        this.resize_draft = None;
-                        cx.notify();
-                        return;
-                    }
                     let changed = if this.resize_draft.is_some() {
                         this.update_resize(point)
                     } else {
@@ -5726,7 +5777,9 @@ impl Render for EditorView {
                     return;
                 }
                 if key == "f5" {
-                    this.refresh_capture(cx);
+                    if !event.is_held {
+                        this.refresh_capture(cx);
+                    }
                     return;
                 }
                 if key == "enter" {

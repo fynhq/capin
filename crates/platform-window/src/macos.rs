@@ -241,6 +241,22 @@ pub(super) fn apply(
     Ok(())
 }
 
+/// Re-enables AppKit's window shadow. Borderless windows turn it off in
+/// `apply` so pins do not clip their own pixels; region pins restore it.
+pub(super) fn enable_native_shadow(window: &impl HasWindowHandle) {
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    // SAFETY: the handle points to the NSView owned by the live GPUI window.
+    let view = unsafe { &*(appkit.ns_view.as_ptr() as *const NSView) };
+    if let Some(window) = view.window() {
+        window.setHasShadow(true);
+    }
+}
+
 pub(super) fn window_capture_includes_native_shadow() -> bool {
     use objc2_foundation::{NSOperatingSystemVersion, NSProcessInfo};
 
@@ -249,6 +265,35 @@ pub(super) fn window_capture_includes_native_shadow() -> bool {
         minorVersion: 0,
         patchVersion: 0,
     })
+}
+
+/// Physical cursor position in the same top-left global space as
+/// `core-capture`'s monitor bounds: global points multiplied by the scale of
+/// the display under the pointer.
+pub(super) fn cursor_screen_position() -> Option<(i32, i32)> {
+    let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).ok()?;
+    let event = CGEvent::new(source).ok()?;
+    let location = event.location();
+    let displays = CGDisplay::active_displays().ok()?;
+    let display = displays.into_iter().find(|id| {
+        let bounds = CGDisplay::new(*id).bounds();
+        location.x >= bounds.origin.x
+            && location.y >= bounds.origin.y
+            && location.x < bounds.origin.x + bounds.size.width
+            && location.y < bounds.origin.y + bounds.size.height
+    })?;
+    let bounds = CGDisplay::new(display).bounds();
+    let scale = screen_backing_scale(display)
+        .or_else(|| {
+            (bounds.size.width > 0.0)
+                .then(|| CGDisplay::new(display).pixels_wide() as f64 / bounds.size.width)
+        })
+        .unwrap_or(1.0)
+        .max(0.1);
+    Some((
+        (location.x * scale).round() as i32,
+        (location.y * scale).round() as i32,
+    ))
 }
 
 pub(super) fn native_window_id(window: &impl HasWindowHandle) -> Option<u64> {

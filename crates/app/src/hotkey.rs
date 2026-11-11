@@ -25,6 +25,53 @@ mod imp {
         static RECORD_PAUSE_KEY: RefCell<Option<HotKey>> = const { RefCell::new(None) };
         static RECORD_STOP_KEY: RefCell<Option<HotKey>> = const { RefCell::new(None) };
         static REGISTRATION_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+        static THROUGH_ESCAPE_ID: Cell<u32> = const { Cell::new(0) };
+        static THROUGH_ESCAPE_KEY: RefCell<Option<HotKey>> = const { RefCell::new(None) };
+        static THROUGH_ESCAPE_FAILED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// A click-through pin cannot receive key events once the click lands on
+    /// another app. While such pins exist, claim Esc globally so the first
+    /// press restores pin interaction instead of closing the pin.
+    fn sync_through_escape(cx: &mut App) {
+        let wanted = crate::pin::click_through_count() > 0
+            && !crate::overlay::has_open_overlays()
+            && !crate::editor::has_open_editors()
+            && !crate::pin::is_pin_menu_open()
+            && !crate::settings::has_open_settings(cx);
+        let active = THROUGH_ESCAPE_ID.with(|id| id.get() != 0);
+        if wanted == active {
+            return;
+        }
+        MANAGER.with(|slot| {
+            let manager = slot.borrow();
+            let Some(manager) = manager.as_ref() else {
+                return;
+            };
+            if wanted {
+                if THROUGH_ESCAPE_FAILED.with(|failed| failed.get()) {
+                    return;
+                }
+                let hotkey = HotKey::new(None, Code::Escape);
+                match manager.register(hotkey) {
+                    Ok(()) => {
+                        THROUGH_ESCAPE_ID.with(|id| id.set(hotkey.id()));
+                        THROUGH_ESCAPE_KEY.with(|key| *key.borrow_mut() = Some(hotkey));
+                        log_info!("hotkey", "registered click-through escape");
+                    }
+                    Err(error) => {
+                        THROUGH_ESCAPE_FAILED.with(|failed| failed.set(true));
+                        log_warn!("hotkey", "failed to register click-through escape: {error}");
+                    }
+                }
+            } else {
+                if let Some(hotkey) = THROUGH_ESCAPE_KEY.with(|key| key.borrow_mut().take()) {
+                    let _ = manager.unregister(hotkey);
+                }
+                THROUGH_ESCAPE_ID.with(|id| id.set(0));
+                THROUGH_ESCAPE_FAILED.with(|failed| failed.set(false));
+            }
+        });
     }
 
     fn fallback_modifiers() -> Modifiers {
@@ -125,6 +172,7 @@ mod imp {
                         actions.push(event.id());
                     }
                 }
+                cx.update(sync_through_escape);
                 if actions.is_empty() {
                     continue;
                 }
@@ -133,6 +181,7 @@ mod imp {
                     let pin_id = PIN_ID.with(|id| id.get());
                     let record_pause_id = RECORD_PAUSE_ID.with(|id| id.get());
                     let record_stop_id = RECORD_STOP_ID.with(|id| id.get());
+                    let through_escape_id = THROUGH_ESCAPE_ID.with(|id| id.get());
                     let capture_enabled = CAPTURE_ENABLED.with(|enabled| enabled.get());
                     let pin_enabled = PIN_ENABLED.with(|enabled| enabled.get());
                     for id in actions {
@@ -152,9 +201,15 @@ mod imp {
                                 // pin the current selection/editor, not an old
                                 // clipboard image behind the overlay.
                                 let _ = crate::overlay::pin_current(cx);
-                            } else {
+                            } else if !crate::editor::pin_current(cx) {
+                                // A standalone long-capture editor is not an
+                                // overlay; route the shortcut there before
+                                // falling back to screenshot history.
                                 crate::pin::pin_last(cx);
                             }
+                        } else if through_escape_id != 0 && id == through_escape_id {
+                            log_info!("hotkey", "click-through escape pressed");
+                            crate::pin::release_click_through(cx);
                         } else if record_pause_id != 0 && id == record_pause_id {
                             log_info!("hotkey", "recording pause shortcut pressed");
                             crate::record::handle_shortcut(
