@@ -1320,18 +1320,10 @@ impl OverlayView {
                 ColorFormat::Rgb => "RGB",
             };
             div()
-                .id("overlay-magnifier-color")
-                .occlude()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(6.0))
-                .cursor_pointer()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|_, _, _, cx| cx.stop_propagation()),
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.copy_color(cx)))
                 .child(
                     div()
                         .w(px(12.0))
@@ -1349,12 +1341,11 @@ impl OverlayView {
                         .text_color(self.chrome.text)
                         .child(text),
                 )
-                // Formats are also switchable without the keyboard: the
-                // tiny HEX/RGB chip is easier to hit than a modifier edge,
-                // especially on macOS where modifier events can be delayed.
+                // The magnifier follows the pointer; any clickable chip would
+                // move the sampled pixel before it could be clicked. Format
+                // switching and copying stay keyboard-only.
                 .child(
                     div()
-                        .id("overlay-magnifier-format")
                         .px(px(4.0))
                         .py(px(1.0))
                         .rounded(px(4.0))
@@ -1363,15 +1354,6 @@ impl OverlayView {
                         .border_color(self.chrome.border)
                         .text_size(px(9.0))
                         .text_color(self.chrome.muted)
-                        .cursor_pointer()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|_, _, _, cx| cx.stop_propagation()),
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.toggle_color_format(cx);
-                            cx.stop_propagation();
-                        }))
                         .child(format_label),
                 )
         });
