@@ -74,22 +74,24 @@ pub fn magnifier_image(
     Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))
 }
 
-/// Builds the downscaled preview for a box-blur radius. A radius of 16 maps
-/// to the historical preview sigma of 2.0 at one eighth resolution.
+/// Builds the preview for a box-blur radius. The frame is downscaled by two
+/// before the Gaussian pass so the preview keeps the exported radius; the
+/// previous eighth-resolution preview compressed every strength into the same
+/// frosted look.
 pub fn blurred_image(frame: &RgbaFrame, radius: u32) -> Arc<RenderImage> {
     let width = frame.width();
     let height = frame.height();
     let source = image::RgbaImage::from_raw(width, height, frame.pixels().to_vec())
         .expect("capture frames are validated before conversion");
-    let small_width = (width / 8).max(1);
-    let small_height = (height / 8).max(1);
+    let small_width = (width / 2).max(1);
+    let small_height = (height / 2).max(1);
     let small = image::imageops::resize(
         &source,
         small_width,
         small_height,
         image::imageops::FilterType::Triangle,
     );
-    let sigma = (radius.max(1) as f32 / 8.0).max(0.5);
+    let sigma = (radius.max(1) as f32 / 2.0).max(0.5);
     let blurred = image::imageops::blur(&small, sigma);
     let mut pixels = blurred.into_raw();
     for pixel in pixels.as_chunks_mut::<4>().0 {

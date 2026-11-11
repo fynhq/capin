@@ -37,6 +37,8 @@ pub struct AnnotationStyle {
     pub text_alignment: TextAlignment,
     /// Spotlight dimming strength in percent (0-100).
     pub spotlight_intensity: u8,
+    /// Corner radius in image pixels for the `Shape::Spotlight` hole.
+    pub spotlight_radius: f32,
 }
 
 /// Opacity used by the highlighter wash. The marker keeps the pure accent
@@ -65,6 +67,7 @@ impl Default for AnnotationStyle {
             text_outline: false,
             text_alignment: TextAlignment::Left,
             spotlight_intensity: 60,
+            spotlight_radius: 0.0,
         }
     }
 }

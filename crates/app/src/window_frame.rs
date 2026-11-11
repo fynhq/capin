@@ -1,4 +1,6 @@
 use core_compose::{Background, Border, Shadow, WindowCanvas, compose_window};
+#[cfg(target_os = "windows")]
+use core_types::PhysicalRect;
 use core_types::{RgbaFrame, WindowId};
 
 use crate::logging::log_error;
@@ -16,6 +18,11 @@ const SHADOW_OPACITY: f32 = 0.35;
 pub fn compose_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> RgbaFrame {
     let settings = settings_state::get();
     let scale = scale.max(0.1);
+    // WGC returns the window surface with a 1px fringe of non-client pixels.
+    // Painting the old light border over it left a white-looking frame on
+    // dark windows; trim the fringe instead and keep the visible edge clean.
+    #[cfg(target_os = "windows")]
+    let frame = trim_capture_fringe(frame);
     let canvas = WindowCanvas {
         padding: (settings.window_padding as f32 * scale)
             .round()
@@ -54,12 +61,13 @@ fn system_border(scale: f32) -> Option<Border> {
         } else {
             [0xFF, 0xFF, 0xFF, 0x34]
         },
+        outside: false,
     })
 }
 
-/// Windows Graphics Capture returns the window's own dark edge fringe. The
-/// system paints a light inactive hairline (#B6B6B6 in light mode), so replace
-/// that fringe instead of baking a darker border into the screenshot.
+/// Windows window screenshots keep a 1px system border. Paint it in the
+/// padding so it covers the first shadow pixel; an inside border leaves a
+/// light 1px gap between itself and the drop shadow.
 #[cfg(target_os = "windows")]
 fn system_border(_scale: f32) -> Option<Border> {
     let light = platform_window::system_uses_light_theme().unwrap_or(true);
@@ -70,7 +78,24 @@ fn system_border(_scale: f32) -> Option<Border> {
         } else {
             [0x4C, 0x4C, 0x4C, 0xFF]
         },
+        outside: true,
     })
+}
+
+/// Removes the non-client fringe Windows Graphics Capture includes around a
+/// window surface. The fringe reads as a light or dark hairline once the
+/// capture is placed on a background, so every window screenshot would
+/// otherwise get a visible 1px frame.
+#[cfg(target_os = "windows")]
+fn trim_capture_fringe(frame: RgbaFrame) -> RgbaFrame {
+    let width = frame.width();
+    let height = frame.height();
+    if width <= 2 || height <= 2 {
+        return frame;
+    }
+    frame
+        .cropped(PhysicalRect::new(1, 1, width - 2, height - 2))
+        .unwrap_or(frame)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

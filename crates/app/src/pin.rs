@@ -644,6 +644,25 @@ fn open_pin_content_at(
     )
 }
 
+fn align_client_to_bounds(window: &Window, bounds: Bounds<Pixels>) {
+    #[cfg(target_os = "windows")]
+    {
+        let scale = window.scale_factor().max(0.1);
+        let physical = PhysicalRect::new(
+            (f32::from(bounds.origin.x) * scale).round() as i32,
+            (f32::from(bounds.origin.y) * scale).round() as i32,
+            (f32::from(bounds.size.width) * scale).ceil().max(1.0) as u32,
+            (f32::from(bounds.size.height) * scale).ceil().max(1.0) as u32,
+        );
+        let dpi = DpiScale::new(scale).unwrap_or_default();
+        let _ = place_on_monitor_deferred(window, physical, dpi);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (window, bounds);
+    }
+}
+
 fn default_bounds(cx: &App, width: f32, height: f32) -> Bounds<Pixels> {
     let mut bounds = centered_bounds(cx, width, height);
     let cascade = PIN_CASCADE.with(|index| {
@@ -704,7 +723,6 @@ fn open_pin_inner(
         if let Err(error) = apply_window_style(&*window, WindowStyle::PIN) {
             log_error!("pin", "failed to style pin window: {error}");
         }
-        hide_native_border(&*window);
         // Window captures bake their edge shadow into the image and must not
         // get a second system shadow. Region and long-capture pins have no
         // composed shadow, so the window supplies the floating edge.
@@ -713,6 +731,15 @@ fn open_pin_inner(
         } else {
             disable_native_shadow(&*window);
         }
+        // Hide the non-client border after the shadow policy: enabling
+        // NC rendering can restore DWM's 1px outline, which reads as a white
+        // frame around dark captures.
+        hide_native_border(&*window);
+        // GPUI centre-splits the popup's resize frame when it first places
+        // the window. The frame sits on the left, right and bottom only, so
+        // that split lifts the client area a few pixels above the requested
+        // rect. Re-place the client area once the native frame is final.
+        align_client_to_bounds(&*window, bounds);
         if click_through {
             let _ = set_click_through(&*window, true);
         }
@@ -730,6 +757,9 @@ fn open_pin_inner(
         view.update(cx, |view, cx| {
             view.watch_close(window, cx);
         });
+        // The DWM frame settles one turn after the shadow policy changes;
+        // repeat the client alignment once the window has laid out.
+        window.defer(cx, move |window, _| align_client_to_bounds(window, bounds));
         view
     }) {
         Ok((window, entity)) => {
@@ -1716,8 +1746,8 @@ impl PinView {
         let physical = PhysicalRect::new(
             (f32::from(origin.x) * scale).round() as i32,
             (f32::from(origin.y) * scale).round() as i32,
-            (width * scale).round().max(1.0) as u32,
-            (height * scale).round().max(1.0) as u32,
+            (width * scale).ceil().max(1.0) as u32,
+            (height * scale).ceil().max(1.0) as u32,
         );
         // Update the content scale before moving the native frame so a
         // repaint driven by the resize already draws the new image.

@@ -67,6 +67,7 @@ pub fn rasterize(
                 expected,
                 rect,
                 annotation.style.spotlight_intensity,
+                annotation.style.spotlight_radius,
             );
             continue;
         }
@@ -357,28 +358,40 @@ fn blend_channel(source: f32, coverage: f32, destination: u8, inverse: f32) -> u
 }
 
 fn rounded_rect_path(rect: PhysicalRect, radius: f32) -> Result<Path, RasterError> {
+    let mut builder = PathBuilder::new();
+    push_rounded_rect(&mut builder, rect, radius)?;
+    builder.finish().ok_or(RasterError::InvalidGeometry)
+}
+
+/// Appends one closed rounded rectangle to `builder`. The radius is clamped to
+/// half of the shorter side so extreme corner values still produce a valid
+/// path.
+fn push_rounded_rect(
+    builder: &mut PathBuilder,
+    rect: PhysicalRect,
+    radius: f32,
+) -> Result<(), RasterError> {
     let rect = to_skia_rect(rect)?;
     let radius = radius.max(0.0).min(rect.width().min(rect.height()) / 2.0);
-    let mut builder = PathBuilder::new();
     if radius < 0.5 {
         builder.push_rect(rect);
-    } else {
-        let left = rect.left();
-        let top = rect.top();
-        let right = rect.right();
-        let bottom = rect.bottom();
-        builder.move_to(left + radius, top);
-        builder.line_to(right - radius, top);
-        builder.quad_to(right, top, right, top + radius);
-        builder.line_to(right, bottom - radius);
-        builder.quad_to(right, bottom, right - radius, bottom);
-        builder.line_to(left + radius, bottom);
-        builder.quad_to(left, bottom, left, bottom - radius);
-        builder.line_to(left, top + radius);
-        builder.quad_to(left, top, left + radius, top);
-        builder.close();
+        return Ok(());
     }
-    builder.finish().ok_or(RasterError::InvalidGeometry)
+    let left = rect.left();
+    let top = rect.top();
+    let right = rect.right();
+    let bottom = rect.bottom();
+    builder.move_to(left + radius, top);
+    builder.line_to(right - radius, top);
+    builder.quad_to(right, top, right, top + radius);
+    builder.line_to(right, bottom - radius);
+    builder.quad_to(right, bottom, right - radius, bottom);
+    builder.line_to(left + radius, bottom);
+    builder.quad_to(left, bottom, left, bottom - radius);
+    builder.line_to(left, top + radius);
+    builder.quad_to(left, top, left + radius, top);
+    builder.close();
+    Ok(())
 }
 
 #[cfg(test)]
@@ -451,7 +464,13 @@ fn draw_number(pixmap: &mut Pixmap, annotation: &Annotation) {
     draw_text(pixmap, &text_annotation);
 }
 
-fn draw_spotlight(pixmap: &mut Pixmap, size: PhysicalSize, rect: PhysicalRect, intensity: u8) {
+fn draw_spotlight(
+    pixmap: &mut Pixmap,
+    size: PhysicalSize,
+    rect: PhysicalRect,
+    intensity: u8,
+    radius: f32,
+) {
     let image_width = size.width as i64;
     let image_height = size.height as i64;
     let left = i64::from(rect.origin.x).clamp(0, image_width);
@@ -461,40 +480,32 @@ fn draw_spotlight(pixmap: &mut Pixmap, size: PhysicalSize, rect: PhysicalRect, i
     if right <= left || bottom <= top {
         return;
     }
+    let hole = PhysicalRect::new(
+        left as i32,
+        top as i32,
+        (right - left) as u32,
+        (bottom - top) as u32,
+    );
 
-    let alpha = (u32::from(intensity.min(100)) * 255 / 100) as u8;
-    let color = (0, 0, 0, alpha);
-    fill_rect(pixmap, 0, 0, image_width, top, color);
-    fill_rect(pixmap, 0, bottom, image_width, image_height - bottom, color);
-    fill_rect(pixmap, 0, top, left, bottom - top, color);
-    fill_rect(pixmap, right, top, image_width - right, bottom - top, color);
-}
-
-fn fill_rect(
-    pixmap: &mut Pixmap,
-    x: i64,
-    y: i64,
-    width: i64,
-    height: i64,
-    color: (u8, u8, u8, u8),
-) {
-    if width <= 0 || height <= 0 {
-        return;
-    }
-    let Some(rect) = Rect::from_xywh(x as f32, y as f32, width as f32, height as f32) else {
+    let Some(canvas) = Rect::from_xywh(0.0, 0.0, image_width as f32, image_height as f32) else {
         return;
     };
     let mut builder = PathBuilder::new();
-    builder.push_rect(rect);
+    builder.push_rect(canvas);
+    if push_rounded_rect(&mut builder, hole, radius).is_err() {
+        return;
+    }
     let Some(path) = builder.finish() else {
         return;
     };
+
+    let alpha = (u32::from(intensity.min(100)) * 255 / 100) as u8;
     let mut paint = Paint::default();
-    paint.set_color_rgba8(color.0, color.1, color.2, color.3);
+    paint.set_color_rgba8(0, 0, 0, alpha);
     pixmap.as_mut().fill_path(
         &path,
         &paint,
-        tiny_skia::FillRule::Winding,
+        tiny_skia::FillRule::EvenOdd,
         Transform::identity(),
         None,
     );
@@ -1052,6 +1063,35 @@ mod tests {
             "spotlight should dim the outside: {outside:?}"
         );
         assert_eq!(pixel(&output, 30, 30), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn spotlight_radius_rounds_the_hole_corners() {
+        let frame = RgbaFrame::from_pixels(60, 60, [255, 255, 255, 255].repeat(60 * 60)).unwrap();
+        let mut rounded = document(60, 60);
+        rounded.add(
+            Shape::Spotlight(PhysicalRect::new(20, 20, 20, 20)),
+            AnnotationStyle {
+                spotlight_intensity: 100,
+                spotlight_radius: 8.0,
+                ..Default::default()
+            },
+        );
+        let output = rasterize(&rounded, &frame).unwrap();
+        // The sharp hole corner is dimmed once the hole gets a radius, while
+        // the centre stays fully clear.
+        assert!(pixel(&output, 21, 21)[0] < 100);
+        assert_eq!(pixel(&output, 30, 30), [255, 255, 255, 255]);
+        let mut square = document(60, 60);
+        square.add(
+            Shape::Spotlight(PhysicalRect::new(20, 20, 20, 20)),
+            AnnotationStyle {
+                spotlight_intensity: 100,
+                ..Default::default()
+            },
+        );
+        let output = rasterize(&square, &frame).unwrap();
+        assert_eq!(pixel(&output, 21, 21), [255, 255, 255, 255]);
     }
 
     #[test]

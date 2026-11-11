@@ -39,6 +39,10 @@ pub struct Border {
     pub width: u32,
     /// Non-premultiplied border color.
     pub color: [u8; 4],
+    /// Paint the ring on the canvas outside the window instead of inside its
+    /// content. Window captures use this so the border covers the first
+    /// shadow pixel; an inside border leaves a light 1px gap outside it.
+    pub outside: bool,
 }
 
 /// The background painted behind the window.
@@ -283,6 +287,10 @@ fn paint_border(
     corner_radius: u32,
     border: &Border,
 ) {
+    if border.outside {
+        paint_border_outside(pixels, canvas_width, padding, window, corner_radius, border);
+        return;
+    }
     let width = border.width;
     let color_alpha = f32::from(border.color[3]);
     if width == 0 || color_alpha <= 0.0 {
@@ -334,32 +342,145 @@ fn paint_border(
     }
 }
 
+/// Paints the border into the padding around the window. The ring is the
+/// difference between a rounded rectangle expanded by `width` and the window
+/// itself, so it follows the corners and covers the first shadow pixels.
+fn paint_border_outside(
+    pixels: &mut [u8],
+    canvas_width: u32,
+    padding: u32,
+    window: &RgbaFrame,
+    corner_radius: u32,
+    border: &Border,
+) {
+    let width = border.width;
+    let color_alpha = f32::from(border.color[3]);
+    if width == 0 || color_alpha <= 0.0 || padding < width {
+        return;
+    }
+    let window_width = window.width();
+    let window_height = window.height();
+    if window_width == 0 || window_height == 0 {
+        return;
+    }
+    let outer_width = window_width + width * 2;
+    let outer_height = window_height + width * 2;
+    let outer_radius = corner_radius + width;
+    let origin_x = padding - width;
+    let origin_y = padding - width;
+    let right = (padding + window_width + width).min(canvas_width);
+    let canvas_height = (pixels.len() / 4 / canvas_width as usize) as u32;
+    let bottom = (padding + window_height + width).min(canvas_height);
+
+    for y in origin_y..bottom {
+        for x in origin_x..right {
+            let point_x = x as f32 + 0.5;
+            let point_y = y as f32 + 0.5;
+            let outer = rounded_coverage_point(
+                point_x - origin_x as f32,
+                point_y - origin_y as f32,
+                outer_width as f32,
+                outer_height as f32,
+                outer_radius as f32,
+            );
+            if outer <= 0.0 {
+                continue;
+            }
+            let inner = rounded_coverage_point(
+                point_x - padding as f32,
+                point_y - padding as f32,
+                window_width as f32,
+                window_height as f32,
+                corner_radius as f32,
+            );
+            let coverage = (outer * (1.0 - inner)).clamp(0.0, 1.0);
+            if coverage <= 0.0 {
+                continue;
+            }
+            let target_offset = (y as usize * canvas_width as usize + x as usize) * 4;
+            let alpha = (color_alpha * coverage).round().clamp(0.0, 255.0) as u8;
+            blend_pixel(
+                &mut pixels[target_offset..target_offset + 4],
+                [border.color[0], border.color[1], border.color[2], alpha],
+            );
+        }
+    }
+}
+
 fn rounded_coverage(x: u32, y: u32, width: u32, height: u32, radius: u32) -> f32 {
     if width == 0 || height == 0 {
         return 0.0;
     }
-    let radius = radius.min(width / 2).min(height / 2) as f32;
-    if radius <= 0.0 {
-        return 1.0;
-    }
+    rounded_coverage_point(
+        x as f32 + 0.5,
+        y as f32 + 0.5,
+        width as f32,
+        height as f32,
+        radius as f32,
+    )
+}
 
-    let half_width = width as f32 / 2.0;
-    let half_height = height as f32 / 2.0;
-    let point_x = x as f32 + 0.5;
-    let point_y = y as f32 + 0.5;
+/// Coverage of a rounded rectangle at an arbitrary (possibly out-of-bounds)
+/// point. `point_x`/`point_y` are absolute canvas coordinates; the rectangle
+/// starts at the origin.
+fn rounded_coverage_point(point_x: f32, point_y: f32, width: f32, height: f32, radius: f32) -> f32 {
+    if width <= 0.0 || height <= 0.0 {
+        return 0.0;
+    }
+    let radius = radius.max(0.0).min(width.min(height) / 2.0);
+    let half_width = width / 2.0;
+    let half_height = height / 2.0;
+    if radius <= 0.0 {
+        let inside = point_x >= 0.0 && point_y >= 0.0 && point_x <= width && point_y <= height;
+        return if inside { 1.0 } else { 0.0 };
+    }
     let qx = (point_x - half_width).abs() - (half_width - radius);
     let qy = (point_y - half_height).abs() - (half_height - radius);
+
+    let outside_box = point_x < 0.0 || point_y < 0.0 || point_x > width || point_y > height;
 
     // Every interior row/column is a straight edge; only the four corner
     // quadrants need the rounded-distance sqrt. This keeps 4K window
     // captures from evaluating the corner math for millions of pixels.
     if qx <= 0.0 || qy <= 0.0 {
-        return 1.0;
+        return if outside_box { 0.0 } else { 1.0 };
+    }
+    if (qx * qx + qy * qy).sqrt() - radius > 1.0 {
+        return 0.0;
     }
 
-    let outside = (qx * qx + qy * qy).sqrt();
-    let distance = outside - radius;
-    (0.5 - distance).clamp(0.0, 1.0)
+    // Supersample the arc instead of estimating a one-pixel distance band.
+    const STEPS: u32 = 8;
+    let mut covered = 0u32;
+    for step_y in 0..STEPS {
+        let sample_y = point_y - 0.5 + (step_y as f32 + 0.5) / STEPS as f32;
+        let corner_y = if sample_y < half_height {
+            radius
+        } else {
+            height - radius
+        };
+        for step_x in 0..STEPS {
+            let sample_x = point_x - 0.5 + (step_x as f32 + 0.5) / STEPS as f32;
+            let inside = if (radius..=width - radius).contains(&sample_x)
+                || (radius..=height - radius).contains(&sample_y)
+            {
+                true
+            } else {
+                let corner_x = if sample_x < half_width {
+                    radius
+                } else {
+                    width - radius
+                };
+                let dx = sample_x - corner_x;
+                let dy = sample_y - corner_y;
+                dx * dx + dy * dy <= radius * radius
+            };
+            if inside {
+                covered += 1;
+            }
+        }
+    }
+    covered as f32 / (STEPS * STEPS) as f32
 }
 
 fn blur_alpha(mask: &mut [u8], width: u32, height: u32, radius: u32) {
@@ -495,6 +616,51 @@ mod tests {
     }
 
     #[test]
+    fn outside_border_covers_the_padding_edge() {
+        let window = solid_frame(10, 10, [200, 50, 50, 255]);
+        let options = WindowCanvas {
+            padding: 2,
+            corner_radius: 4,
+            shadow: None,
+            background: Background::Transparent,
+            border: Some(Border {
+                width: 1,
+                color: [0, 255, 0, 255],
+                outside: true,
+            }),
+        };
+        let output = compose_window(&window, &options).unwrap();
+        // The ring sits at x/y 1..3, outside the window content at 2..12.
+        assert_eq!(output.pixel(1, 6).unwrap(), [0, 255, 0, 255]);
+        assert_eq!(output.pixel(2, 6).unwrap(), [200, 50, 50, 255]);
+        assert_eq!(output.pixel(13, 6).unwrap()[3], 0);
+    }
+
+    #[test]
+    fn rounded_corners_are_supersampled() {
+        let window = solid_frame(24, 24, [20, 20, 20, 255]);
+        let options = WindowCanvas {
+            padding: 0,
+            corner_radius: 10,
+            shadow: None,
+            background: Background::Transparent,
+            border: None,
+        };
+        let output = compose_window(&window, &options).unwrap();
+        let mut levels = std::collections::BTreeSet::new();
+        for y in 0..10 {
+            for x in 0..10 {
+                levels.insert(output.pixel(x, y).unwrap()[3]);
+            }
+        }
+        assert!(
+            levels.iter().any(|alpha| *alpha > 0 && *alpha < 255),
+            "corner arc needs intermediate alpha: {levels:?}"
+        );
+        assert!(levels.len() >= 5, "corner arc is too steppy: {levels:?}");
+    }
+
+    #[test]
     fn zero_radius_keeps_square_corners() {
         let window = solid_frame(6, 6, [200, 50, 50, 255]);
         let options = WindowCanvas {
@@ -520,6 +686,7 @@ mod tests {
             border: Some(Border {
                 width: 2,
                 color: [0, 255, 0, 255],
+                outside: false,
             }),
         };
         let output = compose_window(&window, &options).unwrap();
@@ -539,6 +706,7 @@ mod tests {
             border: Some(Border {
                 width: 1,
                 color: [0, 0, 0, 255],
+                outside: false,
             }),
         };
         let output = compose_window(&window, &options).unwrap();

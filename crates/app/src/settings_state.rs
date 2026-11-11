@@ -205,12 +205,16 @@ pub struct AppSettings {
     pub annotation_text_outline: bool,
     pub annotation_text_alignment: TextAlignment,
     pub annotation_corner_radius: f32,
+    /// Sequence badge diameter in logical pixels.
+    pub annotation_number_size: u32,
     pub annotation_blur_radius: u32,
     pub annotation_rect_filled: bool,
     pub annotation_ellipse_filled: bool,
     /// New rectangle-tool annotations use the ellipse form.
     pub annotation_rect_ellipse: bool,
     pub annotation_spotlight_intensity: u8,
+    /// Rounded corner radius of the spotlight hole in logical pixels.
+    pub annotation_spotlight_radius: f32,
     pub pin_text_ocr: bool,
     pub pin_qr: bool,
 }
@@ -271,11 +275,13 @@ impl Default for AppSettings {
             annotation_text_outline: false,
             annotation_text_alignment: TextAlignment::Left,
             annotation_corner_radius: 0.0,
+            annotation_number_size: 32,
             annotation_blur_radius: 16,
             annotation_rect_filled: false,
             annotation_ellipse_filled: false,
             annotation_rect_ellipse: false,
             annotation_spotlight_intensity: 60,
+            annotation_spotlight_radius: 0.0,
             pin_text_ocr: true,
             pin_qr: true,
         }
@@ -452,6 +458,11 @@ fn parse(text: &str) -> AppSettings {
                     settings.annotation_corner_radius = radius.clamp(0.0, 64.0);
                 }
             }
+            "annotation_number_size" => {
+                if let Ok(size) = value.parse::<u32>() {
+                    settings.annotation_number_size = size.clamp(8, 96);
+                }
+            }
             "annotation_blur_radius" => {
                 if let Ok(radius) = value.parse::<u32>() {
                     settings.annotation_blur_radius = radius.clamp(1, 64);
@@ -463,6 +474,13 @@ fn parse(text: &str) -> AppSettings {
             "annotation_spotlight_intensity" => {
                 if let Ok(intensity) = value.parse::<u8>() {
                     settings.annotation_spotlight_intensity = intensity.min(100);
+                }
+            }
+            "annotation_spotlight_radius" => {
+                if let Ok(radius) = value.parse::<f32>()
+                    && radius.is_finite()
+                {
+                    settings.annotation_spotlight_radius = radius.clamp(0.0, 64.0);
                 }
             }
             key if key.starts_with("annotation_color_") => {
@@ -595,7 +613,7 @@ fn serialize(settings: &AppSettings) -> String {
         settings.repeat_pin.code(),
     ));
     text.push_str(&format!(
-        "annotation_uniform_color={}\nannotation_rect_stroke_width={}\nannotation_arrow_stroke_width={}\nannotation_font_size={}\nannotation_arrow_start={}\nannotation_arrow_end={}\nannotation_arrow_polyline={}\nannotation_text_background={}\nannotation_text_outline={}\nannotation_text_alignment={}\nannotation_corner_radius={}\nannotation_blur_radius={}\nannotation_rect_filled={}\nannotation_ellipse_filled={}\nannotation_rect_ellipse={}\nannotation_spotlight_intensity={}\n",
+        "annotation_uniform_color={}\nannotation_rect_stroke_width={}\nannotation_arrow_stroke_width={}\nannotation_font_size={}\nannotation_arrow_start={}\nannotation_arrow_end={}\nannotation_arrow_polyline={}\nannotation_text_background={}\nannotation_text_outline={}\nannotation_text_alignment={}\nannotation_corner_radius={}\nannotation_number_size={}\nannotation_blur_radius={}\nannotation_rect_filled={}\nannotation_ellipse_filled={}\nannotation_rect_ellipse={}\nannotation_spotlight_intensity={}\nannotation_spotlight_radius={}\n",
         settings.annotation_uniform_color,
         settings.annotation_rect_stroke_width,
         settings.annotation_arrow_stroke_width,
@@ -607,11 +625,13 @@ fn serialize(settings: &AppSettings) -> String {
         settings.annotation_text_outline,
         text_alignment_code(settings.annotation_text_alignment),
         settings.annotation_corner_radius,
+        settings.annotation_number_size,
         settings.annotation_blur_radius,
         settings.annotation_rect_filled,
         settings.annotation_ellipse_filled,
         settings.annotation_rect_ellipse,
         settings.annotation_spotlight_intensity,
+        settings.annotation_spotlight_radius,
     ));
     for tool in AnnotationColorTool::ALL {
         text.push_str(&format!(
@@ -762,11 +782,13 @@ mod tests {
             annotation_text_outline: true,
             annotation_text_alignment: TextAlignment::Center,
             annotation_corner_radius: 16.0,
+            annotation_number_size: 40,
             annotation_blur_radius: 32,
             annotation_rect_filled: true,
             annotation_ellipse_filled: true,
             annotation_rect_ellipse: true,
             annotation_spotlight_intensity: 80,
+            annotation_spotlight_radius: 16.0,
             ..Default::default()
         };
         settings.apply_annotation_color(AnnotationColorTool::Rect, 0xFFCC00FF);

@@ -19,6 +19,13 @@ const TAG_ENCODER: [u8; 4] = [A9, b'e', b'n', b'c'];
 const TAG_URL: [u8; 4] = [A9, b'u', b'r', b'l'];
 const TAGS: [([u8; 4], &str); 2] = [(TAG_ENCODER, ENCODER), (TAG_URL, PROJECT_URL)];
 
+/// Windows Explorer and Windows Media Player read descriptive MP4 metadata
+/// from the proprietary `udta/Xtra` box rather than the iTunes `ilst` tags.
+/// The names must match the WM/ property names exactly.
+const XTRA_ENCODER: &str = "WM/EncodedBy";
+const XTRA_URL: &str = "WM/AuthorURL";
+const XTRA_TAGS: [(&str, &str); 2] = [(XTRA_ENCODER, ENCODER), (XTRA_URL, PROJECT_URL)];
+
 #[derive(Clone, Copy)]
 struct BoxSpan {
     kind: [u8; 4],
@@ -181,13 +188,18 @@ fn child_payload<'a>(payload: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
 
 fn update_udta(payload: &[u8]) -> Result<Vec<u8>, String> {
     let children = parse_boxes(payload)?;
-    let mut rebuilt = Vec::with_capacity(payload.len() + 160);
+    let mut rebuilt = Vec::with_capacity(payload.len() + 256);
     let mut replaced = false;
+    let mut xtra_replaced = false;
     for child in &children {
         if &child.kind == b"meta" {
             let meta = update_meta(&payload[child.payload_range()])?;
             rebuilt.extend_from_slice(&make_box(b"meta", &meta));
             replaced = true;
+        } else if &child.kind == b"Xtra" {
+            let xtra = update_xtra(&payload[child.payload_range()]);
+            rebuilt.extend_from_slice(&make_box(b"Xtra", &xtra));
+            xtra_replaced = true;
         } else {
             rebuilt.extend_from_slice(&payload[child.start..child.start + child.size]);
         }
@@ -196,7 +208,77 @@ fn update_udta(payload: &[u8]) -> Result<Vec<u8>, String> {
         let ilst = update_ilst(&[])?;
         rebuilt.extend_from_slice(&make_meta(&ilst));
     }
+    if !xtra_replaced {
+        rebuilt.extend_from_slice(&make_box(b"Xtra", &update_xtra(&[])));
+    }
     Ok(rebuilt)
+}
+
+/// Rewrites the Windows `Xtra` records so Explorer's Details tab shows the
+/// encoder and author URL. Each record is
+/// `size(u32) name_len(u32) name type(u32) value_len(u32) value`, where both
+/// size fields include their own four bytes and the value starts with the
+/// fixed `0x0008` marker followed by UTF-16LE text and a null terminator.
+fn update_xtra(payload: &[u8]) -> Vec<u8> {
+    let mut rebuilt = Vec::with_capacity(payload.len() + 160);
+    let mut offset = 0;
+    while offset + 16 <= payload.len() {
+        let Some(record) = xtra_record_at(payload, offset) else {
+            // An unknown layout is replaced as a whole: keeping arbitrary
+            // bytes risks a box Explorer cannot parse.
+            rebuilt.clear();
+            break;
+        };
+        if !XTRA_TAGS.iter().any(|(name, _)| record.name == *name) {
+            rebuilt.extend_from_slice(&payload[offset..offset + record.size]);
+        }
+        offset += record.size;
+    }
+    for (name, value) in XTRA_TAGS {
+        rebuilt.extend_from_slice(&make_xtra_record(name, value));
+    }
+    rebuilt
+}
+
+struct XtraRecord<'a> {
+    name: &'a str,
+    size: usize,
+}
+
+fn xtra_record_at(payload: &[u8], offset: usize) -> Option<XtraRecord<'_>> {
+    let read = |at: usize| -> Option<usize> {
+        Some(u32::from_be_bytes(payload.get(at..at + 4)?.try_into().ok()?) as usize)
+    };
+    let size = read(offset)?;
+    if size < 16 || offset + size > payload.len() {
+        return None;
+    }
+    let name_len = read(offset + 4)?;
+    if name_len == 0 || offset + 8 + name_len + 8 > offset + size {
+        return None;
+    }
+    let name = std::str::from_utf8(payload.get(offset + 8..offset + 8 + name_len)?).ok()?;
+    Some(XtraRecord { name, size })
+}
+
+fn make_xtra_record(name: &str, value: &str) -> Vec<u8> {
+    let name = name.as_bytes();
+    let mut text = Vec::with_capacity(value.len() * 2 + 4);
+    text.extend_from_slice(&[0x00, 0x08]);
+    for unit in value.encode_utf16() {
+        text.extend_from_slice(&unit.to_le_bytes());
+    }
+    text.extend_from_slice(&[0x00, 0x00]);
+    let value_len = 4 + text.len();
+    let size = 16 + name.len() + text.len();
+    let mut record = Vec::with_capacity(size);
+    record.extend_from_slice(&(size as u32).to_be_bytes());
+    record.extend_from_slice(&(name.len() as u32).to_be_bytes());
+    record.extend_from_slice(name);
+    record.extend_from_slice(&1u32.to_be_bytes());
+    record.extend_from_slice(&(value_len as u32).to_be_bytes());
+    record.extend_from_slice(&text);
+    record
 }
 
 fn update_meta(payload: &[u8]) -> Result<Vec<u8>, String> {
@@ -335,6 +417,68 @@ mod tests {
         let moov = &patched[moov_box.payload_range()];
         assert_eq!(tag_value(moov, TAG_ENCODER).as_deref(), Some(ENCODER));
         assert_eq!(tag_value(moov, TAG_URL).as_deref(), Some(PROJECT_URL));
+        let _ = fs::remove_file(&path);
+    }
+
+    fn xtra_value(moov: &[u8], name: &str) -> Option<String> {
+        let udta = child(moov, b"udta")?;
+        let udta = &moov[udta.payload_range()];
+        let xtra = child(udta, b"Xtra")?;
+        let payload = &udta[xtra.payload_range()];
+        let mut offset = 0;
+        while offset + 16 <= payload.len() {
+            let size = u32::from_be_bytes(payload[offset..offset + 4].try_into().ok()?) as usize;
+            if size < 16 || offset + size > payload.len() {
+                return None;
+            }
+            let name_len =
+                u32::from_be_bytes(payload[offset + 4..offset + 8].try_into().ok()?) as usize;
+            let record_name =
+                std::str::from_utf8(&payload[offset + 8..offset + 8 + name_len]).ok()?;
+            if record_name == name {
+                let value_len = u32::from_be_bytes(
+                    payload[offset + 12 + name_len..offset + 16 + name_len]
+                        .try_into()
+                        .ok()?,
+                ) as usize;
+                let value = &payload[offset + 16 + name_len..offset + size];
+                assert_eq!(value_len, 4 + value.len());
+                assert_eq!(&value[..2], &[0x00, 0x08]);
+                let text = &value[2..];
+                let units: Vec<u16> = text[..text.len() - 2]
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| u16::from_le_bytes(*pair))
+                    .collect();
+                return Some(String::from_utf16_lossy(&units));
+            }
+            offset += size;
+        }
+        None
+    }
+
+    #[test]
+    fn writes_windows_xtra_tags_for_explorer() {
+        let path = temp_path("xtra");
+        let moov = make_box(
+            b"moov",
+            &make_box(
+                b"udta",
+                &make_box(b"Xtra", &make_xtra_record("WM/Other", "keep")),
+            ),
+        );
+        let mut file = make_box(b"mdat", &[1u8; 8]);
+        file.extend_from_slice(&moov);
+        fs::write(&path, &file).unwrap();
+
+        inject_metadata(&path).unwrap();
+        let patched = fs::read(&path).unwrap();
+        let boxes = parse_boxes(&patched).unwrap();
+        let moov = &patched[boxes.last().unwrap().payload_range()];
+        assert_eq!(xtra_value(moov, XTRA_ENCODER).as_deref(), Some(ENCODER));
+        assert_eq!(xtra_value(moov, XTRA_URL).as_deref(), Some(PROJECT_URL));
+        assert_eq!(xtra_value(moov, "WM/Other").as_deref(), Some("keep"));
         let _ = fs::remove_file(&path);
     }
 

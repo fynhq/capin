@@ -12,7 +12,9 @@ use core_types::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use platform_window::{WindowStyle, apply as apply_window_style, system_accent_hex};
+use platform_window::{
+    WindowStyle, apply as apply_window_style, hide_native_border, system_accent_hex,
+};
 
 use crate::chrome_theme::ChromeTheme;
 use crate::effects::RegionEffects;
@@ -29,11 +31,11 @@ const OPTIONS_PANEL_HEIGHT: f32 = 46.0;
 const INFO_BAR_HEIGHT: f32 = 28.0;
 const INFO_BAR_WIDTH: f32 = 360.0;
 const TOOLBAR_SIZE: u32 = 30;
-const BADGE_SIZE: u32 = 32;
 
 const STROKE_WIDTHS: [f32; 3] = [2.0, 4.0, 8.0];
 const FONT_SIZES: [f32; 4] = [14.0, 20.0, 28.0, 36.0];
 const CORNER_RADII: [f32; 4] = [0.0, 8.0, 16.0, 24.0];
+const NUMBER_SIZES: [u32; 4] = [24, 32, 40, 48];
 const BLUR_RADII: [u32; 4] = [8, 16, 24, 32];
 const SPOTLIGHT_INTENSITIES: [u8; 3] = [40, 60, 80];
 const CANVAS_HISTORY_LIMIT: usize = 3;
@@ -736,7 +738,13 @@ pub(crate) struct EditorView {
     text_background: bool,
     text_outline: bool,
     text_alignment: TextAlignment,
+    /// Image pixels per logical point for the surface hosting this editor.
+    /// Preset sizes (corner radius, badge size, spotlight radius) are stored
+    /// in logical points and multiplied by this value when applied.
+    ui_scale: f32,
     corner_radius: f32,
+    number_size: u32,
+    spotlight_radius: f32,
     /// Independent defaults for the two width-bearing tool families. The
     /// selected object's own width is shown and edited through `style`.
     rect_stroke_width: f32,
@@ -800,6 +808,8 @@ impl EditorView {
         let text_outline = settings.annotation_text_outline;
         let text_alignment = settings.annotation_text_alignment;
         let corner_radius = settings.annotation_corner_radius;
+        let number_size = settings.annotation_number_size;
+        let spotlight_radius = settings.annotation_spotlight_radius;
         let rect_stroke_width = settings.annotation_rect_stroke_width;
         let arrow_stroke_width = settings.annotation_arrow_stroke_width;
         let blur_radius = settings.annotation_blur_radius;
@@ -842,6 +852,7 @@ impl EditorView {
                 text_outline,
                 text_alignment,
                 spotlight_intensity,
+                spotlight_radius,
             },
             font_size,
             arrow_start,
@@ -850,7 +861,10 @@ impl EditorView {
             text_background,
             text_outline,
             text_alignment,
+            ui_scale: 1.0,
             corner_radius,
+            number_size,
+            spotlight_radius,
             rect_stroke_width,
             arrow_stroke_width,
             blur_radius,
@@ -920,6 +934,13 @@ impl EditorView {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut view = Self::new(frame, pin_target, cx);
+        view.ui_scale = if image_rect.size.width > px(0.0) {
+            (view.image_size.width as f32 / f32::from(image_rect.size.width)).clamp(0.25, 8.0)
+        } else {
+            1.0
+        };
+        view.style.corner_radius = view.corner_radius * view.ui_scale;
+        view.style.spotlight_radius = view.spotlight_radius * view.ui_scale;
         view.region_source = region_source;
         if let Some(document) = document
             && document.image_size() == view.image_size
@@ -934,7 +955,7 @@ impl EditorView {
         }
         match initial_tool {
             Tool::Rect => {
-                view.style.corner_radius = view.corner_radius;
+                view.style.corner_radius = view.corner_radius * view.ui_scale;
                 view.style.stroke_width = view.rect_stroke_width;
                 view.style.filled = if view.shape_ellipse {
                     view.ellipse_filled
@@ -2010,9 +2031,12 @@ impl EditorView {
             style.arrow_end = self.arrow_end;
         }
         match self.tool {
-            Tool::Rect => style.corner_radius = self.corner_radius,
+            Tool::Rect => style.corner_radius = self.corner_radius * self.ui_scale,
             Tool::Blur => style.blur_radius = self.blur_radius,
-            Tool::Spotlight => style.spotlight_intensity = self.spotlight_intensity,
+            Tool::Spotlight => {
+                style.spotlight_intensity = self.spotlight_intensity;
+                style.spotlight_radius = self.spotlight_radius * self.ui_scale;
+            }
             _ => {}
         }
         style
@@ -2185,8 +2209,45 @@ impl EditorView {
 
     fn apply_corner_radius(&mut self, radius: f32) {
         self.corner_radius = radius;
-        self.update_style(|style| style.corner_radius = radius);
+        let applied = radius * self.ui_scale;
+        self.update_style(|style| style.corner_radius = applied);
         settings_state::update(|settings| settings.annotation_corner_radius = radius);
+    }
+
+    fn apply_number_size(&mut self, size: u32) {
+        self.number_size = size;
+        settings_state::update(|settings| settings.annotation_number_size = size);
+        let Some(id) = self.document.selected() else {
+            return;
+        };
+        let Some(annotation) = self.document.object(id).cloned() else {
+            return;
+        };
+        let Shape::Number { bounds, value } = annotation.shape else {
+            return;
+        };
+        let side = ((size as f32 * self.ui_scale).round() as u32).max(8);
+        let centre_x = bounds.origin.x + bounds.size.width as i32 / 2;
+        let centre_y = bounds.origin.y + bounds.size.height as i32 / 2;
+        let left = (centre_x - side as i32 / 2)
+            .clamp(0, self.image_size.width.saturating_sub(side) as i32);
+        let top = (centre_y - side as i32 / 2)
+            .clamp(0, self.image_size.height.saturating_sub(side) as i32);
+        self.document.update_shape(
+            id,
+            Shape::Number {
+                bounds: PhysicalRect::new(left, top, side, side),
+                value,
+            },
+            annotation.style,
+        );
+    }
+
+    fn apply_spotlight_radius(&mut self, radius: f32) {
+        self.spotlight_radius = radius;
+        let applied = radius * self.ui_scale;
+        self.update_style(|style| style.spotlight_radius = applied);
+        settings_state::update(|settings| settings.annotation_spotlight_radius = radius);
     }
 
     fn apply_blur_radius(&mut self, radius: u32) {
@@ -2362,7 +2423,7 @@ impl EditorView {
                 match tool {
                     Tool::Rect => {
                         self.shape_ellipse = matches!(&annotation.shape, Shape::Ellipse(_));
-                        self.corner_radius = annotation.style.corner_radius;
+                        self.corner_radius = annotation.style.corner_radius / self.ui_scale;
                         if self.shape_ellipse {
                             self.ellipse_filled = annotation.style.filled;
                         } else {
@@ -2375,7 +2436,12 @@ impl EditorView {
                         self.text_outline = annotation.style.text_outline;
                         self.text_alignment = annotation.style.text_alignment;
                     }
-                    Tool::Number => {}
+                    Tool::Number => {
+                        if let Shape::Number { bounds, .. } = &annotation.shape {
+                            self.number_size =
+                                ((bounds.size.width as f32 / self.ui_scale).round() as u32).max(1);
+                        }
+                    }
                     Tool::Arrow => {
                         self.arrow_start = annotation.style.arrow_start;
                         self.arrow_end = annotation.style.arrow_end;
@@ -2383,7 +2449,8 @@ impl EditorView {
                     }
                     Tool::Blur => self.blur_radius = annotation.style.blur_radius,
                     Tool::Spotlight => {
-                        self.spotlight_intensity = annotation.style.spotlight_intensity
+                        self.spotlight_intensity = annotation.style.spotlight_intensity;
+                        self.spotlight_radius = annotation.style.spotlight_radius / self.ui_scale;
                     }
                     _ => {}
                 }
@@ -2755,7 +2822,7 @@ impl EditorView {
                     match tool {
                         Tool::Rect => {
                             this.style.stroke_width = this.rect_stroke_width;
-                            this.style.corner_radius = this.corner_radius;
+                            this.style.corner_radius = this.corner_radius * this.ui_scale;
                             this.style.filled = if this.shape_ellipse {
                                 this.ellipse_filled
                             } else {
@@ -2765,7 +2832,8 @@ impl EditorView {
                         Tool::Arrow => this.style.stroke_width = this.arrow_stroke_width,
                         Tool::Blur => this.style.blur_radius = this.blur_radius,
                         Tool::Spotlight => {
-                            this.style.spotlight_intensity = this.spotlight_intensity
+                            this.style.spotlight_intensity = this.spotlight_intensity;
+                            this.style.spotlight_radius = this.spotlight_radius * this.ui_scale;
                         }
                         _ => {}
                     }
@@ -2812,8 +2880,10 @@ impl EditorView {
         let show_text_style = config_tool == Some(Tool::Text);
         let show_arrow_heads = config_tool == Some(Tool::Arrow);
         let show_corner = config_tool == Some(Tool::Rect) && !config_ellipse;
+        let show_number = config_tool == Some(Tool::Number);
         let show_blur = config_tool == Some(Tool::Blur);
         let show_spotlight = config_tool == Some(Tool::Spotlight);
+        let size_scale = self.ui_scale.max(0.1);
 
         let mut groups: Vec<AnyElement> = Vec::new();
         if show_color {
@@ -3309,7 +3379,8 @@ impl EditorView {
         if show_corner {
             let mut radii = Vec::new();
             for radius in CORNER_RADII {
-                let selected = (config_style.corner_radius - radius).abs() < 0.1;
+                let applied = (radius * size_scale).round();
+                let selected = (config_style.corner_radius - applied).abs() < 0.1;
                 let label = format!("{radius:.0}");
                 let tooltip = format!("{} {label}", t(language, "editor.corner_radius"));
                 let button = div()
@@ -3348,6 +3419,62 @@ impl EditorView {
                     .gap(px(2.0))
                     .child(icons::icon(icons::RECT, 14.0, muted))
                     .children(radii)
+                    .into_any_element(),
+            );
+        }
+
+        if show_number {
+            let current = self
+                .document
+                .selected()
+                .and_then(|id| self.document.object(id))
+                .and_then(|annotation| match annotation.shape {
+                    Shape::Number { bounds, .. } => Some(bounds.size.height),
+                    _ => None,
+                })
+                .unwrap_or(((self.number_size as f32 * size_scale).round() as u32).max(8));
+            let mut sizes = Vec::new();
+            for size in NUMBER_SIZES {
+                let applied = ((size as f32 * size_scale).round() as u32).max(8);
+                let selected = current.abs_diff(applied) <= 1;
+                let label = format!("{size}");
+                let tooltip = format!("{} {label}", t(language, "editor.number_size"));
+                let button = div()
+                    .id(format!("editor-number-{label}"))
+                    .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
+                    .w(px(24.0))
+                    .h(px(22.0))
+                    .rounded(px(5.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(selected, |button| button.bg(accent_selected))
+                    .when(!selected, |button| {
+                        button.hover(move |style| style.bg(hover))
+                    })
+                    .active(|style| style.opacity(0.85))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.commit_text(cx);
+                        this.apply_number_size(size);
+                        this.status = None;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(if selected { accent } else { muted })
+                            .child(label),
+                    );
+                sizes.push(button.into_any_element());
+            }
+            groups.push(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(2.0))
+                    .child(icons::icon(icons::NUMBER, 14.0, muted))
+                    .children(sizes)
                     .into_any_element(),
             );
         }
@@ -3440,6 +3567,51 @@ impl EditorView {
                     .gap(px(2.0))
                     .child(icons::icon(icons::SPOTLIGHT, 14.0, muted))
                     .children(levels)
+                    .into_any_element(),
+            );
+
+            let mut radii = Vec::new();
+            for radius in CORNER_RADII {
+                let applied = (radius * size_scale).round();
+                let selected = (config_style.spotlight_radius - applied).abs() < 0.1;
+                let label = format!("{radius:.0}");
+                let tooltip = format!("{} {label}", t(language, "editor.spotlight_radius"));
+                let button = div()
+                    .id(format!("editor-spotlight-radius-{label}"))
+                    .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
+                    .w(px(22.0))
+                    .h(px(22.0))
+                    .rounded(px(5.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(selected, |button| button.bg(accent_selected))
+                    .when(!selected, |button| {
+                        button.hover(move |style| style.bg(hover))
+                    })
+                    .active(|style| style.opacity(0.85))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.commit_text(cx);
+                        this.apply_spotlight_radius(radius);
+                        this.status = None;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(if selected { accent } else { muted })
+                            .child(label),
+                    );
+                radii.push(button.into_any_element());
+            }
+            groups.push(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(2.0))
+                    .child(icons::icon(icons::RECT, 14.0, muted))
+                    .children(radii)
                     .into_any_element(),
             );
         }
@@ -5304,14 +5476,16 @@ impl Render for EditorView {
                     this.resize_draft = None;
                     this.move_draft = None;
                     if this.tool == Tool::Number {
-                        let max_left = (this.image_size.width.saturating_sub(BADGE_SIZE)) as i32;
-                        let max_top = (this.image_size.height.saturating_sub(BADGE_SIZE)) as i32;
-                        let left = (point.x - BADGE_SIZE as i32 / 2).clamp(0, max_left);
-                        let top = (point.y - BADGE_SIZE as i32 / 2).clamp(0, max_top);
+                        let side =
+                            ((this.number_size as f32 * this.ui_scale).round() as u32).max(8);
+                        let max_left = (this.image_size.width.saturating_sub(side)) as i32;
+                        let max_top = (this.image_size.height.saturating_sub(side)) as i32;
+                        let left = (point.x - side as i32 / 2).clamp(0, max_left);
+                        let top = (point.y - side as i32 / 2).clamp(0, max_top);
                         let value = this.document.next_number();
                         this.document.add(
                             Shape::Number {
-                                bounds: PhysicalRect::new(left, top, BADGE_SIZE, BADGE_SIZE),
+                                bounds: PhysicalRect::new(left, top, side, side),
                                 value,
                             },
                             this.effective_style(),
@@ -6150,6 +6324,25 @@ fn fit_long_capture_rect(frame: &RgbaFrame, bounds: Bounds<Pixels>) -> Bounds<Pi
     }
 }
 
+fn align_client_to_bounds(window: &Window, bounds: Bounds<Pixels>) {
+    #[cfg(target_os = "windows")]
+    {
+        let scale = window.scale_factor().max(0.1);
+        let physical = core_types::PhysicalRect::new(
+            (f32::from(bounds.origin.x) * scale).round() as i32,
+            (f32::from(bounds.origin.y) * scale).round() as i32,
+            (f32::from(bounds.size.width) * scale).round().max(1.0) as u32,
+            (f32::from(bounds.size.height) * scale).round().max(1.0) as u32,
+        );
+        let dpi = core_types::DpiScale::new(scale).unwrap_or_default();
+        let _ = platform_window::place_on_monitor_deferred(window, physical, dpi);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (window, bounds);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn open_inline_editor_window(
     frame: Arc<RgbaFrame>,
@@ -6186,6 +6379,11 @@ fn open_inline_editor_window(
         if let Err(error) = apply_window_style(&*window, WindowStyle::INLINE_EDITOR) {
             log_error!("editor", "failed to style inline editor: {error}");
         }
+        hide_native_border(&*window);
+        // The popup frame is only on the left, right and bottom, but GPUI
+        // splits its height evenly when placing the window. Align the client
+        // area so annotations land on the pixels they were drawn over.
+        align_client_to_bounds(&*window, window_bounds);
         let editor = cx.new(|cx| {
             EditorView::new_inline(
                 frame,
@@ -6208,6 +6406,7 @@ fn open_inline_editor_window(
             this.watch_close(window, cx);
         });
         window.defer(cx, move |window, cx| {
+            align_client_to_bounds(window, window_bounds);
             window.focus(&focus, cx);
             window.activate_window();
         });
@@ -6360,8 +6559,10 @@ fn annotation_handle_at(shape: &Shape, point: PhysicalPoint, scale: f32) -> Opti
     let scale = scale.max(0.01);
     let bounds = shape.bounds();
     let min_pt = (bounds.size.width.min(bounds.size.height) as f32) * scale;
-    if !matches!(shape, Shape::Arrow { .. } | Shape::Polyline { .. })
-        && min_pt < SELECTION_HANDLE_HALF * 4.0
+    if !matches!(
+        shape,
+        Shape::Arrow { .. } | Shape::Polyline { .. } | Shape::Number { .. }
+    ) && min_pt < SELECTION_HANDLE_HALF * 4.0
         && closed_shape_contains(shape, point, 1.0 / scale)
     {
         return None;
@@ -6464,6 +6665,43 @@ fn resize_shape(
             bottom = top + min_size;
         }
     }
+    if matches!(original, Shape::Number { .. }) {
+        // Sequence badges stay circular: resizing any handle scales the
+        // square uniformly instead of turning the chip into an ellipse.
+        let width = right - left;
+        let height = bottom - top;
+        let (size, anchor_x, anchor_y) = match handle {
+            ResizeHandle::N | ResizeHandle::S => {
+                (height.max(min_size), Some((left + right) / 2), None)
+            }
+            ResizeHandle::E | ResizeHandle::W => {
+                (width.max(min_size), None, Some((top + bottom) / 2))
+            }
+            _ => (width.max(height).max(min_size), None, None),
+        };
+        if let Some(centre) = anchor_x {
+            left = centre - size / 2;
+            right = left + size;
+        } else if matches!(
+            handle,
+            ResizeHandle::Nw | ResizeHandle::W | ResizeHandle::Sw
+        ) {
+            left = right - size;
+        } else {
+            right = left + size;
+        }
+        if let Some(centre) = anchor_y {
+            top = centre - size / 2;
+            bottom = top + size;
+        } else if matches!(
+            handle,
+            ResizeHandle::Nw | ResizeHandle::N | ResizeHandle::Ne
+        ) {
+            top = bottom - size;
+        } else {
+            bottom = top + size;
+        }
+    }
     let rect = PhysicalRect::new(
         left,
         top,
@@ -6487,6 +6725,35 @@ fn resize_shape(
         Shape::Arrow { .. } => unreachable!("arrow handled above"),
         Shape::Polyline { .. } => original.clone(),
     }
+}
+
+fn push_rounded_rect(builder: &mut PathBuilder, rect: Bounds<Pixels>, radius: f32) {
+    let left = f32::from(rect.origin.x);
+    let top = f32::from(rect.origin.y);
+    let width = f32::from(rect.size.width);
+    let height = f32::from(rect.size.height);
+    let radius = radius.clamp(0.0, width.min(height) / 2.0);
+    let right = left + width;
+    let bottom = top + height;
+    builder.move_to(point(px(left + radius), px(top)));
+    builder.line_to(point(px(right - radius), px(top)));
+    builder.curve_to(
+        point(px(right), px(top + radius)),
+        point(px(right), px(top)),
+    );
+    builder.line_to(point(px(right), px(bottom - radius)));
+    builder.curve_to(
+        point(px(right - radius), px(bottom)),
+        point(px(right), px(bottom)),
+    );
+    builder.line_to(point(px(left + radius), px(bottom)));
+    builder.curve_to(
+        point(px(left), px(bottom - radius)),
+        point(px(left), px(bottom)),
+    );
+    builder.line_to(point(px(left), px(top + radius)));
+    builder.curve_to(point(px(left + radius), px(top)), point(px(left), px(top)));
+    builder.close();
 }
 
 fn paint_crop_overlay(
@@ -6670,9 +6937,14 @@ fn paint_shape(
             }
         }
         Shape::Blur(_) | Shape::Text { .. } | Shape::Number { .. } => {}
-        Shape::Spotlight(rect) => {
-            paint_spotlight(window, bounds, scale, *rect, style.spotlight_intensity)
-        }
+        Shape::Spotlight(rect) => paint_spotlight(
+            window,
+            bounds,
+            scale,
+            *rect,
+            style.spotlight_intensity,
+            style.spotlight_radius,
+        ),
     }
 }
 
@@ -6682,6 +6954,7 @@ fn paint_spotlight(
     scale: f32,
     rect: PhysicalRect,
     intensity: u8,
+    radius: f32,
 ) {
     let alpha = (u32::from(intensity.min(100)) * 255 / 100) as u8;
     let image_left = f32::from(bounds.origin.x);
@@ -6692,30 +6965,29 @@ fn paint_spotlight(
     let hole_top = (image_top + rect.origin.y as f32 * scale).clamp(image_top, image_bottom);
     let hole_right = (hole_left + rect.size.width as f32 * scale).clamp(hole_left, image_right);
     let hole_bottom = (hole_top + rect.size.height as f32 * scale).clamp(hole_top, image_bottom);
+    if hole_right <= hole_left || hole_bottom <= hole_top {
+        return;
+    }
 
-    let pieces = [
-        (image_left, image_top, image_right, hole_top),
-        (image_left, hole_bottom, image_right, image_bottom),
-        (image_left, hole_top, hole_left, hole_bottom),
-        (hole_right, hole_top, image_right, hole_bottom),
-    ];
-    for (left, top, right, bottom) in pieces {
-        if right <= left || bottom <= top {
-            continue;
-        }
-        let mut builder = PathBuilder::fill();
-        builder.add_polygon(
-            &[
-                point(px(left), px(top)),
-                point(px(right), px(top)),
-                point(px(right), px(bottom)),
-                point(px(left), px(bottom)),
-            ],
-            true,
-        );
-        if let Ok(path) = builder.build() {
-            window.paint_path(path, rgba(u32::from(alpha)));
-        }
+    let mut builder = PathBuilder::fill().with_style(PathStyle::Fill(
+        FillOptions::default().with_fill_rule(FillRule::EvenOdd),
+    ));
+    builder.move_to(point(px(image_left), px(image_top)));
+    builder.line_to(point(px(image_right), px(image_top)));
+    builder.line_to(point(px(image_right), px(image_bottom)));
+    builder.line_to(point(px(image_left), px(image_bottom)));
+    builder.close();
+    let radius = (radius * scale).clamp(
+        0.0,
+        (hole_right - hole_left).min(hole_bottom - hole_top) / 2.0,
+    );
+    let hole = Bounds {
+        origin: point(px(hole_left), px(hole_top)),
+        size: size(px(hole_right - hole_left), px(hole_bottom - hole_top)),
+    };
+    push_rounded_rect(&mut builder, hole, radius);
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, rgba(u32::from(alpha)));
     }
 }
 
@@ -6830,6 +7102,44 @@ mod tests {
         assert!(
             super::annotation_handle_at(&shape, PhysicalPoint::new(210, 50), 0.5).is_some(),
             "the tip remains a resize handle"
+        );
+    }
+
+    #[test]
+    fn number_resize_stays_square_from_corner_and_edge_handles() {
+        use core_types::PhysicalRect;
+        let original = super::Shape::Number {
+            bounds: PhysicalRect::new(10, 10, 32, 32),
+            value: 1,
+        };
+        let resized = super::resize_shape(
+            &original,
+            super::ResizeHandle::Se,
+            PhysicalPoint::new(42, 42),
+            PhysicalPoint::new(62, 52),
+            4,
+        );
+        assert_eq!(
+            resized,
+            super::Shape::Number {
+                bounds: PhysicalRect::new(10, 10, 52, 52),
+                value: 1,
+            }
+        );
+
+        let resized = super::resize_shape(
+            &original,
+            super::ResizeHandle::E,
+            PhysicalPoint::new(42, 26),
+            PhysicalPoint::new(62, 26),
+            4,
+        );
+        assert_eq!(
+            resized,
+            super::Shape::Number {
+                bounds: PhysicalRect::new(10, 0, 52, 52),
+                value: 1,
+            }
         );
     }
 

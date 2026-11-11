@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use core_types::{PhysicalRect, RgbaFrame};
 use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
@@ -8,6 +8,18 @@ use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
 
 use crate::{OcrError, OcrLine, build_line, build_line_from_words};
 
+#[cfg(target_arch = "x86_64")]
+use paddleocr_rs_onnx::{OcrEngine as PaddleEngine, OrderBy};
+
+#[cfg(target_arch = "x86_64")]
+static PADDLE: OnceLock<Result<Mutex<PaddleEngine>, String>> = OnceLock::new();
+
+/// PaddleOCR confidence at or below this value is treated as icon noise. UI
+/// text normally scores above 0.8; low-confidence boxes are usually toolbar
+/// glyphs rather than copyable text.
+#[cfg(target_arch = "x86_64")]
+const PADDLE_MIN_CONFIDENCE: f32 = 0.5;
+
 pub(super) fn recognize_text(frame: Arc<RgbaFrame>) -> Result<Vec<OcrLine>, OcrError> {
     std::thread::spawn(move || recognize_on_thread(&frame))
         .join()
@@ -15,6 +27,70 @@ pub(super) fn recognize_text(frame: Arc<RgbaFrame>) -> Result<Vec<OcrLine>, OcrE
 }
 
 fn recognize_on_thread(frame: &RgbaFrame) -> Result<Vec<OcrLine>, OcrError> {
+    // Windows OCR splits Chinese characters into radicals at the scales this
+    // app used to feed it. PaddleOCR's PP-OCR models keep whole glyphs and
+    // preserve mixed Latin runs such as `eSIM`; fall back to the system engine
+    // on unsupported architectures or when the bundled models cannot load.
+    if let Some(Ok(lines)) = recognize_with_paddle(frame)
+        && !lines.is_empty()
+    {
+        return Ok(lines);
+    }
+    recognize_with_windows(frame)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn recognize_with_paddle(frame: &RgbaFrame) -> Option<Result<Vec<OcrLine>, OcrError>> {
+    static DET: &[u8] = include_bytes!("../assets/ocr/ch_PP-OCRv3_det_infer.onnx");
+    static REC: &[u8] = include_bytes!("../assets/ocr/ch_PP-OCRv3_rec_static.onnx");
+    static KEYS: &[u8] = include_bytes!("../assets/ocr/ppocr_keys_v1.txt");
+
+    let engine = PADDLE.get_or_init(|| {
+        PaddleEngine::new(DET, REC, KEYS)
+            .map(Mutex::new)
+            .map_err(|error| error.to_string())
+    });
+    let engine = match engine {
+        Ok(engine) => engine,
+        Err(_) => return None,
+    };
+    let image = image::RgbaImage::from_raw(frame.width(), frame.height(), frame.pixels().to_vec())?;
+    let image = image::DynamicImage::ImageRgba8(image);
+    let Ok(engine) = engine.lock() else {
+        return None;
+    };
+    let blocks = match engine.recognize_all(&image, OrderBy::Horizontal) {
+        Ok(blocks) => blocks,
+        Err(error) => return Some(Err(OcrError::Platform(error.to_string()))),
+    };
+    let mut lines = Vec::new();
+    for block in blocks {
+        if block.confidence < PADDLE_MIN_CONFIDENCE || block.text.trim().is_empty() {
+            continue;
+        }
+        let width = frame.width() as i32;
+        let height = frame.height() as i32;
+        let left = (block.x.round() as i32).clamp(0, width);
+        let top = (block.y.round() as i32).clamp(0, height);
+        let right = ((block.x + block.width).round() as i32).clamp(left, width);
+        let bottom = ((block.y + block.height).round() as i32).clamp(top, height);
+        if right <= left || bottom <= top {
+            continue;
+        }
+        lines.push(build_line(
+            block.text,
+            PhysicalRect::new(left, top, (right - left) as u32, (bottom - top) as u32),
+        ));
+    }
+    Some(Ok(lines))
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn recognize_with_paddle(_frame: &RgbaFrame) -> Option<Result<Vec<OcrLine>, OcrError>> {
+    None
+}
+
+fn recognize_with_windows(frame: &RgbaFrame) -> Result<Vec<OcrLine>, OcrError> {
     // SAFETY: initializing a fresh apartment on this worker thread is safe;
     // a pre-initialized apartment only changes the returned HRESULT.
     unsafe {

@@ -1,7 +1,10 @@
+use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use windows::Win32::Media::MediaFoundation::MFGetSystemTime;
 
 use core_capture::{CaptureTarget, platform_backend};
 use core_record::{
@@ -69,6 +72,16 @@ impl CursorSpace {
     /// Returns the cursor position in frame pixels for a frame of `width`x`height`.
     fn cursor_in_frame(self, width: u32, height: u32) -> Option<(f32, f32)> {
         let (cursor_x, cursor_y) = cursor_position()?;
+        self.point_in_frame(width, height, cursor_x, cursor_y)
+    }
+
+    fn point_in_frame(
+        self,
+        width: u32,
+        height: u32,
+        cursor_x: i32,
+        cursor_y: i32,
+    ) -> Option<(f32, f32)> {
         match self {
             Self::Screen {
                 origin_x,
@@ -94,6 +107,60 @@ impl CursorSpace {
                 ))
             }
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CursorSample {
+    /// System-relative time in 100 ns units, matching the capture timestamp.
+    ticks: i64,
+    x: i32,
+    y: i32,
+}
+
+/// Timestamped cursor positions sampled off the capture thread.
+///
+/// WGC composites the cursor into a frame at the frame's capture timestamp,
+/// but the callback runs later. Reading `GetCursorPos` there made the demo
+/// disc lag behind fast pointer movement; matching the frame timestamp to this
+/// trace keeps the disc on the recorded cursor.
+struct CursorTrace {
+    samples: Mutex<VecDeque<CursorSample>>,
+}
+
+impl CursorTrace {
+    fn start(shared: Arc<Flags>) -> Arc<Self> {
+        let trace = Arc::new(Self {
+            samples: Mutex::new(VecDeque::new()),
+        });
+        let thread_trace = Arc::clone(&trace);
+        std::thread::Builder::new()
+            .name("capin-cursor-trace".to_owned())
+            .spawn(move || {
+                while !shared.stop_requested() && !shared.is_finished() {
+                    if let Some((x, y)) = cursor_position() {
+                        // SAFETY: MFGetSystemTime has no preconditions.
+                        let ticks = unsafe { MFGetSystemTime() };
+                        if let Ok(mut samples) = thread_trace.samples.lock() {
+                            samples.push_back(CursorSample { ticks, x, y });
+                            while samples.len() > 400 {
+                                samples.pop_front();
+                            }
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(4));
+                }
+            })
+            .ok();
+        trace
+    }
+
+    fn position_at(&self, ticks: i64) -> Option<(i32, i32)> {
+        let samples = self.samples.lock().ok()?;
+        samples
+            .iter()
+            .min_by_key(|sample| sample.ticks.abs_diff(ticks))
+            .map(|sample| (sample.x, sample.y))
     }
 }
 
@@ -312,6 +379,7 @@ struct Recorder {
     frame_ticks: i64,
     timeline: FrameTimeline,
     flags: CaptureInfo,
+    cursor_trace: Option<Arc<CursorTrace>>,
 }
 
 impl GraphicsCaptureApiHandler for Recorder {
@@ -320,6 +388,10 @@ impl GraphicsCaptureApiHandler for Recorder {
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
         ctx.flags.shared.restart_started();
+        let cursor_trace = ctx
+            .flags
+            .cursor_highlight
+            .map(|_| CursorTrace::start(Arc::clone(&ctx.flags.shared)));
         Ok(Self {
             encoder: None,
             output_size: None,
@@ -330,6 +402,7 @@ impl GraphicsCaptureApiHandler for Recorder {
             frame_ticks: 10_000_000 / i64::from(FRAME_RATE),
             timeline: FrameTimeline::new(),
             flags: ctx.flags,
+            cursor_trace,
         })
     }
 
@@ -345,12 +418,9 @@ impl GraphicsCaptureApiHandler for Recorder {
             return Ok(());
         }
 
+        let raw_ticks = frame.timestamp()?.Duration;
         let paused_ticks = (self.flags.shared.paused_duration().as_nanos() / 100) as i64;
-        let adjusted = frame
-            .timestamp()?
-            .Duration
-            .saturating_sub(paused_ticks)
-            .max(0);
+        let adjusted = raw_ticks.saturating_sub(paused_ticks).max(0);
         let adjusted = Duration::from_nanos((adjusted as u64).saturating_mul(100));
         let FrameDecision::Encode { index, .. } = self.timeline.submit(adjusted) else {
             return Ok(());
@@ -409,7 +479,13 @@ impl GraphicsCaptureApiHandler for Recorder {
         self.packed = packed;
 
         let highlight = self.flags.cursor_highlight;
-        let cursor = highlight.and_then(|_| self.flags.cursor_space.cursor_in_frame(width, height));
+        let cursor = highlight.and_then(|_| {
+            self.cursor_trace
+                .as_ref()
+                .and_then(|trace| trace.position_at(raw_ticks))
+                .and_then(|(x, y)| self.flags.cursor_space.point_in_frame(width, height, x, y))
+                .or_else(|| self.flags.cursor_space.cursor_in_frame(width, height))
+        });
         if let (Some(highlight), Some((cursor_x, cursor_y))) = (highlight, cursor) {
             let radius = CURSOR_HIGHLIGHT_RADIUS * self.flags.cursor_space.dpi();
             paint_cursor_highlight_bgra(

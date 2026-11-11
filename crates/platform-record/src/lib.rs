@@ -62,6 +62,10 @@ impl Flags {
         self.stop.load(Ordering::Acquire)
     }
 
+    pub(crate) fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::Acquire)
+    }
+
     pub(crate) fn is_paused(&self) -> bool {
         self.paused.load(Ordering::Relaxed)
     }
