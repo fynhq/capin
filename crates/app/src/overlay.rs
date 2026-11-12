@@ -1123,6 +1123,14 @@ impl OverlayView {
             self.clear_magnifier(window);
             return;
         }
+        // An active drag hides the panel and reports the region through the
+        // size tag, so there is no point uploading a magnifier texture for
+        // every captured pointer event. Dropping the stale image also keeps
+        // the color-copy shortcut reading the live cursor pixel.
+        if self.session.is_dragging() {
+            self.clear_magnifier(window);
+            return;
+        }
         let Some(point) = self.cursor else {
             self.clear_magnifier(window);
             return;
@@ -1535,7 +1543,12 @@ impl OverlayView {
         let _ = window;
     }
 
-    fn begin_selection(&mut self, outcome: SelectionOutcome, cx: &mut Context<Self>) {
+    fn begin_selection(
+        &mut self,
+        outcome: SelectionOutcome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let monitor = self.session.monitor_bounds();
         let (target, rect, scale, ratio) = match outcome {
             SelectionOutcome::Region(region) => (
@@ -1591,7 +1604,7 @@ impl OverlayView {
             space_down: false,
         });
         self.aspect = ratio;
-        self.magnifier = None;
+        self.clear_magnifier(window);
         cx.notify();
     }
 
@@ -1932,7 +1945,7 @@ impl OverlayView {
             if self.mode == OverlayMode::Capture {
                 let click_opens_editor = self.click_opens_editor;
                 self.click_opens_editor = false;
-                self.begin_selection(outcome, cx);
+                self.begin_selection(outcome, window, cx);
                 platform_window::set_cursor_hidden(false);
                 if click_opens_editor {
                     self.window_only = false;
@@ -3298,7 +3311,6 @@ impl OverlayView {
                 .child(editor)
                 .into_any_element();
         }
-        self.update_magnifier(window);
         let language = settings_state::get().language;
         let selected_bounds = self.selection_bounds();
         let selected = self.selected.is_some();
@@ -3364,7 +3376,7 @@ impl OverlayView {
                 })
             })
             .flatten();
-        let magnifier = (!selected)
+        let magnifier = (!selected && !self.session.is_dragging())
             .then(|| self.magnifier_panel(drag_selection, language, cx))
             .flatten();
         let size_tag = self.selection_size_tag(language);
@@ -3718,7 +3730,7 @@ impl OverlayView {
                     cx.notify();
                 }
             }))
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 let point = this.to_physical(event.position);
                 this.cursor = Some(point);
                 // Covers the case where Ctrl was already held before the
@@ -3775,6 +3787,12 @@ impl OverlayView {
                         this.refresh_auto_target(point, cx);
                     }
                 }
+                // The magnifier is built here instead of during render so
+                // frames triggered by other state (theme, notices) do not
+                // upload a fresh texture; an active drag skips it entirely
+                // because the size tag already reports the region while the
+                // pointer is captured.
+                this.update_magnifier(window);
                 cx.notify();
             }))
             .on_scroll(cx.listener(|this, event: &ScrollEvent, _window, cx| {
@@ -3856,7 +3874,7 @@ impl OverlayView {
                     this.primary_pointer_up(event, window, cx);
                 }),
             )
-            .on_mouse_exit(cx.listener(|this, _event: &MouseExitEvent, _window, cx| {
+            .on_mouse_exit(cx.listener(|this, _event: &MouseExitEvent, window, cx| {
                 if this
                     .selected
                     .as_ref()
@@ -3865,6 +3883,7 @@ impl OverlayView {
                     this.finish_region_drag(cx);
                 }
                 this.cursor = None;
+                this.clear_magnifier(window);
                 this.cursor_style = CursorStyle::Crosshair;
                 this.ctrl_click_primary = false;
                 this.element_window = None;
