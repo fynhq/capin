@@ -19,6 +19,10 @@ Capin 是面向 Windows 10+ 与 macOS 13+ 的截图、标注、贴图、OCR、�
 - **录屏**：区域/窗口录制，MP4（系统 H.264，固定 30 fps，自动码率），无音频与摄像头；倒计时、暂停/继续、计时、光标录入与演示高亮；录制条和选区边框不入镜。
 - **系统**：托盘、全局热键、剪贴板、自动保存、开机自启、中英文界面；截图与录屏分目录保存，共用文件名模板；跟随系统亮暗与强调色；不上传，无遥测。
 
+## 资源占用
+
+Windows 11：后台常驻内存约 14 MB；截图操作期间约 100–150 MB，截图完成后逐步回落。
+
 ## 安装
 
 从 [Releases](https://github.com/fynhq/capin/releases) 下载对应包：
@@ -90,6 +94,10 @@ Capin is a screenshot, annotation, pin, OCR, scrolling-capture, and screen-recor
 - **Scrolling capture** — manual scrolling with automatic stitching, overlap matching and fixed-header trimming; no wheel injection.
 - **Recording** — region/window MP4 via the system H.264 encoder at 30 fps and automatic bitrate; no audio or camera; countdown, pause/resume, timer, cursor and demo highlight; the control bar and selection border stay out of frame.
 - **System** — tray, global hotkeys, clipboard, autosave, launch at login, Chinese/English UI; separate Pictures/Videos folders and a shared filename template; follows system appearance and accent; no upload, no telemetry.
+
+## Resource usage
+
+Windows 11: about 14 MB of memory while resident in the tray; 100–150 MB during a capture, settling back down after the capture completes.
 
 ## Install
 
