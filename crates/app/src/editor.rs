@@ -1106,7 +1106,8 @@ impl EditorView {
         if self.full_canvas.is_some() {
             // Full-canvas editors show the whole monitor; the selection is an
             // arbitrary rect inside it, not the image boundary.
-            return full_selection_bounds(image, self.image_size, capture.region.rect);
+            let selection = self.live_selection_rect().unwrap_or(capture.region.rect);
+            return full_selection_bounds(image, self.image_size, selection);
         }
         let scale = capture.scale.max(0.1);
         let width = capture.region.rect.size.width as f32 / scale;
@@ -1117,6 +1118,17 @@ impl EditorView {
             origin: point(px(center_x - width / 2.0), px(center_y - height / 2.0)),
             size: size(px(width), px(height)),
         })
+    }
+
+    /// The selection frame the user currently sees. While the export frame is
+    /// being dragged this is the live preview rectangle, so the dim mask,
+    /// border, handles and size readout follow the pointer in real time the
+    /// way the initial capture selection does.
+    fn live_selection_rect(&self) -> Option<PhysicalRect> {
+        self.region_drag
+            .filter(|_| self.full_canvas.is_some())
+            .map(|draft| draft.current)
+            .or_else(|| self.full_selection())
     }
 
     /// Selection frame in full-monitor physical pixels.
@@ -1895,6 +1907,68 @@ impl EditorView {
         cx.notify();
     }
 
+    /// Leaves the current annotation state exactly like the first Escape
+    /// press: cancel the text or polyline in progress, close the tool
+    /// panels, or drop the selection and return to Select. Returns false
+    /// when the editor is already idle, so the caller can decide whether
+    /// Escape should close the editor.
+    fn cancel_annotation_state(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.text_edit.is_some() {
+            self.cancel_text(cx);
+            return true;
+        }
+        if self.polyline_draft.is_some() {
+            self.cancel_polyline(cx);
+            return true;
+        }
+        if self.more_open || self.effects_open || self.hints_visible {
+            self.more_open = false;
+            self.effects_open = false;
+            self.hints_visible = false;
+            cx.notify();
+            return true;
+        }
+        if self.document.selected().is_some() || self.tool != Tool::Select {
+            self.select_annotation(None);
+            self.tool = Tool::Select;
+            self.draft = None;
+            self.move_draft = None;
+            self.resize_draft = None;
+            self.pan_draft = None;
+            self.selection_hover = SelectionHover::None;
+            self.status = None;
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
+    /// Right click never leaves the capture. While annotating it behaves like
+    /// Escape and leaves the tool; an annotation already in progress is
+    /// confirmed first (text commit, polyline finish, crop apply). The image
+    /// layer carries this handler as well, because its opaque hitbox blocks
+    /// events from reaching handlers on the editor root.
+    fn right_click(&mut self, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        if self.text_edit.is_some() {
+            self.commit_text(cx);
+            return;
+        }
+        if self.polyline_draft.is_some() {
+            self.finish_polyline(cx);
+            return;
+        }
+        if self.crop_mode {
+            if self.crop_draft.is_some() {
+                self.apply_crop(cx);
+            } else {
+                self.cancel_crop(cx);
+            }
+            return;
+        }
+        let _ = self.cancel_annotation_state(cx);
+    }
+
     fn region_handles(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         if !self.can_adjust_region() {
             return Vec::new();
@@ -2034,50 +2108,6 @@ impl EditorView {
             );
         }
         bands
-    }
-
-    /// Paints the crop frame while a region edge is being dragged. The image
-    /// stays at its current size so the captured pixels are never stretched;
-    /// the frame and its handles preview the rectangle that will be applied on
-    /// release.
-    fn region_drag_preview(&self) -> Option<AnyElement> {
-        let draft = self.region_drag?;
-        let capture = self.inline.as_ref()?.capture.as_ref()?;
-        let scale = capture.scale.max(0.1);
-        let rect = Bounds {
-            origin: point(
-                px(draft.current.origin.x as f32 / scale),
-                px(draft.current.origin.y as f32 / scale),
-            ),
-            size: size(
-                px(draft.current.size.width as f32 / scale),
-                px(draft.current.size.height as f32 / scale),
-            ),
-        };
-        let accent = rgba((self.accent_hex << 8) | 0xFF);
-        let mut layer = div()
-            .absolute()
-            .left(rect.origin.x)
-            .top(rect.origin.y)
-            .w(rect.size.width)
-            .h(rect.size.height)
-            .border_1()
-            .border_color(accent);
-        for (_, position) in handle_positions(rect) {
-            layer = layer.child(
-                div()
-                    .absolute()
-                    .left(px(f32::from(position.x) - f32::from(rect.origin.x) - 4.5))
-                    .top(px(f32::from(position.y) - f32::from(rect.origin.y) - 4.5))
-                    .w(px(9.0))
-                    .h(px(9.0))
-                    .rounded(px(1.5))
-                    .bg(rgb(0xFFFFFF))
-                    .border_1()
-                    .border_color(accent),
-            );
-        }
-        Some(layer.into_any_element())
     }
 
     /// Selection outline and resize handles as regular elements. They sit
@@ -4453,10 +4483,11 @@ impl EditorView {
         let capture = inline.capture?;
         let rect = self.info_rect(window)?;
         let language = settings_state::get().language;
-        let absolute_x = capture.monitor_origin.x + capture.region.rect.origin.x;
-        let absolute_y = capture.monitor_origin.y + capture.region.rect.origin.y;
-        let width = capture.region.rect.size.width;
-        let height = capture.region.rect.size.height;
+        let selection = self.live_selection_rect().unwrap_or(capture.region.rect);
+        let absolute_x = capture.monitor_origin.x + selection.origin.x;
+        let absolute_y = capture.monitor_origin.y + selection.origin.y;
+        let width = selection.size.width;
+        let height = selection.size.height;
         let mut bar = div()
             .id("editor-info-bar")
             .absolute()
@@ -5783,7 +5814,7 @@ impl Render for EditorView {
                 }),
             )
         });
-        let full_frame = self.full_selection();
+        let full_frame = self.live_selection_rect();
         let show_full_frame = self
             .full_canvas
             .is_some_and(|full_canvas| full_canvas.adjustable);
@@ -5908,6 +5939,12 @@ impl Render for EditorView {
                 cx.stop_propagation();
             }))
             .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                    this.right_click(cx);
+                }),
+            )
+            .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     // Clicking the image must keep keyboard focus in the
@@ -5930,6 +5967,9 @@ impl Render for EditorView {
                     // A previous gesture can outlive its mouse-up when the
                     // pointer leaves the window or the platform consumes the
                     // release. Every new press starts from a clean transform.
+                    if this.region_drag.is_some() {
+                        this.finish_region_drag(cx);
+                    }
                     this.move_draft = None;
                     this.resize_draft = None;
                     if this
@@ -6141,6 +6181,13 @@ impl Render for EditorView {
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                // The export-frame grab bands sit above this layer; their drag
+                // must keep following the pointer even though it moves over
+                // the opaque image, which never reaches the editor root.
+                if this.region_drag.is_some() {
+                    this.update_region_drag(event.position, event.modifiers, cx);
+                    return;
+                }
                 if let Some(pan_draft) = &this.pan_draft {
                     this.view_pan.x =
                         pan_draft.start_pan.x + (event.position.x - pan_draft.start.x);
@@ -6192,6 +6239,11 @@ impl Render for EditorView {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    if this.region_drag.is_some() {
+                        this.finish_region_drag(cx);
+                        cx.stop_propagation();
+                        return;
+                    }
                     if this.crop_mode {
                         if let Some(point) = this.to_image_point(event.position, window)
                             && let Some(crop_draft) = &mut this.crop_draft
@@ -6268,13 +6320,24 @@ impl Render for EditorView {
                 if changed {
                     cx.notify();
                 }
-            }));
+            }))
+            // A release over a toolbar or panel never reaches this image
+            // layer's mouse-up handler; finish the export-frame drag from the
+            // outside path so the frame cannot stay stuck mid-resize.
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseUpEvent, _window, cx| {
+                    if this.region_drag.is_some() {
+                        this.update_region_drag(event.position, event.modifiers, cx);
+                        this.finish_region_drag(cx);
+                    }
+                }),
+            );
 
         let toolbar_rect = self.toolbar_rect(window);
         let region_bands = self.region_edge_bands(window, cx);
         let region_handles = self.region_handles(window, cx);
         let selection_layer = self.selection_layer(window);
-        let region_preview = self.region_drag_preview();
         let (toolbar, options_panel, more_panel) = self.toolbar(window, cx);
         let info_bar = if inline {
             self.info_bar(window, cx)
@@ -6380,48 +6443,7 @@ impl Render for EditorView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, _: &MouseDownEvent, _window, cx| {
-                    // Right click confirms the annotation in progress instead
-                    // of tearing the capture down: commit text, finish a
-                    // multi-segment arrow, apply a crop, or close a panel.
-                    cx.stop_propagation();
-                    if this.text_edit.is_some() {
-                        this.commit_text(cx);
-                        return;
-                    }
-                    if this.polyline_draft.is_some() {
-                        this.finish_polyline(cx);
-                        return;
-                    }
-                    if this.crop_mode {
-                        if this.crop_draft.is_some() {
-                            this.apply_crop(cx);
-                        } else {
-                            this.cancel_crop(cx);
-                        }
-                        return;
-                    }
-                    if this.document.selected().is_some()
-                        || this.tool != Tool::Select
-                        || this.more_open
-                        || this.effects_open
-                        || this.hints_visible
-                    {
-                        // Outside an in-progress annotation, right click leaves
-                        // annotation mode like Escape: drop the selection,
-                        // return to Select, and close the tool options bar.
-                        this.select_annotation(None);
-                        this.tool = Tool::Select;
-                        this.draft = None;
-                        this.move_draft = None;
-                        this.resize_draft = None;
-                        this.pan_draft = None;
-                        this.more_open = false;
-                        this.effects_open = false;
-                        this.hints_visible = false;
-                        this.selection_hover = SelectionHover::None;
-                        this.status = None;
-                        cx.notify();
-                    }
+                    this.right_click(cx);
                 }),
             )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
@@ -6646,16 +6668,7 @@ impl Render for EditorView {
                     }
                     // First Escape clears the current annotation selection or
                     // active drawing tool; only the next one leaves the editor.
-                    if this.document.selected().is_some() || this.tool != Tool::Select {
-                        this.select_annotation(None);
-                        this.tool = Tool::Select;
-                        this.draft = None;
-                        this.move_draft = None;
-                        this.resize_draft = None;
-                        this.pan_draft = None;
-                        this.selection_hover = SelectionHover::None;
-                        this.status = None;
-                        cx.notify();
+                    if this.cancel_annotation_state(cx) {
                         return;
                     }
                     this.release_images(cx);
@@ -6732,7 +6745,6 @@ impl Render for EditorView {
             .children(region_bands)
             .children(region_handles)
             .children(selection_layer)
-            .children(region_preview)
             .children(info_bar)
             .child(toolbar)
             .children(options_panel)
