@@ -488,12 +488,15 @@ impl GraphicsCaptureApiHandler for Recorder {
         });
         if let (Some(highlight), Some((cursor_x, cursor_y))) = (highlight, cursor) {
             let radius = CURSOR_HIGHLIGHT_RADIUS * self.flags.cursor_space.dpi();
+            // The buffer is bottom-up for `send_frame_buffer`; the cursor
+            // position is top-down like the displayed frame.
+            let buffer_y = height as f32 - cursor_y;
             paint_cursor_highlight_bgra(
                 &mut self.frame_back,
                 width,
                 height,
                 cursor_x,
-                cursor_y,
+                buffer_y,
                 radius,
                 highlight.color,
                 CURSOR_HIGHLIGHT_ALPHA,
