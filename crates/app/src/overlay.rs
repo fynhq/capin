@@ -2416,29 +2416,30 @@ impl OverlayView {
         cx.notify();
     }
 
-    fn nudge_selection(
-        &mut self,
-        dx: i32,
-        dy: i32,
-        shrink: bool,
-        expand: bool,
-        cx: &mut Context<Self>,
-    ) {
+    /// Arrow keys move the selection one pixel at a time. Shift resizes it
+    /// toward the arrow: left/up shrink, right/down grow, with the top-left
+    /// corner anchored.
+    fn nudge_selection(&mut self, dx: i32, dy: i32, resize: bool, cx: &mut Context<Self>) {
         let Some(selected) = self.selected.as_mut() else {
             return;
         };
         let monitor = self.session.monitor_bounds();
         let mut rect = selected.rect;
-        if shrink || expand {
-            let delta_x = if dx > 0 { dx } else { -dx };
-            let delta_y = if dy > 0 { dy } else { -dy };
-            if shrink {
-                rect.size.width = rect.size.width.saturating_sub(delta_x as u32);
-                rect.size.height = rect.size.height.saturating_sub(delta_y as u32);
-            } else {
-                rect.size.width = rect.size.width.saturating_add(delta_x as u32);
-                rect.size.height = rect.size.height.saturating_add(delta_y as u32);
-            }
+        if resize {
+            // Keep the top-left corner anchored and stop growing at the
+            // monitor edge instead of letting the clamp slide the origin.
+            let max_width = monitor
+                .size
+                .width
+                .saturating_sub(rect.origin.x.max(0) as u32);
+            let max_height = monitor
+                .size
+                .height
+                .saturating_sub(rect.origin.y.max(0) as u32);
+            let width = i64::from(rect.size.width) + i64::from(dx);
+            let height = i64::from(rect.size.height) + i64::from(dy);
+            rect.size.width = width.clamp(1, i64::from(max_width.max(1))) as u32;
+            rect.size.height = height.clamp(1, i64::from(max_height.max(1))) as u32;
         } else {
             rect.origin.x += dx;
             rect.origin.y += dy;
@@ -3667,7 +3668,7 @@ impl OverlayView {
                         "down" => Some((0, 1)),
                         _ => None,
                     } {
-                        this.nudge_selection(dx, dy, event.keystroke.modifiers.shift, command, cx);
+                        this.nudge_selection(dx, dy, event.keystroke.modifiers.shift, cx);
                         return;
                     }
                     return;
