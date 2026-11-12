@@ -73,8 +73,8 @@ const FALLBACK_ACCENT_DARK: u32 = 0x4CC2FF;
 /// follows System Settings, so paddings, corner radii and type sizes match the host.
 #[cfg(target_os = "windows")]
 mod layout {
-    pub const WINDOW_WIDTH: f32 = 940.0;
-    pub const WINDOW_HEIGHT: f32 = 700.0;
+    pub const WINDOW_WIDTH: f32 = 870.0;
+    pub const WINDOW_HEIGHT: f32 = 640.0;
     pub const MIN_WIDTH: f32 = 760.0;
     pub const MIN_HEIGHT: f32 = 560.0;
     pub const TITLEBAR_HEIGHT: f32 = 34.0;
