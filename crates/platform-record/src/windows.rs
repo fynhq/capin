@@ -9,7 +9,7 @@ use windows::Win32::Media::MediaFoundation::MFGetSystemTime;
 use core_capture::{CaptureTarget, platform_backend};
 use core_record::{
     CURSOR_HIGHLIGHT_ALPHA, CURSOR_HIGHLIGHT_RADIUS, CursorHighlight, FRAME_RATE, FrameDecision,
-    FrameTimeline, RecordConfig, paint_cursor_highlight_bgra,
+    FrameTimeline, RecordConfig, paint_cursor_highlight_bgra, video_bitrate,
 };
 use core_types::PhysicalRect;
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
@@ -504,8 +504,7 @@ impl GraphicsCaptureApiHandler for Recorder {
         }
 
         if self.encoder.is_none() {
-            let bitrate = (u64::from(width) * u64::from(height) * u64::from(FRAME_RATE)) / 4;
-            let bitrate = (bitrate as f32).clamp(4_000_000.0, 60_000_000.0) as u32;
+            let bitrate = video_bitrate(width, height);
             let encoder = match VideoEncoder::new(
                 VideoSettingsBuilder::new(width, height)
                     .sub_type(VideoSettingsSubType::H264)

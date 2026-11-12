@@ -8,7 +8,7 @@ use block2::RcBlock;
 use core_capture::CaptureTarget;
 use core_record::{
     CURSOR_HIGHLIGHT_ALPHA, CURSOR_HIGHLIGHT_RADIUS, CursorHighlight, FRAME_RATE, FrameDecision,
-    FrameTimeline, RecordConfig, paint_cursor_highlight_bgra,
+    FrameTimeline, RecordConfig, paint_cursor_highlight_bgra, video_bitrate,
 };
 use core_types::PhysicalRect;
 use dispatch2::DispatchQueue;
@@ -867,9 +867,7 @@ fn video_settings(
     height: usize,
 ) -> Result<Retained<NSDictionary<NSString, AnyObject>>, String> {
     let codec = unsafe { AVVideoCodecTypeH264 }.ok_or_else(|| "H.264 is unavailable".to_owned())?;
-    let base_bitrate = ((width as u64 * height as u64 * u64::from(FRAME_RATE)) / 4) as f32;
-    let bitrate = base_bitrate.clamp(4_000_000.0, 60_000_000.0) as u32;
-    let bitrate = NSNumber::new_u32(bitrate);
+    let bitrate = NSNumber::new_u32(video_bitrate(width as u32, height as u32));
     let interval = NSNumber::new_u32(FRAME_RATE);
     let compression = NSDictionary::from_slices(
         &[

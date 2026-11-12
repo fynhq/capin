@@ -5,6 +5,16 @@ use thiserror::Error;
 /// Fixed output frame rate for every recording.
 pub const FRAME_RATE: u32 = 30;
 
+/// Encoder bitrate for screen content, in bits per second.
+///
+/// Screen recordings spend bits on sharp text and flat UI rather than camera
+/// motion, so one bit per eight pixels per frame keeps 1080p30 near 7.8 Mbps
+/// instead of the 15.5 Mbps of a one-bit-per-four budget.
+pub fn video_bitrate(width: u32, height: u32) -> u32 {
+    let bits = u64::from(width) * u64::from(height) * u64::from(FRAME_RATE) / 8;
+    bits.clamp(2_000_000, 24_000_000) as u32
+}
+
 /// The translucent disc painted under the system cursor during a recording.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CursorHighlight {
@@ -90,5 +100,13 @@ mod tests {
             config.validate(PhysicalSize::new(1920, 1080)),
             Err(RecordError::EmptyTarget)
         );
+    }
+
+    #[test]
+    fn bitrate_halves_the_previous_screen_budget() {
+        assert_eq!(super::video_bitrate(1920, 1080), 7_776_000);
+        assert_eq!(super::video_bitrate(1280, 720), 3_456_000);
+        assert_eq!(super::video_bitrate(3840, 2160), 24_000_000);
+        assert_eq!(super::video_bitrate(160, 120), 2_000_000);
     }
 }
