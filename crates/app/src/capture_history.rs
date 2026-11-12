@@ -17,6 +17,25 @@ struct HistoryEntry {
     file: String,
     created_at: u64,
     hash: u64,
+    /// Present when the export deliberately left the composed shadow out so
+    /// pinning it must render the floating edge again.
+    #[serde(default)]
+    pin_shadow: Option<HistoryPinShadow>,
+}
+
+/// Recipe for the pin-only shadow of a region export.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HistoryPinShadow {
+    /// Logical corner radius the export was rendered with.
+    pub corner_radius: u32,
+    /// Capture scale the export was rendered at.
+    pub scale: f32,
+}
+
+/// A decoded history screenshot plus its pin-display shadow recipe.
+pub struct HistoryImage {
+    pub frame: RgbaFrame,
+    pub pin_shadow: Option<HistoryPinShadow>,
 }
 
 thread_local! {
@@ -26,17 +45,21 @@ thread_local! {
 /// Records an already encoded PNG. Copying a screenshot to the clipboard
 /// produces PNG bytes; history writes those bytes instead of encoding the
 /// same image a second time.
-pub fn record_png_bytes(bytes: &[u8], hash: u64) {
-    record_png(hash, |path| std::fs::write(path, bytes).is_ok());
+pub fn record_png_bytes(bytes: &[u8], hash: u64, pin_shadow: Option<HistoryPinShadow>) {
+    record_png(hash, pin_shadow, |path| std::fs::write(path, bytes).is_ok());
 }
 
 /// Records an existing exported PNG by copying the file. Saving a screenshot
 /// already paid for PNG encoding, so history only duplicates the bytes.
-pub fn record_png_file(source: &Path, hash: u64) -> bool {
-    record_png(hash, |path| std::fs::copy(source, path).is_ok())
+pub fn record_png_file(source: &Path, hash: u64, pin_shadow: Option<HistoryPinShadow>) -> bool {
+    record_png(hash, pin_shadow, |path| std::fs::copy(source, path).is_ok())
 }
 
-fn record_png(hash: u64, write: impl FnOnce(&Path) -> bool) -> bool {
+fn record_png(
+    hash: u64,
+    pin_shadow: Option<HistoryPinShadow>,
+    write: impl FnOnce(&Path) -> bool,
+) -> bool {
     let Some(directory) = history_dir() else {
         return false;
     };
@@ -46,6 +69,7 @@ fn record_png(hash: u64, write: impl FnOnce(&Path) -> bool) -> bool {
         // Re-exporting the newest image refreshes its age instead of creating
         // a duplicate entry.
         first.created_at = now;
+        first.pin_shadow = pin_shadow;
         write_entries(&directory, &entries);
         ENTRIES.with(|slot| *slot.borrow_mut() = Some(entries));
         return true;
@@ -77,6 +101,7 @@ fn record_png(hash: u64, write: impl FnOnce(&Path) -> bool) -> bool {
             file,
             created_at: now,
             hash,
+            pin_shadow,
         },
     );
     prune(&mut entries, &directory, now);
@@ -91,7 +116,7 @@ fn record_png(hash: u64, write: impl FnOnce(&Path) -> bool) -> bool {
 /// wraps back to the newest, so one sequence cannot show an image twice. If
 /// `hash` does not belong to the history (for example a clipboard-only pin),
 /// the walk starts at the newest screenshot.
-pub fn cycle(hash: u64) -> Option<RgbaFrame> {
+pub fn cycle(hash: u64) -> Option<HistoryImage> {
     let entries = entries();
     if entries.is_empty() {
         return None;
@@ -102,7 +127,10 @@ pub fn cycle(hash: u64) -> Option<RgbaFrame> {
         if entry.hash != hash
             && let Some(frame) = load_entry(&directory, entry)
         {
-            return Some(frame);
+            return Some(HistoryImage {
+                frame,
+                pin_shadow: entry.pin_shadow,
+            });
         }
         index += 1;
     }
@@ -125,23 +153,31 @@ pub fn contains(hash: u64) -> bool {
 
 /// Loads the history entry matching `hash`. Used to reopen a pin that was just
 /// closed without advancing the history walk.
-pub fn find(hash: u64) -> Option<RgbaFrame> {
+pub fn find(hash: u64) -> Option<HistoryImage> {
     let entries = entries();
     let directory = history_dir()?;
     entries
         .iter()
         .find(|entry| entry.hash == hash)
-        .and_then(|entry| load_entry(&directory, entry))
+        .and_then(|entry| {
+            Some(HistoryImage {
+                frame: load_entry(&directory, entry)?,
+                pin_shadow: entry.pin_shadow,
+            })
+        })
 }
 
 /// Loads the newest exported screenshot. The pin shortcut falls back to this
 /// instead of keeping a full decoded frame in memory for the whole session.
-pub fn latest() -> Option<RgbaFrame> {
+pub fn latest() -> Option<HistoryImage> {
     let entries = entries();
     let directory = history_dir()?;
-    entries
-        .iter()
-        .find_map(|entry| load_entry(&directory, entry))
+    entries.iter().find_map(|entry| {
+        Some(HistoryImage {
+            frame: load_entry(&directory, entry)?,
+            pin_shadow: entry.pin_shadow,
+        })
+    })
 }
 
 /// Stable in-process hash for matching an image against history.
@@ -285,6 +321,7 @@ mod tests {
                 file,
                 created_at: index as u64 + 1,
                 hash: index as u64,
+                pin_shadow: None,
             });
         }
         let now = HISTORY_LIMIT as u64 + 10;
@@ -313,6 +350,7 @@ mod tests {
                 file,
                 created_at: index,
                 hash,
+                pin_shadow: None,
             });
         }
         prune(&mut entries, &directory, 100);
@@ -334,16 +372,19 @@ mod tests {
                 file: "new.png".to_owned(),
                 created_at: 3,
                 hash: 30,
+                pin_shadow: None,
             },
             HistoryEntry {
                 file: "mid.png".to_owned(),
                 created_at: 2,
                 hash: 20,
+                pin_shadow: None,
             },
             HistoryEntry {
                 file: "old.png".to_owned(),
                 created_at: 1,
                 hash: 10,
+                pin_shadow: None,
             },
         ];
         assert_eq!(older_index(&entries, 30), 1);
@@ -363,16 +404,19 @@ mod tests {
                 file: "a.png".to_owned(),
                 created_at: 3,
                 hash: 1,
+                pin_shadow: None,
             },
             HistoryEntry {
                 file: "b.png".to_owned(),
                 created_at: 2,
                 hash: 2,
+                pin_shadow: None,
             },
             HistoryEntry {
                 file: "c.png".to_owned(),
                 created_at: 1,
                 hash: 3,
+                pin_shadow: None,
             },
         ];
         let mut index = older_index(&entries, 1);

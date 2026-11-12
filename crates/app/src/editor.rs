@@ -4927,13 +4927,26 @@ impl EditorView {
         let native_shadow = self.pin_native_shadow();
         let document = self.action_document();
         match rasterize(&document, &self.frame) {
-            Ok(output) => {
-                let output = if pin_effects.active() {
-                    pin_effects.apply(output, self.region_effects_scale())
+            Ok(raw) => {
+                let export = if self.region_effects_active() {
+                    self.effects.apply(raw.clone(), effects_scale)
                 } else {
-                    output
+                    raw.clone()
                 };
-                let hash = crate::capture_history::hash_frame(&output);
+                let output = if pin_effects.active() {
+                    pin_effects.apply(raw, effects_scale)
+                } else {
+                    raw
+                };
+                let hash = crate::capture_history::hash_frame(&export);
+                let record_history = self.pin_target.is_none();
+                let pin_shadow =
+                    (record_history && self.region_effects_active() && !self.effects.shadow)
+                        .then_some(crate::capture_history::HistoryPinShadow {
+                            corner_radius: self.effects.corner_radius,
+                            scale: effects_scale,
+                        });
+                let export_padding = if self.effects.shadow { 0 } else { pin_padding };
                 let placement = inline_host.map(|inline| {
                     // The editor image may already be zoomed; use its displayed
                     // scale so the pin opens at the same size and center. This
@@ -4995,6 +5008,11 @@ impl EditorView {
                     if inline_host.is_some() {
                         crate::windows::close_capture_auxiliary(cx, handles);
                     }
+                    // Encoding blocks for a few milliseconds; run it after the
+                    // editor closes instead of inside the toolbar callback.
+                    if record_history && let Ok(bytes) = image_util::encode_png(&export) {
+                        crate::capture_history::record_png_bytes(&bytes, hash, pin_shadow);
+                    }
                     let id = if let Some((bounds, zoom)) = placement {
                         crate::pin::open_frame_at_with_hash(
                             output,
@@ -5010,6 +5028,7 @@ impl EditorView {
                     };
                     if let Some(id) = id {
                         crate::pin::set_edit_state(id, edit_state);
+                        crate::pin::set_export_padding(id, export_padding);
                     }
                 });
             }
@@ -5064,12 +5083,18 @@ impl EditorView {
                 };
                 let hash = crate::capture_history::hash_frame(&output);
                 let record_history = self.pin_target.is_none();
+                let pin_shadow =
+                    (record_history && self.region_effects_active() && !self.effects.shadow)
+                        .then_some(crate::capture_history::HistoryPinShadow {
+                            corner_radius: self.effects.corner_radius,
+                            scale,
+                        });
                 if copy_only || settings_state::get().copy_to_clipboard {
                     match image_util::encode_png(&output) {
                         Ok(bytes) => {
                             copy_ok = true;
                             if record_history {
-                                crate::capture_history::record_png_bytes(&bytes, hash);
+                                crate::capture_history::record_png_bytes(&bytes, hash, pin_shadow);
                             }
                             image_util::copy_png_bytes(bytes, cx);
                             messages.push(t(language, "editor.copied").to_owned());
@@ -5083,7 +5108,7 @@ impl EditorView {
                     match image_util::save_png(&output) {
                         Ok(path) => {
                             save_ok = true;
-                            crate::capture_history::record_png_file(&path, hash);
+                            crate::capture_history::record_png_file(&path, hash, pin_shadow);
                             messages.push(format!(
                                 "{} {}",
                                 t(language, "editor.saved"),
@@ -5109,6 +5134,8 @@ impl EditorView {
                     let pin_image = pin_output.unwrap_or(output);
                     if crate::pin::replace_image_with_edit_state(pin_id, pin_image, edit_state, cx)
                     {
+                        let export_padding = if self.effects.shadow { 0 } else { pin_padding };
+                        crate::pin::set_export_padding(pin_id, export_padding);
                         pin_ok = true;
                         messages.push(t(language, "editor.pin_updated").to_owned());
                     } else {

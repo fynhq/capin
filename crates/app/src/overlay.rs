@@ -16,6 +16,7 @@ use gpui_kit::*;
 use platform_window::{WindowStyle, apply as apply_window_style, system_accent_hex};
 
 use crate::{
+    capture_history::HistoryPinShadow,
     chrome_theme::ChromeTheme,
     editor::{EditorView, FullCanvasInit, InlineCapture, Tool, tooltip_view},
     effects::RegionEffects,
@@ -1900,6 +1901,18 @@ impl OverlayView {
         cx.notify();
     }
 
+    /// Shadow recipe a history entry needs to pin a shadow-free region export.
+    fn history_pin_shadow(&self) -> Option<HistoryPinShadow> {
+        let selected = self.selected.as_ref()?;
+        if !matches!(selected.target, CaptureTarget::Region(_)) || self.effects.shadow {
+            return None;
+        }
+        Some(HistoryPinShadow {
+            corner_radius: self.effects.corner_radius,
+            scale: self.effective_scale(),
+        })
+    }
+
     fn copy_selected(&mut self, cx: &mut Context<Self>) {
         self.commit_edit(cx);
         let output = match self.selected_output() {
@@ -1910,10 +1923,11 @@ impl OverlayView {
             }
         };
         let hash = crate::capture_history::hash_frame(&output);
+        let pin_shadow = self.history_pin_shadow();
         match image_util::encode_png(&output) {
             Ok(bytes) => {
                 log_info!("overlay", "selection copied to clipboard");
-                crate::capture_history::record_png_bytes(&bytes, hash);
+                crate::capture_history::record_png_bytes(&bytes, hash, pin_shadow);
                 image_util::copy_png_bytes(bytes, cx);
                 self.close_overlays(cx);
             }
@@ -1931,10 +1945,11 @@ impl OverlayView {
             }
         };
         let hash = crate::capture_history::hash_frame(&output);
+        let pin_shadow = self.history_pin_shadow();
         match image_util::save_png(&output) {
             Ok(path) => {
                 log_info!("overlay", "selection saved");
-                crate::capture_history::record_png_file(&path, hash);
+                crate::capture_history::record_png_file(&path, hash, pin_shadow);
                 self.close_overlays(cx);
             }
             Err(error) => self.set_notice(error.to_string(), cx),
@@ -1955,27 +1970,50 @@ impl OverlayView {
         };
         let monitor = self.session.monitor_bounds();
         let scale = self.effective_scale();
+        let region = matches!(selected.target, CaptureTarget::Region(_));
+        let window = matches!(selected.target, CaptureTarget::Window(_));
+        let raw = output;
         // Region pins always show the composed shadow so rounded corners keep
-        // their floating edge. Copy/save still use the configured effects.
-        let output = if matches!(selected.target, CaptureTarget::Window(_)) {
-            output
-        } else if matches!(selected.target, CaptureTarget::Region(_)) {
-            self.effects.with_shadow().apply(output, scale)
+        // their floating edge; the export (copy/save/history) follows the
+        // configured effects.
+        let display_effects = if region {
+            self.effects.with_shadow()
         } else {
-            self.effects.apply(output, scale)
+            self.effects
+        };
+        let export = if window {
+            raw.clone()
+        } else {
+            self.effects.apply(raw.clone(), scale)
+        };
+        let display = if window {
+            raw.clone()
+        } else {
+            display_effects.apply(raw.clone(), scale)
         };
         let center_x = (monitor.origin.x + selected.rect.origin.x) as f32 / scale
             + selected.rect.size.width as f32 / scale / 2.0;
         let center_y = (monitor.origin.y + selected.rect.origin.y) as f32 / scale
             + selected.rect.size.height as f32 / scale / 2.0;
-        let width = output.width() as f32 / scale;
-        let height = output.height() as f32 / scale;
+        let width = display.width() as f32 / scale;
+        let height = display.height() as f32 / scale;
         let bounds = Bounds {
             origin: point(px(center_x - width / 2.0), px(center_y - height / 2.0)),
             size: size(px(width), px(height)),
         };
         log_info!("overlay", "selection pinned");
-        let hash = crate::capture_history::hash_frame(&output);
+        let hash = crate::capture_history::hash_frame(&export);
+        let pin_shadow = (region && !self.effects.shadow).then_some(HistoryPinShadow {
+            corner_radius: self.effects.corner_radius,
+            scale,
+        });
+        // A region pin shows a shadow margin the export may not carry; copy and
+        // save strip that margin instead of handing out the display image.
+        let export_padding = if pin_shadow.is_some() {
+            display_effects.padding(scale)
+        } else {
+            0
+        };
         let monitor = self.session.monitor();
         let handles = cx.windows();
         // Opening the pin window inside this input callback would re-enter
@@ -1983,15 +2021,22 @@ impl OverlayView {
         // next turn.
         cx.defer(move |cx| {
             crate::windows::close_capture_auxiliary(cx, handles);
-            crate::pin::open_frame_at_with_hash(
-                output,
+            // Encoding the export blocks for a few milliseconds; keep it out of
+            // the toolbar's input callback.
+            if let Ok(bytes) = image_util::encode_png(&export) {
+                crate::capture_history::record_png_bytes(&bytes, hash, pin_shadow);
+            }
+            if let Some(id) = crate::pin::open_frame_at_with_hash(
+                display,
                 bounds,
                 1.0 / scale,
                 hash,
                 Some(monitor),
                 false,
                 cx,
-            );
+            ) {
+                crate::pin::set_export_padding(id, export_padding);
+            }
         });
     }
 

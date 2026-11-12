@@ -416,6 +416,9 @@ struct PinState {
     /// Present after the pin has been edited in this session. Rotating or
     /// replacing the image from another source clears it.
     edit_state: Option<PinEditState>,
+    /// Shadow margin baked into the pinned image while the export shadow was
+    /// off. Copy/save strip it so the clipboard matches the export settings.
+    export_padding: u32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -434,6 +437,10 @@ struct PersistedPin {
     click_through: bool,
     #[serde(default)]
     shadow: bool,
+    /// Composed shadow margin that copy/save must strip while the export
+    /// shadow setting is off.
+    #[serde(default)]
+    export_padding: u32,
 }
 
 pub fn pin_last(cx: &mut App) {
@@ -486,7 +493,13 @@ pub fn pin_last(cx: &mut App) {
             _ => false,
         };
         if LAST_PIN_TRIGGER.with(|slot| slot.get()).is_none() || clipboard_changed {
-            pin_image(frame, cx);
+            pin_image(
+                crate::capture_history::HistoryImage {
+                    frame,
+                    pin_shadow: None,
+                },
+                cx,
+            );
             return;
         }
         // The sequence is already walking the history. Even when it is
@@ -517,8 +530,8 @@ pub fn pin_last(cx: &mut App) {
         pin_history_step(cx);
         return;
     }
-    if let Some(frame) = crate::capture_history::latest() {
-        pin_image(frame, cx);
+    if let Some(image) = crate::capture_history::latest() {
+        pin_image(image, cx);
     } else {
         log_warn!("pin", "no clipboard content or recent capture to pin");
     }
@@ -539,12 +552,8 @@ fn pin_history_step(cx: &mut App) -> bool {
             .values()
             .any(|state| state.content_hash == Some(current))
     });
-    if !live && let Some(frame) = crate::capture_history::find(current) {
-        open_pin_content_with_shadow(
-            PinContent::from_frame_with_hash(frame, current),
-            LAST_PIN_SHADOW.with(|slot| slot.get()),
-            cx,
-        );
+    if !live && let Some(image) = crate::capture_history::find(current) {
+        open_history_pin(image, LAST_PIN_SHADOW.with(|slot| slot.get()), cx);
         return true;
     }
     if settings_state::get().repeat_pin == settings_state::RepeatPinBehavior::FlashCurrent
@@ -552,22 +561,22 @@ fn pin_history_step(cx: &mut App) -> bool {
     {
         return true;
     }
-    let Some(frame) = crate::capture_history::cycle(current) else {
+    let Some(image) = crate::capture_history::cycle(current) else {
         log_info!("pin", "screenshot history has no older entry");
         return true;
     };
-    let hash = crate::capture_history::hash_frame(&frame);
+    let hash = crate::capture_history::hash_frame(&image.frame);
     LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
     if !flash_existing_pin(hash, cx) {
-        open_pin_content(PinContent::from_frame_with_hash(frame, hash), cx);
+        open_history_pin(image, false, cx);
     }
     true
 }
 
 /// Pins an image, or applies the configured repeat behavior when the same
 /// screenshot is triggered again without a new clipboard source.
-fn pin_image(frame: RgbaFrame, cx: &mut App) {
-    let hash = crate::capture_history::hash_frame(&frame);
+fn pin_image(image: crate::capture_history::HistoryImage, cx: &mut App) {
+    let hash = crate::capture_history::hash_frame(&image.frame);
     let repeated = LAST_PIN_TRIGGER.with(|slot| slot.get() == Some(hash))
         || PINS.with(|pins| {
             pins.borrow()
@@ -578,15 +587,12 @@ fn pin_image(frame: RgbaFrame, cx: &mut App) {
         let behavior = settings_state::get().repeat_pin;
         if behavior == settings_state::RepeatPinBehavior::RestoreHistory
             && crate::capture_history::contains(hash)
-            && let Some(history_frame) = crate::capture_history::cycle(hash)
+            && let Some(history_image) = crate::capture_history::cycle(hash)
         {
-            let history_hash = crate::capture_history::hash_frame(&history_frame);
+            let history_hash = crate::capture_history::hash_frame(&history_image.frame);
             LAST_PIN_TRIGGER.with(|slot| slot.set(Some(history_hash)));
             if !flash_existing_pin(history_hash, cx) {
-                open_pin_content(
-                    PinContent::from_frame_with_hash(history_frame, history_hash),
-                    cx,
-                );
+                open_history_pin(history_image, false, cx);
             }
             return;
         }
@@ -596,7 +602,7 @@ fn pin_image(frame: RgbaFrame, cx: &mut App) {
             return;
         }
     }
-    open_image_pin(frame, hash, cx);
+    open_history_pin(image, false, cx);
 }
 
 /// Brings the pin holding `hash` to the front and flashes its outline.
@@ -626,7 +632,9 @@ pub fn open_frame_with_hash(
     let zoom = content.preferred_zoom();
     let (width, height) = content.size(zoom);
     let bounds = default_bounds(cx, width, height);
-    open_pin_content_at(content, bounds, zoom, true, None, native_shadow, cx)
+    // Capture pins record their shadow-free export into history themselves;
+    // the pinned image may carry a pin-only shadow.
+    open_pin_content_at(content, bounds, zoom, None, native_shadow, cx)
 }
 
 /// Pins a capture at a screen rectangle using a hash already computed by the
@@ -661,23 +669,55 @@ pub fn open_frame_at_with_hash(
         PinContent::from_frame_with_hash(frame, hash),
         bounds,
         zoom,
-        true,
         display_id,
         native_shadow,
         cx,
     )
 }
 
-fn open_image_pin(frame: RgbaFrame, hash: u64, cx: &mut App) {
+/// Opens a screenshot from history. Region exports leave the composed shadow
+/// out so copy/save match the settings; pinning one renders the floating edge
+/// again and keeps the shadow-free export as the edit base.
+fn open_history_pin(
+    image: crate::capture_history::HistoryImage,
+    native_shadow: bool,
+    cx: &mut App,
+) {
+    let crate::capture_history::HistoryImage { frame, pin_shadow } = image;
+    let hash = crate::capture_history::hash_frame(&frame);
     LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
-    open_pin_content(PinContent::from_frame_with_hash(frame, hash), cx);
+    let Some(shadow) = pin_shadow else {
+        let _ = open_pin_content_with_shadow(
+            PinContent::from_frame_with_hash(frame, hash),
+            native_shadow,
+            cx,
+        );
+        return;
+    };
+    let display_effects = crate::effects::RegionEffects {
+        corner_radius: shadow.corner_radius,
+        shadow: true,
+    };
+    let display = display_effects.apply(frame, shadow.scale);
+    let display_padding = display_effects.padding(shadow.scale);
+    // The image already carries its composed shadow; the window must not add
+    // a second one. Copy/save strip the pin-only margin.
+    if let Some(id) =
+        open_pin_content_with_shadow(PinContent::from_frame_with_hash(display, hash), false, cx)
+    {
+        set_export_padding(id, display_padding);
+    }
 }
 
 fn open_pin_content(content: PinContent, cx: &mut App) {
-    open_pin_content_with_shadow(content, false, cx);
+    let _ = open_pin_content_with_shadow(content, false, cx);
 }
 
-fn open_pin_content_with_shadow(content: PinContent, native_shadow: bool, cx: &mut App) {
+fn open_pin_content_with_shadow(
+    content: PinContent,
+    native_shadow: bool,
+    cx: &mut App,
+) -> Option<u64> {
     let zoom = content.preferred_zoom();
     let (width, height) = content.size(zoom);
     log_info!("pin", "opening pin {}x{}", width.round(), height.round());
@@ -691,11 +731,10 @@ fn open_pin_content_with_shadow(content: PinContent, native_shadow: bool, cx: &m
         false,
         None,
         true,
-        false,
         native_shadow,
         None,
         cx,
-    );
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -703,7 +742,6 @@ fn open_pin_content_at(
     content: PinContent,
     bounds: Bounds<Pixels>,
     zoom: f32,
-    record_history: bool,
     display_id: Option<DisplayId>,
     native_shadow: bool,
     cx: &mut App,
@@ -725,7 +763,6 @@ fn open_pin_content_at(
         false,
         None,
         true,
-        record_history,
         native_shadow,
         display_id,
         cx,
@@ -753,7 +790,6 @@ fn open_pin_inner(
     click_through: bool,
     existing_image: Option<PathBuf>,
     persist: bool,
-    record_history: bool,
     native_shadow: bool,
     display_id: Option<DisplayId>,
     cx: &mut App,
@@ -836,13 +872,6 @@ fn open_pin_inner(
         view
     }) {
         Ok((window, entity)) => {
-            if record_history
-                && let (Some(hash), Some(path)) = (content_hash, image_path.as_deref())
-            {
-                // The pin file is already encoded; copy it into history
-                // instead of encoding the same frame again.
-                crate::capture_history::record_png_file(path, hash);
-            }
             let view_for_release = entity.clone();
             let state = PinState {
                 kind,
@@ -856,6 +885,7 @@ fn open_pin_inner(
                 click_through,
                 native_shadow,
                 edit_state: None,
+                export_padding: 0,
             };
             PINS.with(|pins| {
                 pins.borrow_mut().insert(id, state);
@@ -947,7 +977,7 @@ pub fn restore(cx: &mut App) {
                 .map(|name| directory.join(name)),
             _ => None,
         };
-        let _ = open_pin_inner(
+        let id = open_pin_inner(
             content,
             Some(entry.id),
             bounds,
@@ -956,11 +986,13 @@ pub fn restore(cx: &mut App) {
             entry.click_through,
             existing_image,
             false,
-            false,
             entry.shadow,
             None,
             cx,
         );
+        if let Some(id) = id {
+            set_export_padding(id, entry.export_padding);
+        }
     }
     save_manifest();
 }
@@ -971,6 +1003,16 @@ pub(crate) fn set_edit_state(id: u64, edit_state: PinEditState) {
     PINS.with(|pins| {
         if let Some(state) = pins.borrow_mut().get_mut(&id) {
             state.edit_state = Some(edit_state);
+        }
+    });
+}
+
+/// Marks how much composed shadow margin a pin image carries so copy/save can
+/// drop it while the export shadow setting is off.
+pub(crate) fn set_export_padding(id: u64, padding: u32) {
+    PINS.with(|pins| {
+        if let Some(state) = pins.borrow_mut().get_mut(&id) {
+            state.export_padding = padding;
         }
     });
 }
@@ -1288,6 +1330,7 @@ fn save_manifest() {
                     zoom: state.zoom,
                     click_through: state.click_through,
                     shadow: state.native_shadow,
+                    export_padding: state.export_padding,
                 })
             })
             .collect();
@@ -2149,38 +2192,66 @@ impl PinView {
         self.show_notice(t(language, "pin.copied").to_owned(), cx);
     }
 
-    fn copy_image(&mut self, cx: &mut Context<Self>) {
-        // The persisted PNG is already encoded; copying its bytes avoids
-        // decoding the pin and re-encoding it just to reach the clipboard.
-        if let Some(path) = self.persisted_path()
-            && let Ok(bytes) = std::fs::read(path)
+    /// The frame copy/save exports. Region pins display a composed shadow even
+    /// when the export setting leaves it off, so those re-export the capture
+    /// with the configured effects instead of handing out the display image.
+    fn export_frame(&self) -> Option<Arc<RgbaFrame>> {
+        let edit_state = PINS.with(|pins| {
+            pins.borrow()
+                .get(&self.id)
+                .and_then(|state| state.edit_state.clone())
+        });
+        if let Some(state) = edit_state
+            && let Some(base) = state.base_frame()
+            && let Ok(raw) = core_annotate::rasterize(&state.document, &base)
         {
-            image_util::copy_png_bytes(bytes, cx);
-            let language = settings_state::get().language;
-            self.show_notice(t(language, "pin.copied").to_owned(), cx);
-            return;
+            let frame = if state.effects.active() {
+                state.effects.apply(raw, state.effects_scale)
+            } else {
+                raw
+            };
+            return Some(Arc::new(frame));
         }
-        let Some(frame) = self.frame_for_action() else {
+        // A restored pin has no vector document; strip the pin-only shadow
+        // margin so the copy matches the export that was recorded in history.
+        let frame = self.frame_for_action()?;
+        let padding = self.export_padding();
+        if padding > 0 {
+            let width = frame.width().saturating_sub(padding.saturating_mul(2));
+            let height = frame.height().saturating_sub(padding.saturating_mul(2));
+            if width > 0 && height > 0 {
+                let inner = PhysicalRect::new(padding as i32, padding as i32, width, height);
+                return frame.cropped(inner).map(Arc::new);
+            }
+        }
+        Some(frame)
+    }
+
+    fn export_padding(&self) -> u32 {
+        PINS.with(|pins| {
+            pins.borrow()
+                .get(&self.id)
+                .map_or(0, |state| state.export_padding)
+        })
+    }
+
+    fn copy_image(&mut self, cx: &mut Context<Self>) {
+        let language = settings_state::get().language;
+        let Some(frame) = self.export_frame() else {
             return;
         };
         if let Ok(bytes) = image_util::encode_png(&frame) {
             image_util::copy_png_bytes(bytes, cx);
-            let language = settings_state::get().language;
             self.show_notice(t(language, "pin.copied").to_owned(), cx);
         }
     }
 
     fn save_image(&mut self, cx: &mut Context<Self>) {
         let language = settings_state::get().language;
-        let result = if let Some(path) = self.persisted_path() {
-            crate::storage::save_png_file(&path)
-        } else {
-            let Some(frame) = self.frame_for_action() else {
-                return;
-            };
-            image_util::save_png(&frame)
+        let Some(frame) = self.export_frame() else {
+            return;
         };
-        match result {
+        match image_util::save_png(&frame) {
             Ok(path) => {
                 self.show_notice(
                     format!("{} {}", t(language, "pin.saved"), path.display()),

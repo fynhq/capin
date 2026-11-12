@@ -128,23 +128,6 @@ pub fn save_png(frame: &RgbaFrame) -> Result<PathBuf, std::io::Error> {
     Ok(path)
 }
 
-/// Saves an existing PNG by copying its encoded bytes. Used by pin "save"
-/// after OCR has released the CPU frame.
-pub fn save_png_file(source: &Path) -> Result<PathBuf, std::io::Error> {
-    let (width, height) = image::image_dimensions(source).map_err(std::io::Error::other)?;
-    let directory = screenshot_dir();
-    ensure_directory(&directory)?;
-    let template = settings_state::get().filename_template.clone();
-    let stem = render_filename(&template, width, height);
-    let (path, file) = create_unique_file(&directory, &stem, "png")?;
-    drop(file);
-    if let Err(error) = std::fs::copy(source, &path) {
-        let _ = std::fs::remove_file(&path);
-        return Err(error);
-    }
-    Ok(path)
-}
-
 /// Expands the user filename template. `{date}` is local `YYYYMMDD`,
 /// `{time}` is local `HHMMSS`, and `{width}`/`{height}` are image pixels.
 pub fn render_filename(template: &str, width: u32, height: u32) -> String {
