@@ -487,6 +487,13 @@ struct PersistedPin {
 }
 
 pub fn pin_last(cx: &mut App) {
+    // Every pin was closed: the next press enters the history queue from the
+    // newest item again. Continuing from the last shown image made a finished
+    // walk keep sinking into older screenshots instead of restarting.
+    if PINS.with(|pins| pins.borrow().is_empty()) {
+        LAST_PIN_TRIGGER.with(|slot| slot.set(None));
+        LAST_PIN_SHADOW.with(|slot| slot.set(false));
+    }
     let mut clipboard_frame = None;
     let mut clipboard_signature = None;
     let mut clipboard_text = None;
