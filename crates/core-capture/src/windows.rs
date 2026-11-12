@@ -25,8 +25,10 @@ use windows::Win32::UI::HiDpi::{
     MDT_EFFECTIVE_DPI, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetDesktopWindow, GetShellWindow, GetWindowDisplayAffinity, GetWindowRect,
-    IsIconic, IsZoomed, MONITORINFOF_PRIMARY, WDA_EXCLUDEFROMCAPTURE,
+    EnumWindows, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetDesktopWindow, GetShellWindow,
+    GetWindowDisplayAffinity, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, IsIconic, IsWindowVisible, IsZoomed, MONITORINFOF_PRIMARY,
+    WDA_EXCLUDEFROMCAPTURE, WS_CHILD, WS_EX_TOOLWINDOW,
 };
 use windows::core::BOOL;
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
@@ -312,18 +314,41 @@ unsafe fn monitor_info(monitor: HMONITOR) -> Option<MonitorInfo> {
 }
 
 fn enumerate_windows() -> Result<Vec<WindowInfo>> {
-    let windows = Window::enumerate().map_err(|error| platform_error("EnumWindows", error))?;
+    let mut handles: Vec<HWND> = Vec::new();
+    // EnumWindows walks top-level windows in z-order, topmost first.
+    // windows_capture::Window::enumerate is not used because it rejects every
+    // WS_EX_TOOLWINDOW, which includes the taskbar and notification area.
+    // SAFETY: the callback only writes to the Vec borrowed for the duration of
+    // the call, and EnumWindows runs callbacks synchronously.
+    unsafe {
+        EnumWindows(
+            Some(enum_window_callback),
+            LPARAM(&raw mut handles as isize),
+        )
+    }
+    .map_err(|error| platform_error("EnumWindows", error))?;
+
     let shell_window = unsafe { GetShellWindow() };
     let desktop_window = unsafe { GetDesktopWindow() };
 
-    let mut result = Vec::with_capacity(windows.len());
-    for window in windows {
-        let hwnd = HWND(window.as_raw_hwnd());
+    let mut result = Vec::with_capacity(handles.len());
+    for hwnd in handles {
         if hwnd == shell_window || hwnd == desktop_window {
             continue;
         }
-
         // SAFETY: hwnd came from a live window enumeration.
+        if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            continue;
+        }
+        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
+        if style & WS_CHILD.0 != 0 {
+            continue;
+        }
+        let taskbar = is_taskbar(hwnd);
+        let ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+        if ex_style & WS_EX_TOOLWINDOW.0 != 0 && !taskbar {
+            continue;
+        }
         if unsafe { IsIconic(hwnd) }.as_bool() {
             continue;
         }
@@ -347,13 +372,48 @@ fn enumerate_windows() -> Result<Vec<WindowInfo>> {
         result.push(WindowInfo {
             id: WindowId::from_raw(hwnd.0 as usize as u64),
             bounds,
-            title: window.title().unwrap_or_default(),
+            title: window_title(hwnd),
             monitor: monitor_id,
             scale,
         });
     }
 
     Ok(result)
+}
+
+unsafe extern "system" fn enum_window_callback(hwnd: HWND, data: LPARAM) -> BOOL {
+    // SAFETY: `data` points to the Vec owned by enumerate_windows.
+    let handles = unsafe { &mut *(data.0 as *mut Vec<HWND>) };
+    handles.push(hwnd);
+    TRUE
+}
+
+fn window_title(hwnd: HWND) -> String {
+    // SAFETY: hwnd belongs to a live window; the buffer length is queried
+    // first and the returned string is copied into the caller-owned buffer.
+    let length = unsafe { GetWindowTextLengthW(hwnd) };
+    if length <= 0 {
+        return String::new();
+    }
+    let mut buffer = vec![0u16; length as usize + 1];
+    // SAFETY: the buffer is writable for its full length.
+    let copied = unsafe { GetWindowTextW(hwnd, &mut buffer) };
+    if copied <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buffer[..copied as usize])
+}
+
+fn window_class(hwnd: HWND) -> Option<String> {
+    let mut buffer = [0u16; 64];
+    // SAFETY: the buffer is writable for its full length.
+    let length = unsafe { GetClassNameW(hwnd, &mut buffer) };
+    (length > 0).then(|| String::from_utf16_lossy(&buffer[..length as usize]))
+}
+
+fn is_taskbar(hwnd: HWND) -> bool {
+    window_class(hwnd)
+        .is_some_and(|class| matches!(class.as_str(), "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"))
 }
 
 fn is_cloaked(hwnd: HWND) -> bool {
@@ -371,18 +431,10 @@ fn is_cloaked(hwnd: HWND) -> bool {
 }
 
 fn is_shell_surface(hwnd: HWND) -> bool {
-    let mut buffer = [0u16; 64];
-    // SAFETY: the buffer is writable for its full length.
-    let length = unsafe { GetClassNameW(hwnd, &mut buffer) };
-    if length <= 0 {
-        return false;
-    }
-
-    let class = String::from_utf16_lossy(&buffer[..length as usize]);
     // The taskbar is a valid capture target. Only the desktop host windows
     // are excluded; their content is the wallpaper, not a window the user
     // can pick.
-    matches!(class.as_str(), "Progman" | "WorkerW")
+    window_class(hwnd).is_some_and(|class| matches!(class.as_str(), "Progman" | "WorkerW"))
 }
 
 /// Windows marked with `WDA_EXCLUDEFROMCAPTURE` cannot appear in a capture
