@@ -523,10 +523,7 @@ impl TextEdit {
             .or_else(|| self.marked.take())
             .or_else(|| (!selection.is_empty()).then_some(selection))
             .unwrap_or(self.cursor_utf8()..self.cursor_utf8());
-        let text: String = text
-            .chars()
-            .filter(|ch| *ch != '\n' && *ch != '\r')
-            .collect();
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
         self.content.replace_range(range.clone(), &text);
         self.cursor = range.start + text.len();
         self.anchor = self.cursor;
@@ -571,19 +568,25 @@ fn next_char_boundary(content: &str, cursor: usize) -> usize {
 /// layout that the preview actually paints.
 #[derive(Clone, Copy)]
 struct TextLineBox {
+    /// UTF-8 byte offsets in the edited content. The newline that ends a hard
+    /// line is not part of any box, so the next hard line starts one byte later.
     start: usize,
     end: usize,
     x: f32,
     width: f32,
     y: f32,
+    hard_line: usize,
 }
 
+/// Shapes every hard line. `shape_text` splits on `\n` and returns one
+/// `WrappedLine` per hard line; keeping only the first one made multi-line
+/// text hit-test and paint its caret against the first line.
 fn layout_annotation_text(
     window: &Window,
     text: &str,
     font_size: f32,
     width: f32,
-) -> Option<WrappedLine> {
+) -> Option<Vec<WrappedLine>> {
     if text.is_empty() || width <= 0.0 {
         return None;
     }
@@ -604,38 +607,43 @@ fn layout_annotation_text(
             Some(px(width)),
             None,
         )
-        .ok()?
-        .into_iter()
-        .next()
+        .ok()
+        .map(|lines| lines.into_iter().collect())
 }
 
-fn text_line_boxes(layout: &WrappedLine, line_height: f32) -> Vec<TextLineBox> {
+fn text_line_boxes(layouts: &[WrappedLine], line_height: f32) -> Vec<TextLineBox> {
     let mut boxes = Vec::new();
-    let mut start = 0usize;
-    let mut start_x = 0.0f32;
-    for boundary in layout.wrap_boundaries() {
-        let run = &layout.runs()[boundary.run_ix];
-        let glyph = &run.glyphs[boundary.glyph_ix];
-        let end = glyph.index;
-        let end_x = f32::from(glyph.position.x);
+    let mut base = 0usize;
+    for (hard_line, layout) in layouts.iter().enumerate() {
+        let mut start = 0usize;
+        let mut start_x = 0.0f32;
+        for boundary in layout.wrap_boundaries() {
+            let run = &layout.runs()[boundary.run_ix];
+            let glyph = &run.glyphs[boundary.glyph_ix];
+            let end = glyph.index;
+            let end_x = f32::from(glyph.position.x);
+            boxes.push(TextLineBox {
+                start: base + start,
+                end: base + end,
+                x: start_x,
+                width: (end_x - start_x).max(0.0),
+                y: boxes.len() as f32 * line_height,
+                hard_line,
+            });
+            start = end;
+            start_x = end_x;
+        }
+        let end_x = f32::from(layout.unwrapped_layout.width);
         boxes.push(TextLineBox {
-            start,
-            end,
+            start: base + start,
+            end: base + layout.len(),
             x: start_x,
             width: (end_x - start_x).max(0.0),
             y: boxes.len() as f32 * line_height,
+            hard_line,
         });
-        start = end;
-        start_x = end_x;
+        base += layout.len() + 1;
     }
-    let end_x = f32::from(layout.unwrapped_layout.width);
-    boxes.push(TextLineBox {
-        start,
-        end: layout.len(),
-        x: start_x,
-        width: (end_x - start_x).max(0.0),
-        y: boxes.len() as f32 * line_height,
-    });
     boxes
 }
 
@@ -649,7 +657,7 @@ fn text_alignment_offset(alignment: TextAlignment, container_width: f32, line_wi
 }
 
 fn text_caret_position(
-    layout: Option<&WrappedLine>,
+    layouts: Option<&[WrappedLine]>,
     boxes: &[TextLineBox],
     edit: &TextEdit,
     container_width: f32,
@@ -669,15 +677,19 @@ fn text_caret_position(
             px(0.0),
         );
     };
-    let x = layout.map_or(0.0, |layout| {
-        (f32::from(layout.unwrapped_layout.x_for_index(cursor)) - line.x).clamp(0.0, line.width)
-    });
+    let local = cursor.saturating_sub(line.start);
+    let x = layouts
+        .and_then(|layouts| layouts.get(line.hard_line))
+        .map_or(0.0, |layout| {
+            let local = local.min(layout.len());
+            (f32::from(layout.unwrapped_layout.x_for_index(local)) - line.x).clamp(0.0, line.width)
+        });
     let offset = text_alignment_offset(edit.style.text_alignment, container_width, line.width);
     point(px(x + offset), px(line.y))
 }
 
 fn text_selection_boxes(
-    layout: &WrappedLine,
+    layouts: &[WrappedLine],
     boxes: &[TextLineBox],
     selection: &Range<usize>,
     alignment: TextAlignment,
@@ -691,10 +703,15 @@ fn text_selection_boxes(
         if start >= end {
             continue;
         }
-        let x1 =
-            (f32::from(layout.unwrapped_layout.x_for_index(start)) - line.x).clamp(0.0, line.width);
-        let x2 =
-            (f32::from(layout.unwrapped_layout.x_for_index(end)) - line.x).clamp(0.0, line.width);
+        let Some(layout) = layouts.get(line.hard_line) else {
+            continue;
+        };
+        let local_start = (start - line.start).min(layout.len());
+        let local_end = (end - line.start).min(layout.len());
+        let x1 = (f32::from(layout.unwrapped_layout.x_for_index(local_start)) - line.x)
+            .clamp(0.0, line.width);
+        let x2 = (f32::from(layout.unwrapped_layout.x_for_index(local_end)) - line.x)
+            .clamp(0.0, line.width);
         if x2 <= x1 {
             continue;
         }
@@ -3063,26 +3080,28 @@ impl EditorView {
         let scale = self.image_scale(window);
         let font_size = (edit.style.font_size * scale).max(8.0);
         let width = (edit.bounds.size.width as f32 * scale).max(24.0);
-        let Some(layout) = layout_annotation_text(window, &edit.content, font_size, width) else {
+        let Some(layouts) = layout_annotation_text(window, &edit.content, font_size, width) else {
             return Some(0);
         };
         let line_height = font_size * 1.3;
-        let boxes = text_line_boxes(&layout, line_height);
+        let boxes = text_line_boxes(&layouts, line_height);
         let local_x = f32::from(position.x - bounds.origin.x).max(0.0);
         let local_y = f32::from(position.y - bounds.origin.y).max(0.0);
         let line = boxes
             .iter()
             .find(|line| local_y < line.y + line_height)
-            .or_else(|| boxes.last());
-        let offset = line.map_or(0.0, |line| {
-            text_alignment_offset(edit.style.text_alignment, width, line.width)
-        });
-        let point = point(px((local_x - offset).max(0.0)), px(local_y));
-        Some(
-            layout
-                .index_for_position(point, px(line_height))
-                .unwrap_or_else(|index| index),
-        )
+            .or_else(|| boxes.last())?;
+        let layout = layouts.get(line.hard_line)?;
+        let offset = text_alignment_offset(edit.style.text_alignment, width, line.width);
+        let point = point(
+            px((local_x - offset).max(0.0)),
+            px((local_y - line.y).max(0.0)),
+        );
+        let index = layout
+            .index_for_position(point, px(line_height))
+            .unwrap_or_else(|index| index)
+            .min(layout.len());
+        Some(line.start + index)
     }
 
     fn move_text_vertical(
@@ -3098,27 +3117,24 @@ impl EditorView {
             let font_size = (edit.style.font_size * scale).max(8.0);
             let width = (edit.bounds.size.width as f32 * scale).max(24.0);
             let line_height = font_size * 1.3;
-            let layout = layout_annotation_text(window, &edit.content, font_size, width)?;
-            let boxes = text_line_boxes(&layout, line_height);
-            let caret = text_caret_position(Some(&layout), &boxes, edit, width);
+            let layouts = layout_annotation_text(window, &edit.content, font_size, width)?;
+            let boxes = text_line_boxes(&layouts, line_height);
+            let caret = text_caret_position(Some(&layouts), &boxes, edit, width);
             let target_y =
                 (f32::from(caret.y) + if up { -line_height } else { line_height }).max(0.0);
             let line = boxes
                 .iter()
                 .find(|line| target_y < line.y + line_height)
                 .or_else(|| boxes.last())?;
+            let layout = layouts.get(line.hard_line)?;
             let offset = text_alignment_offset(edit.style.text_alignment, width, line.width);
             let x = (f32::from(caret.x) - offset).max(0.0);
-            let y = if target_y >= line.y + line_height {
-                line.y
-            } else {
-                target_y
-            };
-            Some(
-                layout
-                    .index_for_position(point(px(x), px(y)), px(line_height))
-                    .unwrap_or_else(|index| index),
-            )
+            let y = (target_y - line.y).max(0.0);
+            let index = layout
+                .index_for_position(point(px(x), px(y)), px(line_height))
+                .unwrap_or_else(|index| index)
+                .min(layout.len());
+            Some(line.start + index)
         })() else {
             return;
         };
@@ -3131,9 +3147,9 @@ impl EditorView {
         let font_size = (edit.style.font_size * scale).max(8.0);
         let width = (edit.bounds.size.width as f32 * scale).max(24.0);
         let line_height = font_size * 1.3;
-        let layout = layout_annotation_text(window, &edit.content, font_size, width)?;
-        let boxes = text_line_boxes(&layout, line_height);
-        let caret = text_caret_position(Some(&layout), &boxes, edit, width);
+        let layouts = layout_annotation_text(window, &edit.content, font_size, width)?;
+        let boxes = text_line_boxes(&layouts, line_height);
+        let caret = text_caret_position(Some(&layouts), &boxes, edit, width);
         let y = f32::from(caret.y);
         let line = boxes
             .iter()
@@ -3175,6 +3191,26 @@ impl EditorView {
             t(settings_state::get().language, "editor.copied").to_owned(),
             cx,
         );
+    }
+
+    /// Inserts clipboard text at the caret. Multi-line text keeps its line
+    /// breaks so pasted notes match what the source application showed.
+    fn paste_text(&mut self, cx: &mut Context<Self>) {
+        let Some(text) = cx.read_from_clipboard().and_then(|item| {
+            item.entries().iter().find_map(|entry| match entry {
+                ClipboardEntry::String(string) => Some(string.text.clone()),
+                _ => None,
+            })
+        }) else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        if let Some(edit) = &mut self.text_edit {
+            edit.replace(None, &text, false);
+            cx.notify();
+        }
     }
 
     fn toolbar(
@@ -5647,6 +5683,7 @@ impl Render for EditorView {
                         .top(px(bounds.origin.y as f32 * scale))
                         .w(px(bounds.size.width as f32 * scale))
                         .text_size(px(font_size))
+                        .line_height(px(font_size * 1.3))
                         .text_align(text_align);
                     if annotation.style.text_background {
                         let background = if prefers_dark_foreground(color) {
@@ -5681,6 +5718,7 @@ impl Render for EditorView {
                                     .top(px(dy as f32))
                                     .w_full()
                                     .text_size(px(font_size))
+                                    .line_height(px(font_size * 1.3))
                                     .text_align(text_align)
                                     .text_color(outline)
                                     .child(text.clone()),
@@ -5689,7 +5727,13 @@ impl Render for EditorView {
                     }
                     object_layers.push(
                         layer
-                            .child(div().w_full().text_color(text_color).child(text.clone()))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .line_height(px(font_size * 1.3))
+                                    .text_color(text_color)
+                                    .child(text.clone()),
+                            )
                             .into_any_element(),
                     );
                 }
@@ -5776,18 +5820,18 @@ impl Render for EditorView {
             )
             .absolute()
             .inset_0();
-            let layout = layout_annotation_text(window, &edit.content, font_size, width);
-            let boxes = layout
+            let layouts = layout_annotation_text(window, &edit.content, font_size, width);
+            let boxes = layouts
                 .as_ref()
-                .map(|layout| text_line_boxes(layout, line_height))
+                .map(|layouts| text_line_boxes(layouts, line_height))
                 .unwrap_or_default();
-            let caret = text_caret_position(layout.as_ref(), &boxes, edit, width);
+            let caret = text_caret_position(layouts.as_deref(), &boxes, edit, width);
             let selection = edit.selection();
-            let selection_boxes = layout
+            let selection_boxes = layouts
                 .as_ref()
-                .map(|layout| {
+                .map(|layouts| {
                     text_selection_boxes(
-                        layout,
+                        layouts,
                         &boxes,
                         &selection,
                         edit.style.text_alignment,
@@ -5804,6 +5848,7 @@ impl Render for EditorView {
                 .w(px(width))
                 .min_h(px(line_height))
                 .text_size(px(font_size))
+                .line_height(px(line_height))
                 .text_color(if edit.content.is_empty() {
                     rgb(accent_hex)
                 } else {
@@ -6666,7 +6711,14 @@ impl Render for EditorView {
                             return;
                         }
                         "enter" => {
-                            this.commit_text(cx);
+                            if event.keystroke.modifiers.shift {
+                                if let Some(edit) = &mut this.text_edit {
+                                    edit.replace(None, "\n", false);
+                                }
+                                cx.notify();
+                            } else {
+                                this.commit_text(cx);
+                            }
                             return;
                         }
                         "backspace" => {
@@ -6722,6 +6774,10 @@ impl Render for EditorView {
                     }
                     if command && key == "c" {
                         this.copy_text_selection(cx);
+                        return;
+                    }
+                    if command && key == "v" {
+                        this.paste_text(cx);
                         return;
                     }
                     if command && key == "s" && !event.keystroke.modifiers.shift {
