@@ -56,6 +56,7 @@ pub fn rasterize(
                 expected.height,
                 *rect,
                 annotation.style.blur_radius,
+                annotation.style.blur_feather,
             );
             continue;
         }
@@ -526,7 +527,14 @@ struct TextEngine {
     swash_cache: SwashCache,
 }
 
-fn blur_region(data: &mut [u8], width: u32, height: u32, rect: PhysicalRect, radius: u32) {
+fn blur_region(
+    data: &mut [u8],
+    width: u32,
+    height: u32,
+    rect: PhysicalRect,
+    radius: u32,
+    feather: u32,
+) {
     if rect.is_empty() {
         return;
     }
@@ -538,52 +546,62 @@ fn blur_region(data: &mut [u8], width: u32, height: u32, rect: PhysicalRect, rad
         return;
     }
 
+    let image_width = width as usize;
     let region_width = x1 - x0;
     let region_height = y1 - y0;
     let radius = (radius as usize)
         .max(1)
         .min(region_width.min(region_height) / 2)
         .max(1);
+    let mut blurred = Vec::with_capacity(region_width * region_height * 4);
+    for row in 0..region_height {
+        let start = ((y0 + row) * image_width + x0) * 4;
+        blurred.extend_from_slice(&data[start..start + region_width * 4]);
+    }
     let mut scratch = vec![0u8; region_width * region_height * 4];
 
     // Three box passes are a close, separable approximation of a Gaussian blur.
     for _ in 0..3 {
-        box_blur_horizontal(
-            data,
-            &mut scratch,
-            width as usize,
-            x0,
-            y0,
-            region_width,
-            region_height,
-            radius,
-        );
-        box_blur_vertical(
-            &scratch,
-            data,
-            width as usize,
-            x0,
-            y0,
-            region_width,
-            region_height,
-            radius,
-        );
+        box_blur_horizontal(&blurred, &mut scratch, region_width, region_height, radius);
+        box_blur_vertical(&scratch, &mut blurred, region_width, region_height, radius);
+    }
+
+    let feather = (feather as usize).min(region_width.min(region_height) / 2);
+    for row in 0..region_height {
+        for column in 0..region_width {
+            let target = ((y0 + row) * image_width + x0 + column) * 4;
+            let source = (row * region_width + column) * 4;
+            let alpha = if feather == 0 {
+                1.0
+            } else {
+                let distance = column
+                    .min(region_width - 1 - column)
+                    .min(row.min(region_height - 1 - row)) as f32;
+                let t = (distance / feather as f32).clamp(0.0, 1.0);
+                t * t * (3.0 - 2.0 * t)
+            };
+            if alpha >= 1.0 {
+                data[target..target + 4].copy_from_slice(&blurred[source..source + 4]);
+            } else if alpha > 0.0 {
+                for channel in 0..4 {
+                    let original = f32::from(data[target + channel]);
+                    let mixed = f32::from(blurred[source + channel]);
+                    data[target + channel] = (original + (mixed - original) * alpha).round() as u8;
+                }
+            }
+        }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn box_blur_horizontal(
     source: &[u8],
     target: &mut [u8],
-    image_width: usize,
-    x0: usize,
-    y0: usize,
     width: usize,
     height: usize,
     radius: usize,
 ) {
     for row in 0..height {
-        let source_row = (y0 + row) * image_width + x0;
+        let source_row = row * width;
         let mut sums = [0u32; 4];
         for column in 0..=radius.min(width - 1) {
             let index = (source_row + column) * 4;
@@ -619,17 +637,7 @@ fn box_blur_horizontal(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn box_blur_vertical(
-    source: &[u8],
-    target: &mut [u8],
-    image_width: usize,
-    x0: usize,
-    y0: usize,
-    width: usize,
-    height: usize,
-    radius: usize,
-) {
+fn box_blur_vertical(source: &[u8], target: &mut [u8], width: usize, height: usize, radius: usize) {
     for column in 0..width {
         let mut sums = [0u32; 4];
         for row in 0..=radius.min(height - 1) {
@@ -658,7 +666,7 @@ fn box_blur_vertical(
             let low = row.saturating_sub(radius);
             let high = (row + radius).min(height - 1);
             let count = (high - low + 1) as u32;
-            let target_index = ((y0 + row) * image_width + x0 + column) * 4;
+            let target_index = (row * width + column) * 4;
             for channel in 0..4 {
                 target[target_index + channel] = (sums[channel] / count) as u8;
             }
@@ -865,6 +873,49 @@ mod tests {
         assert!(
             blurred_sample(4) < blurred_sample(32),
             "stronger blur should spread the source block further"
+        );
+    }
+
+    #[test]
+    fn blur_feather_softens_the_region_edge() {
+        let width = 40;
+        let height = 40;
+        let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
+        for _y in 0..height {
+            for x in 0..width {
+                let value = if x < width / 2 { 255 } else { 0 };
+                pixels.extend_from_slice(&[value, value, value, 255]);
+            }
+        }
+        let frame = RgbaFrame::from_pixels(width, height, pixels).unwrap();
+
+        let sample = |feather: u32| {
+            let mut document = document(width, height);
+            document.add(
+                Shape::Blur(PhysicalRect::new(0, 0, width, height)),
+                AnnotationStyle {
+                    blur_radius: 8,
+                    blur_feather: feather,
+                    ..Default::default()
+                },
+            );
+            let output = rasterize(&document, &frame).unwrap();
+            (pixel(&output, 0, 20)[0], pixel(&output, 20, 20)[0])
+        };
+
+        let (hard_edge, hard_center) = sample(0);
+        let (feathered_edge, feathered_center) = sample(12);
+        assert!(
+            hard_edge < 255,
+            "a hard-edged blur must change the boundary pixel"
+        );
+        assert_eq!(
+            feathered_edge, 255,
+            "the feather band must leave the outer edge untouched"
+        );
+        assert!(
+            feathered_center < 255 && hard_center < 255,
+            "the blur center must stay blurred with a feather band"
         );
     }
 
