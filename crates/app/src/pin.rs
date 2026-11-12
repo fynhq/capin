@@ -23,6 +23,10 @@ use crate::ui::centered_bounds;
 
 const MAX_RESTORED_PINS: usize = 20;
 
+/// Lowest wheel-zoom factor. Tall stitched captures need well below 15% to
+/// fit a display, so the floor must not clamp them back to an oversized pin.
+const MIN_PIN_ZOOM: f32 = 0.02;
+
 /// macOS `WindowKind::PopUp` is an `NSPanel` with `NonactivatingPanel`, which
 /// can never take keyboard focus; pins need key status for the system copy
 /// shortcut on selected OCR text. Windows keeps the popup tool window.
@@ -746,7 +750,7 @@ fn open_pin_content_at(
     native_shadow: bool,
     cx: &mut App,
 ) -> Option<u64> {
-    let zoom = zoom.clamp(0.1, 4.0);
+    let zoom = zoom.clamp(MIN_PIN_ZOOM, 4.0);
     let size = bounds.size;
     log_info!(
         "pin",
@@ -958,7 +962,7 @@ pub fn restore(cx: &mut App) {
             }
             _ => continue,
         };
-        let zoom = entry.zoom.clamp(0.1, 4.0);
+        let zoom = entry.zoom.clamp(MIN_PIN_ZOOM, 4.0);
         let (width, height) = content.size(zoom);
         let bounds = ensure_visible(
             cx,
@@ -1609,7 +1613,7 @@ impl PinView {
 
     fn text_index_at(&self, position: Point<Pixels>) -> Option<usize> {
         let lines = self.text_lines()?;
-        let zoom = self.zoom.max(0.1);
+        let zoom = self.zoom.max(MIN_PIN_ZOOM);
         let x = f32::from(position.x) / zoom;
         let y = f32::from(position.y) / zoom;
         let mut base = 0usize;
@@ -1846,10 +1850,9 @@ impl PinView {
         let Some(size) = self.content.image_size() else {
             return 4.0;
         };
-        let Some(display) = window.display(cx).or_else(|| cx.primary_display()) else {
+        let Some(screen) = pin_display_bounds(window, cx) else {
             return 4.0;
         };
-        let screen = display.bounds();
         fit_zoom_limit(
             size.width,
             size.height,
@@ -1870,7 +1873,11 @@ impl PinView {
         if self.content.image_size().is_none() {
             return;
         }
-        let zoom = zoom.clamp(0.15, 4.0);
+        // Keep the whole pin on screen: capping the applied zoom also covers
+        // pins that were opened larger than their display, which used to stay
+        // cut at the screen edge through every wheel step.
+        let fit = self.fitted_zoom_limit(window, cx).max(MIN_PIN_ZOOM);
+        let zoom = zoom.clamp(MIN_PIN_ZOOM, fit);
         let (width, height) = self.content.size(zoom);
         let bounds = window.bounds();
         let (center_x, center_y) = self.zoom_center.unwrap_or_else(|| {
@@ -1890,8 +1897,7 @@ impl PinView {
         });
         let mut origin_x = center_x - width / 2.0;
         let mut origin_y = center_y - height / 2.0;
-        if let Some(display) = window.display(cx).or_else(|| cx.primary_display()) {
-            let screen = display.bounds();
+        if let Some(screen) = pin_display_bounds(window, cx) {
             let screen_left = f32::from(screen.origin.x);
             let screen_top = f32::from(screen.origin.y);
             let screen_width = f32::from(screen.size.width);
@@ -1956,12 +1962,10 @@ impl PinView {
         if self.content.image_size().is_none() {
             return;
         }
-        let target = target.clamp(0.15, 4.0);
-        // Stop growing once the pin would leave the display. Keeping the
-        // window whole is what makes 100%+ zoom readable; clip-in-the-middle
-        // windows were the "incomplete image" feedback.
-        let limit = self.fitted_zoom_limit(window, cx).max(self.zoom).max(0.15);
-        self.zoom_target = target.min(limit).max(0.15);
+        // Stop growing once the whole pin fits the display. Zooming out may
+        // go below that limit so tall captures can still be shrunk further.
+        let fit = self.fitted_zoom_limit(window, cx).clamp(MIN_PIN_ZOOM, 4.0);
+        self.zoom_target = target.clamp(MIN_PIN_ZOOM, fit);
         let language = settings_state::get().language;
         let percent = (self.zoom_target * 100.0).round() as i32;
         // Animating a native window resize on Windows presents the stretched
@@ -2322,7 +2326,7 @@ impl PinView {
                 // the native frame can reach its new size one frame before
                 // GPUI relayouts, which made the image visibly trail the
                 // border during wheel zoom.
-                let (width, height) = self.content.size(self.zoom.max(0.1));
+                let (width, height) = self.content.size(self.zoom.max(MIN_PIN_ZOOM));
                 div()
                     .w(px(width))
                     .h(px(height))
@@ -2354,7 +2358,7 @@ impl Render for PinView {
         let hud_serial = self.hud_serial;
         let hud_leaving = self.hud_leaving;
         let body = self.body(&theme, language).opacity(self.opacity);
-        let zoom = self.zoom.max(0.1);
+        let zoom = self.zoom.max(MIN_PIN_ZOOM);
         let text_layers: Vec<Div> = self
             .selection_rects()
             .into_iter()
@@ -3024,7 +3028,30 @@ fn fit_zoom_limit(
     }
     (screen_width / image_width as f32)
         .min(screen_height / image_height as f32)
-        .clamp(0.15, 4.0)
+        .clamp(MIN_PIN_ZOOM, 4.0)
+}
+
+/// Display under the pin window. `Window::display` reflects the monitor stored
+/// at creation and can lag a move across monitors, which made the zoom limit
+/// fit the wrong screen size.
+fn pin_display_bounds(window: &Window, cx: &App) -> Option<Bounds<Pixels>> {
+    let bounds = window.bounds();
+    let center_x = f32::from(bounds.origin.x) + f32::from(bounds.size.width) / 2.0;
+    let center_y = f32::from(bounds.origin.y) + f32::from(bounds.size.height) / 2.0;
+    cx.displays()
+        .into_iter()
+        .find(|display| {
+            let display = display.bounds();
+            let left = f32::from(display.origin.x);
+            let top = f32::from(display.origin.y);
+            center_x >= left
+                && center_x < left + f32::from(display.size.width)
+                && center_y >= top
+                && center_y < top + f32::from(display.size.height)
+        })
+        .map(|display| display.bounds())
+        .or_else(|| window.display(cx).map(|display| display.bounds()))
+        .or_else(|| cx.primary_display().map(|display| display.bounds()))
 }
 
 fn ensure_visible(cx: &App, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
@@ -3066,6 +3093,9 @@ mod tests {
         assert!((super::fit_zoom_limit(1000, 500, 1200.0, 800.0) - 1.2).abs() < 0.001);
         assert!((super::fit_zoom_limit(200, 100, 1920.0, 1080.0) - 4.0).abs() < 0.001);
         assert!((super::fit_zoom_limit(4000, 3000, 1920.0, 1080.0) - 0.36).abs() < 0.001);
+        // Tall stitched captures must be allowed below 15% so the whole pin
+        // still fits instead of being clamped back to a cropped window.
+        assert!((super::fit_zoom_limit(3000, 12000, 1920.0, 1080.0) - 0.09).abs() < 0.001);
     }
 
     #[test]
