@@ -75,15 +75,54 @@ fn clipboard_signature_of(bytes: &[u8]) -> u64 {
 
 /// Cheap content signature for the first clipboard image. Bytes are hashed
 /// without decoding, so checking whether the clipboard changed costs one read.
+/// Copied image files use their path, size and modification time instead so
+/// the file itself is not read twice.
 fn clipboard_image_signature(cx: &mut App) -> Option<u64> {
     let item = cx.read_from_clipboard()?;
     for entry in item.entries() {
-        let ClipboardEntry::Image(image) = entry else {
+        if let ClipboardEntry::Image(image) = entry {
+            return Some(clipboard_signature_of(&image.bytes));
+        }
+    }
+    for entry in item.entries() {
+        let ClipboardEntry::ExternalPaths(paths) = entry else {
             continue;
         };
-        return Some(clipboard_signature_of(&image.bytes));
+        if let Some(signature) = paths
+            .0
+            .iter()
+            .find(|path| is_image_path(path))
+            .and_then(|path| clipboard_file_signature(path))
+        {
+            return Some(signature);
+        }
     }
     None
+}
+
+fn clipboard_file_signature(path: &Path) -> Option<u64> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    let mut bytes = path.display().to_string().into_bytes();
+    bytes.extend_from_slice(&metadata.len().to_le_bytes());
+    bytes.extend_from_slice(&modified.to_le_bytes());
+    Some(clipboard_signature_of(&bytes))
+}
+
+fn is_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "bmp"
+            )
+        })
 }
 
 fn clipboard_text_signature(cx: &mut App) -> Option<u64> {
@@ -466,6 +505,28 @@ pub fn pin_last(cx: &mut App) {
             if let Ok(frame) = RgbaFrame::from_pixels(width, height, rgba.into_raw()) {
                 clipboard_frame = Some(frame);
                 break;
+            }
+        }
+        // Explorer and browsers often copy image files as CF_HDROP instead of
+        // pixel data; those should pin just like a copied bitmap.
+        if clipboard_frame.is_none() {
+            for entry in item.entries() {
+                let ClipboardEntry::ExternalPaths(paths) = entry else {
+                    continue;
+                };
+                let Some(path) = paths.0.iter().find(|path| is_image_path(path)) else {
+                    continue;
+                };
+                clipboard_signature = clipboard_file_signature(path);
+                let Ok(image) = image::open(path) else {
+                    continue;
+                };
+                let rgba = image.to_rgba8();
+                let (width, height) = rgba.dimensions();
+                if let Ok(frame) = RgbaFrame::from_pixels(width, height, rgba.into_raw()) {
+                    clipboard_frame = Some(frame);
+                    break;
+                }
             }
         }
         if clipboard_frame.is_none() {
