@@ -2372,6 +2372,34 @@ impl EditorView {
         Some(PhysicalPoint::new(x, y))
     }
 
+    /// Whether a left press should start panning a zoomable long-capture
+    /// preview instead of drawing or selecting. Empty image area pans; an
+    /// annotation body or its resize handle keeps its editing behavior.
+    fn zoomable_pan_start(&self, position: Point<Pixels>, window: &Window) -> bool {
+        let Some(inline) = self.inline else {
+            return false;
+        };
+        if !inline.zoomable || self.tool != Tool::Select || self.text_edit.is_some() {
+            return false;
+        }
+        let Some(point) = self.to_display_point(position, window) else {
+            return false;
+        };
+        if self.document.hit_test(point).is_some() {
+            return false;
+        }
+        let scale = self.image_scale(window);
+        if let Some(annotation) = self
+            .document
+            .selected()
+            .and_then(|id| self.document.object(id))
+            && annotation_handle_at(&annotation.shape, point, scale).is_some()
+        {
+            return false;
+        }
+        true
+    }
+
     fn to_image_point(&self, position: Point<Pixels>, window: &Window) -> Option<PhysicalPoint> {
         let point = self.to_display_point(position, window)?;
         if self
@@ -5986,6 +6014,12 @@ impl Render for EditorView {
                 // Any annotation under the pointer can be selected and moved,
                 // even while a drawing tool is active.
                 SelectionHover::Body => crate::ui::open_hand_cursor(),
+                SelectionHover::None
+                    if self.tool == Tool::Select
+                        && self.inline.is_some_and(|inline| inline.zoomable) =>
+                {
+                    crate::ui::open_hand_cursor()
+                }
                 SelectionHover::None if self.tool == Tool::Select => CursorStyle::Arrow,
                 SelectionHover::None => CursorStyle::Crosshair,
             }
@@ -6130,7 +6164,15 @@ impl Render for EditorView {
                     ScrollDelta::Pixels(delta) => (f32::from(delta.x), f32::from(delta.y)),
                     ScrollDelta::Lines(delta) => (delta.x * 50.0, delta.y * 50.0),
                 };
-                if event.modifiers.control || event.modifiers.platform {
+                // Long-capture preview: the wheel zooms directly, anchored at
+                // the pointer. Panning is left-drag only, so Ctrl is optional.
+                if zoomable {
+                    let delta = if y.abs() >= x.abs() { y } else { x };
+                    let steps = (delta / 50.0).clamp(-4.0, 4.0);
+                    if steps != 0.0 {
+                        this.zoom_at(1.15f32.powf(steps), event.position, window, cx);
+                    }
+                } else if event.modifiers.control || event.modifiers.platform {
                     let steps = (y / 50.0).clamp(-4.0, 4.0);
                     this.zoom_at(1.15f32.powf(steps), event.position, window, cx);
                 } else {
@@ -6154,7 +6196,9 @@ impl Render for EditorView {
                     // after a toolbar interaction.
                     let focus = this.focus_handle.clone();
                     window.focus(&focus, cx);
-                    if this.space_down && this.text_edit.is_none() {
+                    if this.text_edit.is_none()
+                        && (this.space_down || this.zoomable_pan_start(event.position, window))
+                    {
                         this.pan_draft = Some(PanDraft {
                             start: event.position,
                             start_pan: this.view_pan,
