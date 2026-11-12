@@ -1113,10 +1113,10 @@ impl SettingsView {
         let content = card(
             theme,
             vec![
-                div().child(self.language_row(theme, cx)),
-                div().child(self.auto_start_row(theme, cx)),
-                div().child(self.logs_row(theme, cx)),
-                div().child(self.filename_template_row(theme, window, cx)),
+                self.language_row(theme, cx),
+                self.auto_start_row(theme, cx),
+                self.logs_row(theme, cx),
+                self.filename_template_row(theme, window, cx),
             ],
         );
         let page = div()
@@ -1126,6 +1126,7 @@ impl SettingsView {
             .child(content);
         #[cfg(target_os = "macos")]
         let page = page.child(group(
+            "settings-group-permissions",
             theme,
             t(language, "settings.group.permissions"),
             "",
@@ -1175,22 +1176,22 @@ impl SettingsView {
         card(
             theme,
             vec![
-                div().child(self.permission_row(
+                self.permission_row(
                     theme,
                     t(language, "settings.permission_screen"),
                     t(language, "settings.permission_screen_desc"),
                     self.permission_screen,
                     platform_window::PrivacyPane::ScreenCapture,
                     cx,
-                )),
-                div().child(self.permission_row(
+                ),
+                self.permission_row(
                     theme,
                     t(language, "settings.permission_accessibility"),
                     t(language, "settings.permission_accessibility_desc"),
                     self.permission_accessibility,
                     platform_window::PrivacyPane::Accessibility,
                     cx,
-                )),
+                ),
             ],
         )
     }
@@ -1204,7 +1205,7 @@ impl SettingsView {
         granted: bool,
         pane: platform_window::PrivacyPane,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> AnyElement {
         let language = self.settings.language;
         let status = t(
             language,
@@ -1214,49 +1215,59 @@ impl SettingsView {
                 "settings.permission_missing"
             },
         );
-        row_shell()
-            .child(row_label_with_icon(
-                theme,
-                icons::SHIELD,
-                title,
-                description,
-            ))
-            .child(
-                div()
-                    .flex()
-                    .flex_shrink_0()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(10.0))
-                    .child(
-                        div()
-                            .text_size(px(layout::CAPTION))
-                            .text_color(if granted { theme.muted } else { theme.accent })
-                            .child(status),
-                    )
-                    .child(
-                        action_button(theme, t(language, "settings.open_settings").to_owned())
-                            .id(match pane {
-                                platform_window::PrivacyPane::ScreenCapture => {
-                                    "settings-open-screen-permission"
-                                }
-                                platform_window::PrivacyPane::Accessibility => {
-                                    "settings-open-accessibility-permission"
-                                }
-                            })
-                            .active(|style| style.opacity(0.88))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                platform_window::open_privacy_settings(pane);
-                                this.permission_screen = platform_window::screen_capture_trusted();
-                                this.permission_accessibility =
-                                    platform_window::accessibility_trusted();
-                                cx.notify();
-                            })),
-                    ),
-            )
+        a11y_row(
+            match pane {
+                platform_window::PrivacyPane::ScreenCapture => "settings-row-permission-screen",
+                platform_window::PrivacyPane::Accessibility => {
+                    "settings-row-permission-accessibility"
+                }
+            },
+            title.to_owned(),
+            row_shell()
+                .child(row_label_with_icon(
+                    theme,
+                    icons::SHIELD,
+                    title,
+                    description,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_shrink_0()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(10.0))
+                        .child(
+                            div()
+                                .text_size(px(layout::CAPTION))
+                                .text_color(if granted { theme.muted } else { theme.accent })
+                                .child(status),
+                        )
+                        .child(
+                            action_button(theme, t(language, "settings.open_settings").to_owned())
+                                .id(match pane {
+                                    platform_window::PrivacyPane::ScreenCapture => {
+                                        "settings-open-screen-permission"
+                                    }
+                                    platform_window::PrivacyPane::Accessibility => {
+                                        "settings-open-accessibility-permission"
+                                    }
+                                })
+                                .active(|style| style.opacity(0.88))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    platform_window::open_privacy_settings(pane);
+                                    this.permission_screen =
+                                        platform_window::screen_capture_trusted();
+                                    this.permission_accessibility =
+                                        platform_window::accessibility_trusted();
+                                    cx.notify();
+                                })),
+                        ),
+                ),
+        )
     }
 
-    fn language_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn language_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let language = self.settings.language;
         let mut control = segmented();
         for option in Language::ALL {
@@ -1278,83 +1289,91 @@ impl SettingsView {
             );
         }
 
-        row_shell()
-            .child(row_label_with_icon(
-                theme,
-                icons::LANGUAGE,
-                t(language, "settings.language"),
-                "",
-            ))
-            .child(control)
+        a11y_row(
+            "settings-row-language",
+            t(language, "settings.language"),
+            row_shell()
+                .child(row_label_with_icon(
+                    theme,
+                    icons::LANGUAGE,
+                    t(language, "settings.language"),
+                    "",
+                ))
+                .child(control),
+        )
     }
 
-    fn auto_start_row(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn auto_start_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let language = self.settings.language;
         let value = self.settings.auto_start;
 
-        row_shell()
-            .child(row_label_with_icon(
-                theme,
-                icons::STARTUP,
-                t(language, "settings.auto_start"),
-                "",
-            ))
-            .child(
-                div()
-                    .id("settings-auto-start")
-                    .cursor_pointer()
-                    .active(move |style| style.opacity(0.85))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let language = this.settings.language;
-                        let desired = !this.settings.auto_start;
-                        match set_autostart(desired) {
-                            Ok(AutostartState::Unsupported) => {
-                                this.show_status(
-                                    t(language, "settings.status_autostart_failed").to_owned(),
-                                    cx,
-                                );
+        a11y_row(
+            "settings-row-auto-start",
+            t(language, "settings.auto_start"),
+            row_shell()
+                .child(row_label_with_icon(
+                    theme,
+                    icons::STARTUP,
+                    t(language, "settings.auto_start"),
+                    "",
+                ))
+                .child(
+                    div()
+                        .id("settings-auto-start")
+                        .cursor_pointer()
+                        .active(move |style| style.opacity(0.85))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let language = this.settings.language;
+                            let desired = !this.settings.auto_start;
+                            match set_autostart(desired) {
+                                Ok(AutostartState::Unsupported) => {
+                                    this.show_status(
+                                        t(language, "settings.status_autostart_failed").to_owned(),
+                                        cx,
+                                    );
+                                }
+                                Ok(state) => {
+                                    this.settings.auto_start = desired;
+                                    this.settings.auto_start_explicit = true;
+                                    settings_state::update(|settings| {
+                                        settings.auto_start = desired;
+                                        settings.auto_start_explicit = true;
+                                    });
+                                    let message = match state {
+                                        AutostartState::Enabled => {
+                                            t(language, "settings.status_autostart_enabled")
+                                        }
+                                        AutostartState::Disabled => {
+                                            t(language, "settings.status_autostart_disabled")
+                                        }
+                                        AutostartState::RequiresApproval => {
+                                            t(language, "settings.status_autostart_approval")
+                                        }
+                                        AutostartState::Unsupported => {
+                                            t(language, "settings.status_autostart_failed")
+                                        }
+                                    };
+                                    this.show_status(message.to_owned(), cx);
+                                }
+                                Err(error) => {
+                                    this.show_status(
+                                        format!(
+                                            "{}{}",
+                                            t(language, "settings.status_autostart_failed"),
+                                            error
+                                        ),
+                                        cx,
+                                    );
+                                }
                             }
-                            Ok(state) => {
-                                this.settings.auto_start = desired;
-                                this.settings.auto_start_explicit = true;
-                                settings_state::update(|settings| {
-                                    settings.auto_start = desired;
-                                    settings.auto_start_explicit = true;
-                                });
-                                let message = match state {
-                                    AutostartState::Enabled => {
-                                        t(language, "settings.status_autostart_enabled")
-                                    }
-                                    AutostartState::Disabled => {
-                                        t(language, "settings.status_autostart_disabled")
-                                    }
-                                    AutostartState::RequiresApproval => {
-                                        t(language, "settings.status_autostart_approval")
-                                    }
-                                    AutostartState::Unsupported => {
-                                        t(language, "settings.status_autostart_failed")
-                                    }
-                                };
-                                this.show_status(message.to_owned(), cx);
-                            }
-                            Err(error) => {
-                                this.show_status(
-                                    format!(
-                                        "{}{}",
-                                        t(language, "settings.status_autostart_failed"),
-                                        error
-                                    ),
-                                    cx,
-                                );
-                            }
-                        }
-                        cx.notify();
-                    }))
-                    .child(toggle(theme, value, "settings-auto-start-toggle")),
-            )
+                            cx.notify();
+                        }))
+                        .child(toggle(theme, value, "settings-auto-start-toggle")),
+                ),
+        )
     }
 
-    fn logs_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    fn logs_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let language = self.settings.language;
         let open = action_button(theme, t(language, "settings.open_logs").to_owned())
             .id("settings-open-logs")
@@ -1365,14 +1384,18 @@ impl SettingsView {
                 log_info!("settings", "opening log directory");
                 cx.open_with_system(&directory);
             }));
-        row_shell()
-            .child(row_label_with_icon(
-                theme,
-                icons::LOGS,
-                t(language, "settings.logs"),
-                t(language, "settings.logs_desc"),
-            ))
-            .child(open)
+        a11y_row(
+            "settings-row-logs",
+            t(language, "settings.logs"),
+            row_shell()
+                .child(row_label_with_icon(
+                    theme,
+                    icons::LOGS,
+                    t(language, "settings.logs"),
+                    t(language, "settings.logs_desc"),
+                ))
+                .child(open),
+        )
     }
 
     fn capture_settings(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
@@ -1383,6 +1406,7 @@ impl SettingsView {
             .flex_col()
             .gap(px(layout::GROUP_GAP))
             .child(group(
+                "settings-group-selection",
                 theme,
                 t(language, "settings.group.selection"),
                 "",
@@ -1420,6 +1444,7 @@ impl SettingsView {
                 ),
             ))
             .child(group(
+                "settings-group-window",
                 theme,
                 t(language, "settings.group.window"),
                 "",
@@ -1432,6 +1457,7 @@ impl SettingsView {
                 ),
             ))
             .child(group(
+                "settings-group-annotation",
                 theme,
                 t(language, "settings.group.annotation"),
                 "",
@@ -1453,6 +1479,7 @@ impl SettingsView {
                 ),
             ))
             .child(group(
+                "settings-group-pin",
                 theme,
                 t(language, "settings.group.pin"),
                 "",
@@ -1494,96 +1521,112 @@ impl SettingsView {
     /// One on/off row. Only the switch is a hit target; the label and the row
     /// background stay inert like the native settings lists. `refresh_pin`
     /// reapplies pin recognition when a recognition toggle changes.
-    fn toggle_row(&self, theme: &Theme, cx: &mut Context<Self>, row: ToggleRow) -> Div {
+    fn toggle_row(&self, theme: &Theme, cx: &mut Context<Self>, row: ToggleRow) -> AnyElement {
         let language = self.settings.language;
-        div().child(
-            row_shell()
-                .child(row_label_with_icon(
-                    theme,
-                    row.icon,
-                    t(language, row.title_key),
-                    row.description_key
-                        .map(|key| t(language, key))
-                        .unwrap_or_default(),
-                ))
-                .child(
-                    div()
-                        .id(row.id)
-                        .cursor_pointer()
-                        .active(move |style| style.opacity(0.85))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let value = !row.value;
-                            (row.set)(&mut this.settings, value);
-                            settings_state::update(|settings| (row.set)(settings, value));
-                            if row.refresh_pin {
-                                cx.defer(crate::pin::refresh_recognition);
-                            }
-                            this.status = None;
-                            cx.notify();
-                        }))
-                        .child(toggle(theme, row.value, row.id)),
-                ),
+        a11y_row(
+            row.id,
+            t(language, row.title_key),
+            div().child(
+                row_shell()
+                    .child(row_label_with_icon(
+                        theme,
+                        row.icon,
+                        t(language, row.title_key),
+                        row.description_key
+                            .map(|key| t(language, key))
+                            .unwrap_or_default(),
+                    ))
+                    .child(
+                        div()
+                            .id(row.id)
+                            .cursor_pointer()
+                            .active(move |style| style.opacity(0.85))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let value = !row.value;
+                                (row.set)(&mut this.settings, value);
+                                settings_state::update(|settings| (row.set)(settings, value));
+                                if row.refresh_pin {
+                                    cx.defer(crate::pin::refresh_recognition);
+                                }
+                                this.status = None;
+                                cx.notify();
+                            }))
+                            .child(toggle(theme, row.value, row.id)),
+                    ),
+            ),
         )
     }
 
-    fn window_background_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    fn window_background_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let language = self.settings.language;
         let current = t(
             language,
             background_label_key(self.settings.window_background),
         );
-        row_shell()
-            .child(row_label_with_icon(
-                theme,
-                icons::IMAGE,
-                t(language, "settings.window_background"),
-                t(language, "settings.window_background_desc"),
-            ))
-            .child(self.select_trigger(
-                theme,
-                current,
-                "settings-window-background",
-                SelectKind::WindowBackground,
-                cx,
-            ))
+        a11y_row(
+            "settings-row-window-background",
+            t(language, "settings.window_background"),
+            row_shell()
+                .child(row_label_with_icon(
+                    theme,
+                    icons::IMAGE,
+                    t(language, "settings.window_background"),
+                    t(language, "settings.window_background_desc"),
+                ))
+                .child(self.select_trigger(
+                    theme,
+                    current,
+                    "settings-window-background",
+                    SelectKind::WindowBackground,
+                    cx,
+                )),
+        )
     }
 
-    fn window_padding_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    fn window_padding_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let language = self.settings.language;
         let current = self.settings.window_padding.to_string();
-        row_shell()
-            .child(row_label_with_icon(
-                theme,
-                icons::PADDING,
-                t(language, "settings.window_padding"),
-                "",
-            ))
-            .child(self.select_trigger(
-                theme,
-                &current,
-                "settings-window-padding",
-                SelectKind::WindowPadding,
-                cx,
-            ))
+        a11y_row(
+            "settings-row-window-padding",
+            t(language, "settings.window_padding"),
+            row_shell()
+                .child(row_label_with_icon(
+                    theme,
+                    icons::PADDING,
+                    t(language, "settings.window_padding"),
+                    "",
+                ))
+                .child(self.select_trigger(
+                    theme,
+                    &current,
+                    "settings-window-padding",
+                    SelectKind::WindowPadding,
+                    cx,
+                )),
+        )
     }
 
-    fn repeat_pin_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    fn repeat_pin_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let language = self.settings.language;
         let current = t(language, repeat_pin_key(self.settings.repeat_pin));
-        row_shell()
-            .child(row_label_with_icon(
-                theme,
-                icons::PIN,
-                t(language, "settings.repeat_pin"),
-                t(language, "settings.repeat_pin_desc"),
-            ))
-            .child(self.select_trigger(
-                theme,
-                current,
-                "settings-repeat-pin",
-                SelectKind::RepeatPin,
-                cx,
-            ))
+        a11y_row(
+            "settings-row-repeat-pin",
+            t(language, "settings.repeat_pin"),
+            row_shell()
+                .child(row_label_with_icon(
+                    theme,
+                    icons::PIN,
+                    t(language, "settings.repeat_pin"),
+                    t(language, "settings.repeat_pin_desc"),
+                ))
+                .child(self.select_trigger(
+                    theme,
+                    current,
+                    "settings-repeat-pin",
+                    SelectKind::RepeatPin,
+                    cx,
+                )),
+        )
     }
 
     fn select_entries(&self, kind: SelectKind) -> Vec<(String, u32, bool)> {
@@ -1826,7 +1869,12 @@ impl SettingsView {
             .into_any_element(),
         )
     }
-    fn save_location_row(&self, target: SaveTarget, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    fn save_location_row(
+        &self,
+        target: SaveTarget,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let language = self.settings.language;
         let custom = target.selected_directory(&self.settings).is_some();
         let directory = target.directory(&self.settings).display().to_string();
@@ -1845,48 +1893,60 @@ impl SettingsView {
                 .on_click(cx.listener(move |this, _, _, cx| this.reset_directory(target, cx)))
         });
 
-        row_shell()
-            .child(row_label_with_icon(
-                theme,
-                icons::FOLDER,
-                t(language, target.title_key()),
-                "",
-            ))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_shrink_1()
-                    .min_w(px(0.0))
-                    .items_center()
-                    .gap(px(10.0))
-                    .child(
-                        div()
-                            .flex_shrink_1()
-                            .min_w(px(0.0))
-                            .max_w(px(230.0))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis_middle()
-                            .text_size(px(layout::CAPTION))
-                            .text_color(theme.muted)
-                            .child(directory),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_shrink_0()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(open)
-                            .child(change)
-                            .children(reset),
-                    ),
-            )
+        a11y_row(
+            match target {
+                SaveTarget::Screenshots => "settings-row-save-screenshots",
+                SaveTarget::Recordings => "settings-row-save-recordings",
+            },
+            t(language, target.title_key()),
+            row_shell()
+                .child(row_label_with_icon(
+                    theme,
+                    icons::FOLDER,
+                    t(language, target.title_key()),
+                    "",
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_shrink_1()
+                        .min_w(px(0.0))
+                        .items_center()
+                        .gap(px(10.0))
+                        .child(
+                            div()
+                                .flex_shrink_1()
+                                .min_w(px(0.0))
+                                .max_w(px(230.0))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis_middle()
+                                .text_size(px(layout::CAPTION))
+                                .text_color(theme.muted)
+                                .child(directory),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_shrink_0()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(open)
+                                .child(change)
+                                .children(reset),
+                        ),
+                ),
+        )
     }
 
-    fn filename_template_row(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> Div {
+    fn filename_template_row(
+        &self,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let language = self.settings.language;
         self.filename_input.update(cx, |state, _| {
             state.set_editor_style(input_editor_style(theme));
@@ -1926,40 +1986,44 @@ impl SettingsView {
                 window.focus(&focus, cx);
             }));
 
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap(px(8.0))
-            .px(px(layout::ROW_PAD_X))
-            .py(px(layout::ROW_PAD_Y))
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(24.0))
-                    .child(row_label_with_icon(
-                        theme,
-                        icons::FILENAME,
-                        t(language, "settings.filename_template"),
-                        t(language, "settings.filename_template_desc"),
-                    ))
-                    .child(field),
-            )
-            .child(
-                div()
-                    .pl(px(28.0))
-                    .text_size(px(layout::CAPTION))
-                    .text_color(theme.muted)
-                    .child(format!(
-                        "{} {}",
-                        t(language, "settings.filename_template_preview"),
-                        preview
-                    )),
-            )
+        a11y_row(
+            "settings-row-filename-template",
+            t(language, "settings.filename_template"),
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .px(px(layout::ROW_PAD_X))
+                .py(px(layout::ROW_PAD_Y))
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(24.0))
+                        .child(row_label_with_icon(
+                            theme,
+                            icons::FILENAME,
+                            t(language, "settings.filename_template"),
+                            t(language, "settings.filename_template_desc"),
+                        ))
+                        .child(field),
+                )
+                .child(
+                    div()
+                        .pl(px(28.0))
+                        .text_size(px(layout::CAPTION))
+                        .text_color(theme.muted)
+                        .child(format!(
+                            "{} {}",
+                            t(language, "settings.filename_template_preview"),
+                            preview
+                        )),
+                ),
+        )
     }
 
     fn commit_filename_template(
@@ -2113,7 +2177,7 @@ impl SettingsView {
     /// Pastel swatches plus a custom hex picker for the recording cursor
     /// disc. The color is stored as RGB; the recorder applies a fixed
     /// translucent alpha.
-    fn record_highlight_color_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    fn record_highlight_color_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let language = self.settings.language;
         let current = self.settings.record_cursor_highlight_color;
         let mut swatches = Vec::new();
@@ -2207,21 +2271,25 @@ impl SettingsView {
             .child(probe);
         swatches.push(custom.into_any_element());
 
-        row_shell()
-            .child(row_label_with_icon(
-                theme,
-                icons::PALETTE,
-                t(language, "settings.record_cursor_highlight_color"),
-                t(language, "settings.record_cursor_highlight_color_desc"),
-            ))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.0))
-                    .children(swatches),
-            )
+        a11y_row(
+            "settings-row-highlight-color",
+            t(language, "settings.record_cursor_highlight_color"),
+            row_shell()
+                .child(row_label_with_icon(
+                    theme,
+                    icons::PALETTE,
+                    t(language, "settings.record_cursor_highlight_color"),
+                    t(language, "settings.record_cursor_highlight_color_desc"),
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.0))
+                        .children(swatches),
+                ),
+        )
     }
 
     fn open_record_color_picker(
@@ -2483,6 +2551,7 @@ impl SettingsView {
                     .child(note(theme, t(language, "shortcuts.editor_note"))),
             )
             .child(group(
+                "settings-group-capture-keys",
                 theme,
                 t(language, "settings.group.capture_keys"),
                 t(language, "settings.group.capture_keys_desc"),
@@ -2605,6 +2674,7 @@ impl SettingsView {
                 ),
             ))
             .child(group(
+                "settings-group-pin-keys",
                 theme,
                 t(language, "settings.group.pin_keys"),
                 t(language, "settings.group.pin_keys_desc"),
@@ -2685,7 +2755,12 @@ impl SettingsView {
         })
     }
 
-    fn shortcut_row(&self, slot: ShortcutSlot, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    fn shortcut_row(
+        &self,
+        slot: ShortcutSlot,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let language = self.settings.language;
         let recording = self.recording_shortcut == Some(slot);
         let display = if recording {
@@ -2700,43 +2775,47 @@ impl SettingsView {
         let border = theme.border;
         let text = theme.text;
 
-        div().child(
-            row_shell()
-                .child(row_label_with_icon(
-                    theme,
-                    icons::SHORTCUTS,
-                    t(language, slot.title_key()),
-                    slot.description_key()
-                        .map(|key| t(language, key))
-                        .unwrap_or_default(),
-                ))
-                .child(
-                    div()
-                        .id(slot.id())
-                        .h(px(layout::BUTTON_HEIGHT))
-                        .px(px(12.0))
-                        .rounded(px(layout::BUTTON_RADIUS))
-                        .flex()
-                        .flex_shrink_0()
-                        .items_center()
-                        .cursor_pointer()
-                        .bg(if recording { selected } else { control })
-                        .border_1()
-                        .border_color(if recording { accent } else { border })
-                        .text_size(px(layout::CONTROL_TEXT))
-                        .text_color(if recording { accent } else { text })
-                        .when(!recording, |pill| {
-                            pill.hover(move |style| style.bg(control_hover))
-                        })
-                        .active(move |style| style.opacity(0.88))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.recording_shortcut = Some(slot);
-                            this.status = None;
-                            window.focus(&this.focus_handle, cx);
-                            cx.notify();
-                        }))
-                        .child(display),
-                ),
+        a11y_row(
+            slot.id(),
+            t(language, slot.title_key()),
+            div().child(
+                row_shell()
+                    .child(row_label_with_icon(
+                        theme,
+                        icons::SHORTCUTS,
+                        t(language, slot.title_key()),
+                        slot.description_key()
+                            .map(|key| t(language, key))
+                            .unwrap_or_default(),
+                    ))
+                    .child(
+                        div()
+                            .id(slot.id())
+                            .h(px(layout::BUTTON_HEIGHT))
+                            .px(px(12.0))
+                            .rounded(px(layout::BUTTON_RADIUS))
+                            .flex()
+                            .flex_shrink_0()
+                            .items_center()
+                            .cursor_pointer()
+                            .bg(if recording { selected } else { control })
+                            .border_1()
+                            .border_color(if recording { accent } else { border })
+                            .text_size(px(layout::CONTROL_TEXT))
+                            .text_color(if recording { accent } else { text })
+                            .when(!recording, |pill| {
+                                pill.hover(move |style| style.bg(control_hover))
+                            })
+                            .active(move |style| style.opacity(0.88))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.recording_shortcut = Some(slot);
+                                this.status = None;
+                                window.focus(&this.focus_handle, cx);
+                                cx.notify();
+                            }))
+                            .child(display),
+                    ),
+            ),
         )
     }
 
@@ -3070,7 +3149,7 @@ fn window_control_button(
         )
 }
 
-fn card(theme: &Theme, rows: Vec<Div>) -> Div {
+fn card(theme: &Theme, rows: Vec<AnyElement>) -> Div {
     let mut children: Vec<AnyElement> = Vec::with_capacity(rows.len() * 2);
     for (index, row) in rows.into_iter().enumerate() {
         if index > 0 {
@@ -3122,13 +3201,33 @@ fn group_header(theme: &Theme, title: &str, description: &str) -> Div {
 }
 
 /// A group header and its card at the tight native label gap.
-fn group(theme: &Theme, title: &str, description: &str, body: Div) -> Div {
+///
+/// The wrapper is also the accessibility node: the settings page paints its
+/// own widgets, so without a role and label the window exposes nothing to UI
+/// Automation and the capture overlay cannot pick a section.
+fn group(id: &'static str, theme: &Theme, title: &str, description: &str, body: Div) -> AnyElement {
     div()
+        .id(id)
+        .role(Role::Group)
+        .aria_label(title.to_owned())
         .flex()
         .flex_col()
         .gap(px(layout::GROUP_HEADER_GAP))
         .child(group_header(theme, title, description))
         .child(body)
+        .into_any_element()
+}
+
+/// Wraps one settings row in its accessibility node so element picking lands
+/// on the labeled row instead of the whole card.
+fn a11y_row(id: impl Into<ElementId>, label: impl Into<SharedString>, row: Div) -> AnyElement {
+    div()
+        .id(id)
+        .role(Role::Group)
+        .aria_label(label)
+        .w_full()
+        .child(row)
+        .into_any_element()
 }
 
 fn note(theme: &Theme, text: &str) -> Div {
@@ -3212,7 +3311,7 @@ fn info_row(
     subtitle: &str,
     value: &str,
     icon: Option<&'static [u8]>,
-) -> Div {
+) -> AnyElement {
     let value_side = div()
         .flex()
         .flex_shrink_0()
@@ -3230,7 +3329,11 @@ fn info_row(
         Some(icon) => row_label_with_icon(theme, icon, title, subtitle),
         None => row_label(theme, title, subtitle),
     };
-    row_shell().child(label).child(value_side)
+    a11y_row(
+        ElementId::Name(SharedString::from(format!("settings-info-{title}"))),
+        title.to_owned(),
+        row_shell().child(label).child(value_side),
+    )
 }
 
 fn toggle(theme: &Theme, value: bool, id: &'static str) -> impl IntoElement {

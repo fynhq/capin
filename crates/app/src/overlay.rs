@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -702,6 +702,9 @@ struct OverlayView {
     notice_serial: u64,
     notice_leaving: bool,
     element_cache: HashMap<WindowId, Vec<PhysicalRect>>,
+    /// Windows whose empty element list was retried once. Self-drawn windows
+    /// only expose their accessibility nodes one frame after the first query.
+    element_retry: HashSet<WindowId>,
     element_window: Option<WindowId>,
     element_pending: Option<WindowId>,
     element_candidates: Vec<PhysicalRect>,
@@ -767,6 +770,7 @@ impl OverlayView {
             notice_serial: 0,
             notice_leaving: false,
             element_cache: HashMap::new(),
+            element_retry: HashSet::new(),
             element_window: None,
             element_pending: None,
             element_candidates: Vec::new(),
@@ -982,32 +986,9 @@ impl OverlayView {
             self.element_level = 0;
             self.element_candidates.clear();
             self.session.set_hovered_element(None);
-            if !self.element_cache.contains_key(&window.id) && self.element_pending.is_none() {
-                // UIA's FindAll walks the whole descendant tree. Running it
-                // on the UI thread stalled the first hover on complex windows
-                // (browsers, Explorer), so resolve the element list off-thread.
-                self.element_pending = Some(window.id);
-                let window_id = window.id;
-                cx.spawn(async move |this, cx| {
-                    let elements = cx
-                        .background_executor()
-                        .spawn(async move { core_capture::ui_elements(window_id) })
-                        .await;
-                    this.update(cx, |this, cx| {
-                        if this.element_pending != Some(window_id) {
-                            return;
-                        }
-                        this.element_pending = None;
-                        this.element_cache.insert(window_id, elements);
-                        if let Some(point) = this.cursor {
-                            this.refresh_auto_target(point, cx);
-                        }
-                        cx.notify();
-                    })
-                    .ok();
-                })
-                .detach();
-            }
+        }
+        if !self.element_cache.contains_key(&window.id) && self.element_pending.is_none() {
+            self.query_elements(window.id, cx);
         }
         let Some(cached) = self.element_cache.get(&window.id) else {
             self.session.set_hovered_element(None);
@@ -1021,6 +1002,69 @@ impl OverlayView {
         let selected = candidates.get(self.element_level).copied();
         self.element_candidates = candidates;
         self.session.set_hovered_element(selected);
+    }
+
+    /// Resolves a window's UI Automation descendants off the UI thread and
+    /// retries once when the list comes back empty. Self-drawn GPUI windows
+    /// report no nodes until a frame after the first client connects, so a
+    /// single empty answer is not conclusive.
+    fn query_elements(&mut self, window_id: WindowId, cx: &mut Context<Self>) {
+        // UIA's FindAll walks the whole descendant tree. Running it
+        // on the UI thread stalled the first hover on complex windows
+        // (browsers, Explorer), so resolve the element list off-thread.
+        self.element_pending = Some(window_id);
+        cx.spawn(async move |this, cx| {
+            let elements = cx
+                .background_executor()
+                .spawn(async move { core_capture::ui_elements(window_id) })
+                .await;
+            let empty = elements.is_empty();
+            let applied = this
+                .update(cx, |this, cx| {
+                    if this.element_pending != Some(window_id) {
+                        return false;
+                    }
+                    this.element_pending = None;
+                    this.element_cache.insert(window_id, elements);
+                    if let Some(point) = this.cursor {
+                        this.refresh_auto_target(point, cx);
+                    }
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !applied || !empty {
+                return;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
+            let retry = this
+                .update(cx, |this, _| this.element_retry.insert(window_id))
+                .unwrap_or(false);
+            if !retry {
+                return;
+            }
+            let elements = cx
+                .background_executor()
+                .spawn(async move { core_capture::ui_elements(window_id) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this
+                    .element_cache
+                    .get(&window_id)
+                    .is_some_and(Vec::is_empty)
+                {
+                    this.element_cache.insert(window_id, elements);
+                    if let Some(point) = this.cursor {
+                        this.refresh_auto_target(point, cx);
+                    }
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn adjust_auto_target(&mut self, delta: f32) {
@@ -2091,6 +2135,7 @@ impl OverlayView {
             log_warn!("overlay", "failed to release magnifier frame: {error}");
         }
         self.element_cache.clear();
+        self.element_retry.clear();
         self.element_window = None;
         self.element_pending = None;
         self.element_candidates.clear();
