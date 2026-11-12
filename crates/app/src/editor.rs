@@ -20,7 +20,8 @@ use crate::chrome_theme::ChromeTheme;
 use crate::effects::RegionEffects;
 use crate::logging::{log_error, log_info};
 use crate::overlay::{
-    ResizeHandle as RegionHandle, edge_resize_handle, handle_positions, resize_rect,
+    ResizeHandle as RegionHandle, corner_handle_offset, edge_resize_handle, handle_positions,
+    resize_rect,
 };
 use crate::settings_state::AnnotationColorTool;
 use crate::{i18n::t, icons, image_util, settings_state};
@@ -211,6 +212,8 @@ enum SelectionHover {
     None,
     Body,
     Handle(ResizeHandle),
+    /// Edge of the adjustable export frame in a full-canvas region editor.
+    Region(RegionHandle),
 }
 
 struct ResizeDraft {
@@ -748,6 +751,12 @@ pub(crate) struct EditorView {
     full_canvas: Option<FullCanvas>,
     region_drag: Option<RegionAdjustDraft>,
     pin_target: Option<u64>,
+    /// The pin being edited came from a region capture, which always displays
+    /// the composed shadow even when the export setting leaves it off.
+    pin_shadow_always: bool,
+    /// Capture scale of a pin's stored effects; pin editors have no inline
+    /// capture descriptor to read it from.
+    pin_effects_scale: f32,
     document: AnnotationDocument,
     image_size: PhysicalSize,
     tool: Tool,
@@ -872,6 +881,8 @@ impl EditorView {
             full_canvas: None,
             region_drag: None,
             pin_target,
+            pin_shadow_always: false,
+            pin_effects_scale: 1.0,
             document: AnnotationDocument::new(image_size),
             image_size,
             tool: Tool::Select,
@@ -1059,10 +1070,13 @@ impl EditorView {
             .selected()
             .and_then(|id| self.document.object(id))
             .and_then(|annotation| annotation_handle_at(&annotation.shape, point, scale));
+        let hit = self.document.hit_test(point);
         let hover = if let Some(handle) = handle {
             SelectionHover::Handle(handle)
-        } else if self.document.hit_test(point).is_some() {
+        } else if hit.is_some() {
             SelectionHover::Body
+        } else if let Some(handle) = self.region_handle_at(point) {
+            SelectionHover::Region(handle)
         } else {
             SelectionHover::None
         };
@@ -1278,8 +1292,8 @@ impl EditorView {
         let info = self.info_rect(window)?;
         let window_width = f32::from(window.viewport_size().width);
         let window_height = f32::from(window.viewport_size().height);
-        let width = 250.0_f32.min((window_width - 16.0).max(120.0));
-        let height = 86.0;
+        let width = 216.0_f32.min((window_width - 16.0).max(120.0));
+        let height = 40.0;
         let left = f32::from(info.origin.x).clamp(8.0, (window_width - width - 8.0).max(8.0));
         let top =
             crate::ui::popover_top(info, height, window_height, Some(self.toolbar_rect(window)));
@@ -1862,14 +1876,20 @@ impl EditorView {
         let rect = self
             .inline_selection_rect(window)
             .unwrap_or_else(|| self.image_view_rect(window));
+        let radius = if self.region_effects_active() {
+            self.effects.corner_radius as f32
+        } else {
+            0.0
+        };
         let mut handles = Vec::new();
         for (handle, position) in handle_positions(rect) {
+            let (dx, dy) = corner_handle_offset(handle, radius);
             handles.push(
                 div()
                     .id(format!("editor-region-handle-{:?}", handle))
                     .absolute()
-                    .left(px(f32::from(position.x) - 4.5))
-                    .top(px(f32::from(position.y) - 4.5))
+                    .left(px(f32::from(position.x) + dx - 4.5))
+                    .top(px(f32::from(position.y) + dy - 4.5))
                     .w(px(9.0))
                     .h(px(9.0))
                     .rounded(px(1.5))
@@ -2114,16 +2134,23 @@ impl EditorView {
         cx.notify();
     }
 
-    fn to_image_point(&self, position: Point<Pixels>, window: &Window) -> Option<PhysicalPoint> {
+    fn to_display_point(&self, position: Point<Pixels>, window: &Window) -> Option<PhysicalPoint> {
         let view = self.image_view_rect(window);
         let scale = f32::from(view.size.width) / self.image_size.width as f32;
+        if !scale.is_finite() || scale <= 0.0 {
+            return None;
+        }
         let x = ((f32::from(position.x) - f32::from(view.origin.x)) / scale).floor() as i32;
         let y = ((f32::from(position.y) - f32::from(view.origin.y)) / scale).floor() as i32;
         if x < 0 || y < 0 || x >= self.image_size.width as i32 || y >= self.image_size.height as i32
         {
             return None;
         }
-        let point = PhysicalPoint::new(x, y);
+        Some(PhysicalPoint::new(x, y))
+    }
+
+    fn to_image_point(&self, position: Point<Pixels>, window: &Window) -> Option<PhysicalPoint> {
+        let point = self.to_display_point(position, window)?;
         if self
             .full_selection()
             .is_some_and(|selection| !selection.contains(point))
@@ -2131,6 +2158,26 @@ impl EditorView {
             return None;
         }
         Some(point)
+    }
+
+    /// Export-frame edge under `point`. Full-canvas region editors keep the
+    /// whole monitor on screen, so these handles must follow the selection
+    /// rect instead of the monitor boundary.
+    fn region_handle_at(&self, point: PhysicalPoint) -> Option<RegionHandle> {
+        if !self.can_adjust_region() {
+            return None;
+        }
+        let rect = self.full_selection().unwrap_or_else(|| {
+            PhysicalRect::new(0, 0, self.image_size.width, self.image_size.height)
+        });
+        let scale = self
+            .inline
+            .map(|inline| {
+                f32::from(inline.image_rect.size.width) / self.image_size.width.max(1) as f32
+            })
+            .unwrap_or(1.0)
+            .max(0.01);
+        edge_resize_handle(rect, point, (8.0 / scale).max(1.0))
     }
 
     fn effective_style(&self) -> AnnotationStyle {
@@ -4240,11 +4287,40 @@ impl EditorView {
         }
     }
 
+    /// Effects applied to a pin created from this editor. Region pins always
+    /// compose the shadow; copy/save still follow the configured effects.
+    fn pin_effects(&self) -> RegionEffects {
+        let mut effects = self.stored_region_effects();
+        if self.region_pin() {
+            effects = effects.with_shadow();
+        }
+        effects
+    }
+
+    /// Whether the pin being created or edited keeps the shadow regardless of
+    /// the export setting.
+    fn region_pin(&self) -> bool {
+        self.pin_shadow_always
+            || self
+                .inline
+                .and_then(|inline| inline.capture)
+                .is_some_and(|capture| matches!(capture.target, CaptureTarget::Region(_)))
+    }
+
+    /// Long-capture results have no composed shadow and rely on the native
+    /// window shadow. Region pins now compose their own, and window/pin
+    /// editors already carry the captured edge shadow.
+    fn pin_native_shadow(&self) -> bool {
+        self.inline.is_some()
+            && self.inline.and_then(|inline| inline.capture).is_none()
+            && self.pin_target.is_none()
+    }
+
     fn region_effects_scale(&self) -> f32 {
         self.inline
             .and_then(|inline| inline.capture)
             .map(|capture| capture.scale)
-            .unwrap_or(1.0)
+            .unwrap_or(self.pin_effects_scale)
             .max(0.1)
     }
 
@@ -4353,7 +4429,12 @@ impl EditorView {
         }
         let rect = self.effects_rect(window)?;
         let language = settings_state::get().language;
-        let mut corner_row = div().flex().flex_row().items_center().gap(px(3.0));
+        let mut corner_row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(2.0))
+            .child(icons::icon(icons::RECT, 14.0, self.chrome.muted));
         for radius in [0u32, 8, 16, 24] {
             let selected_radius = self.effects.corner_radius == radius;
             let label = if radius == 0 {
@@ -4361,19 +4442,25 @@ impl EditorView {
             } else {
                 radius.to_string()
             };
+            let tooltip = format!("{} {label}", t(language, "overlay.effects_corner"));
             corner_row = corner_row.child(
                 div()
                     .id(format!("editor-radius-{radius}"))
-                    .px(px(7.0))
-                    .py(px(3.0))
+                    .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
+                    .h(px(22.0))
+                    .px(px(6.0))
                     .rounded(px(5.0))
-                    .when(selected_radius, |chip| chip.bg(self.chrome.accent))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(selected_radius, |chip| chip.bg(self.chrome.accent_tint))
                     .when(!selected_radius, |chip| {
                         chip.hover(|style| style.bg(self.chrome.hover))
                     })
-                    .text_size(px(10.5))
+                    .active(|style| style.opacity(0.85))
+                    .text_size(px(11.0))
                     .text_color(if selected_radius {
-                        self.chrome.accent_text
+                        self.chrome.accent
                     } else {
                         self.chrome.muted
                     })
@@ -4388,16 +4475,51 @@ impl EditorView {
                     .child(label),
             );
         }
+        let shadow = self.effects.shadow;
+        let shadow_label = t(language, "overlay.effects_shadow").to_owned();
+        let shadow_chip = div()
+            .id("editor-effects-shadow")
+            .tooltip({
+                let label = shadow_label.clone();
+                move |_, cx| tooltip_view(label.clone(), cx)
+            })
+            .h(px(22.0))
+            .px(px(8.0))
+            .rounded(px(5.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(shadow, |chip| chip.bg(self.chrome.accent_tint))
+            .when(!shadow, |chip| {
+                chip.hover(|style| style.bg(self.chrome.hover))
+            })
+            .active(|style| style.opacity(0.85))
+            .text_size(px(11.0))
+            .text_color(if shadow {
+                self.chrome.accent
+            } else {
+                self.chrome.muted
+            })
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.effects.shadow = !this.effects.shadow;
+                let shadow = this.effects.shadow;
+                settings_state::update(|settings| settings.region_shadow = shadow);
+                cx.notify();
+            }))
+            .child(shadow_label);
         let panel = div()
             .id("editor-effects-panel")
             .absolute()
             .left(rect.origin.x)
             .top(rect.origin.y)
             .w(rect.size.width)
+            .h(rect.size.height)
+            .px(px(8.0))
             .flex()
-            .flex_col()
+            .flex_row()
+            .items_center()
             .gap(px(6.0))
-            .p(px(8.0))
             .rounded(px(self.chrome.radius))
             .bg(self.chrome.surface_strong)
             .border_1()
@@ -4408,43 +4530,9 @@ impl EditorView {
                 MouseButton::Left,
                 cx.listener(|_, _, _, cx| cx.stop_propagation()),
             )
-            .child(
-                div()
-                    .text_size(px(10.5))
-                    .text_color(self.chrome.muted)
-                    .child(t(language, "overlay.effects_corner")),
-            )
             .child(corner_row)
-            .child({
-                let shadow = self.effects.shadow;
-                div()
-                    .id("editor-effects-shadow")
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.0))
-                    .px(px(7.0))
-                    .py(px(3.0))
-                    .rounded(px(5.0))
-                    .when(shadow, |chip| chip.bg(self.chrome.accent))
-                    .when(!shadow, |chip| {
-                        chip.hover(|style| style.bg(self.chrome.hover))
-                    })
-                    .text_size(px(10.5))
-                    .text_color(if shadow {
-                        self.chrome.accent_text
-                    } else {
-                        self.chrome.muted
-                    })
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.effects.shadow = !this.effects.shadow;
-                        let shadow = this.effects.shadow;
-                        settings_state::update(|settings| settings.region_shadow = shadow);
-                        cx.notify();
-                    }))
-                    .child(t(language, "overlay.effects_shadow"))
-            });
+            .child(div().w(px(1.0)).h(px(18.0)).bg(self.chrome.separator))
+            .child(shadow_chip);
         let panel = crate::ui::enter_slide_fade(
             panel,
             "editor-effects-enter",
@@ -4805,11 +4893,16 @@ impl EditorView {
         self.commit_text(cx);
         let inline_host = self.inline;
         let selection_bounds = self.full_selection_screen_bounds();
+        let pin_effects = self.pin_effects();
+        let pin_shadow_always = self.region_pin();
+        let effects_scale = self.region_effects_scale();
+        let pin_padding = pin_effects.padding(effects_scale);
+        let native_shadow = self.pin_native_shadow();
         let document = self.action_document();
         match rasterize(&document, &self.frame) {
             Ok(output) => {
-                let output = if self.region_effects_active() {
-                    self.effects.apply(output, self.region_effects_scale())
+                let output = if pin_effects.active() {
+                    pin_effects.apply(output, self.region_effects_scale())
                 } else {
                     output
                 };
@@ -4857,20 +4950,6 @@ impl EditorView {
                 let monitor = inline_host
                     .and_then(|inline| inline.capture)
                     .map(|capture| capture.region.monitor);
-                // Window captures already include their composed edge shadow.
-                // Region captures only bake one when the shadow effect is on;
-                // long-capture results never do, so those pins use the native
-                // window shadow instead. Rounded frames without a composed
-                // shadow skip the native one: a rectangular DWM shadow around
-                // transparent corners reads as square.
-                let native_shadow = inline_host.is_some_and(|inline| match inline.capture {
-                    Some(capture) => {
-                        matches!(capture.target, CaptureTarget::Region(_))
-                            && !self.effects.shadow
-                            && self.effects.corner_radius == 0
-                    }
-                    None => self.pin_target.is_none(),
-                });
                 if inline_host.is_some() {
                     self.release_images(cx);
                 }
@@ -4879,6 +4958,9 @@ impl EditorView {
                     self.frame.clone(),
                     document,
                     self.stored_region_effects(),
+                    pin_shadow_always,
+                    pin_padding,
+                    effects_scale,
                 );
                 // Pin windows must not be created inside the toolbar's input
                 // callback; close the editor first and open the pin next turn.
@@ -4925,11 +5007,33 @@ impl EditorView {
         let mut pin_ok = false;
         let document = self.action_document();
         match rasterize(&document, &self.frame) {
-            Ok(output) => {
-                let output = if self.region_effects_active() {
-                    self.effects.apply(output, self.region_effects_scale())
+            Ok(raw) => {
+                let pin_update = (!copy_only).then_some(self.pin_target).flatten();
+                let scale = self.region_effects_scale();
+                let pin_effects = self.pin_effects();
+                let pin_padding = pin_effects.padding(scale);
+                // Pin editors display region captures with a composed shadow
+                // even when the export setting is off; copy/save keep following
+                // the configured effects.
+                let (output, pin_output) = if pin_update.is_some() {
+                    let copy = if self.region_effects_active() {
+                        self.effects.apply(raw.clone(), scale)
+                    } else {
+                        raw.clone()
+                    };
+                    let pin = if pin_effects.active() {
+                        pin_effects.apply(raw, scale)
+                    } else {
+                        raw
+                    };
+                    (copy, Some(pin))
                 } else {
-                    output
+                    let copy = if self.region_effects_active() {
+                        self.effects.apply(raw, scale)
+                    } else {
+                        raw
+                    };
+                    (copy, None)
                 };
                 let hash = crate::capture_history::hash_frame(&output);
                 let record_history = self.pin_target.is_none();
@@ -4971,8 +5075,13 @@ impl EditorView {
                         self.frame.clone(),
                         document,
                         self.stored_region_effects(),
+                        self.region_pin(),
+                        pin_padding,
+                        scale,
                     );
-                    if crate::pin::replace_image_with_edit_state(pin_id, output, edit_state, cx) {
+                    let pin_image = pin_output.unwrap_or(output);
+                    if crate::pin::replace_image_with_edit_state(pin_id, pin_image, edit_state, cx)
+                    {
                         pin_ok = true;
                         messages.push(t(language, "editor.pin_updated").to_owned());
                     } else {
@@ -5489,6 +5598,7 @@ impl Render for EditorView {
         } else {
             match self.selection_hover {
                 SelectionHover::Handle(handle) => handle_cursor(handle),
+                SelectionHover::Region(handle) => region_handle_cursor(handle),
                 // Any annotation under the pointer can be selected and moved,
                 // even while a drawing tool is active.
                 SelectionHover::Body => crate::ui::open_hand_cursor(),
@@ -5539,36 +5649,44 @@ impl Render for EditorView {
                     px(rect.size.height as f32 * scale),
                 ),
             });
-        let dim_layer = selection_clip.map(|clip| {
-            let full_width = f32::from(image_rect.size.width);
-            let full_height = f32::from(image_rect.size.height);
-            let left = f32::from(clip.origin.x);
-            let top = f32::from(clip.origin.y);
-            let right = left + f32::from(clip.size.width);
-            let bottom = top + f32::from(clip.size.height);
-            let dim_rect = move |x: f32, y: f32, width: f32, height: f32| {
-                div()
-                    .absolute()
-                    .left(px(x))
-                    .top(px(y))
-                    .w(px(width.max(0.0)))
-                    .h(px(height.max(0.0)))
-                    .bg(rgba(0x00000066))
+        let image_radius = if effects_active && !show_full_frame {
+            self.effects.corner_radius as f32
+        } else {
+            0.0
+        };
+        let frame_radius = if effects_active {
+            self.effects.corner_radius as f32
+        } else {
+            0.0
+        };
+        let frame_overlay = selection_clip.map(|clip| {
+            // Paint in window coordinates: the canvas is anchored to the image
+            // layer, while the mask and its accent ring share one outline.
+            let origin = image_rect.origin;
+            let hole = Bounds {
+                origin: point(
+                    px(f32::from(clip.origin.x) + f32::from(origin.x)),
+                    px(f32::from(clip.origin.y) + f32::from(origin.y)),
+                ),
+                size: clip.size,
             };
-            let mut layer = div().absolute().inset_0();
-            if top > 0.0 {
-                layer = layer.child(dim_rect(0.0, 0.0, full_width, top));
-            }
-            if bottom < full_height {
-                layer = layer.child(dim_rect(0.0, bottom, full_width, full_height - bottom));
-            }
-            if left > 0.0 {
-                layer = layer.child(dim_rect(0.0, top, left, bottom - top));
-            }
-            if right < full_width {
-                layer = layer.child(dim_rect(right, top, full_width - right, bottom - top));
-            }
-            layer
+            let accent = rgba((accent_hex << 8) | 0xFF);
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    crate::ui::paint_rounded_mask(
+                        window,
+                        bounds,
+                        hole,
+                        frame_radius,
+                        rgba(0x00000066),
+                        Some((accent, 1.0)),
+                    );
+                },
+            )
+            .absolute()
+            .inset_0()
+            .size_full()
         });
         let annotation_content = div()
             .absolute()
@@ -5596,16 +5714,6 @@ impl Render for EditorView {
         } else {
             annotation_content
         };
-        let frame_border = selection_clip.map(|clip| {
-            div()
-                .absolute()
-                .left(clip.origin.x)
-                .top(clip.origin.y)
-                .w(clip.size.width)
-                .h(clip.size.height)
-                .border_1()
-                .border_color(rgba((accent_hex << 8) | 0xFF))
-        });
         let image_layer = div()
             .absolute()
             .left(image_rect.origin.x)
@@ -5613,11 +5721,6 @@ impl Render for EditorView {
             .w(image_rect.size.width)
             .h(image_rect.size.height)
             .cursor(image_cursor)
-            .rounded(px(if effects_active && !show_full_frame {
-                self.effects.corner_radius as f32
-            } else {
-                0.0
-            }))
             .overflow_hidden()
             // Block the inline backdrop behind the image: without this the
             // same click selected an object and then reached the backdrop,
@@ -5628,11 +5731,11 @@ impl Render for EditorView {
                     .absolute()
                     .inset_0()
                     .size_full()
+                    .rounded(px(image_radius))
                     .object_fit(ObjectFit::Fill),
             )
-            .children(dim_layer)
             .child(annotation_layer)
-            .children(frame_border)
+            .children(frame_overlay)
             .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
                 let zoomable = this.inline.is_some_and(|inline| inline.zoomable);
                 if this.inline.is_some() && !zoomable {
@@ -5670,7 +5773,7 @@ impl Render for EditorView {
                         cx.notify();
                         return;
                     }
-                    let Some(point) = this.to_image_point(event.position, window) else {
+                    let Some(display_point) = this.to_display_point(event.position, window) else {
                         return;
                     };
                     // A previous gesture can outlive its mouse-up when the
@@ -5678,6 +5781,20 @@ impl Render for EditorView {
                     // release. Every new press starts from a clean transform.
                     this.move_draft = None;
                     this.resize_draft = None;
+                    if this
+                        .full_selection()
+                        .is_some_and(|selection| !selection.contains(display_point))
+                    {
+                        // Pressing just outside the export frame still grabs the
+                        // nearest frame edge; the pointer may sit on the border
+                        // itself while the selection is the real target.
+                        if let Some(handle) = this.region_handle_at(display_point) {
+                            this.begin_region_drag(handle, cx);
+                            cx.stop_propagation();
+                        }
+                        return;
+                    }
+                    let point = display_point;
                     // Selection handles stay live regardless of the active
                     // drawing tool: after drawing a shape the tool does not
                     // switch to Select, and dragging a painted handle should
@@ -5720,11 +5837,7 @@ impl Render for EditorView {
                     // annotations remain selectable.
                     if hit.is_none()
                         && this.can_adjust_region()
-                        && let Some(handle) = edge_resize_handle(
-                            PhysicalRect::new(0, 0, this.image_size.width, this.image_size.height),
-                            point,
-                            (8.0 / scale).max(1.0),
-                        )
+                        && let Some(handle) = this.region_handle_at(point)
                     {
                         this.begin_region_drag(handle, cx);
                         cx.stop_propagation();
@@ -6564,9 +6677,15 @@ pub fn open_pin_editor_overlay(
     // The caller already resolved the unannotated base (or the flattened pin
     // when a compact base could not be decoded); only the vector document and
     // effects come from the edit state here.
-    let (document, effects) = match edit_state {
-        Some(state) => (Some(state.document), state.effects),
-        None => (None, RegionEffects::default()),
+    let (document, effects, shadow_always, display_padding, effects_scale) = match edit_state {
+        Some(state) => (
+            Some(state.document),
+            state.effects,
+            state.shadow_always,
+            state.display_padding,
+            state.effects_scale,
+        ),
+        None => (None, RegionEffects::default(), false, 0, 1.0),
     };
     let center_x = f32::from(pin_bounds.origin.x) + f32::from(pin_bounds.size.width) / 2.0;
     let center_y = f32::from(pin_bounds.origin.y) + f32::from(pin_bounds.size.height) / 2.0;
@@ -6586,12 +6705,21 @@ pub fn open_pin_editor_overlay(
         return false;
     };
     let display_bounds = display.bounds();
+    // Pins with composed effects display the base inset by the shadow padding;
+    // open the editor on that inner rect so the base is neither stretched nor
+    // re-shadowed.
+    let output_width = frame.width() as f32 + display_padding as f32 * 2.0;
+    let display_scale = f32::from(pin_bounds.size.width) / output_width.max(1.0);
+    let inset = display_padding as f32 * display_scale;
     let image_rect = Bounds {
         origin: point(
-            px(f32::from(pin_bounds.origin.x) - f32::from(display_bounds.origin.x)),
-            px(f32::from(pin_bounds.origin.y) - f32::from(display_bounds.origin.y)),
+            px(f32::from(pin_bounds.origin.x) - f32::from(display_bounds.origin.x) + inset),
+            px(f32::from(pin_bounds.origin.y) - f32::from(display_bounds.origin.y) + inset),
         ),
-        size: pin_bounds.size,
+        size: size(
+            px((f32::from(pin_bounds.size.width) - inset * 2.0).max(1.0)),
+            px((f32::from(pin_bounds.size.height) - inset * 2.0).max(1.0)),
+        ),
     };
     open_inline_editor_window(
         frame,
@@ -6604,6 +6732,8 @@ pub fn open_pin_editor_overlay(
         Tool::Select,
         document,
         effects,
+        shadow_always,
+        effects_scale,
         cx,
     )
 }
@@ -6660,6 +6790,8 @@ pub fn open_long_capture_inline(frame: RgbaFrame, monitor_id: MonitorId, cx: &mu
         Tool::Select,
         None,
         RegionEffects::default(),
+        false,
+        1.0,
         cx,
     )
 }
@@ -6699,6 +6831,8 @@ fn open_inline_editor_window(
     initial_tool: Tool,
     document: Option<AnnotationDocument>,
     effects: RegionEffects,
+    pin_shadow_always: bool,
+    pin_effects_scale: f32,
     cx: &mut App,
 ) -> bool {
     let options = WindowOptions {
@@ -6729,7 +6863,7 @@ fn open_inline_editor_window(
         // area so annotations land on the pixels they were drawn over.
         crate::ui::align_client_to_bounds(&*window, window_bounds);
         let editor = cx.new(|cx| {
-            EditorView::new_inline(
+            let mut editor = EditorView::new_inline(
                 frame,
                 None,
                 image_rect,
@@ -6742,7 +6876,10 @@ fn open_inline_editor_window(
                 effects,
                 None,
                 cx,
-            )
+            );
+            editor.pin_shadow_always = pin_shadow_always;
+            editor.pin_effects_scale = pin_effects_scale.max(0.1);
+            editor
         });
         let focus = editor.read(cx).focus_handle.clone();
         register_view(&editor, window);

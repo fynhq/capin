@@ -65,9 +65,9 @@ fn system_border(scale: f32) -> Option<Border> {
     })
 }
 
-/// Windows window screenshots keep a 1px system border. Paint it in the
-/// padding so it covers the first shadow pixel; an inside border leaves a
-/// light 1px gap between itself and the drop shadow.
+/// Windows window screenshots keep a 1px system border. Paint it inside the
+/// captured content so the composed image does not grow an extra pixel beyond
+/// the window edge; the shadow still starts at that edge.
 #[cfg(target_os = "windows")]
 fn system_border(_scale: f32) -> Option<Border> {
     let light = platform_window::system_uses_light_theme().unwrap_or(true);
@@ -78,7 +78,7 @@ fn system_border(_scale: f32) -> Option<Border> {
         } else {
             [0x4C, 0x4C, 0x4C, 0xFF]
         },
-        outside: true,
+        outside: false,
     })
 }
 

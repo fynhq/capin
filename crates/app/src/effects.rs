@@ -21,6 +21,23 @@ impl RegionEffects {
         self.corner_radius > 0 || self.shadow
     }
 
+    /// Same effects with the composed shadow forced on. Region pins always
+    /// float above the desktop; the saved/copied export still follows the
+    /// configured shadow.
+    pub fn with_shadow(mut self) -> Self {
+        self.shadow = true;
+        self
+    }
+
+    /// Physical pixels added around the frame when the shadow is composed.
+    pub fn padding(self, scale: f32) -> u32 {
+        if self.shadow {
+            ((20.0 + 8.0 + 4.0) * scale.max(0.1)).round().max(1.0) as u32
+        } else {
+            0
+        }
+    }
+
     /// Applies the effects, returning the original frame unchanged when they
     /// are disabled. Taking the frame by value avoids a full-image clone on
     /// the common path where no region effect is configured.
@@ -35,11 +52,7 @@ impl RegionEffects {
             blur_radius: (20.0 * scale).round().max(1.0) as u32,
             opacity: 0.35,
         });
-        let padding = if self.shadow {
-            ((20.0 + 8.0 + 4.0) * scale).round().max(1.0) as u32
-        } else {
-            0
-        };
+        let padding = self.padding(scale);
         let canvas = WindowCanvas {
             padding,
             corner_radius: (self.corner_radius as f32 * scale).round() as u32,

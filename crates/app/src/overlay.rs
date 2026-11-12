@@ -906,9 +906,10 @@ impl OverlayView {
         self.effects.corner_radius as f32
     }
 
-    /// Dims everything outside the hole. A rounded hole is one even-odd path
-    /// so the dimmed corners follow the selected capture radius instead of
-    /// leaving four bright square corners outside the rounded border.
+    /// Dims everything outside the rounded selection and draws the accent
+    /// frame on the same outline. Painting the border from the hole path keeps
+    /// it flush with the dim mask at every radius; the old separate rounded
+    /// border quad drifted off the arc and left bright slivers at 16/24.
     fn dim_layers_rounded(&self, hole: Option<Bounds<Pixels>>, radius: f32) -> Vec<AnyElement> {
         if radius <= 0.5 {
             return self
@@ -924,23 +925,18 @@ impl OverlayView {
                 .map(|layer| layer.into_any_element())
                 .collect();
         };
-        let width = f32::from(self.window_size.width);
-        let height = f32::from(self.window_size.height);
+        let accent = self.accent;
         let layer = canvas(
             |_, _, _| (),
-            move |_bounds, _, window, _| {
-                let mut builder = PathBuilder::fill().with_style(PathStyle::Fill(
-                    FillOptions::default().with_fill_rule(FillRule::EvenOdd),
-                ));
-                builder.move_to(point(px(0.0), px(0.0)));
-                builder.line_to(point(px(width), px(0.0)));
-                builder.line_to(point(px(width), px(height)));
-                builder.line_to(point(px(0.0), px(height)));
-                builder.close();
-                crate::ui::push_rounded_rect(&mut builder, hole, radius);
-                if let Ok(path) = builder.build() {
-                    window.paint_path(path, rgba(DIM));
-                }
+            move |bounds, _, window, _| {
+                crate::ui::paint_rounded_mask(
+                    window,
+                    bounds,
+                    hole,
+                    radius,
+                    rgba(DIM),
+                    Some((accent, 3.0)),
+                );
             },
         )
         .absolute()
@@ -1950,8 +1946,8 @@ impl OverlayView {
         let Some(selected) = self.selected.clone() else {
             return;
         };
-        let output = match self.selected_output() {
-            Ok(output) => output,
+        let output = match self.capture_selected_raw() {
+            Ok(frame) => frame,
             Err(error) => {
                 self.set_notice(error, cx);
                 return;
@@ -1959,6 +1955,15 @@ impl OverlayView {
         };
         let monitor = self.session.monitor_bounds();
         let scale = self.effective_scale();
+        // Region pins always show the composed shadow so rounded corners keep
+        // their floating edge. Copy/save still use the configured effects.
+        let output = if matches!(selected.target, CaptureTarget::Window(_)) {
+            output
+        } else if matches!(selected.target, CaptureTarget::Region(_)) {
+            self.effects.with_shadow().apply(output, scale)
+        } else {
+            self.effects.apply(output, scale)
+        };
         let center_x = (monitor.origin.x + selected.rect.origin.x) as f32 / scale
             + selected.rect.size.width as f32 / scale / 2.0;
         let center_y = (monitor.origin.y + selected.rect.origin.y) as f32 / scale
@@ -1971,9 +1976,6 @@ impl OverlayView {
         };
         log_info!("overlay", "selection pinned");
         let hash = crate::capture_history::hash_frame(&output);
-        let native_shadow = matches!(selected.target, CaptureTarget::Region(_))
-            && !self.effects.shadow
-            && self.effects.corner_radius == 0;
         let monitor = self.session.monitor();
         let handles = cx.windows();
         // Opening the pin window inside this input callback would re-enter
@@ -1987,7 +1989,7 @@ impl OverlayView {
                 1.0 / scale,
                 hash,
                 Some(monitor),
-                native_shadow,
+                false,
                 cx,
             );
         });
@@ -2630,8 +2632,8 @@ impl OverlayView {
         }
         let info = self.info_rect()?;
         let language = settings_state::get().language;
-        let width = 246.0_f32.min(f32::from(self.window_size.width) - 16.0);
-        let height = 86.0;
+        let width = 216.0_f32.min(f32::from(self.window_size.width) - 16.0);
+        let height = 40.0;
         let left = f32::from(info.origin.x).clamp(
             8.0,
             (f32::from(self.window_size.width) - width - 8.0).max(8.0),
@@ -2643,7 +2645,12 @@ impl OverlayView {
             self.toolbar_rect(),
         );
 
-        let mut corner_row = div().flex().flex_row().items_center().gap(px(3.0));
+        let mut corner_row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(2.0))
+            .child(icons::icon(icons::RECT, 14.0, self.chrome.muted));
         for radius in [0u32, 8, 16, 24] {
             let selected_radius = self.effects.corner_radius == radius;
             let label = if radius == 0 {
@@ -2651,20 +2658,25 @@ impl OverlayView {
             } else {
                 radius.to_string()
             };
+            let tooltip = format!("{} {label}", t(language, "overlay.effects_corner"));
             corner_row = corner_row.child(
                 div()
                     .id(format!("overlay-radius-{radius}"))
-                    .px(px(7.0))
-                    .py(px(3.0))
+                    .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
+                    .h(px(22.0))
+                    .px(px(6.0))
                     .rounded(px(5.0))
-                    .when(selected_radius, |chip| chip.bg(self.chrome.accent))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(selected_radius, |chip| chip.bg(self.chrome.accent_tint))
                     .when(!selected_radius, |chip| {
                         chip.hover(|style| style.bg(self.chrome.hover))
                     })
                     .active(|style| style.opacity(0.85))
-                    .text_size(px(10.5))
+                    .text_size(px(11.0))
                     .text_color(if selected_radius {
-                        self.chrome.accent_text
+                        self.chrome.accent
                     } else {
                         self.chrome.muted
                     })
@@ -2680,16 +2692,52 @@ impl OverlayView {
             );
         }
 
+        let shadow = self.effects.shadow;
+        let shadow_label = t(language, "overlay.effects_shadow").to_owned();
+        let shadow_chip = div()
+            .id("overlay-effects-shadow")
+            .tooltip({
+                let label = shadow_label.clone();
+                move |_, cx| tooltip_view(label.clone(), cx)
+            })
+            .h(px(22.0))
+            .px(px(8.0))
+            .rounded(px(5.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(shadow, |chip| chip.bg(self.chrome.accent_tint))
+            .when(!shadow, |chip| {
+                chip.hover(|style| style.bg(self.chrome.hover))
+            })
+            .active(|style| style.opacity(0.85))
+            .text_size(px(11.0))
+            .text_color(if shadow {
+                self.chrome.accent
+            } else {
+                self.chrome.muted
+            })
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.effects.shadow = !this.effects.shadow;
+                let shadow = this.effects.shadow;
+                settings_state::update(|settings| settings.region_shadow = shadow);
+                cx.notify();
+            }))
+            .child(shadow_label);
+
         let panel = div()
             .id("overlay-effects-panel")
             .absolute()
             .left(px(left))
             .top(px(top))
             .w(px(width))
+            .h(px(height))
+            .px(px(8.0))
             .flex()
-            .flex_col()
+            .flex_row()
+            .items_center()
             .gap(px(6.0))
-            .p(px(8.0))
             .rounded(px(self.chrome.radius))
             .bg(self.chrome.surface_strong)
             .border_1()
@@ -2700,43 +2748,9 @@ impl OverlayView {
                 MouseButton::Left,
                 cx.listener(|_, _, _, cx| cx.stop_propagation()),
             )
-            .child(
-                div()
-                    .text_size(px(10.5))
-                    .text_color(self.chrome.muted)
-                    .child(t(language, "overlay.effects_corner")),
-            )
             .child(corner_row)
-            .child({
-                let shadow = self.effects.shadow;
-                div()
-                    .id("overlay-effects-shadow")
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.0))
-                    .px(px(7.0))
-                    .py(px(3.0))
-                    .rounded(px(5.0))
-                    .when(shadow, |chip| chip.bg(self.chrome.accent))
-                    .when(!shadow, |chip| {
-                        chip.hover(|style| style.bg(self.chrome.hover))
-                    })
-                    .text_size(px(10.5))
-                    .text_color(if shadow {
-                        self.chrome.accent_text
-                    } else {
-                        self.chrome.muted
-                    })
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.effects.shadow = !this.effects.shadow;
-                        let shadow = this.effects.shadow;
-                        settings_state::update(|settings| settings.region_shadow = shadow);
-                        cx.notify();
-                    }))
-                    .child(t(language, "overlay.effects_shadow"))
-            });
+            .child(div().w(px(1.0)).h(px(18.0)).bg(self.chrome.separator))
+            .child(shadow_chip);
         let offset = if top >= f32::from(info.origin.y) {
             5.0
         } else {
@@ -3054,14 +3068,16 @@ impl OverlayView {
             return Vec::new();
         };
         let mut handles = Vec::new();
+        let radius = self.selection_effects_radius();
         for (handle, position) in handle_positions(selection) {
+            let (dx, dy) = corner_handle_offset(handle, radius);
             let cursor = overlay_handle_cursor(handle);
             handles.push(
                 div()
                     .id(format!("overlay-handle-{:?}", handle))
                     .absolute()
-                    .left(px(f32::from(position.x) - HANDLE_SIZE / 2.0))
-                    .top(px(f32::from(position.y) - HANDLE_SIZE / 2.0))
+                    .left(px(f32::from(position.x) + dx - HANDLE_SIZE / 2.0))
+                    .top(px(f32::from(position.y) + dy - HANDLE_SIZE / 2.0))
                     .w(px(HANDLE_SIZE))
                     .h(px(HANDLE_SIZE))
                     .rounded(px(1.5))
@@ -3339,11 +3355,14 @@ impl OverlayView {
         });
 
         let screen_color = rgba((SCREEN_SELECTION << 8) | 0xFF);
-        let mut layers = self.dim_layers_rounded(hole, self.selection_effects_radius());
+        let selection_radius = self.selection_effects_radius();
+        let mut layers = self.dim_layers_rounded(hole, selection_radius);
         if let Some(rect) = selected_bounds {
-            layers.push(
-                border(rect, self.accent, self.selection_effects_radius()).into_any_element(),
-            );
+            // Above 0.5 the rounded mask already painted the accent ring from
+            // the same path as the hole.
+            if selection_radius <= 0.5 {
+                layers.push(border(rect, self.accent, selection_radius).into_any_element());
+            }
         } else if let Some(rect) = drag_selection {
             layers.push(border(rect, self.chrome.accent, 0.0).into_any_element());
         } else if let Some(rect) = hovered_element {
@@ -4009,6 +4028,20 @@ pub(crate) fn handle_positions(rect: Bounds<Pixels>) -> Vec<(ResizeHandle, Point
         (ResizeHandle::SouthWest, point(px(left), px(bottom))),
         (ResizeHandle::SouthEast, point(px(right), px(bottom))),
     ]
+}
+
+/// Corner handles normally sit on the square corner. On a rounded selection
+/// that point falls outside the visible shape and the white handle floats in
+/// the dimmed corner, so pull it onto the 45-degree point of the arc.
+pub(crate) fn corner_handle_offset(handle: ResizeHandle, radius: f32) -> (f32, f32) {
+    let inset = radius.max(0.0) * (1.0 - std::f32::consts::FRAC_1_SQRT_2);
+    match handle {
+        ResizeHandle::NorthWest => (inset, inset),
+        ResizeHandle::NorthEast => (-inset, inset),
+        ResizeHandle::SouthWest => (inset, -inset),
+        ResizeHandle::SouthEast => (-inset, -inset),
+        _ => (0.0, 0.0),
+    }
 }
 
 fn dim_rect(left: f32, top: f32, width: f32, height: f32) -> Div {

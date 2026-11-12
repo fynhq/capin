@@ -59,35 +59,119 @@ pub fn align_client_to_bounds(window: &Window, bounds: Bounds<Pixels>) {
     }
 }
 
+/// Bézier handle length for a quarter-circle approximation.
+const ARC_HANDLE: f32 = 0.552_284_8;
+
 /// Appends a rounded-rectangle path to `builder`, clamping the radius to half
-/// the shorter side.
+/// the shorter side. The corners are cubic approximations of circular arcs so
+/// they line up with GPUI's rounded quads and the composed export corners.
 pub fn push_rounded_rect(builder: &mut PathBuilder, rect: Bounds<Pixels>, radius: f32) {
     let left = f32::from(rect.origin.x);
     let top = f32::from(rect.origin.y);
     let width = f32::from(rect.size.width);
     let height = f32::from(rect.size.height);
     let radius = radius.clamp(0.0, width.min(height) / 2.0);
+    if width <= 0.0 || height <= 0.0 {
+        return;
+    }
     let right = left + width;
     let bottom = top + height;
+    let handle = radius * ARC_HANDLE;
     builder.move_to(point(px(left + radius), px(top)));
     builder.line_to(point(px(right - radius), px(top)));
-    builder.curve_to(
+    builder.cubic_bezier_to(
         point(px(right), px(top + radius)),
-        point(px(right), px(top)),
+        point(px(right - radius + handle), px(top)),
+        point(px(right), px(top + radius - handle)),
     );
     builder.line_to(point(px(right), px(bottom - radius)));
-    builder.curve_to(
+    builder.cubic_bezier_to(
         point(px(right - radius), px(bottom)),
-        point(px(right), px(bottom)),
+        point(px(right), px(bottom - radius + handle)),
+        point(px(right - radius + handle), px(bottom)),
     );
     builder.line_to(point(px(left + radius), px(bottom)));
-    builder.curve_to(
+    builder.cubic_bezier_to(
         point(px(left), px(bottom - radius)),
-        point(px(left), px(bottom)),
+        point(px(left + radius - handle), px(bottom)),
+        point(px(left), px(bottom - radius + handle)),
     );
     builder.line_to(point(px(left), px(top + radius)));
-    builder.curve_to(point(px(left + radius), px(top)), point(px(left), px(top)));
+    builder.cubic_bezier_to(
+        point(px(left + radius), px(top)),
+        point(px(left), px(top + radius - handle)),
+        point(px(left + radius - handle), px(top)),
+    );
     builder.close();
+}
+
+/// Paints the dimmed area outside a rounded hole plus, optionally, an accent
+/// ring along the hole edge.
+///
+/// The ring is tessellated from the same rounded outline as the hole instead
+/// of a separate `border()` quad. At large radii the two primitives used to
+/// disagree by about a pixel around the arc, leaving an undimmed sliver the
+/// border could not cover.
+pub fn paint_rounded_mask(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    hole: Bounds<Pixels>,
+    radius: f32,
+    dim: Rgba,
+    ring: Option<(Rgba, f32)>,
+) {
+    let hole_left = f32::from(hole.origin.x);
+    let hole_top = f32::from(hole.origin.y);
+    let hole_width = f32::from(hole.size.width);
+    let hole_height = f32::from(hole.size.height);
+    let valid_hole = hole_width > 0.5 && hole_height > 0.5;
+
+    if valid_hole {
+        let left = f32::from(bounds.origin.x);
+        let top = f32::from(bounds.origin.y);
+        let right = left + f32::from(bounds.size.width);
+        let bottom = top + f32::from(bounds.size.height);
+        if right > left && bottom > top {
+            let mut builder = PathBuilder::fill().with_style(PathStyle::Fill(
+                FillOptions::default().with_fill_rule(FillRule::EvenOdd),
+            ));
+            builder.move_to(point(px(left), px(top)));
+            builder.line_to(point(px(right), px(top)));
+            builder.line_to(point(px(right), px(bottom)));
+            builder.line_to(point(px(left), px(bottom)));
+            builder.close();
+            push_rounded_rect(&mut builder, hole, radius);
+            if let Ok(path) = builder.build() {
+                window.paint_path(path, dim);
+            }
+        }
+    }
+
+    let Some((color, width)) = ring else {
+        return;
+    };
+    if !valid_hole || width <= 0.0 {
+        return;
+    }
+    let width = width.min(hole_width / 2.0).min(hole_height / 2.0);
+    if width <= 0.0 {
+        return;
+    }
+    let inner = Bounds {
+        origin: point(px(hole_left + width), px(hole_top + width)),
+        size: size(
+            px((hole_width - width * 2.0).max(0.0)),
+            px((hole_height - width * 2.0).max(0.0)),
+        ),
+    };
+    let mut builder = PathBuilder::fill().with_style(PathStyle::Fill(
+        FillOptions::default().with_fill_rule(FillRule::EvenOdd),
+    ));
+    push_rounded_rect(&mut builder, hole, radius);
+    push_rounded_rect(&mut builder, inner, (radius - width).max(0.0));
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
+    }
 }
 
 /// Places a popover beside its anchor without covering the anchor or another

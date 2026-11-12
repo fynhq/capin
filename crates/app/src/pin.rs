@@ -314,6 +314,17 @@ pub(crate) struct PinEditState {
     base: PinBase,
     pub document: AnnotationDocument,
     pub effects: crate::effects::RegionEffects,
+    /// Region pins keep the composed shadow on screen even when the export
+    /// shadow setting is off, so re-pinning from the editor must force it too.
+    pub shadow_always: bool,
+    /// Physical margin composed around the base in the displayed pin image.
+    /// The editor opens the base inset by this much so it is not stretched to
+    /// the padded pin window.
+    pub display_padding: u32,
+    /// Capture scale used for the stored effects. Pin editors have no inline
+    /// capture descriptor, so they must carry it to re-apply radii and shadow
+    /// padding at the original DPI.
+    pub effects_scale: f32,
 }
 
 #[derive(Clone)]
@@ -334,11 +345,17 @@ impl PinEditState {
         base: Arc<RgbaFrame>,
         document: AnnotationDocument,
         effects: crate::effects::RegionEffects,
+        shadow_always: bool,
+        display_padding: u32,
+        effects_scale: f32,
     ) -> Self {
         Self {
             base: PinBase::new(base),
             document,
             effects,
+            shadow_always,
+            display_padding,
+            effects_scale: effects_scale.max(0.1),
         }
     }
 
@@ -1780,9 +1797,32 @@ impl PinView {
         true
     }
 
+    /// Largest zoom whose window still fits the display the pin lives on.
+    /// Returns the configured maximum when the image or display is unknown.
+    fn fitted_zoom_limit(&self, window: &Window, cx: &App) -> f32 {
+        let Some(size) = self.content.image_size() else {
+            return 4.0;
+        };
+        let Some(display) = window.display(cx).or_else(|| cx.primary_display()) else {
+            return 4.0;
+        };
+        let screen = display.bounds();
+        fit_zoom_limit(
+            size.width,
+            size.height,
+            f32::from(screen.size.width),
+            f32::from(screen.size.height),
+        )
+    }
+
     /// Applies one animation step around the window centre. Resizing from the
     /// top-left made wheel zoom drift towards the bottom-right; moving the
     /// native frame keeps the image's centre anchored.
+    ///
+    /// A pin cannot usefully show more than one display, so the frame is kept
+    /// inside the display bounds whenever it fits. Growing past the screen
+    /// used to leave the image cut at the display edges even though the user
+    /// asked for a larger pin.
     fn apply_zoom(&mut self, zoom: f32, window: &mut Window, cx: &mut Context<Self>) {
         if self.content.image_size().is_none() {
             return;
@@ -1791,12 +1831,36 @@ impl PinView {
         let (width, height) = self.content.size(zoom);
         let bounds = window.bounds();
         let (center_x, center_y) = self.zoom_center.unwrap_or_else(|| {
-            (
+            let stored = PINS.with(|pins| {
+                pins.borrow().get(&self.id).map(|state| {
+                    (
+                        f32::from(state.bounds.origin.x) + f32::from(state.bounds.size.width) / 2.0,
+                        f32::from(state.bounds.origin.y)
+                            + f32::from(state.bounds.size.height) / 2.0,
+                    )
+                })
+            });
+            stored.unwrap_or((
                 f32::from(bounds.origin.x) + f32::from(bounds.size.width) / 2.0,
                 f32::from(bounds.origin.y) + f32::from(bounds.size.height) / 2.0,
-            )
+            ))
         });
-        let origin = point(px(center_x - width / 2.0), px(center_y - height / 2.0));
+        let mut origin_x = center_x - width / 2.0;
+        let mut origin_y = center_y - height / 2.0;
+        if let Some(display) = window.display(cx).or_else(|| cx.primary_display()) {
+            let screen = display.bounds();
+            let screen_left = f32::from(screen.origin.x);
+            let screen_top = f32::from(screen.origin.y);
+            let screen_width = f32::from(screen.size.width);
+            let screen_height = f32::from(screen.size.height);
+            if width <= screen_width {
+                origin_x = origin_x.clamp(screen_left, screen_left + screen_width - width);
+            }
+            if height <= screen_height {
+                origin_y = origin_y.clamp(screen_top, screen_top + screen_height - height);
+            }
+        }
+        let origin = point(px(origin_x), px(origin_y));
         let scale = window.scale_factor().max(0.1);
         let dpi = DpiScale::new(scale).unwrap_or_default();
         let physical = PhysicalRect::new(
@@ -1808,16 +1872,21 @@ impl PinView {
         // Update the content scale before moving the native frame so a
         // repaint driven by the resize already draws the new image.
         self.zoom = zoom;
+        let settle_bounds = Bounds {
+            origin,
+            size: size(px(width), px(height)),
+        };
         if place_on_monitor_deferred(&*window, physical, dpi).is_err() {
             window.resize(size(px(width), px(height)));
         }
-        update_bounds_state(
-            self.id,
-            Bounds {
-                origin,
-                size: size(px(width), px(height)),
-            },
-        );
+        // The native frame and DWM can settle one turn after a resize; repeat
+        // the client alignment and repaint so the image never stays clipped to
+        // the previous window size.
+        window.defer(cx, move |window, _| {
+            crate::ui::align_client_to_bounds(window, settle_bounds);
+            window.refresh();
+        });
+        update_bounds_state(self.id, settle_bounds);
         update_meta(self.id, self.zoom, self.opacity);
         cx.notify();
     }
@@ -1844,7 +1913,12 @@ impl PinView {
         if self.content.image_size().is_none() {
             return;
         }
-        self.zoom_target = target.clamp(0.15, 4.0);
+        let target = target.clamp(0.15, 4.0);
+        // Stop growing once the pin would leave the display. Keeping the
+        // window whole is what makes 100%+ zoom readable; clip-in-the-middle
+        // windows were the "incomplete image" feedback.
+        let limit = self.fitted_zoom_limit(window, cx).max(self.zoom).max(0.15);
+        self.zoom_target = target.min(limit).max(0.15);
         let language = settings_state::get().language;
         let percent = (self.zoom_target * 100.0).round() as i32;
         // Animating a native window resize on Windows presents the stretched
@@ -2866,6 +2940,22 @@ fn display_for_bounds(cx: &App, bounds: Bounds<Pixels>) -> Option<DisplayId> {
         .or_else(|| cx.primary_display().map(|display| display.id()))
 }
 
+/// Largest zoom where a pin image still fits the given display. Pins stop
+/// growing at the display edge instead of hanging off-screen.
+fn fit_zoom_limit(
+    image_width: u32,
+    image_height: u32,
+    screen_width: f32,
+    screen_height: f32,
+) -> f32 {
+    if image_width == 0 || image_height == 0 || screen_width <= 0.0 || screen_height <= 0.0 {
+        return 4.0;
+    }
+    (screen_width / image_width as f32)
+        .min(screen_height / image_height as f32)
+        .clamp(0.15, 4.0)
+}
+
 fn ensure_visible(cx: &App, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
     let left = f32::from(bounds.origin.x);
     let top = f32::from(bounds.origin.y);
@@ -2901,6 +2991,13 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn zoom_limit_keeps_the_pin_inside_the_display() {
+        assert!((super::fit_zoom_limit(1000, 500, 1200.0, 800.0) - 1.2).abs() < 0.001);
+        assert!((super::fit_zoom_limit(200, 100, 1920.0, 1080.0) - 4.0).abs() < 0.001);
+        assert!((super::fit_zoom_limit(4000, 3000, 1920.0, 1080.0) - 0.36).abs() < 0.001);
+    }
+
+    #[test]
     fn text_pins_hug_short_content() {
         let (width, height) = text_pin_size("Hi");
         assert!(
@@ -2927,6 +3024,9 @@ mod tests {
             frame,
             AnnotationDocument::new(PhysicalSize::new(16, 16)),
             RegionEffects::default(),
+            false,
+            0,
+            1.0,
         );
         assert!(matches!(state.base, PinBase::Frame(_)));
     }
@@ -2941,6 +3041,9 @@ mod tests {
             frame.clone(),
             AnnotationDocument::new(PhysicalSize::new(width, height)),
             RegionEffects::default(),
+            false,
+            0,
+            1.0,
         );
         assert!(matches!(state.base, PinBase::Encoded { .. }));
         let decoded = state.base_frame().expect("compressed base decodes");
