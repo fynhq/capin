@@ -772,7 +772,7 @@ impl SettingsView {
         .detach();
     }
 
-    fn sidebar(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    fn sidebar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let mut nav: Vec<AnyElement> = Vec::new();
         for section in SettingsSection::ALL {
             let selected = self.section == section;
@@ -794,17 +794,29 @@ impl SettingsView {
                 .when(selected, |item| item.bg(selected_bg))
                 .when(!selected, |item| item.hover(move |style| style.bg(hover)))
                 .id(section.id())
+                .role(Role::Button)
+                .aria_label(section.title(self.settings.language))
+                .aria_selected(selected)
                 .active(move |style| style.bg(selected_bg))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.section = section;
                     this.select_menu = None;
                     cx.notify();
                 }))
-                .child(icons::icon(
-                    section.icon(),
-                    layout::NAV_ICON,
-                    if selected { accent } else { muted },
-                ))
+                .child(
+                    div()
+                        .id(format!("settings-nav-icon-{}", section.id()))
+                        .role(Role::Image)
+                        .aria_label(section.title(self.settings.language))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icons::icon(
+                            section.icon(),
+                            layout::NAV_ICON,
+                            if selected { accent } else { muted },
+                        )),
+                )
                 .child(
                     div()
                         .text_size(px(layout::NAV_FONT))
@@ -832,6 +844,9 @@ impl SettingsView {
             .bg(theme.accent)
             .with_spring("settings-nav-indicator", spring, |bar, top| bar.top(top));
         let nav = div()
+            .id("settings-nav")
+            .role(Role::Navigation)
+            .aria_label(t(self.settings.language, "settings.a11y_sidebar"))
             .relative()
             .w_full()
             .flex()
@@ -840,6 +855,9 @@ impl SettingsView {
             .children(nav)
             .child(indicator);
         let mut sidebar = div()
+            .id("settings-sidebar")
+            .role(Role::Complementary)
+            .aria_label(t(self.settings.language, "settings.a11y_sidebar"))
             .w(px(layout::SIDEBAR_WIDTH))
             .h_full()
             .flex()
@@ -948,6 +966,8 @@ impl SettingsView {
             .child(
                 div()
                     .id("settings-version-link")
+                    .role(Role::Button)
+                    .aria_label(version.clone())
                     .text_size(px(layout::CAPTION))
                     .text_color(theme.muted)
                     .cursor_pointer()
@@ -1059,6 +1079,9 @@ impl SettingsView {
         #[cfg(not(target_os = "macos"))]
         let top_block = header.into_any_element();
         div()
+            .id("settings-content")
+            .role(Role::Main)
+            .aria_label(t(self.settings.language, "settings.a11y_content"))
             .flex_1()
             .h_full()
             .flex()
@@ -1099,11 +1122,16 @@ impl SettingsView {
     }
 
     fn section_header(&self, theme: &Theme) -> Div {
+        let title = self.section.title(self.settings.language);
         div().flex().flex_col().child(
             div()
+                .id("settings-section-heading")
+                .role(Role::Heading)
+                .aria_label(title)
+                .aria_level(1)
                 .text_size(px(layout::PAGE_TITLE))
                 .text_color(theme.text)
-                .child(self.section.title(self.settings.language)),
+                .child(title),
         )
     }
 
@@ -1165,6 +1193,8 @@ impl SettingsView {
             .child(
                 action_button(theme, t(language, "settings.permission_restart").to_owned())
                     .id("settings-permission-restart")
+                    .role(Role::Button)
+                    .aria_label(t(language, "settings.permission_restart"))
                     .active(|style| style.opacity(0.88))
                     .on_click(cx.listener(|_, _, _, cx| crate::tray::restart(cx))),
             )
@@ -1253,6 +1283,8 @@ impl SettingsView {
                                         "settings-open-accessibility-permission"
                                     }
                                 })
+                                .role(Role::Button)
+                                .aria_label(t(language, "settings.open_settings"))
                                 .active(|style| style.opacity(0.88))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     platform_window::open_privacy_settings(pane);
@@ -1277,6 +1309,9 @@ impl SettingsView {
             control = control.child(
                 segment(theme, label, selected)
                     .id(code)
+                    .role(Role::Button)
+                    .aria_label(label.to_owned())
+                    .aria_selected(selected)
                     .active(|style| style.opacity(0.9))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.settings.language = option;
@@ -1377,6 +1412,8 @@ impl SettingsView {
         let language = self.settings.language;
         let open = action_button(theme, t(language, "settings.open_logs").to_owned())
             .id("settings-open-logs")
+            .role(Role::Button)
+            .aria_label(t(language, "settings.open_logs"))
             .active(|style| style.opacity(0.88))
             .on_click(cx.listener(|_, _, _, cx| {
                 let directory = crate::logging::log_directory();
@@ -1539,6 +1576,13 @@ impl SettingsView {
                     .child(
                         div()
                             .id(row.id)
+                            .role(Role::Switch)
+                            .aria_label(t(language, row.title_key))
+                            .aria_toggled(if row.value {
+                                Toggled::True
+                            } else {
+                                Toggled::False
+                            })
                             .cursor_pointer()
                             .active(move |style| style.opacity(0.85))
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -1711,6 +1755,8 @@ impl SettingsView {
         let chevron = theme.muted;
         div()
             .id(id)
+            .role(Role::Button)
+            .aria_label(label.to_owned())
             .relative()
             .w(px(160.0))
             .h(px(layout::BUTTON_HEIGHT))
@@ -1880,15 +1926,21 @@ impl SettingsView {
         let directory = target.directory(&self.settings).display().to_string();
         let open = action_button(theme, t(language, "settings.open_folder").to_owned())
             .id(target.open_id())
+            .role(Role::Button)
+            .aria_label(t(language, "settings.open_folder"))
             .active(|style| style.opacity(0.88))
             .on_click(cx.listener(move |this, _, _, cx| this.open_directory(target, cx)));
         let change = action_button(theme, t(language, "settings.change_folder").to_owned())
             .id(target.change_id())
+            .role(Role::Button)
+            .aria_label(t(language, "settings.change_folder"))
             .active(|style| style.opacity(0.88))
             .on_click(cx.listener(move |this, _, _, cx| this.choose_directory(target, cx)));
         let reset = custom.then(|| {
             action_button(theme, t(language, "settings.use_default_folder").to_owned())
                 .id(target.default_id())
+                .role(Role::Button)
+                .aria_label(t(language, "settings.use_default_folder"))
                 .active(|style| style.opacity(0.88))
                 .on_click(cx.listener(move |this, _, _, cx| this.reset_directory(target, cx)))
         });
@@ -3120,6 +3172,7 @@ fn window_control_button(
 ) -> impl IntoElement {
     div()
         .id(id)
+        .role(Role::Button)
         .w(px(layout::CAPTION_BUTTON_WIDTH))
         .h(px(layout::CAPTION_BUTTON_HEIGHT))
         .flex_shrink_0()
@@ -3186,6 +3239,10 @@ fn group_header(theme: &Theme, title: &str, description: &str) -> Div {
         .gap(px(2.0))
         .child(
             div()
+                .id("settings-group-heading")
+                .role(Role::Heading)
+                .aria_label(title.to_owned())
+                .aria_level(2)
                 .text_size(px(layout::SECTION_TITLE))
                 .text_color(theme.text)
                 .child(title.to_owned()),
@@ -3193,6 +3250,9 @@ fn group_header(theme: &Theme, title: &str, description: &str) -> Div {
         .when(!description.is_empty(), |header| {
             header.child(
                 div()
+                    .id("settings-group-description")
+                    .role(Role::Label)
+                    .aria_label(description.to_owned())
                     .text_size(px(layout::CAPTION))
                     .text_color(theme.muted)
                     .child(description.to_owned()),
@@ -3251,7 +3311,7 @@ fn row_shell() -> Div {
 
 /// Label block for a horizontal settings row. It takes the remaining width so
 /// long descriptions wrap instead of squeezing the control.
-fn row_label(theme: &Theme, title: &str, subtitle: &str) -> Div {
+fn row_label(theme: &Theme, title: &str, subtitle: &str) -> impl IntoElement {
     label_block(theme, title, subtitle).flex_1().min_w(px(0.0))
 }
 
@@ -3272,6 +3332,9 @@ fn row_label_with_icon(
         .min_w(px(0.0))
         .child(
             div()
+                .id("settings-row-icon")
+                .role(Role::Image)
+                .aria_label(title.to_owned())
                 .w(px(18.0))
                 .h(px(18.0))
                 .flex_shrink_0()
@@ -3284,8 +3347,16 @@ fn row_label_with_icon(
 }
 
 /// Label block for stacked layouts that manage their own width.
-fn label_block(theme: &Theme, title: &str, subtitle: &str) -> Div {
+fn label_block(theme: &Theme, title: &str, subtitle: &str) -> Stateful<Div> {
+    let label = if subtitle.is_empty() {
+        title.to_owned()
+    } else {
+        format!("{title} {subtitle}")
+    };
     div()
+        .id("settings-row-text")
+        .role(Role::Label)
+        .aria_label(label)
         .flex()
         .flex_col()
         .gap(px(2.0))
@@ -3326,8 +3397,8 @@ fn info_row(
         );
 
     let label = match icon {
-        Some(icon) => row_label_with_icon(theme, icon, title, subtitle),
-        None => row_label(theme, title, subtitle),
+        Some(icon) => row_label_with_icon(theme, icon, title, subtitle).into_any_element(),
+        None => row_label(theme, title, subtitle).into_any_element(),
     };
     a11y_row(
         ElementId::Name(SharedString::from(format!("settings-info-{title}"))),
