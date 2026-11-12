@@ -163,7 +163,9 @@ fn build_path(annotation: &Annotation) -> Result<Path, RasterError> {
             builder.push_oval(to_skia_rect(*rect)?);
             builder.finish().ok_or(RasterError::InvalidGeometry)
         }
-        Shape::HighlighterBox(rect) => rounded_rect_path(*rect, 0.0),
+        Shape::HighlighterBox(rect) => {
+            rounded_rect_path(*rect, annotation.style.highlighter_radius)
+        }
         Shape::Arrow { .. } | Shape::Polyline { .. } => {
             Err(RasterError::Unsupported(annotation.id))
         }
@@ -1000,6 +1002,30 @@ mod tests {
             "the highlighter must not mix white into its color: {center:?}"
         );
         assert_eq!(pixel(&output, 2, 2), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn highlighter_box_honors_its_corner_radius() {
+        let frame = black_frame(60, 40);
+        let mut document = document(60, 40);
+        document.add(
+            Shape::HighlighterBox(PhysicalRect::new(10, 10, 40, 20)),
+            AnnotationStyle {
+                color: 0xFFFF0080,
+                highlighter_radius: 10.0,
+                ..Default::default()
+            },
+        );
+        let output = rasterize(&document, &frame).unwrap();
+        assert!(
+            pixel(&output, 30, 20)[0] > 80,
+            "the wash center must keep its color"
+        );
+        assert_eq!(
+            pixel(&output, 11, 11),
+            [0, 0, 0, 255],
+            "a rounded corner leaves the top-left pixel untouched"
+        );
     }
 
     #[test]

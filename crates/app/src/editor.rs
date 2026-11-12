@@ -803,6 +803,7 @@ pub(crate) struct EditorView {
     /// in logical points and multiplied by this value when applied.
     ui_scale: f32,
     corner_radius: f32,
+    highlighter_radius: f32,
     number_size: u32,
     spotlight_radius: f32,
     /// Independent defaults for the two width-bearing tool families. The
@@ -886,6 +887,7 @@ impl EditorView {
         let text_outline = settings.annotation_text_outline;
         let text_alignment = settings.annotation_text_alignment;
         let corner_radius = settings.annotation_corner_radius;
+        let highlighter_radius = settings.annotation_highlighter_radius;
         let number_size = settings.annotation_number_size;
         let spotlight_radius = settings.annotation_spotlight_radius;
         let rect_stroke_width = settings.annotation_rect_stroke_width;
@@ -929,6 +931,7 @@ impl EditorView {
                 stroke_width: rect_stroke_width,
                 font_size,
                 corner_radius,
+                highlighter_radius,
                 blur_radius,
                 blur_feather,
                 filled: false,
@@ -949,6 +952,7 @@ impl EditorView {
             text_alignment,
             ui_scale: 1.0,
             corner_radius,
+            highlighter_radius,
             number_size,
             spotlight_radius,
             rect_stroke_width,
@@ -1036,6 +1040,7 @@ impl EditorView {
             1.0
         };
         view.style.corner_radius = view.corner_radius * view.ui_scale;
+        view.style.highlighter_radius = view.highlighter_radius * view.ui_scale;
         view.style.spotlight_radius = view.spotlight_radius * view.ui_scale;
         view.region_source = region_source;
         if let Some(document) = document
@@ -2467,6 +2472,9 @@ impl EditorView {
         }
         match self.tool {
             Tool::Rect => style.corner_radius = self.corner_radius * self.ui_scale,
+            Tool::Highlighter => {
+                style.highlighter_radius = self.highlighter_radius * self.ui_scale;
+            }
             Tool::Blur => {
                 style.blur_radius = self.blur_radius;
                 style.blur_feather = self.blur_feather;
@@ -2650,6 +2658,13 @@ impl EditorView {
         let applied = radius * self.ui_scale;
         self.update_style(|style| style.corner_radius = applied);
         settings_state::update(|settings| settings.annotation_corner_radius = radius);
+    }
+
+    fn apply_highlighter_radius(&mut self, radius: f32) {
+        self.highlighter_radius = radius;
+        let applied = radius * self.ui_scale;
+        self.update_style(|style| style.highlighter_radius = applied);
+        settings_state::update(|settings| settings.annotation_highlighter_radius = radius);
     }
 
     fn apply_number_size(&mut self, size: u32) {
@@ -2879,6 +2894,10 @@ impl EditorView {
                         self.text_background = annotation.style.text_background;
                         self.text_outline = annotation.style.text_outline;
                         self.text_alignment = annotation.style.text_alignment;
+                    }
+                    Tool::Highlighter => {
+                        self.highlighter_radius =
+                            annotation.style.highlighter_radius / self.ui_scale;
                     }
                     Tool::Number => {
                         if let Shape::Number { bounds, .. } = &annotation.shape {
@@ -3296,6 +3315,9 @@ impl EditorView {
                             };
                         }
                         Tool::Arrow => this.style.stroke_width = this.arrow_stroke_width,
+                        Tool::Highlighter => {
+                            this.style.highlighter_radius = this.highlighter_radius * this.ui_scale;
+                        }
                         Tool::Blur => {
                             this.style.blur_radius = this.blur_radius;
                             this.style.blur_feather = this.blur_feather;
@@ -3349,6 +3371,7 @@ impl EditorView {
         let show_text_style = config_tool == Some(Tool::Text);
         let show_arrow_heads = config_tool == Some(Tool::Arrow);
         let show_corner = config_tool == Some(Tool::Rect) && !config_ellipse;
+        let show_highlighter = config_tool == Some(Tool::Highlighter);
         let show_number = config_tool == Some(Tool::Number);
         let show_blur = config_tool == Some(Tool::Blur);
         let show_spotlight = config_tool == Some(Tool::Spotlight);
@@ -3887,6 +3910,53 @@ impl EditorView {
                     .items_center()
                     .gap(px(2.0))
                     .child(icons::icon(icons::RECT, 14.0, muted))
+                    .children(radii)
+                    .into_any_element(),
+            );
+        }
+
+        if show_highlighter {
+            let mut radii = Vec::new();
+            for radius in CORNER_RADII {
+                let applied = (radius * size_scale).round();
+                let selected = (config_style.highlighter_radius - applied).abs() < 0.1;
+                let label = format!("{radius:.0}");
+                let tooltip = format!("{} {label}", t(language, "editor.highlighter_radius"));
+                let button = div()
+                    .id(format!("editor-highlighter-radius-{label}"))
+                    .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
+                    .w(px(22.0))
+                    .h(px(22.0))
+                    .rounded(px(5.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(selected, |button| button.bg(accent_selected))
+                    .when(!selected, |button| {
+                        button.hover(move |style| style.bg(hover))
+                    })
+                    .active(|style| style.opacity(0.85))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.commit_text(cx);
+                        this.apply_highlighter_radius(radius);
+                        this.status = None;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(if selected { accent } else { muted })
+                            .child(label),
+                    );
+                radii.push(button.into_any_element());
+            }
+            groups.push(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(2.0))
+                    .child(icons::icon(icons::HIGHLIGHTER, 14.0, muted))
                     .children(radii)
                     .into_any_element(),
             );
@@ -7871,11 +7941,25 @@ fn paint_shape(
             let top = rect.origin.y as f32;
             let right = left + rect.size.width as f32;
             let bottom = top + rect.size.height as f32;
+            let radius = (style.highlighter_radius * scale)
+                .clamp(0.0, (right - left).min(bottom - top) / 2.0);
             let mut builder = PathBuilder::fill();
-            builder.move_to(to_point(left, top));
-            builder.line_to(to_point(right, top));
-            builder.line_to(to_point(right, bottom));
-            builder.line_to(to_point(left, bottom));
+            if radius < 0.5 {
+                builder.move_to(to_point(left, top));
+                builder.line_to(to_point(right, top));
+                builder.line_to(to_point(right, bottom));
+                builder.line_to(to_point(left, bottom));
+            } else {
+                builder.move_to(to_point(left + radius, top));
+                builder.line_to(to_point(right - radius, top));
+                builder.curve_to(to_point(right, top + radius), to_point(right, top));
+                builder.line_to(to_point(right, bottom - radius));
+                builder.curve_to(to_point(right - radius, bottom), to_point(right, bottom));
+                builder.line_to(to_point(left + radius, bottom));
+                builder.curve_to(to_point(left, bottom - radius), to_point(left, bottom));
+                builder.line_to(to_point(left, top + radius));
+                builder.curve_to(to_point(left + radius, top), to_point(left, top));
+            }
             builder.close();
             if let Ok(path) = builder.build() {
                 window.paint_path(path, color);

@@ -21,6 +21,8 @@ pub struct AnnotationStyle {
     pub font_size: f32,
     /// Corner radius in image pixels for `Shape::Rect`.
     pub corner_radius: f32,
+    /// Corner radius in image pixels for `Shape::HighlighterBox`.
+    pub highlighter_radius: f32,
     /// Box-blur radius in image pixels for `Shape::Blur`.
     pub blur_radius: u32,
     /// Width in image pixels of the feather band that blends the blurred
@@ -62,6 +64,7 @@ impl Default for AnnotationStyle {
             stroke_width: 3.0,
             font_size: 20.0,
             corner_radius: 0.0,
+            highlighter_radius: 0.0,
             blur_radius: 16,
             blur_feather: 0,
             filled: false,
