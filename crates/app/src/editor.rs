@@ -1914,14 +1914,10 @@ impl EditorView {
                 div()
                     .id(format!("editor-region-handle-{:?}", handle))
                     .absolute()
-                    .left(px(f32::from(position.x) + dx - 4.5))
-                    .top(px(f32::from(position.y) + dy - 4.5))
-                    .w(px(9.0))
-                    .h(px(9.0))
-                    .rounded(px(1.5))
-                    .bg(rgb(0xFFFFFF))
-                    .border_1()
-                    .border_color(rgba((self.accent_hex << 8) | 0xFF))
+                    .left(px(f32::from(position.x) + dx - HANDLE_HIT / 2.0))
+                    .top(px(f32::from(position.y) + dy - HANDLE_HIT / 2.0))
+                    .w(px(HANDLE_HIT))
+                    .h(px(HANDLE_HIT))
                     .cursor(region_handle_cursor(handle))
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1933,10 +1929,111 @@ impl EditorView {
                             cx.notify();
                         }),
                     )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px((HANDLE_HIT - REGION_HANDLE_SIZE) / 2.0))
+                            .top(px((HANDLE_HIT - REGION_HANDLE_SIZE) / 2.0))
+                            .w(px(REGION_HANDLE_SIZE))
+                            .h(px(REGION_HANDLE_SIZE))
+                            .rounded(px(1.5))
+                            .bg(rgb(0xFFFFFF))
+                            .border_1()
+                            .border_color(rgba((self.accent_hex << 8) | 0xFF)),
+                    )
                     .into_any_element(),
             );
         }
         handles
+    }
+
+    /// Transparent grab bands on the export frame edges and corners. They sit
+    /// above the image layer so a frame edge stays draggable even when an
+    /// annotation runs along it, and they make the 9px handles easier to grab.
+    fn region_edge_bands(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        if !self.can_adjust_region() {
+            return Vec::new();
+        }
+        let Some(rect) = self.inline_selection_rect(window) else {
+            return Vec::new();
+        };
+        let left = f32::from(rect.origin.x);
+        let top = f32::from(rect.origin.y);
+        let width = f32::from(rect.size.width);
+        let height = f32::from(rect.size.height);
+        let half = BAND_HALF;
+        let mut bands = Vec::new();
+        {
+            let mut band = |handle: RegionHandle, x: f32, y: f32, w: f32, h: f32| {
+                bands.push(
+                    div()
+                        .id(format!("editor-region-band-{:?}", handle))
+                        .absolute()
+                        .left(px(x))
+                        .top(px(y))
+                        .w(px(w.max(1.0)))
+                        .h(px(h.max(1.0)))
+                        .cursor(region_handle_cursor(handle))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                let focus = this.focus_handle.clone();
+                                window.focus(&focus, cx);
+                                this.begin_region_drag(handle, cx);
+                                cx.stop_propagation();
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element(),
+                );
+            };
+            band(RegionHandle::North, left, top - half, width, half * 2.0);
+            band(
+                RegionHandle::South,
+                left,
+                top + height - half,
+                width,
+                half * 2.0,
+            );
+            band(RegionHandle::West, left - half, top, half * 2.0, height);
+            band(
+                RegionHandle::East,
+                left + width - half,
+                top,
+                half * 2.0,
+                height,
+            );
+            let corner = half * 2.0;
+            band(
+                RegionHandle::NorthWest,
+                left - half,
+                top - half,
+                corner,
+                corner,
+            );
+            band(
+                RegionHandle::NorthEast,
+                left + width - half,
+                top - half,
+                corner,
+                corner,
+            );
+            band(
+                RegionHandle::SouthWest,
+                left - half,
+                top + height - half,
+                corner,
+                corner,
+            );
+            band(
+                RegionHandle::SouthEast,
+                left + width - half,
+                top + height - half,
+                corner,
+                corner,
+            );
+        }
+        bands
     }
 
     /// Paints the crop frame while a region edge is being dragged. The image
@@ -5734,7 +5831,7 @@ impl Render for EditorView {
                         hole,
                         frame_radius,
                         rgba(0x00000066),
-                        Some((accent, 1.0)),
+                        Some((accent, 3.0)),
                     );
                 },
             )
@@ -6174,6 +6271,7 @@ impl Render for EditorView {
             }));
 
         let toolbar_rect = self.toolbar_rect(window);
+        let region_bands = self.region_edge_bands(window, cx);
         let region_handles = self.region_handles(window, cx);
         let selection_layer = self.selection_layer(window);
         let region_preview = self.region_drag_preview();
@@ -6631,6 +6729,7 @@ impl Render for EditorView {
             }))
             .children(outside_backdrop)
             .child(image_layer)
+            .children(region_bands)
             .children(region_handles)
             .children(selection_layer)
             .children(region_preview)
@@ -7147,6 +7246,13 @@ fn hit_resize_handle(shape: &Shape, point: PhysicalPoint, tolerance: f32) -> Opt
 /// must match it, otherwise the visible outer half of a handle starts a move
 /// instead of a resize.
 const SELECTION_HANDLE_HALF: f32 = 5.5;
+
+/// Painted size of the export-frame handles, matching the capture overlay.
+const REGION_HANDLE_SIZE: f32 = 9.0;
+/// Invisible grab area around each export-frame handle.
+const HANDLE_HIT: f32 = 18.0;
+/// Half thickness of the transparent grab bands along the export frame.
+const BAND_HALF: f32 = 6.0;
 
 /// Resolves a resize handle without stealing drags from the object body.
 ///
