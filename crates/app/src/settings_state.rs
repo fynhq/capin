@@ -280,7 +280,7 @@ impl Default for AppSettings {
             annotation_rect_filled: false,
             annotation_ellipse_filled: false,
             annotation_rect_ellipse: false,
-            annotation_spotlight_intensity: 60,
+            annotation_spotlight_intensity: 40,
             annotation_spotlight_radius: 0.0,
             pin_text_ocr: true,
             pin_qr: true,
@@ -740,7 +740,7 @@ mod tests {
         assert_eq!(defaults.annotation_blur_radius, 16);
         assert!(!defaults.annotation_rect_filled);
         assert!(!defaults.annotation_ellipse_filled);
-        assert_eq!(defaults.annotation_spotlight_intensity, 60);
+        assert_eq!(defaults.annotation_spotlight_intensity, 40);
 
         let settings = parse(
             "annotation_stroke_width=8\nannotation_font_size=32\nannotation_arrow_start=true\nannotation_arrow_end=false\nannotation_arrow_polyline=true\nannotation_text_background=true\nannotation_text_outline=true\nannotation_text_alignment=center\nannotation_corner_radius=16\nannotation_blur_radius=32\nannotation_rect_filled=true\nannotation_ellipse_filled=true\nannotation_rect_ellipse=true\nannotation_spotlight_intensity=80\n",

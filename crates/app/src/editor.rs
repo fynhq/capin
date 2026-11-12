@@ -38,7 +38,7 @@ const FONT_SIZES: [f32; 4] = [14.0, 20.0, 28.0, 36.0];
 const CORNER_RADII: [f32; 4] = [0.0, 8.0, 16.0, 24.0];
 const NUMBER_SIZES: [u32; 4] = [24, 32, 40, 48];
 const BLUR_RADII: [u32; 4] = [8, 16, 24, 32];
-const SPOTLIGHT_INTENSITIES: [u8; 3] = [40, 60, 80];
+const SPOTLIGHT_INTENSITIES: [u8; 3] = [20, 40, 60];
 const CANVAS_HISTORY_LIMIT: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
