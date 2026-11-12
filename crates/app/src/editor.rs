@@ -347,6 +347,10 @@ struct InlineHost {
     /// Long captures fit the full image first and allow wheel zoom/pan;
     /// screenshot and pin editors must keep the captured pixel rect exact.
     zoomable: bool,
+    /// Client area used to fit the image. Set for zoomable editors so a crop
+    /// or undo can re-fit the new canvas instead of stretching it into the
+    /// original tall rect.
+    fit_area: Option<Size<Pixels>>,
 }
 
 #[derive(Clone, Copy)]
@@ -990,7 +994,7 @@ impl EditorView {
         };
         view.full_canvas = full_setting;
         view.ui_scale = if image_rect.size.width > px(0.0) {
-            (view.image_size.width as f32 / f32::from(image_rect.size.width)).clamp(0.25, 8.0)
+            (view.image_size.width as f32 / f32::from(image_rect.size.width)).clamp(0.25, 32.0)
         } else {
             1.0
         };
@@ -1028,6 +1032,7 @@ impl EditorView {
             screen_origin,
             capture,
             zoomable,
+            fit_area: None,
         });
         view
     }
@@ -1504,7 +1509,7 @@ impl EditorView {
         }
         let image_x = (f32::from(anchor.x) - f32::from(before.origin.x)) / before_scale;
         let image_y = (f32::from(anchor.y) - f32::from(before.origin.y)) / before_scale;
-        let zoom = (self.view_zoom * factor).clamp(0.25, 8.0);
+        let zoom = (self.view_zoom * factor).clamp(0.25, 32.0);
         if (zoom - self.view_zoom).abs() < f32::EPSILON {
             return;
         }
@@ -1524,9 +1529,28 @@ impl EditorView {
         cx.notify();
     }
 
+    /// Re-fits the canvas after its pixel size changed. Without this a crop or
+    /// an undo kept the original tall display rect, which stretched the new
+    /// image to the old aspect ratio.
+    fn refit_zoomable_view(&mut self) {
+        let Some(mut inline) = self.inline else {
+            return;
+        };
+        if !inline.zoomable {
+            return;
+        }
+        let Some(area) = inline.fit_area else {
+            return;
+        };
+        inline.image_rect = fit_frame_rect(self.image_size, area);
+        let width = f32::from(inline.image_rect.size.width).max(1.0);
+        self.ui_scale = (self.image_size.width as f32 / width).clamp(0.25, 32.0);
+        self.inline = Some(inline);
+    }
+
     fn actual_size(&mut self, window: &Window, cx: &mut Context<Self>) {
         let fit = self.fit_scale(window);
-        self.view_zoom = (1.0 / fit).clamp(0.25, 8.0);
+        self.view_zoom = (1.0 / fit).clamp(0.25, 32.0);
         self.view_pan = point(px(0.0), px(0.0));
         cx.notify();
     }
@@ -1620,6 +1644,7 @@ impl EditorView {
         self.pan_draft = None;
         self.crop_mode = false;
         self.crop_draft = None;
+        self.refit_zoomable_view();
         self.reset_view(cx);
     }
 
@@ -1661,6 +1686,7 @@ impl EditorView {
         self.pan_draft = None;
         self.crop_mode = false;
         self.crop_draft = None;
+        self.refit_zoomable_view();
         self.reset_view(cx);
     }
 
@@ -2120,6 +2146,7 @@ impl EditorView {
         self.crop_mode = false;
         self.crop_draft = None;
         self.text_edit = None;
+        self.refit_zoomable_view();
         self.reset_view(cx);
         self.show_status(
             t(settings_state::get().language, "editor.cropped").to_owned(),
@@ -6734,6 +6761,7 @@ pub fn open_pin_editor_overlay(
         effects,
         shadow_always,
         effects_scale,
+        None,
         cx,
     )
 }
@@ -6741,8 +6769,21 @@ pub fn open_pin_editor_overlay(
 /// Opens a stitched long capture in the same in-place editor surface. The
 /// tall image is initially fit to the capture monitor; wheel zoom/pan keeps
 /// full-resolution detail reachable without a separate editor page.
-pub fn open_long_capture_inline(frame: RgbaFrame, monitor_id: MonitorId, cx: &mut App) -> bool {
+pub fn open_long_capture_inline(
+    frame: RgbaFrame,
+    monitor_id: MonitorId,
+    missed_frames: u32,
+    cx: &mut App,
+) -> bool {
     let frame = Arc::new(frame);
+    let language = settings_state::get().language;
+    let notice = (missed_frames > 0).then(|| {
+        format!(
+            "{} ({})",
+            t(language, "scroll.missed_summary"),
+            missed_frames
+        )
+    });
     let monitors = platform_backend().monitors().unwrap_or_default();
     let monitor = monitors.iter().find(|monitor| monitor.id == monitor_id);
     let (window_bounds, display_id, screen_origin) = match monitor {
@@ -6778,7 +6819,10 @@ pub fn open_long_capture_inline(frame: RgbaFrame, monitor_id: MonitorId, cx: &mu
             }
         },
     };
-    let image_rect = fit_long_capture_rect(&frame, window_bounds);
+    let image_rect = fit_frame_rect(
+        PhysicalSize::new(frame.width(), frame.height()),
+        window_bounds.size,
+    );
     open_inline_editor_window(
         frame,
         image_rect,
@@ -6792,26 +6836,27 @@ pub fn open_long_capture_inline(frame: RgbaFrame, monitor_id: MonitorId, cx: &mu
         RegionEffects::default(),
         false,
         1.0,
+        notice,
         cx,
     )
 }
 
-fn fit_long_capture_rect(frame: &RgbaFrame, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+fn fit_frame_rect(image_size: PhysicalSize, area: Size<Pixels>) -> Bounds<Pixels> {
     // Keep the result clear of the macOS menu bar (which can be up to 37 pt on
     // notched displays) and the window edges elsewhere, so a tall capture
     // never opens partially off-screen.
     const MARGIN: f32 = 44.0;
     const GAP: f32 = 8.0;
-    let window_width = f32::from(bounds.size.width);
-    let window_height = f32::from(bounds.size.height);
-    let available_width = (window_width - MARGIN * 2.0).max(1.0);
-    let available_height = (window_height - MARGIN * 2.0 - COMPACT_TOOLBAR_HEIGHT - GAP).max(1.0);
-    let fit = (available_width / frame.width().max(1) as f32)
-        .min(available_height / frame.height().max(1) as f32)
+    let area_width = f32::from(area.width);
+    let area_height = f32::from(area.height);
+    let available_width = (area_width - MARGIN * 2.0).max(1.0);
+    let available_height = (area_height - MARGIN * 2.0 - COMPACT_TOOLBAR_HEIGHT - GAP).max(1.0);
+    let fit = (available_width / image_size.width.max(1) as f32)
+        .min(available_height / image_size.height.max(1) as f32)
         .min(1.0);
-    let width = frame.width() as f32 * fit;
-    let height = frame.height() as f32 * fit;
-    let x = (window_width - width) / 2.0;
+    let width = image_size.width as f32 * fit;
+    let height = image_size.height as f32 * fit;
+    let x = (area_width - width) / 2.0;
     let y = MARGIN + (available_height - height) / 2.0;
     Bounds {
         origin: point(px(x), px(y)),
@@ -6833,6 +6878,7 @@ fn open_inline_editor_window(
     effects: RegionEffects,
     pin_shadow_always: bool,
     pin_effects_scale: f32,
+    notice: Option<String>,
     cx: &mut App,
 ) -> bool {
     let options = WindowOptions {
@@ -6879,8 +6925,17 @@ fn open_inline_editor_window(
             );
             editor.pin_shadow_always = pin_shadow_always;
             editor.pin_effects_scale = pin_effects_scale.max(0.1);
+            if zoomable && let Some(inline) = editor.inline.as_mut() {
+                inline.fit_area = Some(window_bounds.size);
+            }
             editor
         });
+        if let Some(message) = notice {
+            editor.update(cx, |this, cx| {
+                this.status = Some(message);
+                cx.notify();
+            });
+        }
         let focus = editor.read(cx).focus_handle.clone();
         register_view(&editor, window);
         editor.update(cx, |this, cx| {
@@ -7633,17 +7688,29 @@ mod tests {
     #[test]
     fn long_capture_fit_keeps_room_for_the_menu_bar_and_toolbar() {
         use gpui_kit::{Bounds, point, px, size};
-        let frame =
-            core_types::RgbaFrame::from_pixels(400, 12_000, vec![0; 400 * 12_000 * 4]).unwrap();
         let bounds = Bounds {
             origin: point(px(0.0), px(0.0)),
             size: size(px(1440.0), px(900.0)),
         };
-        let rect = super::fit_long_capture_rect(&frame, bounds);
+        let rect = super::fit_frame_rect(core_types::PhysicalSize::new(400, 12_000), bounds.size);
         assert!(f32::from(rect.origin.y) >= 44.0);
         assert!(f32::from(rect.origin.y) + f32::from(rect.size.height) <= 900.0 - 44.0);
         assert!(f32::from(rect.origin.x) >= 44.0);
         assert!(f32::from(rect.size.width) <= 1440.0 - 88.0 + 0.5);
+    }
+
+    #[test]
+    fn refit_uses_the_new_canvas_size() {
+        use gpui_kit::{px, size};
+        let area = size(px(1440.0), px(900.0));
+        let tall = super::fit_frame_rect(core_types::PhysicalSize::new(400, 12_000), area);
+        let wide = super::fit_frame_rect(core_types::PhysicalSize::new(400, 200), area);
+        assert!(f32::from(wide.size.width) > f32::from(tall.size.width));
+        assert!(f32::from(wide.size.height) < 900.0 - 44.0);
+        assert!(
+            (f32::from(wide.size.width) / f32::from(wide.size.height) - 2.0).abs() < 0.01,
+            "the fitted rect must keep the new canvas aspect ratio"
+        );
     }
 
     #[test]

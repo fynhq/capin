@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use core_capture::{CaptureTarget, platform_backend};
 use core_stitch::{StitchConfig, StitchError, Stitcher};
@@ -14,7 +14,9 @@ use crate::settings_state;
 
 const BAR_WIDTH: f32 = 460.0;
 const BAR_HEIGHT: f32 = 62.0;
-const CAPTURE_INTERVAL: Duration = Duration::from_millis(600);
+const CAPTURE_INTERVAL: Duration = Duration::from_millis(400);
+const SLOW_CAPTURE_INTERVAL: Duration = Duration::from_millis(700);
+const SLOW_CAPTURE_THRESHOLD: Duration = Duration::from_millis(200);
 
 pub fn open_session(region: CaptureRegion, first_frame: RgbaFrame, cx: &mut App) {
     let config = StitchConfig::default();
@@ -82,6 +84,7 @@ struct ScrollView {
     status: String,
     language: Language,
     running: bool,
+    missed_frames: u32,
 }
 
 impl ScrollView {
@@ -102,14 +105,17 @@ impl ScrollView {
             },
             language,
             running: true,
+            missed_frames: 0,
         };
         cx.on_release(|_, cx| crate::region_outline::close(cx))
             .detach();
         // Stitching is automatic: injected wheel events are unreliable, so the
-        // session samples the selected region while the user scrolls.
+        // session samples the selected region while the user scrolls. A slow
+        // capture (macOS ScreenCaptureKit is the expensive case) backs off so
+        // sampling never saturates the capture backend.
         cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(CAPTURE_INTERVAL).await;
+                let started = Instant::now();
                 let alive = this
                     .update(cx, |this, cx| {
                         if !this.running {
@@ -122,6 +128,12 @@ impl ScrollView {
                 if !alive {
                     break;
                 }
+                let interval = if started.elapsed() > SLOW_CAPTURE_THRESHOLD {
+                    SLOW_CAPTURE_INTERVAL
+                } else {
+                    CAPTURE_INTERVAL
+                };
+                cx.background_executor().timer(interval).await;
             }
         })
         .detach();
@@ -142,13 +154,28 @@ impl ScrollView {
                     );
                 }
                 Err(StitchError::NoOverlap) => {
-                    self.status = t(self.language, "scroll.no_overlap").to_owned();
+                    self.missed_frames += 1;
+                    self.status = format!(
+                        "{} ({})",
+                        t(self.language, "scroll.no_overlap"),
+                        self.missed_frames
+                    );
                 }
                 Err(error) => {
+                    self.missed_frames += 1;
+                    // A full buffer cannot accept more rows; stop sampling but
+                    // leave the bar up so the user can finish with what exists.
+                    if matches!(
+                        error,
+                        StitchError::HeightLimit(_) | StitchError::MemoryLimit(_)
+                    ) {
+                        self.running = false;
+                    }
                     self.status = format!("{}{}", t(self.language, "scroll.failed"), error);
                 }
             },
             Err(error) => {
+                self.missed_frames += 1;
                 self.status = format!("{}{}", t(self.language, "scroll.failed"), error);
             }
         }
@@ -166,9 +193,10 @@ impl ScrollView {
             Ok(frame) => {
                 let handles = cx.windows();
                 let monitor = self.region.monitor;
+                let missed_frames = self.missed_frames;
                 cx.defer(move |cx| {
                     crate::windows::close_capture_auxiliary(cx, handles);
-                    if !crate::editor::open_long_capture_inline(frame, monitor, cx) {
+                    if !crate::editor::open_long_capture_inline(frame, monitor, missed_frames, cx) {
                         log_error!("scroll", "failed to open the in-place long-capture editor");
                     }
                 });
