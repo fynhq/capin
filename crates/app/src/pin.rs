@@ -882,6 +882,8 @@ fn open_pin_inner(
     display_id: Option<DisplayId>,
     cx: &mut App,
 ) -> Option<u64> {
+    let display = pin_open_display_bounds(cx, bounds, display_id);
+    let (bounds, zoom) = fit_pin_to_display(&content, bounds, zoom, display);
     let id = id.unwrap_or_else(next_pin_id);
     LAST_PIN_SHADOW.with(|slot| slot.set(native_shadow));
     let kind = content.kind();
@@ -3099,6 +3101,84 @@ fn display_for_bounds(cx: &App, bounds: Bounds<Pixels>) -> Option<DisplayId> {
         .or_else(|| cx.primary_display().map(|display| display.id()))
 }
 
+/// Display that will host a pin being opened. Prefers the caller's monitor,
+/// then the display under the requested bounds, then the primary display.
+fn pin_open_display_bounds(
+    cx: &App,
+    bounds: Bounds<Pixels>,
+    display_id: Option<DisplayId>,
+) -> Option<Bounds<Pixels>> {
+    let displays = cx.displays();
+    if let Some(id) = display_id
+        && let Some(display) = displays.iter().find(|display| display.id() == id)
+    {
+        return Some(display.bounds());
+    }
+    let center_x = bounds.origin.x + bounds.size.width / 2.0;
+    let center_y = bounds.origin.y + bounds.size.height / 2.0;
+    displays
+        .iter()
+        .find(|display| {
+            let bounds = display.bounds();
+            center_x >= bounds.origin.x
+                && center_x < bounds.origin.x + bounds.size.width
+                && center_y >= bounds.origin.y
+                && center_y < bounds.origin.y + bounds.size.height
+        })
+        .map(|display| display.bounds())
+        .or_else(|| cx.primary_display().map(|display| display.bounds()))
+}
+
+/// Fits a pin being opened inside its display: caps the zoom so the whole
+/// image stays visible and clamps the origin inside the screen. A pin opened
+/// from history used to inherit both its capture scale and a cascade offset,
+/// so a full-screen capture started cut at the display edge.
+fn fit_pin_to_display(
+    content: &PinContent,
+    bounds: Bounds<Pixels>,
+    zoom: f32,
+    display: Option<Bounds<Pixels>>,
+) -> (Bounds<Pixels>, f32) {
+    let mut zoom = zoom.clamp(MIN_PIN_ZOOM, 4.0);
+    if let (Some(size), Some(display)) = (content.image_size(), display) {
+        let fit = fit_zoom_limit(
+            size.width,
+            size.height,
+            f32::from(display.size.width),
+            f32::from(display.size.height),
+        );
+        zoom = zoom.min(fit);
+    }
+    let (width, height) = content.size(zoom);
+    let center_x = f32::from(bounds.origin.x) + f32::from(bounds.size.width) / 2.0;
+    let center_y = f32::from(bounds.origin.y) + f32::from(bounds.size.height) / 2.0;
+    let mut origin_x = center_x - width / 2.0;
+    let mut origin_y = center_y - height / 2.0;
+    if let Some(display) = display {
+        let left = f32::from(display.origin.x);
+        let top = f32::from(display.origin.y);
+        let screen_width = f32::from(display.size.width);
+        let screen_height = f32::from(display.size.height);
+        origin_x = if width <= screen_width {
+            origin_x.clamp(left, left + screen_width - width)
+        } else {
+            left + (screen_width - width) / 2.0
+        };
+        origin_y = if height <= screen_height {
+            origin_y.clamp(top, top + screen_height - height)
+        } else {
+            top + (screen_height - height) / 2.0
+        };
+    }
+    (
+        Bounds {
+            origin: point(px(origin_x), px(origin_y)),
+            size: size(px(width), px(height)),
+        },
+        zoom,
+    )
+}
+
 /// Largest zoom where a pin image still fits the given display. Pins stop
 /// growing at the display edge instead of hanging off-screen.
 fn fit_zoom_limit(
@@ -3180,6 +3260,44 @@ mod tests {
         // Tall stitched captures must be allowed below 15% so the whole pin
         // still fits instead of being clamped back to a cropped window.
         assert!((super::fit_zoom_limit(3000, 12000, 1920.0, 1080.0) - 0.09).abs() < 0.001);
+    }
+
+    #[test]
+    fn opening_pins_fit_the_image_inside_the_display() {
+        let frame = RgbaFrame::from_pixels(400, 300, vec![0; 400 * 300 * 4]).unwrap();
+        let content = super::PinContent::from_frame(frame);
+        let display = gpui_kit::Bounds {
+            origin: gpui_kit::point(gpui_kit::px(0.0), gpui_kit::px(0.0)),
+            size: gpui_kit::size(gpui_kit::px(200.0), gpui_kit::px(200.0)),
+        };
+        let bounds = gpui_kit::Bounds {
+            origin: gpui_kit::point(gpui_kit::px(-100.0), gpui_kit::px(-100.0)),
+            size: gpui_kit::size(gpui_kit::px(400.0), gpui_kit::px(300.0)),
+        };
+        let (fitted, zoom) = super::fit_pin_to_display(&content, bounds, 1.0, Some(display));
+        assert!((zoom - 0.5).abs() < 0.001, "zoom was {zoom}");
+        assert_eq!(f32::from(fitted.size.width), 200.0);
+        assert_eq!(f32::from(fitted.size.height), 150.0);
+        assert_eq!(f32::from(fitted.origin.x), 0.0);
+        assert_eq!(f32::from(fitted.origin.y), 0.0);
+    }
+
+    #[test]
+    fn opening_pins_clamp_origins_into_the_display() {
+        let frame = RgbaFrame::from_pixels(100, 100, vec![0; 100 * 100 * 4]).unwrap();
+        let content = super::PinContent::from_frame(frame);
+        let display = gpui_kit::Bounds {
+            origin: gpui_kit::point(gpui_kit::px(0.0), gpui_kit::px(0.0)),
+            size: gpui_kit::size(gpui_kit::px(1920.0), gpui_kit::px(1080.0)),
+        };
+        let bounds = gpui_kit::Bounds {
+            origin: gpui_kit::point(gpui_kit::px(1900.0), gpui_kit::px(1000.0)),
+            size: gpui_kit::size(gpui_kit::px(100.0), gpui_kit::px(100.0)),
+        };
+        let (fitted, zoom) = super::fit_pin_to_display(&content, bounds, 1.0, Some(display));
+        assert!((zoom - 1.0).abs() < 0.001);
+        assert_eq!(f32::from(fitted.origin.x), 1820.0);
+        assert_eq!(f32::from(fitted.origin.y), 980.0);
     }
 
     #[test]
