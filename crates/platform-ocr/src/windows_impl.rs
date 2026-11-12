@@ -6,10 +6,10 @@ use windows::Media::Ocr::OcrEngine;
 use windows::Security::Cryptography::CryptographicBuffer;
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
 
-use crate::{OcrError, OcrLine, build_line, build_line_from_words};
+use crate::{OcrError, OcrLine, build_line, build_line_from_words, merge_recognition_overlap};
 
 #[cfg(target_arch = "x86_64")]
-use paddleocr_rs_onnx::{OcrEngine as PaddleEngine, OrderBy};
+use paddleocr_rs_onnx::{OcrEngine as PaddleEngine, OrderBy, TextRegion};
 
 #[cfg(target_arch = "x86_64")]
 static PADDLE: OnceLock<Result<Mutex<PaddleEngine>, String>> = OnceLock::new();
@@ -19,6 +19,12 @@ static PADDLE: OnceLock<Result<Mutex<PaddleEngine>, String>> = OnceLock::new();
 /// glyphs rather than copyable text.
 #[cfg(target_arch = "x86_64")]
 const PADDLE_MIN_CONFIDENCE: f32 = 0.5;
+
+/// The bundled recognition model has a fixed 48x320 input, so a line wider
+/// than about 6.7:1 is squeezed horizontally and its punctuation degrades.
+/// Wide blocks are recognized in overlapping chunks instead.
+#[cfg(target_arch = "x86_64")]
+const PADDLE_REC_ASPECT: f32 = 320.0 / 48.0;
 
 pub(super) fn recognize_text(frame: Arc<RgbaFrame>) -> Result<Vec<OcrLine>, OcrError> {
     std::thread::spawn(move || recognize_on_thread(&frame))
@@ -56,6 +62,10 @@ fn recognize_with_paddle(frame: &RgbaFrame) -> Option<Result<Vec<OcrLine>, OcrEr
     };
     let image = image::RgbaImage::from_raw(frame.width(), frame.height(), frame.pixels().to_vec())?;
     let image = image::DynamicImage::ImageRgba8(image);
+    // Small crops (window titles, file names) lose punctuation detail when the
+    // recognizer resizes them to its 48 px input height. Upscaling first keeps
+    // strokes such as `.` and `_` separable.
+    let (image, scale_x, scale_y) = paddle_source(&image);
     let Ok(engine) = engine.lock() else {
         return None;
     };
@@ -65,24 +75,126 @@ fn recognize_with_paddle(frame: &RgbaFrame) -> Option<Result<Vec<OcrLine>, OcrEr
     };
     let mut lines = Vec::new();
     for block in blocks {
-        if block.confidence < PADDLE_MIN_CONFIDENCE || block.text.trim().is_empty() {
+        if block.text.trim().is_empty() {
+            continue;
+        }
+        let (text, confidence) = paddle_block_text(&engine, &image, &block);
+        if confidence < PADDLE_MIN_CONFIDENCE || text.trim().is_empty() {
             continue;
         }
         let width = frame.width() as i32;
         let height = frame.height() as i32;
-        let left = (block.x.round() as i32).clamp(0, width);
-        let top = (block.y.round() as i32).clamp(0, height);
-        let right = ((block.x + block.width).round() as i32).clamp(left, width);
-        let bottom = ((block.y + block.height).round() as i32).clamp(top, height);
+        let left = (block.x * scale_x).round() as i32;
+        let top = (block.y * scale_y).round() as i32;
+        let right = ((block.x + block.width) * scale_x).round() as i32;
+        let bottom = ((block.y + block.height) * scale_y).round() as i32;
+        let left = left.clamp(0, width);
+        let top = top.clamp(0, height);
+        let right = right.clamp(left, width);
+        let bottom = bottom.clamp(top, height);
         if right <= left || bottom <= top {
             continue;
         }
         lines.push(build_line(
-            block.text,
+            text,
             PhysicalRect::new(left, top, (right - left) as u32, (bottom - top) as u32),
         ));
     }
     Some(Ok(lines))
+}
+
+/// Upscales small frames before PaddleOCR runs. Full-screen captures are left
+/// alone: the detector already resizes to a 960 px long side, and the extra
+/// copy would only cost memory.
+#[cfg(target_arch = "x86_64")]
+fn paddle_upscale(width: u32, height: u32) -> f32 {
+    let pixels = u64::from(width).saturating_mul(u64::from(height));
+    if pixels == 0 {
+        return 1.0;
+    }
+    if pixels <= 1_200_000 {
+        2.0
+    } else if pixels <= 4_000_000 {
+        1.5
+    } else {
+        1.0
+    }
+}
+
+/// Returns the (possibly upscaled) image plus the factors that map its
+/// coordinates back to the original frame.
+#[cfg(target_arch = "x86_64")]
+fn paddle_source(image: &image::DynamicImage) -> (image::DynamicImage, f32, f32) {
+    let upscale = paddle_upscale(image.width(), image.height());
+    if upscale <= 1.0 {
+        return (image.clone(), 1.0, 1.0);
+    }
+    let width = ((image.width() as f32 * upscale).round() as u32).max(1);
+    let height = ((image.height() as f32 * upscale).round() as u32).max(1);
+    let resized =
+        image::imageops::resize(image, width, height, image::imageops::FilterType::Lanczos3);
+    (
+        image::DynamicImage::ImageRgba8(resized),
+        image.width() as f32 / width as f32,
+        image.height() as f32 / height as f32,
+    )
+}
+
+/// Recognizes one detected block. Blocks much wider than the recognizer's
+/// fixed aspect ratio are cut into overlapping chunks; each chunk keeps a
+/// near-native character width instead of being squeezed into 320 px.
+#[cfg(target_arch = "x86_64")]
+fn paddle_block_text(
+    engine: &PaddleEngine,
+    image: &image::DynamicImage,
+    block: &paddleocr_rs_onnx::OcrBlock,
+) -> (String, f32) {
+    let width = block.width.max(1.0);
+    let height = block.height.max(1.0);
+    let aspect = width / height;
+    if aspect <= PADDLE_REC_ASPECT * 1.05 || height < 8.0 {
+        return (block.text.clone(), block.confidence);
+    }
+    let chunks = (aspect / PADDLE_REC_ASPECT).ceil().clamp(2.0, 8.0) as usize;
+    // Overlap is one character wide (CJK glyphs are roughly square) so a
+    // glyph cut by the chunk boundary still appears whole in one of them.
+    let overlap = (height * 1.2 / width).clamp(0.01, 0.2);
+    let mut text = String::new();
+    let mut score_sum = 0.0_f32;
+    let mut score_count = 0_u32;
+    for index in 0..chunks {
+        let start = (index as f32 / chunks as f32 - overlap).max(0.0);
+        let end = ((index as f32 + 1.0) / chunks as f32 + overlap).min(1.0);
+        let left = block.x + width * start;
+        let right = block.x + width * end;
+        let region = TextRegion {
+            bbox: [
+                [left, block.y],
+                [right, block.y],
+                [right, block.y + height],
+                [left, block.y + height],
+            ],
+            confidence: block.confidence,
+        };
+        let Ok(decoded) = engine.recognize_text(image, &region) else {
+            continue;
+        };
+        if decoded.text.is_empty() {
+            continue;
+        }
+        text = if text.is_empty() {
+            decoded.text
+        } else {
+            merge_recognition_overlap(&text, &decoded.text)
+        };
+        score_sum += decoded.score;
+        score_count += 1;
+    }
+    if text.is_empty() || score_count == 0 {
+        (block.text.clone(), block.confidence)
+    } else {
+        (text, score_sum / score_count as f32)
+    }
 }
 
 #[cfg(not(target_arch = "x86_64"))]

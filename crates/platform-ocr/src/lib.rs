@@ -126,15 +126,55 @@ pub fn recognize_shared(frame: Arc<RgbaFrame>, options: OcrOptions) -> OcrOutput
 /// Windows OCR often returns full-width punctuation for Latin text (a
 /// U+FF0C comma instead of `,`, for example) because the active recognizer is
 /// the CJK model. Lines without CJK content are mapped back to ASCII forms so
-/// copied commands, code and URLs stay usable. Mixed or CJK lines keep their
-/// original punctuation.
+/// copied commands, code and URLs stay usable. Mostly-Latin lines keep their
+/// CJK glyphs but still clean up the lookalikes the Chinese model produces
+/// for `.` and `_` inside file names and version numbers.
 fn normalize_latin_punctuation(line: &mut OcrLine) {
-    if line.text.chars().any(is_cjk) {
+    let chars: Vec<char> = line.text.chars().collect();
+    let meaningful: Vec<char> = chars
+        .iter()
+        .copied()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    if meaningful.is_empty() {
         return;
     }
-    line.text = line.text.chars().map(normalize_latin_char).collect();
-    for item in &mut line.chars {
-        item.ch = normalize_latin_char(item.ch);
+    if !meaningful.iter().any(|ch| is_cjk(*ch)) {
+        line.text = line.text.chars().map(normalize_latin_char).collect();
+        for item in &mut line.chars {
+            item.ch = normalize_latin_char(item.ch);
+        }
+        return;
+    }
+    let ascii = meaningful
+        .iter()
+        .filter(|ch| ch.is_ascii_alphanumeric() || ch.is_ascii_punctuation())
+        .count();
+    if ascii * 3 < meaningful.len() * 2 {
+        // A genuinely Chinese line: full-width punctuation is intentional.
+        return;
+    }
+    let normalized: Vec<char> = chars
+        .iter()
+        .enumerate()
+        .map(|(index, &ch)| {
+            let previous = chars[..index]
+                .iter()
+                .rev()
+                .copied()
+                .find(|ch| !ch.is_whitespace());
+            let next = chars[index + 1..]
+                .iter()
+                .copied()
+                .find(|ch| !ch.is_whitespace());
+            normalize_mixed_char(ch, previous, next)
+        })
+        .collect();
+    line.text = normalized.iter().collect();
+    if line.chars.len() == normalized.len() {
+        for (item, ch) in line.chars.iter_mut().zip(normalized) {
+            item.ch = ch;
+        }
     }
 }
 
@@ -150,6 +190,62 @@ fn normalize_latin_char(ch: char) -> char {
         '\u{3001}' => ',',
         _ => ch,
     }
+}
+
+/// Cleans up one character inside a mostly-Latin line. Only characters with
+/// an ASCII neighbour are touched, so Chinese punctuation that happens to sit
+/// inside such a line stays intact.
+fn normalize_mixed_char(ch: char, previous: Option<char>, next: Option<char>) -> char {
+    let previous_ascii = previous.is_some_and(|ch| ch.is_ascii_alphanumeric());
+    let next_ascii = next.is_some_and(|ch| ch.is_ascii_alphanumeric());
+    if !previous_ascii && !next_ascii {
+        return ch;
+    }
+    match ch {
+        // The dot in `v0.1.0` or `setup.exe` frequently decodes as a
+        // full-width comma; between two digits only a decimal point fits.
+        '\u{FF0C}' | '\u{3001}' => {
+            return if previous.is_some_and(|ch| ch.is_ascii_digit())
+                && next.is_some_and(|ch| ch.is_ascii_digit())
+            {
+                '.'
+            } else {
+                ','
+            };
+        }
+        '\u{3002}' => return '.',
+        // `_` inside a file name decodes as the CJK one or a dash.
+        '\u{4E00}' => return '_',
+        '\u{2014}' | '\u{2013}' | '\u{2015}' => return '-',
+        _ => {}
+    }
+    let code = ch as u32;
+    if (0xFF01..=0xFF5E).contains(&code) {
+        return char::from_u32(code - 0xFEE0).unwrap_or(ch);
+    }
+    ch
+}
+
+/// Joins two overlapping chunk decodes without repeating the shared seam.
+#[allow(dead_code)] // Windows x86_64 recognition only
+pub(crate) fn merge_recognition_overlap(previous: &str, next: &str) -> String {
+    let mut merged = String::with_capacity(previous.len() + next.len());
+    merged.push_str(previous);
+    let max_overlap = previous.chars().count().min(next.chars().count()).min(8);
+    let overlap = (1..=max_overlap)
+        .rev()
+        .find(|&count| previous.ends_with(prefix_chars(next, count)))
+        .unwrap_or(0);
+    merged.extend(next.chars().skip(overlap));
+    merged
+}
+
+fn prefix_chars(text: &str, count: usize) -> &str {
+    let byte = text
+        .char_indices()
+        .nth(count)
+        .map_or(text.len(), |(index, _)| index);
+    &text[..byte]
 }
 
 fn is_cjk(ch: char) -> bool {
@@ -530,6 +626,40 @@ mod tests {
         );
         normalize_latin_punctuation(&mut cjk);
         assert_eq!(cjk.text, "\u{4F60}\u{597D}\u{FF0C}\u{4E16}\u{754C}");
+    }
+
+    #[test]
+    fn mixed_latin_lines_fix_file_name_lookalikes() {
+        let mut line = build_line(
+            "v0\u{FF0C}1\u{FF0C}0\u{4E00}a275035_dev_setup.exe".to_owned(),
+            PhysicalRect::new(0, 0, 300, 20),
+        );
+        normalize_latin_punctuation(&mut line);
+        assert_eq!(line.text, "v0.1.0_a275035_dev_setup.exe");
+        assert_eq!(
+            line.chars.iter().map(|ch| ch.ch).collect::<String>(),
+            "v0.1.0_a275035_dev_setup.exe"
+        );
+    }
+
+    #[test]
+    fn mixed_cjk_and_latin_lines_keep_real_chinese() {
+        let mut line = build_line(
+            "Capin\u{FF0C}\u{56FE}\u{7247}\u{5DF2}\u{4FDD}\u{5B58}".to_owned(),
+            PhysicalRect::new(0, 0, 300, 20),
+        );
+        normalize_latin_punctuation(&mut line);
+        assert_eq!(
+            line.text,
+            "Capin\u{FF0C}\u{56FE}\u{7247}\u{5DF2}\u{4FDD}\u{5B58}"
+        );
+    }
+
+    #[test]
+    fn chunk_overlap_is_not_repeated() {
+        assert_eq!(merge_recognition_overlap("abc_", "_def"), "abc_def");
+        assert_eq!(merge_recognition_overlap("v0.1", "1.0_a"), "v0.1.0_a");
+        assert_eq!(merge_recognition_overlap("abc", "xyz"), "abcxyz");
     }
 
     #[test]
