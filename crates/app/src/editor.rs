@@ -5250,7 +5250,12 @@ impl EditorView {
                     // Encoding blocks for a few milliseconds; run it after the
                     // editor closes instead of inside the toolbar callback.
                     if record_history && let Ok(bytes) = image_util::encode_png(&export) {
-                        crate::capture_history::record_png_bytes(&bytes, hash, pin_shadow);
+                        crate::capture_history::record_png_bytes(
+                            &bytes,
+                            hash,
+                            pin_shadow,
+                            Some(effects_scale),
+                        );
                     }
                     let id = if let Some((bounds, zoom)) = placement {
                         crate::pin::open_frame_at_with_hash(
@@ -5333,7 +5338,12 @@ impl EditorView {
                         Ok(bytes) => {
                             copy_ok = true;
                             if record_history {
-                                crate::capture_history::record_png_bytes(&bytes, hash, pin_shadow);
+                                crate::capture_history::record_png_bytes(
+                                    &bytes,
+                                    hash,
+                                    pin_shadow,
+                                    Some(scale),
+                                );
                             }
                             image_util::copy_png_bytes(bytes, cx);
                             messages.push(t(language, "editor.copied").to_owned());
@@ -5347,7 +5357,12 @@ impl EditorView {
                     match image_util::save_png(&output) {
                         Ok(path) => {
                             save_ok = true;
-                            crate::capture_history::record_png_file(&path, hash, pin_shadow);
+                            crate::capture_history::record_png_file(
+                                &path,
+                                hash,
+                                pin_shadow,
+                                Some(scale),
+                            );
                             messages.push(format!(
                                 "{} {}",
                                 t(language, "editor.saved"),
@@ -7103,6 +7118,7 @@ pub fn open_long_capture_inline(
         PhysicalSize::new(frame.width(), frame.height()),
         window_bounds.size,
     );
+    let effects_scale = monitor.map(|monitor| monitor.scale.get()).unwrap_or(1.0);
     open_inline_editor_window(
         frame,
         image_rect,
@@ -7115,7 +7131,7 @@ pub fn open_long_capture_inline(
         None,
         RegionEffects::default(),
         false,
-        1.0,
+        effects_scale,
         notice,
         cx,
     )

@@ -1971,7 +1971,12 @@ impl OverlayView {
         match image_util::encode_png(&output) {
             Ok(bytes) => {
                 log_info!("overlay", "selection copied to clipboard");
-                crate::capture_history::record_png_bytes(&bytes, hash, pin_shadow);
+                crate::capture_history::record_png_bytes(
+                    &bytes,
+                    hash,
+                    pin_shadow,
+                    Some(self.effective_scale()),
+                );
                 image_util::copy_png_bytes(bytes, cx);
                 self.close_overlays(cx);
             }
@@ -1993,7 +1998,12 @@ impl OverlayView {
         match image_util::save_png(&output) {
             Ok(path) => {
                 log_info!("overlay", "selection saved");
-                crate::capture_history::record_png_file(&path, hash, pin_shadow);
+                crate::capture_history::record_png_file(
+                    &path,
+                    hash,
+                    pin_shadow,
+                    Some(self.effective_scale()),
+                );
                 self.close_overlays(cx);
             }
             Err(error) => self.set_notice(error.to_string(), cx),
@@ -2068,7 +2078,7 @@ impl OverlayView {
             // Encoding the export blocks for a few milliseconds; keep it out of
             // the toolbar's input callback.
             if let Ok(bytes) = image_util::encode_png(&export) {
-                crate::capture_history::record_png_bytes(&bytes, hash, pin_shadow);
+                crate::capture_history::record_png_bytes(&bytes, hash, pin_shadow, Some(scale));
             }
             if let Some(id) = crate::pin::open_frame_at_with_hash(
                 display,

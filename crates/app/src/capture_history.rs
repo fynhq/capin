@@ -21,6 +21,10 @@ struct HistoryEntry {
     /// pinning it must render the floating edge again.
     #[serde(default)]
     pin_shadow: Option<HistoryPinShadow>,
+    /// Capture pixels per logical point. Pins use its inverse so a history
+    /// image reopens at the size it had when it was captured.
+    #[serde(default)]
+    scale: Option<f32>,
 }
 
 /// Recipe for the pin-only shadow of a region export.
@@ -36,6 +40,7 @@ pub struct HistoryPinShadow {
 pub struct HistoryImage {
     pub frame: RgbaFrame,
     pub pin_shadow: Option<HistoryPinShadow>,
+    pub scale: Option<f32>,
 }
 
 thread_local! {
@@ -45,19 +50,34 @@ thread_local! {
 /// Records an already encoded PNG. Copying a screenshot to the clipboard
 /// produces PNG bytes; history writes those bytes instead of encoding the
 /// same image a second time.
-pub fn record_png_bytes(bytes: &[u8], hash: u64, pin_shadow: Option<HistoryPinShadow>) {
-    record_png(hash, pin_shadow, |path| std::fs::write(path, bytes).is_ok());
+pub fn record_png_bytes(
+    bytes: &[u8],
+    hash: u64,
+    pin_shadow: Option<HistoryPinShadow>,
+    scale: Option<f32>,
+) {
+    record_png(hash, pin_shadow, scale, |path| {
+        std::fs::write(path, bytes).is_ok()
+    });
 }
 
 /// Records an existing exported PNG by copying the file. Saving a screenshot
 /// already paid for PNG encoding, so history only duplicates the bytes.
-pub fn record_png_file(source: &Path, hash: u64, pin_shadow: Option<HistoryPinShadow>) -> bool {
-    record_png(hash, pin_shadow, |path| std::fs::copy(source, path).is_ok())
+pub fn record_png_file(
+    source: &Path,
+    hash: u64,
+    pin_shadow: Option<HistoryPinShadow>,
+    scale: Option<f32>,
+) -> bool {
+    record_png(hash, pin_shadow, scale, |path| {
+        std::fs::copy(source, path).is_ok()
+    })
 }
 
 fn record_png(
     hash: u64,
     pin_shadow: Option<HistoryPinShadow>,
+    scale: Option<f32>,
     write: impl FnOnce(&Path) -> bool,
 ) -> bool {
     let Some(directory) = history_dir() else {
@@ -70,6 +90,7 @@ fn record_png(
         // a duplicate entry.
         first.created_at = now;
         first.pin_shadow = pin_shadow;
+        first.scale = scale;
         write_entries(&directory, &entries);
         ENTRIES.with(|slot| *slot.borrow_mut() = Some(entries));
         return true;
@@ -102,6 +123,7 @@ fn record_png(
             created_at: now,
             hash,
             pin_shadow,
+            scale,
         },
     );
     prune(&mut entries, &directory, now);
@@ -130,6 +152,7 @@ pub fn cycle(hash: u64) -> Option<HistoryImage> {
             return Some(HistoryImage {
                 frame,
                 pin_shadow: entry.pin_shadow,
+                scale: entry.scale,
             });
         }
         index += 1;
@@ -163,6 +186,7 @@ pub fn find(hash: u64) -> Option<HistoryImage> {
             Some(HistoryImage {
                 frame: load_entry(&directory, entry)?,
                 pin_shadow: entry.pin_shadow,
+                scale: entry.scale,
             })
         })
 }
@@ -176,6 +200,7 @@ pub fn latest() -> Option<HistoryImage> {
         Some(HistoryImage {
             frame: load_entry(&directory, entry)?,
             pin_shadow: entry.pin_shadow,
+            scale: entry.scale,
         })
     })
 }
@@ -322,6 +347,7 @@ mod tests {
                 created_at: index as u64 + 1,
                 hash: index as u64,
                 pin_shadow: None,
+                scale: None,
             });
         }
         let now = HISTORY_LIMIT as u64 + 10;
@@ -351,6 +377,7 @@ mod tests {
                 created_at: index,
                 hash,
                 pin_shadow: None,
+                scale: None,
             });
         }
         prune(&mut entries, &directory, 100);
@@ -373,18 +400,21 @@ mod tests {
                 created_at: 3,
                 hash: 30,
                 pin_shadow: None,
+                scale: None,
             },
             HistoryEntry {
                 file: "mid.png".to_owned(),
                 created_at: 2,
                 hash: 20,
                 pin_shadow: None,
+                scale: None,
             },
             HistoryEntry {
                 file: "old.png".to_owned(),
                 created_at: 1,
                 hash: 10,
                 pin_shadow: None,
+                scale: None,
             },
         ];
         assert_eq!(older_index(&entries, 30), 1);
@@ -405,18 +435,21 @@ mod tests {
                 created_at: 3,
                 hash: 1,
                 pin_shadow: None,
+                scale: None,
             },
             HistoryEntry {
                 file: "b.png".to_owned(),
                 created_at: 2,
                 hash: 2,
                 pin_shadow: None,
+                scale: None,
             },
             HistoryEntry {
                 file: "c.png".to_owned(),
                 created_at: 1,
                 hash: 3,
                 pin_shadow: None,
+                scale: None,
             },
         ];
         let mut index = older_index(&entries, 1);

@@ -501,6 +501,7 @@ pub fn pin_last(cx: &mut App) {
                 crate::capture_history::HistoryImage {
                     frame,
                     pin_shadow: None,
+                    scale: None,
                 },
                 cx,
             );
@@ -687,15 +688,23 @@ fn open_history_pin(
     native_shadow: bool,
     cx: &mut App,
 ) {
-    let crate::capture_history::HistoryImage { frame, pin_shadow } = image;
+    let crate::capture_history::HistoryImage {
+        frame,
+        pin_shadow,
+        scale,
+    } = image;
     let hash = crate::capture_history::hash_frame(&frame);
     LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
+    let zoom = scale.map(|scale| (1.0 / scale.max(0.1)).clamp(MIN_PIN_ZOOM, 4.0));
     let Some(shadow) = pin_shadow else {
-        let _ = open_pin_content_with_shadow(
-            PinContent::from_frame_with_hash(frame, hash),
-            native_shadow,
-            cx,
-        );
+        let content = PinContent::from_frame_with_hash(frame, hash);
+        if let Some(zoom) = zoom {
+            let (width, height) = content.size(zoom);
+            let bounds = default_bounds(cx, width, height);
+            let _ = open_pin_content_at(content, bounds, zoom, None, native_shadow, cx);
+        } else {
+            let _ = open_pin_content_with_shadow(content, native_shadow, cx);
+        }
         return;
     };
     let display_effects = crate::effects::RegionEffects {
@@ -704,11 +713,18 @@ fn open_history_pin(
     };
     let display = display_effects.apply(frame, shadow.scale);
     let display_padding = display_effects.padding(shadow.scale);
+    let content = PinContent::from_frame_with_hash(display, hash);
     // The image already carries its composed shadow; the window must not add
     // a second one. Copy/save strip the pin-only margin.
-    if let Some(id) =
-        open_pin_content_with_shadow(PinContent::from_frame_with_hash(display, hash), false, cx)
-    {
+    let id = match zoom {
+        Some(zoom) => {
+            let (width, height) = content.size(zoom);
+            let bounds = default_bounds(cx, width, height);
+            open_pin_content_at(content, bounds, zoom, None, false, cx)
+        }
+        None => open_pin_content_with_shadow(content, false, cx),
+    };
+    if let Some(id) = id {
         set_export_padding(id, display_padding);
     }
 }
