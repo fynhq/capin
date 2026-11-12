@@ -3446,15 +3446,25 @@ impl OverlayView {
 
         let screen_color = rgba((SCREEN_SELECTION << 8) | 0xFF);
         let selection_radius = self.selection_effects_radius();
-        let mut layers = self.dim_layers_rounded(hole, selection_radius);
+        // A free-region drag previews the same rounded frame the confirmed
+        // selection and the export use; window and element hovers stay square.
+        let drag_radius = if self.selected.is_none() && drag_selection.is_some() {
+            self.effects.corner_radius as f32
+        } else {
+            0.0
+        };
+        let radius = selection_radius.max(drag_radius);
+        let mut layers = self.dim_layers_rounded(hole, radius);
         if let Some(rect) = selected_bounds {
             // Above 0.5 the rounded mask already painted the accent ring from
             // the same path as the hole.
-            if selection_radius <= 0.5 {
-                layers.push(border(rect, self.accent, selection_radius).into_any_element());
+            if radius <= 0.5 {
+                layers.push(border(rect, self.accent, radius).into_any_element());
             }
         } else if let Some(rect) = drag_selection {
-            layers.push(border(rect, self.chrome.accent, 0.0).into_any_element());
+            if radius <= 0.5 {
+                layers.push(border(rect, self.accent, 0.0).into_any_element());
+            }
         } else if let Some(rect) = hovered_element {
             layers.push(element_border(rect).into_any_element());
         } else if let Some(rect) = hovered_window {
