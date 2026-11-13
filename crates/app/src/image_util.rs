@@ -298,7 +298,27 @@ pub fn encode_png(frame: &RgbaFrame) -> Result<Vec<u8>, image::ImageError> {
     Ok(cursor.into_inner())
 }
 
-pub fn copy_png_bytes(bytes: Vec<u8>, cx: &mut App) {
+/// Copies a screenshot together with the formats native apps expect.
+///
+/// Windows legacy apps reject a PNG-only clipboard, so the platform layer
+/// writes a CF_DIB next to the PNG entry. Other platforms and failures fall
+/// back to the GPUI image clipboard.
+pub fn copy_png_bytes(bytes: Vec<u8>, frame: &RgbaFrame, cx: &mut App) {
+    #[cfg(target_os = "windows")]
+    {
+        if platform_window::set_image_clipboard(
+            frame.width(),
+            frame.height(),
+            frame.pixels(),
+            Some(&bytes),
+        )
+        .is_ok()
+        {
+            return;
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = frame;
     let image = Image::from_bytes(ImageFormat::Png, bytes);
     cx.write_to_clipboard(ClipboardItem::new_image(&image));
 }

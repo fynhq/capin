@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::POINT as ScreenPoint;
-use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT};
+use windows::Win32::Foundation::{COLORREF, GlobalFree, HANDLE, HWND, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{
     DWM_WINDOW_CORNER_PREFERENCE, DWMNCRENDERINGPOLICY, DWMNCRP_DISABLED, DWMNCRP_ENABLED,
     DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
@@ -15,6 +15,10 @@ use windows::Win32::Graphics::Gdi::{
     MonitorFromWindow,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+};
+use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
 };
@@ -275,6 +279,111 @@ pub(super) fn set_click_through(
     // SAFETY: the extended style value came from the same window.
     unsafe {
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style as isize);
+    }
+    Ok(())
+}
+
+const CF_DIB_FORMAT: u32 = 8;
+
+/// Writes the image as a bottom-up CF_DIB plus the registered PNG format.
+/// Legacy apps only read CF_DIB/CF_BITMAP, so a PNG-only clipboard cannot be
+/// pasted there; the PNG entry keeps alpha and fidelity for modern apps.
+pub(super) fn set_image_clipboard(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    png: Option<&[u8]>,
+) -> Result<(), PlatformWindowError> {
+    let pixel_bytes = width as usize * height as usize * 4;
+    if width == 0 || height == 0 || rgba.len() < pixel_bytes {
+        return Err(PlatformWindowError::Platform {
+            operation: "SetClipboardData",
+            message: "invalid image buffer".to_owned(),
+        });
+    }
+    let dib = dib_from_rgba(width, height, rgba);
+
+    let mut opened = false;
+    for _ in 0..5 {
+        // SAFETY: no clipboard data is read before this thread owns it.
+        if unsafe { OpenClipboard(None) }.is_ok() {
+            opened = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    if !opened {
+        return Err(platform_error(
+            "OpenClipboard",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    let result = (|| -> windows::core::Result<()> {
+        // SAFETY: this thread owns the open clipboard until CloseClipboard.
+        unsafe {
+            EmptyClipboard()?;
+            if let Some(png) = png {
+                let format = RegisterClipboardFormatW(windows::core::w!("PNG"));
+                if format != 0 {
+                    set_clipboard_bytes(format, png)?;
+                }
+            }
+            set_clipboard_bytes(CF_DIB_FORMAT, &dib)?;
+        }
+        Ok(())
+    })();
+    // SAFETY: pairs with the successful OpenClipboard above.
+    unsafe {
+        let _ = CloseClipboard();
+    }
+    result.map_err(|error| platform_error("SetClipboardData", error))
+}
+
+fn dib_from_rgba(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+    let pixel_bytes = width as usize * height as usize * 4;
+    let mut dib = Vec::with_capacity(40 + pixel_bytes);
+    let mut header = [0u8; 40];
+    header[0..4].copy_from_slice(&40i32.to_le_bytes());
+    header[4..8].copy_from_slice(&(width as i32).to_le_bytes());
+    header[8..12].copy_from_slice(&(height as i32).to_le_bytes());
+    header[12..14].copy_from_slice(&1u16.to_le_bytes());
+    header[14..16].copy_from_slice(&32u16.to_le_bytes());
+    header[20..24].copy_from_slice(&(pixel_bytes as u32).to_le_bytes());
+    header[24..28].copy_from_slice(&2835i32.to_le_bytes());
+    header[28..32].copy_from_slice(&2835i32.to_le_bytes());
+    dib.extend_from_slice(&header);
+    // CF_DIB has no alpha channel. Flatten transparent corners onto white so
+    // window captures keep their rounded look instead of turning black.
+    for row in (0..height as usize).rev() {
+        for column in 0..width as usize {
+            let index = (row * width as usize + column) * 4;
+            let alpha = u32::from(rgba[index + 3]);
+            for channel in [2usize, 1, 0] {
+                let value = u32::from(rgba[index + channel]);
+                dib.push(((value * alpha + 255 * (255 - alpha) + 127) / 255) as u8);
+            }
+            dib.push(255);
+        }
+    }
+    dib
+}
+
+fn set_clipboard_bytes(format: u32, bytes: &[u8]) -> windows::core::Result<()> {
+    // SAFETY: the clipboard is open on this thread; the allocation is handed
+    // to the system on success and freed on every failure path.
+    unsafe {
+        let handle = GlobalAlloc(GMEM_MOVEABLE, bytes.len())?;
+        let pointer = GlobalLock(handle);
+        if pointer.is_null() {
+            let _ = GlobalFree(Some(handle));
+            return Err(windows::core::Error::from_thread());
+        }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer as *mut u8, bytes.len());
+        let _ = GlobalUnlock(handle);
+        if let Err(error) = SetClipboardData(format, Some(HANDLE(handle.0))) {
+            let _ = GlobalFree(Some(handle));
+            return Err(error);
+        }
     }
     Ok(())
 }

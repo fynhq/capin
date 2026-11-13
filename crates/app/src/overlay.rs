@@ -2027,7 +2027,7 @@ impl OverlayView {
                     pin_shadow,
                     Some(self.effective_scale()),
                 );
-                image_util::copy_png_bytes(bytes, cx);
+                image_util::copy_png_bytes(bytes, &output, cx);
                 self.close_overlays(cx);
             }
             Err(error) => self.set_notice(error.to_string(), cx),

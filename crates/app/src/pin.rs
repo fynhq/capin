@@ -2428,7 +2428,7 @@ impl PinView {
             return;
         };
         if let Ok(bytes) = image_util::encode_png(&frame) {
-            image_util::copy_png_bytes(bytes, cx);
+            image_util::copy_png_bytes(bytes, &frame, cx);
             self.show_notice(t(language, "pin.copied").to_owned(), cx);
         }
     }

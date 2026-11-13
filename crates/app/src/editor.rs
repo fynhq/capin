@@ -5482,7 +5482,7 @@ impl EditorView {
                                     Some(scale),
                                 );
                             }
-                            image_util::copy_png_bytes(bytes, cx);
+                            image_util::copy_png_bytes(bytes, &output, cx);
                             messages.push(t(language, "editor.copied").to_owned());
                         }
                         Err(error) => {

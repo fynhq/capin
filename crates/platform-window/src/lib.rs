@@ -389,6 +389,31 @@ pub fn place_on_monitor_deferred(
     }
 }
 
+/// Writes a screenshot to the system clipboard in the formats native apps
+/// expect.
+///
+/// Windows gets a bottom-up CF_DIB plus the registered PNG format: several
+/// Win32 and legacy apps reject a PNG-only clipboard. The DIB has no alpha
+/// channel, so transparent corners are flattened onto white. Other platforms
+/// return [`PlatformWindowError::UnsupportedPlatform`] and keep the GPUI
+/// clipboard path.
+pub fn set_image_clipboard(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    png: Option<&[u8]>,
+) -> Result<(), PlatformWindowError> {
+    #[cfg(target_os = "windows")]
+    {
+        windows::set_image_clipboard(width, height, rgba, png)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (width, height, rgba, png);
+        Err(PlatformWindowError::UnsupportedPlatform)
+    }
+}
+
 /// Whether the operating system asks applications to reduce decorative
 /// motion. The caller forwards this to GPUI once at startup so `with_animation`
 /// and `with_spring` render their static end state.
