@@ -53,6 +53,8 @@ pub enum OcrError {
 
 #[cfg(target_os = "macos")]
 mod macos_impl;
+#[cfg(any(target_os = "windows", test))]
+mod tiling;
 #[cfg(target_os = "windows")]
 mod windows_impl;
 

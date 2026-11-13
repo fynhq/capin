@@ -6,10 +6,14 @@ use windows::Media::Ocr::OcrEngine;
 use windows::Security::Cryptography::CryptographicBuffer;
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
 
-use crate::{OcrError, OcrLine, build_line, build_line_from_words, merge_recognition_overlap};
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use crate::merge_recognition_overlap;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use crate::tiling::{Rect, TILE, merge_rects, sort_rects, tile_rects};
+use crate::{OcrError, OcrLine, build_line, build_line_from_words};
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-use paddleocr_rs_onnx::{OcrEngine as PaddleEngine, OrderBy, TextRegion};
+use paddleocr_rs_onnx::{OcrEngine as PaddleEngine, TextRegion};
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 static PADDLE: OnceLock<Result<Mutex<PaddleEngine>, String>> = OnceLock::new();
@@ -20,11 +24,13 @@ static PADDLE: OnceLock<Result<Mutex<PaddleEngine>, String>> = OnceLock::new();
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const PADDLE_MIN_CONFIDENCE: f32 = 0.5;
 
-/// The bundled recognition model has a fixed 48x320 input, so a line wider
-/// than about 6.7:1 is squeezed horizontally and its punctuation degrades.
-/// Wide blocks are recognized in overlapping chunks instead.
+/// PP-OCRv6 accepts a dynamic recognition width, but extremely wide lines
+/// still produce a huge input tensor. Lines above this aspect ratio are
+/// recognized in overlapping chunks, each close to the model's training width.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-const PADDLE_REC_ASPECT: f32 = 320.0 / 48.0;
+const PADDLE_REC_MAX_ASPECT: f32 = 64.0;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+const PADDLE_REC_CHUNK_ASPECT: f32 = 48.0;
 
 pub(super) fn recognize_text(frame: Arc<RgbaFrame>) -> Result<Vec<OcrLine>, OcrError> {
     std::thread::spawn(move || recognize_on_thread(&frame))
@@ -47,9 +53,9 @@ fn recognize_on_thread(frame: &RgbaFrame) -> Result<Vec<OcrLine>, OcrError> {
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn recognize_with_paddle(frame: &RgbaFrame) -> Option<Result<Vec<OcrLine>, OcrError>> {
-    static DET: &[u8] = include_bytes!("../assets/ocr/ch_PP-OCRv3_det_infer.onnx");
-    static REC: &[u8] = include_bytes!("../assets/ocr/ch_PP-OCRv3_rec_static.onnx");
-    static KEYS: &[u8] = include_bytes!("../assets/ocr/ppocr_keys_v1.txt");
+    static DET: &[u8] = include_bytes!("../assets/ocr/PP-OCRv6_tiny_det.onnx");
+    static REC: &[u8] = include_bytes!("../assets/ocr/PP-OCRv6_tiny_rec.onnx");
+    static KEYS: &[u8] = include_bytes!("../assets/ocr/ppocrv6_dict.txt");
 
     let engine = PADDLE.get_or_init(|| {
         PaddleEngine::new(DET, REC, KEYS)
@@ -62,50 +68,259 @@ fn recognize_with_paddle(frame: &RgbaFrame) -> Option<Result<Vec<OcrLine>, OcrEr
     };
     let image = image::RgbaImage::from_raw(frame.width(), frame.height(), frame.pixels().to_vec())?;
     let image = image::DynamicImage::ImageRgba8(image);
-    // Small crops (window titles, file names) lose punctuation detail when the
-    // recognizer resizes them to its 48 px input height. Upscaling first keeps
-    // strokes such as `.` and `_` separable.
-    let (image, scale_x, scale_y) = paddle_source(&image);
+    // Small crops (window titles, file names) gain stroke detail when
+    // upscaled. Large screenshots are tiled instead so the detector never
+    // shrinks 4K UI text to a few pixels.
+    let (width, height) = (image.width(), image.height());
+    let tiled = width.max(height) > TILE;
+    let (source, scale_x, scale_y) = if tiled {
+        (image, 1.0, 1.0)
+    } else {
+        paddle_source(&image)
+    };
     let Ok(engine) = engine.lock() else {
         return None;
     };
-    let blocks = match engine.recognize_all(&image, OrderBy::Horizontal) {
-        Ok(blocks) => blocks,
-        Err(error) => return Some(Err(OcrError::Platform(error.to_string()))),
+    let mut regions = match detect_regions(&engine, &source, tiled) {
+        Ok(regions) => regions,
+        Err(error) => return Some(Err(error)),
     };
-    let mut lines = Vec::new();
-    for block in blocks {
-        if block.text.trim().is_empty() {
-            continue;
-        }
-        let (text, confidence) = paddle_block_text(&engine, &image, &block);
-        if confidence < PADDLE_MIN_CONFIDENCE || text.trim().is_empty() {
-            continue;
-        }
-        let width = frame.width() as i32;
-        let height = frame.height() as i32;
-        let left = (block.x * scale_x).round() as i32;
-        let top = (block.y * scale_y).round() as i32;
-        let right = ((block.x + block.width) * scale_x).round() as i32;
-        let bottom = ((block.y + block.height) * scale_y).round() as i32;
-        let left = left.clamp(0, width);
-        let top = top.clamp(0, height);
-        let right = right.clamp(left, width);
-        let bottom = bottom.clamp(top, height);
-        if right <= left || bottom <= top {
-            continue;
-        }
-        lines.push(build_line(
-            text,
-            PhysicalRect::new(left, top, (right - left) as u32, (bottom - top) as u32),
-        ));
+    // A tight crop of a single line can have no room for the detector's
+    // unclip margin. Keep the old whole-image recognition fallback for small
+    // images; large images stay tiled and fall back to the system engine.
+    if regions.is_empty() && !tiled {
+        let (width, height) = (source.width() as f32, source.height() as f32);
+        regions.push(TextRegion {
+            bbox: [[0.0, 0.0], [width, 0.0], [width, height], [0.0, height]],
+            confidence: 1.0,
+        });
     }
+    let lines = recognize_regions(
+        &engine,
+        &source,
+        regions,
+        scale_x,
+        scale_y,
+        frame.width(),
+        frame.height(),
+    );
     Some(Ok(lines))
 }
 
-/// Upscales small frames before PaddleOCR runs. Full-screen captures are left
-/// alone: the detector already resizes to a 960 px long side, and the extra
-/// copy would only cost memory.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn detect_regions(
+    engine: &PaddleEngine,
+    image: &image::DynamicImage,
+    tiled: bool,
+) -> Result<Vec<TextRegion>, OcrError> {
+    let (width, height) = (image.width(), image.height());
+    let regions = if tiled {
+        detect_tiled(engine, image, width, height)?
+    } else {
+        engine
+            .detect_text_regions(image)
+            .map_err(|error| OcrError::Platform(error.to_string()))?
+    };
+    let mut rects: Vec<Rect> = regions.iter().map(region_to_rect).collect();
+    merge_rects(&mut rects);
+    sort_rects(&mut rects);
+    Ok(rects
+        .into_iter()
+        .filter_map(|rect| rect_to_region(rect, width, height))
+        .collect())
+}
+
+/// Runs detection on overlapping tiles and maps the boxes back to the source
+/// image. A failed tile is skipped unless every tile fails, so one bad tile
+/// does not discard the rest of the screenshot.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn detect_tiled(
+    engine: &PaddleEngine,
+    image: &image::DynamicImage,
+    width: u32,
+    height: u32,
+) -> Result<Vec<TextRegion>, OcrError> {
+    let tiles = tile_rects(width, height);
+    let tile_count = tiles.len();
+    let mut regions = Vec::new();
+    let mut failures = 0u32;
+    for (x, y, tile_width, tile_height) in tiles {
+        let tile = image.crop_imm(x, y, tile_width, tile_height);
+        match engine.detect_text_regions(&tile) {
+            Ok(found) => {
+                for region in found {
+                    let mut bbox = region.bbox;
+                    for point in &mut bbox {
+                        point[0] += x as f32;
+                        point[1] += y as f32;
+                    }
+                    regions.push(TextRegion {
+                        bbox,
+                        confidence: region.confidence,
+                    });
+                }
+            }
+            Err(_) => failures += 1,
+        }
+    }
+    if failures == tile_count as u32 {
+        return Err(OcrError::Platform(
+            "text detection failed on every tile".to_owned(),
+        ));
+    }
+    Ok(regions)
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn recognize_regions(
+    engine: &PaddleEngine,
+    image: &image::DynamicImage,
+    regions: Vec<TextRegion>,
+    scale_x: f32,
+    scale_y: f32,
+    frame_width: u32,
+    frame_height: u32,
+) -> Vec<OcrLine> {
+    let mut lines = Vec::with_capacity(regions.len());
+    for region in regions {
+        let Some((text, confidence)) = recognize_region(engine, image, &region) else {
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() || confidence < PADDLE_MIN_CONFIDENCE {
+            continue;
+        }
+        let Some(rect) = physical_rect(&region, scale_x, scale_y, frame_width, frame_height) else {
+            continue;
+        };
+        lines.push(build_line(text.to_owned(), rect));
+    }
+    lines
+}
+
+/// Recognizes one region, splitting extremely wide lines into overlapping
+/// chunks so the recognizer keeps a native character width.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn recognize_region(
+    engine: &PaddleEngine,
+    image: &image::DynamicImage,
+    region: &TextRegion,
+) -> Option<(String, f32)> {
+    let rect = region_to_rect(region);
+    let width = rect.width();
+    let height = rect.height();
+    if width < 2.0 || height < 2.0 {
+        return None;
+    }
+    let aspect = width / height;
+    if aspect <= PADDLE_REC_MAX_ASPECT {
+        let decoded = engine.recognize_text(image, region).ok()?;
+        return Some((decoded.text, decoded.score));
+    }
+    let chunks = ((aspect / PADDLE_REC_CHUNK_ASPECT).ceil() as usize).clamp(2, 16);
+    // One character of overlap keeps a glyph cut by the chunk boundary whole.
+    let overlap = (height * 1.2 / width).clamp(0.005, 0.2);
+    let mut text = String::new();
+    let mut weighted_score = 0.0_f32;
+    let mut char_count = 0_u32;
+    let mut decoded_chunks = 0_u32;
+    for index in 0..chunks {
+        let start = (index as f32 / chunks as f32 - overlap).max(0.0);
+        let end = ((index as f32 + 1.0) / chunks as f32 + overlap).min(1.0);
+        let chunk = TextRegion {
+            bbox: [
+                [rect.left + width * start, rect.top],
+                [rect.left + width * end, rect.top],
+                [rect.left + width * end, rect.bottom],
+                [rect.left + width * start, rect.bottom],
+            ],
+            confidence: region.confidence,
+        };
+        let Ok(decoded) = engine.recognize_text(image, &chunk) else {
+            continue;
+        };
+        let chunk_text = decoded.text;
+        if chunk_text.is_empty() {
+            continue;
+        }
+        let count = chunk_text.chars().count().max(1) as u32;
+        text = if text.is_empty() {
+            chunk_text
+        } else {
+            merge_recognition_overlap(&text, &chunk_text)
+        };
+        weighted_score += decoded.score * count as f32;
+        char_count += count;
+        decoded_chunks += 1;
+    }
+    if text.is_empty() || decoded_chunks == 0 {
+        let decoded = engine.recognize_text(image, region).ok()?;
+        return Some((decoded.text, decoded.score));
+    }
+    Some((text, weighted_score / char_count.max(1) as f32))
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn region_to_rect(region: &TextRegion) -> Rect {
+    let (mut left, mut top) = (f32::INFINITY, f32::INFINITY);
+    let (mut right, mut bottom) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for point in region.bbox {
+        left = left.min(point[0]);
+        top = top.min(point[1]);
+        right = right.max(point[0]);
+        bottom = bottom.max(point[1]);
+    }
+    Rect::new(left, top, right, bottom, region.confidence)
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn rect_to_region(rect: Rect, width: u32, height: u32) -> Option<TextRegion> {
+    let left = rect.left.max(0.0).min(width as f32);
+    let top = rect.top.max(0.0).min(height as f32);
+    let right = rect.right.max(0.0).min(width as f32);
+    let bottom = rect.bottom.max(0.0).min(height as f32);
+    if right - left < 2.0 || bottom - top < 2.0 {
+        return None;
+    }
+    Some(TextRegion {
+        bbox: [[left, top], [right, top], [right, bottom], [left, bottom]],
+        confidence: rect.confidence,
+    })
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn physical_rect(
+    region: &TextRegion,
+    scale_x: f32,
+    scale_y: f32,
+    frame_width: u32,
+    frame_height: u32,
+) -> Option<PhysicalRect> {
+    let rect = region_to_rect(region);
+    let width = frame_width as i32;
+    let height = frame_height as i32;
+    let left = (rect.left * scale_x).round() as i32;
+    let top = (rect.top * scale_y).round() as i32;
+    let right = (rect.right * scale_x).round() as i32;
+    let bottom = (rect.bottom * scale_y).round() as i32;
+    let left = left.clamp(0, width);
+    let top = top.clamp(0, height);
+    let right = right.clamp(left, width);
+    let bottom = bottom.clamp(top, height);
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some(PhysicalRect::new(
+        left,
+        top,
+        (right - left) as u32,
+        (bottom - top) as u32,
+    ))
+}
+
+/// Upscales small frames before detection and recognition. The detector caps
+/// its input at a 960 px long side, so small crops still benefit from extra
+/// pixels; large frames go through tiled detection instead.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn paddle_upscale(width: u32, height: u32) -> f32 {
     let pixels = u64::from(width).saturating_mul(u64::from(height));
@@ -138,63 +353,6 @@ fn paddle_source(image: &image::DynamicImage) -> (image::DynamicImage, f32, f32)
         image.width() as f32 / width as f32,
         image.height() as f32 / height as f32,
     )
-}
-
-/// Recognizes one detected block. Blocks much wider than the recognizer's
-/// fixed aspect ratio are cut into overlapping chunks; each chunk keeps a
-/// near-native character width instead of being squeezed into 320 px.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-fn paddle_block_text(
-    engine: &PaddleEngine,
-    image: &image::DynamicImage,
-    block: &paddleocr_rs_onnx::OcrBlock,
-) -> (String, f32) {
-    let width = block.width.max(1.0);
-    let height = block.height.max(1.0);
-    let aspect = width / height;
-    if aspect <= PADDLE_REC_ASPECT * 1.05 || height < 8.0 {
-        return (block.text.clone(), block.confidence);
-    }
-    let chunks = (aspect / PADDLE_REC_ASPECT).ceil().clamp(2.0, 8.0) as usize;
-    // Overlap is one character wide (CJK glyphs are roughly square) so a
-    // glyph cut by the chunk boundary still appears whole in one of them.
-    let overlap = (height * 1.2 / width).clamp(0.01, 0.2);
-    let mut text = String::new();
-    let mut score_sum = 0.0_f32;
-    let mut score_count = 0_u32;
-    for index in 0..chunks {
-        let start = (index as f32 / chunks as f32 - overlap).max(0.0);
-        let end = ((index as f32 + 1.0) / chunks as f32 + overlap).min(1.0);
-        let left = block.x + width * start;
-        let right = block.x + width * end;
-        let region = TextRegion {
-            bbox: [
-                [left, block.y],
-                [right, block.y],
-                [right, block.y + height],
-                [left, block.y + height],
-            ],
-            confidence: block.confidence,
-        };
-        let Ok(decoded) = engine.recognize_text(image, &region) else {
-            continue;
-        };
-        if decoded.text.is_empty() {
-            continue;
-        }
-        text = if text.is_empty() {
-            decoded.text
-        } else {
-            merge_recognition_overlap(&text, &decoded.text)
-        };
-        score_sum += decoded.score;
-        score_count += 1;
-    }
-    if text.is_empty() || score_count == 0 {
-        (block.text.clone(), block.confidence)
-    } else {
-        (text, score_sum / score_count as f32)
-    }
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]

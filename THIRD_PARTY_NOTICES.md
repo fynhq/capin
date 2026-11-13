@@ -17157,10 +17157,12 @@ at the versions pinned in `Cargo.lock`.
 
 ## Bundled OCR models
 
-Capin bundles the PaddleOCR PP-OCRv3 Chinese detection and recognition models
-(`ch_PP-OCRv3_det_infer.onnx` and the input-shape-normalized
-`ch_PP-OCRv3_rec_static.onnx`) together with the recognition dictionary. They
-are distributed under the Apache License 2.0; the full license text is
-reproduced in the Standard license texts section below. The models are used
-only by the Windows x64 OCR backend and run locally through ONNX Runtime.
+Capin bundles the PaddleOCR PP-OCRv6 tiny detection and recognition models
+(`PP-OCRv6_tiny_det.onnx`, `PP-OCRv6_tiny_rec.onnx`) together with the
+recognition dictionary (`ppocrv6_dict.txt`). They are distributed under the
+Apache License 2.0; the full license text is reproduced in the Standard license
+texts section below. The models are used only by the Windows x64/ARM64 OCR
+backend and run locally through ONNX Runtime. Sources:
+https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_det_onnx and
+https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_rec_onnx.
 

@@ -59,7 +59,7 @@ TREE_ALLOW = {
     ".github/scripts/check_public_surface.py": {"all"},
     # OCR recognition dictionary: recognition data, not prose. It contains
     # the section sign as one of its glyphs.
-    "crates/platform-ocr/assets/ocr/ppocr_keys_v1.txt": {"cjk", "private-doc"},
+    "crates/platform-ocr/assets/ocr/ppocrv6_dict.txt": {"cjk", "private-doc"},
 }
 LANG_ALLOWLIST = ".github/language_allowlist.txt"
 BINARY_PATTERNS = [
