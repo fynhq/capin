@@ -210,8 +210,6 @@ pub struct AppSettings {
     /// Sequence badge diameter in logical pixels.
     pub annotation_number_size: u32,
     pub annotation_blur_radius: u32,
-    /// Width of the blur edge fade in image pixels; zero keeps a hard edge.
-    pub annotation_blur_feather: u32,
     pub annotation_rect_filled: bool,
     pub annotation_ellipse_filled: bool,
     /// New rectangle-tool annotations use the ellipse form.
@@ -282,7 +280,6 @@ impl Default for AppSettings {
             annotation_highlighter_radius: 0.0,
             annotation_number_size: 32,
             annotation_blur_radius: 16,
-            annotation_blur_feather: 0,
             annotation_rect_filled: false,
             annotation_ellipse_filled: false,
             annotation_rect_ellipse: false,
@@ -481,11 +478,6 @@ fn parse(text: &str) -> AppSettings {
                     settings.annotation_blur_radius = radius.clamp(1, 64);
                 }
             }
-            "annotation_blur_feather" => {
-                if let Ok(feather) = value.parse::<u32>() {
-                    settings.annotation_blur_feather = feather.min(64);
-                }
-            }
             "annotation_rect_filled" => settings.annotation_rect_filled = value != "false",
             "annotation_ellipse_filled" => settings.annotation_ellipse_filled = value != "false",
             "annotation_rect_ellipse" => settings.annotation_rect_ellipse = value != "false",
@@ -631,7 +623,7 @@ fn serialize(settings: &AppSettings) -> String {
         settings.repeat_pin.code(),
     ));
     text.push_str(&format!(
-        "annotation_uniform_color={}\nannotation_rect_stroke_width={}\nannotation_arrow_stroke_width={}\nannotation_font_size={}\nannotation_arrow_start={}\nannotation_arrow_end={}\nannotation_arrow_polyline={}\nannotation_text_background={}\nannotation_text_outline={}\nannotation_text_alignment={}\nannotation_corner_radius={}\nannotation_highlighter_radius={}\nannotation_number_size={}\nannotation_blur_radius={}\nannotation_blur_feather={}\nannotation_rect_filled={}\nannotation_ellipse_filled={}\nannotation_rect_ellipse={}\nannotation_spotlight_intensity={}\nannotation_spotlight_radius={}\n",
+        "annotation_uniform_color={}\nannotation_rect_stroke_width={}\nannotation_arrow_stroke_width={}\nannotation_font_size={}\nannotation_arrow_start={}\nannotation_arrow_end={}\nannotation_arrow_polyline={}\nannotation_text_background={}\nannotation_text_outline={}\nannotation_text_alignment={}\nannotation_corner_radius={}\nannotation_highlighter_radius={}\nannotation_number_size={}\nannotation_blur_radius={}\nannotation_rect_filled={}\nannotation_ellipse_filled={}\nannotation_rect_ellipse={}\nannotation_spotlight_intensity={}\nannotation_spotlight_radius={}\n",
         settings.annotation_uniform_color,
         settings.annotation_rect_stroke_width,
         settings.annotation_arrow_stroke_width,
@@ -646,7 +638,6 @@ fn serialize(settings: &AppSettings) -> String {
         settings.annotation_highlighter_radius,
         settings.annotation_number_size,
         settings.annotation_blur_radius,
-        settings.annotation_blur_feather,
         settings.annotation_rect_filled,
         settings.annotation_ellipse_filled,
         settings.annotation_rect_ellipse,
@@ -762,8 +753,9 @@ mod tests {
         assert!(!defaults.annotation_rect_filled);
         assert!(!defaults.annotation_ellipse_filled);
         assert_eq!(defaults.annotation_spotlight_intensity, 40);
-        assert_eq!(defaults.annotation_blur_feather, 0);
 
+        // The retired edge-fade key stays in the sample so older config files
+        // keep loading without it.
         let settings = parse(
             "annotation_stroke_width=8\nannotation_font_size=32\nannotation_arrow_start=true\nannotation_arrow_end=false\nannotation_arrow_polyline=true\nannotation_text_background=true\nannotation_text_outline=true\nannotation_text_alignment=center\nannotation_corner_radius=16\nannotation_highlighter_radius=12\nannotation_blur_radius=32\nannotation_blur_feather=24\nannotation_rect_filled=true\nannotation_ellipse_filled=true\nannotation_rect_ellipse=true\nannotation_spotlight_intensity=80\n",
         );
@@ -779,7 +771,6 @@ mod tests {
         assert_eq!(settings.annotation_corner_radius, 16.0);
         assert_eq!(settings.annotation_highlighter_radius, 12.0);
         assert_eq!(settings.annotation_blur_radius, 32);
-        assert_eq!(settings.annotation_blur_feather, 24);
         assert!(settings.annotation_rect_filled);
         assert!(settings.annotation_ellipse_filled);
         assert!(settings.annotation_rect_ellipse);
@@ -809,7 +800,6 @@ mod tests {
             annotation_highlighter_radius: 8.0,
             annotation_number_size: 40,
             annotation_blur_radius: 32,
-            annotation_blur_feather: 24,
             annotation_rect_filled: true,
             annotation_ellipse_filled: true,
             annotation_rect_ellipse: true,

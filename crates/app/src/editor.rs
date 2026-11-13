@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,7 +38,6 @@ const FONT_SIZES: [f32; 4] = [14.0, 20.0, 28.0, 36.0];
 const CORNER_RADII: [f32; 4] = [0.0, 8.0, 16.0, 24.0];
 const NUMBER_SIZES: [u32; 4] = [24, 32, 40, 48];
 const BLUR_RADII: [u32; 4] = [8, 16, 24, 32];
-const BLUR_FEATHERS: [u32; 4] = [0, 8, 16, 32];
 const SPOTLIGHT_INTENSITIES: [u8; 3] = [20, 40, 60];
 const CANVAS_HISTORY_LIMIT: usize = 3;
 
@@ -230,13 +228,6 @@ struct ResizeDraft {
 struct PanDraft {
     start: Point<Pixels>,
     start_pan: Point<Pixels>,
-}
-
-struct BlurPreview {
-    rect: PhysicalRect,
-    radius: u32,
-    feather: u32,
-    image: Arc<RenderImage>,
 }
 
 struct CropDraft {
@@ -811,10 +802,6 @@ pub(crate) struct EditorView {
     rect_stroke_width: f32,
     arrow_stroke_width: f32,
     blur_radius: u32,
-    blur_feather: u32,
-    /// Feathered blur previews keyed by annotation. Each entry stores the
-    /// geometry it was rendered for so a move or resize regenerates it.
-    blur_previews: HashMap<core_annotate::AnnotationId, BlurPreview>,
     rect_filled: bool,
     ellipse_filled: bool,
     shape_ellipse: bool,
@@ -893,7 +880,6 @@ impl EditorView {
         let rect_stroke_width = settings.annotation_rect_stroke_width;
         let arrow_stroke_width = settings.annotation_arrow_stroke_width;
         let blur_radius = settings.annotation_blur_radius;
-        let blur_feather = settings.annotation_blur_feather;
         let rect_filled = settings.annotation_rect_filled;
         let ellipse_filled = settings.annotation_ellipse_filled;
         let shape_ellipse = settings.annotation_rect_ellipse;
@@ -906,9 +892,6 @@ impl EditorView {
             cx.drop_image(this.image.clone(), None);
             for image in this.blur_images.iter().flatten() {
                 cx.drop_image(image.clone(), None);
-            }
-            for preview in this.blur_previews.values() {
-                cx.drop_image(preview.image.clone(), None);
             }
         })
         .detach();
@@ -933,7 +916,6 @@ impl EditorView {
                 corner_radius,
                 highlighter_radius,
                 blur_radius,
-                blur_feather,
                 filled: false,
                 arrow_start,
                 arrow_end,
@@ -958,8 +940,6 @@ impl EditorView {
             rect_stroke_width,
             arrow_stroke_width,
             blur_radius,
-            blur_feather,
-            blur_previews: HashMap::new(),
             rect_filled,
             ellipse_filled,
             shape_ellipse,
@@ -1626,7 +1606,6 @@ impl EditorView {
     /// the atlas until dropped, so every canvas replacement has to release
     /// the previous set explicitly.
     fn refresh_frame_images(&mut self, cx: &mut Context<Self>) {
-        let old_previews = std::mem::take(&mut self.blur_previews);
         let image = image_util::render_image_ref(&self.frame);
         let old_image = std::mem::replace(&mut self.image, image);
         let old_blur_images =
@@ -1636,10 +1615,9 @@ impl EditorView {
         // immediate `App::drop_image` cannot reach the editor's atlas. Defer
         // the drop until the update finished; otherwise every F5 refresh or
         // canvas replacement leaks the previous full image.
-        let mut dropped = Vec::with_capacity(1 + old_blur_images.len() + old_previews.len());
+        let mut dropped = Vec::with_capacity(1 + old_blur_images.len());
         dropped.push(old_image);
         dropped.extend(old_blur_images.into_iter().flatten());
-        dropped.extend(old_previews.into_values().map(|preview| preview.image));
         cx.defer(move |cx| {
             for image in dropped {
                 cx.drop_image(image, None);
@@ -1650,36 +1628,6 @@ impl EditorView {
     /// Returns the cached blurred preview for `radius`, creating it on first
     /// use. The blur tool is rare, so the four previews no longer cost a
     /// resize and blur over the full frame on every editor open.
-    /// Cached feathered blur preview for one committed annotation. The image
-    /// is cropped to the blur rect and carries the alpha fade, so dragging an
-    /// unrelated object never re-renders it.
-    fn feathered_blur_preview(
-        &mut self,
-        id: core_annotate::AnnotationId,
-        rect: PhysicalRect,
-        radius: u32,
-        feather: u32,
-    ) -> Option<Arc<RenderImage>> {
-        if let Some(preview) = self.blur_previews.get(&id)
-            && preview.rect == rect
-            && preview.radius == radius
-            && preview.feather == feather
-        {
-            return Some(preview.image.clone());
-        }
-        let image = image_util::feathered_blur_image(&self.frame, rect, radius, feather)?;
-        self.blur_previews.insert(
-            id,
-            BlurPreview {
-                rect,
-                radius,
-                feather,
-                image: image.clone(),
-            },
-        );
-        Some(image)
-    }
-
     fn blur_image(&mut self, radius: u32, _cx: &mut Context<Self>) -> Arc<RenderImage> {
         let index = blur_image_index(radius);
         if let Some(image) = &self.blur_images[index] {
@@ -2475,10 +2423,7 @@ impl EditorView {
             Tool::Highlighter => {
                 style.highlighter_radius = self.highlighter_radius * self.ui_scale;
             }
-            Tool::Blur => {
-                style.blur_radius = self.blur_radius;
-                style.blur_feather = self.blur_feather;
-            }
+            Tool::Blur => style.blur_radius = self.blur_radius,
             Tool::Spotlight => {
                 style.spotlight_intensity = self.spotlight_intensity;
                 style.spotlight_radius = self.spotlight_radius * self.ui_scale;
@@ -2709,12 +2654,6 @@ impl EditorView {
         settings_state::update(|settings| settings.annotation_blur_radius = radius);
     }
 
-    fn apply_blur_feather(&mut self, feather: u32) {
-        self.blur_feather = feather;
-        self.update_style(|style| style.blur_feather = feather);
-        settings_state::update(|settings| settings.annotation_blur_feather = feather);
-    }
-
     fn apply_fill(&mut self, filled: bool) {
         let Some(tool) = self.config_tool() else {
             return;
@@ -2910,10 +2849,7 @@ impl EditorView {
                         self.arrow_end = annotation.style.arrow_end;
                         self.arrow_polyline = matches!(&annotation.shape, Shape::Polyline { .. });
                     }
-                    Tool::Blur => {
-                        self.blur_radius = annotation.style.blur_radius;
-                        self.blur_feather = annotation.style.blur_feather;
-                    }
+                    Tool::Blur => self.blur_radius = annotation.style.blur_radius,
                     Tool::Spotlight => {
                         self.spotlight_intensity = annotation.style.spotlight_intensity;
                         self.spotlight_radius = annotation.style.spotlight_radius / self.ui_scale;
@@ -3321,10 +3257,7 @@ impl EditorView {
                         Tool::Highlighter => {
                             this.style.highlighter_radius = this.highlighter_radius * this.ui_scale;
                         }
-                        Tool::Blur => {
-                            this.style.blur_radius = this.blur_radius;
-                            this.style.blur_feather = this.blur_feather;
-                        }
+                        Tool::Blur => this.style.blur_radius = this.blur_radius,
                         Tool::Spotlight => {
                             this.style.spotlight_intensity = this.spotlight_intensity;
                             this.style.spotlight_radius = this.spotlight_radius * this.ui_scale;
@@ -4063,50 +3996,6 @@ impl EditorView {
                     .gap(px(2.0))
                     .child(icons::icon(icons::BLUR, 14.0, muted))
                     .children(radii)
-                    .into_any_element(),
-            );
-
-            let mut feathers = Vec::new();
-            for feather in BLUR_FEATHERS {
-                let selected = config_style.blur_feather == feather;
-                let label = format!("{feather}");
-                let tooltip = format!("{} {label}", t(language, "editor.blur_feather"));
-                let button = div()
-                    .id(format!("editor-blur-feather-{label}"))
-                    .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
-                    .w(px(24.0))
-                    .h(px(22.0))
-                    .rounded(px(5.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(selected, |button| button.bg(accent_selected))
-                    .when(!selected, |button| {
-                        button.hover(move |style| style.bg(hover))
-                    })
-                    .active(|style| style.opacity(0.85))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.commit_text(cx);
-                        this.apply_blur_feather(feather);
-                        this.status = None;
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(if selected { accent } else { muted })
-                            .child(label),
-                    );
-                feathers.push(button.into_any_element());
-            }
-            groups.push(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(2.0))
-                    .child(icons::icon(icons::BLUR, 14.0, muted))
-                    .children(feathers)
                     .into_any_element(),
             );
         }
@@ -5717,37 +5606,6 @@ impl Render for EditorView {
                     let top = rect.origin.y as f32 * scale;
                     let width = px(rect.size.width as f32 * scale);
                     let height = px(rect.size.height as f32 * scale);
-                    let dragging = self
-                        .move_draft
-                        .as_ref()
-                        .is_some_and(|draft| draft.id == annotation.id)
-                        || self
-                            .resize_draft
-                            .as_ref()
-                            .is_some_and(|draft| draft.id == annotation.id);
-                    let feathered = (annotation.style.blur_feather > 0 && !dragging)
-                        .then(|| {
-                            self.feathered_blur_preview(
-                                annotation.id,
-                                *rect,
-                                annotation.style.blur_radius,
-                                annotation.style.blur_feather,
-                            )
-                        })
-                        .flatten();
-                    if let Some(blur_image) = feathered {
-                        object_layers.push(
-                            div()
-                                .absolute()
-                                .left(px(left))
-                                .top(px(top))
-                                .w(width)
-                                .h(height)
-                                .child(img(blur_image).absolute().inset_0().size_full())
-                                .into_any_element(),
-                        );
-                        continue;
-                    }
                     let blur_image = self.blur_image(annotation.style.blur_radius, cx);
                     object_layers.push(
                         div()

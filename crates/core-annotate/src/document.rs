@@ -25,9 +25,6 @@ pub struct AnnotationStyle {
     pub highlighter_radius: f32,
     /// Box-blur radius in image pixels for `Shape::Blur`.
     pub blur_radius: u32,
-    /// Width in image pixels of the feather band that blends the blurred
-    /// region back into the original image. Zero keeps a hard edge.
-    pub blur_feather: u32,
     /// Whether `Shape::Rect` and `Shape::Ellipse` render as solid fills.
     pub filled: bool,
     /// Draw an arrow head at the start of `Shape::Arrow`.
@@ -66,7 +63,6 @@ impl Default for AnnotationStyle {
             corner_radius: 0.0,
             highlighter_radius: 0.0,
             blur_radius: 16,
-            blur_feather: 0,
             filled: false,
             arrow_start: false,
             arrow_end: true,

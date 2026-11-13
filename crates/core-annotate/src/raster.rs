@@ -56,7 +56,6 @@ pub fn rasterize(
                 expected.height,
                 *rect,
                 annotation.style.blur_radius,
-                annotation.style.blur_feather,
             );
             continue;
         }
@@ -534,14 +533,7 @@ struct TextEngine {
     swash_cache: SwashCache,
 }
 
-fn blur_region(
-    data: &mut [u8],
-    width: u32,
-    height: u32,
-    rect: PhysicalRect,
-    radius: u32,
-    feather: u32,
-) {
+fn blur_region(data: &mut [u8], width: u32, height: u32, rect: PhysicalRect, radius: u32) {
     if rect.is_empty() {
         return;
     }
@@ -573,30 +565,11 @@ fn blur_region(
         box_blur_vertical(&scratch, &mut blurred, region_width, region_height, radius);
     }
 
-    let feather = (feather as usize).min(region_width.min(region_height) / 2);
     for row in 0..region_height {
-        for column in 0..region_width {
-            let target = ((y0 + row) * image_width + x0 + column) * 4;
-            let source = (row * region_width + column) * 4;
-            let alpha = if feather == 0 {
-                1.0
-            } else {
-                let distance = column
-                    .min(region_width - 1 - column)
-                    .min(row.min(region_height - 1 - row)) as f32;
-                let t = (distance / feather as f32).clamp(0.0, 1.0);
-                t * t * (3.0 - 2.0 * t)
-            };
-            if alpha >= 1.0 {
-                data[target..target + 4].copy_from_slice(&blurred[source..source + 4]);
-            } else if alpha > 0.0 {
-                for channel in 0..4 {
-                    let original = f32::from(data[target + channel]);
-                    let mixed = f32::from(blurred[source + channel]);
-                    data[target + channel] = (original + (mixed - original) * alpha).round() as u8;
-                }
-            }
-        }
+        let target = ((y0 + row) * image_width + x0) * 4;
+        let source = row * region_width * 4;
+        data[target..target + region_width * 4]
+            .copy_from_slice(&blurred[source..source + region_width * 4]);
     }
 }
 
@@ -884,7 +857,7 @@ mod tests {
     }
 
     #[test]
-    fn blur_feather_softens_the_region_edge() {
+    fn blur_region_keeps_a_hard_edge() {
         let width = 40;
         let height = 40;
         let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
@@ -895,34 +868,23 @@ mod tests {
             }
         }
         let frame = RgbaFrame::from_pixels(width, height, pixels).unwrap();
-
-        let sample = |feather: u32| {
-            let mut document = document(width, height);
-            document.add(
-                Shape::Blur(PhysicalRect::new(0, 0, width, height)),
-                AnnotationStyle {
-                    blur_radius: 8,
-                    blur_feather: feather,
-                    ..Default::default()
-                },
-            );
-            let output = rasterize(&document, &frame).unwrap();
-            (pixel(&output, 0, 20)[0], pixel(&output, 20, 20)[0])
-        };
-
-        let (hard_edge, hard_center) = sample(0);
-        let (feathered_edge, feathered_center) = sample(12);
+        let mut document = document(width, height);
+        document.add(
+            Shape::Blur(PhysicalRect::new(10, 10, 20, 20)),
+            AnnotationStyle {
+                blur_radius: 8,
+                ..Default::default()
+            },
+        );
+        let output = rasterize(&document, &frame).unwrap();
         assert!(
-            hard_edge < 255,
-            "a hard-edged blur must change the boundary pixel"
+            pixel(&output, 20, 20)[0] < 255,
+            "the blur center must change"
         );
         assert_eq!(
-            feathered_edge, 255,
-            "the feather band must leave the outer edge untouched"
-        );
-        assert!(
-            feathered_center < 255 && hard_center < 255,
-            "the blur center must stay blurred with a feather band"
+            pixel(&output, 9, 20)[0],
+            255,
+            "pixels outside the blur rect must stay untouched"
         );
     }
 

@@ -190,62 +190,6 @@ impl image::GenericImageView for RenderFrameView<'_> {
     }
 }
 
-/// Builds a cropped feathered blur preview.
-///
-/// The blurred pixels are blended back into the original crop across the
-/// `feather` band, exactly like the exported blur. The previous version faded
-/// the blurred layer's alpha instead, which let GPUI composite it against
-/// whatever happened to be below and read as a washed-out, white edge once
-/// the annotation was committed.
-pub fn feathered_blur_image(
-    frame: &RgbaFrame,
-    rect: PhysicalRect,
-    radius: u32,
-    feather: u32,
-) -> Option<Arc<RenderImage>> {
-    let frame_rect = PhysicalRect::new(0, 0, frame.width(), frame.height());
-    let rect = rect.intersection(frame_rect)?;
-    let width = rect.size.width as usize;
-    let height = rect.size.height as usize;
-    if width == 0 || height == 0 {
-        return None;
-    }
-    let mut original = Vec::with_capacity(width * height * 4);
-    for row in 0..height {
-        let start =
-            ((rect.origin.y as usize + row) * frame.width() as usize + rect.origin.x as usize) * 4;
-        original.extend_from_slice(&frame.pixels()[start..start + width * 4]);
-    }
-    let image = image::RgbaImage::from_raw(width as u32, height as u32, original)?;
-    let sigma = (radius as f32).max(0.5);
-    let blurred = image::imageops::blur(&image, sigma);
-    // Reclaim the source buffer instead of holding a second crop copy for the
-    // feather blend.
-    let original = image.into_raw();
-    let feather = feather.min((width.min(height) / 2) as u32) as usize;
-    let mut pixels = blurred.into_raw();
-    if feather > 0 {
-        for row in 0..height {
-            for column in 0..width {
-                let distance = column
-                    .min(width - 1 - column)
-                    .min(row.min(height - 1 - row));
-                let t = (distance as f32 / feather as f32).clamp(0.0, 1.0);
-                let mix = t * t * (3.0 - 2.0 * t);
-                let index = (row * width + column) * 4;
-                for channel in 0..4 {
-                    let source = f32::from(original[index + channel]);
-                    let target = f32::from(pixels[index + channel]);
-                    pixels[index + channel] = (source + (target - source) * mix).round() as u8;
-                }
-            }
-        }
-    }
-    RgbaFrame::from_pixels(width as u32, height as u32, pixels)
-        .ok()
-        .map(render_image)
-}
-
 /// Builds the preview for a box-blur radius. The frame is downscaled by two
 /// before the Gaussian pass so the preview keeps the exported radius; the
 /// previous eighth-resolution preview compressed every strength into the same
