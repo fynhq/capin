@@ -709,6 +709,9 @@ struct OverlayView {
     element_pending: Option<WindowId>,
     element_candidates: Vec<PhysicalRect>,
     element_level: usize,
+    /// Wheel targeting climbed past the hovered window; the whole screen is
+    /// highlighted and a click captures the monitor.
+    screen_targeting: bool,
     focus_handle: FocusHandle,
     editor: Option<Entity<EditorView>>,
     editing_rect: Option<Bounds<Pixels>>,
@@ -775,6 +778,7 @@ impl OverlayView {
             element_pending: None,
             element_candidates: Vec::new(),
             element_level: 0,
+            screen_targeting: false,
             focus_handle: cx.focus_handle(),
             editor: None,
             editing_rect: None,
@@ -965,11 +969,16 @@ impl OverlayView {
         if self.session.is_dragging() || self.selected.is_some() {
             return;
         }
-        let Some(window) = self.session.hovered_window().cloned() else {
+        // `hovered_window` is suppressed while whole-screen targeting is
+        // active; the raw window still tells us which element tree to resolve
+        // so scrolling back down restores the window level.
+        let Some(window) = self.session.window_under_pointer().cloned() else {
             self.element_window = None;
             self.element_pending = None;
             self.element_candidates.clear();
             self.element_level = 0;
+            self.screen_targeting = false;
+            self.session.set_screen_targeting(false);
             self.session.set_hovered_element(None);
             return;
         };
@@ -978,6 +987,8 @@ impl OverlayView {
             self.element_pending = None;
             self.element_candidates.clear();
             self.element_level = 0;
+            self.screen_targeting = false;
+            self.session.set_screen_targeting(false);
             self.session.set_hovered_element(None);
             return;
         }
@@ -999,8 +1010,11 @@ impl OverlayView {
         if self.element_level > candidates.len() {
             self.element_level = candidates.len();
         }
-        let selected = candidates.get(self.element_level).copied();
         self.element_candidates = candidates;
+        self.session.set_screen_targeting(self.screen_targeting);
+        let selected = (!self.screen_targeting)
+            .then(|| self.element_candidates.get(self.element_level).copied())
+            .flatten();
         self.session.set_hovered_element(selected);
     }
 
@@ -1068,19 +1082,36 @@ impl OverlayView {
     }
 
     fn adjust_auto_target(&mut self, delta: f32) {
-        if delta == 0.0 || self.session.has_drag() || self.session.hovered_window().is_none() {
+        if delta == 0.0 || self.session.has_drag() {
             return;
         }
-        if self.element_candidates.is_empty() {
+        if !self.screen_targeting && self.session.window_under_pointer().is_none() {
             return;
         }
         let max = self.element_candidates.len();
-        if delta > 0.0 {
-            self.element_level = (self.element_level + 1).min(max);
+        if self.screen_targeting {
+            if delta < 0.0 {
+                // Back down from the whole screen to the window it lives in.
+                self.screen_targeting = false;
+                self.element_level = max;
+            }
+        } else if delta > 0.0 {
+            if self.element_level < max {
+                self.element_level += 1;
+            } else {
+                // Past the window level the whole monitor becomes the target,
+                // so the wheel walk can reach a full-screen capture.
+                self.screen_targeting = true;
+            }
         } else {
             self.element_level = self.element_level.saturating_sub(1);
         }
-        let selected = self.element_candidates.get(self.element_level).copied();
+        self.session.set_screen_targeting(self.screen_targeting);
+        let selected = if self.screen_targeting {
+            None
+        } else {
+            self.element_candidates.get(self.element_level).copied()
+        };
         self.session.set_hovered_element(selected);
     }
 
@@ -1097,6 +1128,8 @@ impl OverlayView {
         self.element_pending = None;
         self.element_candidates.clear();
         self.element_level = 0;
+        self.screen_targeting = false;
+        self.session.set_screen_targeting(false);
         self.session.set_hovered_element(None);
         if let Some(point) = self.cursor {
             self.session.pointer_moved(point);
@@ -1583,6 +1616,7 @@ impl OverlayView {
                 AspectPreset::Free,
             ),
         };
+        self.screen_targeting = false;
         self.session.cancel();
         log_info!(
             "overlay",
@@ -1810,6 +1844,7 @@ impl OverlayView {
         self.clear_magnifier(window);
         self.editing_rect = Some(editor_rect);
         self.selected = None;
+        self.screen_targeting = false;
         self.session.cancel();
         // Cropped region editors share the frozen monitor image for edge
         // resizing; full-canvas editors already keep it as their display image.
@@ -1941,6 +1976,8 @@ impl OverlayView {
         let point = self.to_physical(event.position);
         self.cursor = Some(point);
         let action = self.session.pointer_released(point);
+        self.screen_targeting = false;
+        self.session.set_screen_targeting(false);
         if let SelectionAction::Capture(outcome) = action {
             if self.mode == OverlayMode::Capture {
                 let click_opens_editor = self.click_opens_editor;
@@ -2163,6 +2200,7 @@ impl OverlayView {
         self.element_pending = None;
         self.element_candidates.clear();
         self.element_level = 0;
+        self.screen_targeting = false;
         let monitor_bounds = self.session.monitor_bounds();
         let mut excluded = live_overlay_window_ids_excluding(cx, Some(cx.entity().entity_id()));
         if let Some(id) = self.native_id {
@@ -3679,6 +3717,7 @@ impl OverlayView {
                     }
                     if key == "delete" || key == "backspace" {
                         this.selected = None;
+                        this.screen_targeting = false;
                         this.session.cancel();
                         cx.notify();
                         return;
@@ -3697,6 +3736,7 @@ impl OverlayView {
                 }
 
                 if key == "escape" || (command && matches!(key, "w" | "q")) {
+                    this.screen_targeting = false;
                     this.session.cancel();
                     this.close_overlays(cx);
                     return;
@@ -3710,6 +3750,8 @@ impl OverlayView {
                         this.element_targeting = !this.element_targeting;
                         this.element_candidates.clear();
                         this.element_level = 0;
+                        this.screen_targeting = false;
+                        this.session.set_screen_targeting(false);
                         this.session.set_hovered_element(None);
                         cx.notify();
                     } else if key == "f5" && !event.is_held {
@@ -3780,6 +3822,7 @@ impl OverlayView {
                     // The mouse-up happened outside this overlay. Drop the
                     // stale press instead of turning the next click into a
                     // region that starts at the old origin.
+                    this.screen_targeting = false;
                     this.session.cancel();
                 } else {
                     this.session.pointer_moved(point);
@@ -3890,6 +3933,7 @@ impl OverlayView {
                 this.element_pending = None;
                 this.element_candidates.clear();
                 this.element_level = 0;
+                this.screen_targeting = false;
                 this.session.pointer_left();
                 cx.notify();
             }))

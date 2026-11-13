@@ -46,6 +46,10 @@ pub struct SelectionSession {
     drag: Option<Drag>,
     aspect_ratio: Option<f32>,
     window_targeting: bool,
+    /// Wheel targeting climbed past the hovered window: the next click
+    /// captures the whole monitor. Window and element hovers are suppressed
+    /// so the overlay can paint the full-screen hole.
+    screen_targeting: bool,
     drag_threshold: i32,
 }
 
@@ -77,6 +81,7 @@ impl SelectionSession {
             drag: None,
             aspect_ratio: None,
             window_targeting: false,
+            screen_targeting: false,
             drag_threshold: drag_threshold.max(1),
         }
     }
@@ -107,7 +112,23 @@ impl SelectionSession {
         if !enabled {
             self.hovered = None;
             self.hovered_element = None;
+            self.screen_targeting = false;
         }
+    }
+
+    /// Enables whole-monitor targeting. The overlay's wheel walk uses it once
+    /// it climbs past the hovered window, so a click captures the full screen
+    /// even though the pointer is over a window.
+    pub fn set_screen_targeting(&mut self, enabled: bool) {
+        self.screen_targeting = enabled && self.window_targeting;
+        if self.screen_targeting {
+            self.hovered = None;
+            self.hovered_element = None;
+        }
+    }
+
+    pub fn screen_targeting(&self) -> bool {
+        self.screen_targeting
     }
 
     pub fn window_targeting(&self) -> bool {
@@ -115,6 +136,16 @@ impl SelectionSession {
     }
 
     pub fn hovered_window(&self) -> Option<&WindowInfo> {
+        if self.screen_targeting {
+            return None;
+        }
+        let hovered = self.hovered?;
+        self.window(hovered)
+    }
+
+    /// Window under the pointer even while whole-screen targeting is active.
+    /// The overlay needs it to climb back down from the screen level.
+    pub fn window_under_pointer(&self) -> Option<&WindowInfo> {
         let hovered = self.hovered?;
         self.window(hovered)
     }
@@ -139,7 +170,7 @@ impl SelectionSession {
     /// Sets the UI element under the pointer. The overlay resolves platform
     /// accessibility bounds and keeps this session free of platform code.
     pub fn set_hovered_element(&mut self, element: Option<PhysicalRect>) {
-        if self.drag.as_ref().is_some_and(|drag| drag.active) {
+        if self.drag.as_ref().is_some_and(|drag| drag.active) || self.screen_targeting {
             self.hovered_element = None;
         } else {
             self.hovered_element = element;
@@ -201,6 +232,7 @@ impl SelectionSession {
         if self.drag.is_none() {
             self.hovered = None;
             self.hovered_element = None;
+            self.screen_targeting = false;
         }
     }
 
@@ -211,12 +243,12 @@ impl SelectionSession {
         self.drag = None;
 
         let over_window = self.hit_test(point).is_some();
-        let start_window = if self.window_targeting {
+        let start_window = if self.window_targeting && !self.screen_targeting {
             self.hit_test(point).map(|window| window.id)
         } else {
             None
         };
-        let start_element = if self.window_targeting {
+        let start_element = if self.window_targeting && !self.screen_targeting {
             self.hovered_element
         } else {
             None
@@ -258,7 +290,7 @@ impl SelectionSession {
 
         if let Some(window) = drag.start_window {
             SelectionAction::Capture(SelectionOutcome::Window(window))
-        } else if drag.over_window {
+        } else if drag.over_window && !self.screen_targeting {
             // Window targeting is disabled, so a click over a window does not
             // implicitly capture it.
             SelectionAction::None
@@ -271,6 +303,7 @@ impl SelectionSession {
         self.drag = None;
         self.hovered = None;
         self.hovered_element = None;
+        self.screen_targeting = false;
     }
 
     fn hit_test(&self, point: PhysicalPoint) -> Option<&WindowInfo> {
@@ -696,13 +729,47 @@ mod tests {
     }
 
     #[test]
+    fn screen_targeting_captures_the_monitor_from_inside_a_window() {
+        let mut session = session();
+        session.set_window_targeting(true);
+        session.pointer_moved(PhysicalPoint::new(250, 200));
+        session.set_screen_targeting(true);
+        session.pointer_pressed(PhysicalPoint::new(250, 200));
+        assert_eq!(
+            session.pointer_released(PhysicalPoint::new(250, 200)),
+            SelectionAction::Capture(SelectionOutcome::Monitor(MonitorId::from_raw(1)))
+        );
+    }
+
+    #[test]
+    fn screen_targeting_suppresses_window_hover() {
+        let mut session = session();
+        session.set_window_targeting(true);
+        session.pointer_moved(PhysicalPoint::new(250, 200));
+        session.set_screen_targeting(true);
+        assert_eq!(session.hovered_window(), None);
+        session.pointer_moved(PhysicalPoint::new(260, 210));
+        assert_eq!(session.hovered_window(), None);
+        session.set_screen_targeting(false);
+        session.pointer_moved(PhysicalPoint::new(260, 210));
+        assert_eq!(
+            session.hovered_window().map(|window| window.id),
+            Some(WindowId::from_raw(10))
+        );
+    }
+
+    #[test]
     fn cancel_clears_hover_and_drag() {
         let mut session = session();
+        session.set_window_targeting(true);
         session.pointer_pressed(PhysicalPoint::new(120, 120));
         session.pointer_moved(PhysicalPoint::new(400, 500));
+        session.set_screen_targeting(true);
+        assert!(session.screen_targeting());
         session.cancel();
         assert!(!session.is_dragging());
         assert_eq!(session.hovered_window().map(|window| window.id), None);
         assert_eq!(session.selection_rect(), None);
+        assert!(!session.screen_targeting());
     }
 }
