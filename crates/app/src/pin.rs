@@ -62,6 +62,12 @@ thread_local! {
     /// closed.
     static PIN_CLIPBOARD: Cell<Option<u64>> = const { Cell::new(None) };
     static PIN_CLIPBOARD_TEXT: Cell<Option<u64>> = const { Cell::new(None) };
+    /// History generation the current walk belongs to. A new capture starts
+    /// the walk over at the newest entry; closing pins does not.
+    static PIN_WALK_GENERATION: Cell<Option<u64>> = const { Cell::new(None) };
+    /// The walk already passed the oldest history entry, so the next press
+    /// starts a new walk from the newest capture.
+    static PIN_WALK_EXHAUSTED: Cell<bool> = const { Cell::new(false) };
 }
 
 fn clipboard_signature_of(bytes: &[u8]) -> u64 {
@@ -135,7 +141,7 @@ fn clipboard_text_signature(cx: &mut App) -> Option<u64> {
         if text.is_empty() {
             continue;
         }
-        return Some(clipboard_signature_of(text.as_bytes()));
+        return Some(text_signature(text));
     }
     None
 }
@@ -238,7 +244,7 @@ impl PinContent {
     fn hash(&self) -> Option<u64> {
         match self {
             Self::Image { hash, .. } => Some(*hash),
-            _ => None,
+            Self::Text(text) => Some(text_signature(text)),
         }
     }
 
@@ -487,12 +493,19 @@ struct PersistedPin {
 }
 
 pub fn pin_last(cx: &mut App) {
-    // Every pin was closed: the next press enters the history queue from the
-    // newest item again. Continuing from the last shown image made a finished
-    // walk keep sinking into older screenshots instead of restarting.
-    if PINS.with(|pins| pins.borrow().is_empty()) {
+    // Closing every pin keeps the walk position so repeated presses keep
+    // moving through older screenshots. Only a new capture restarts it: that
+    // way the shortcut never sinks back to an image the user just walked past.
+    let generation = crate::capture_history::generation();
+    if PIN_WALK_GENERATION.with(|slot| slot.get()) != Some(generation) {
         LAST_PIN_TRIGGER.with(|slot| slot.set(None));
-        LAST_PIN_SHADOW.with(|slot| slot.set(false));
+        PIN_WALK_EXHAUSTED.with(|slot| slot.set(false));
+    }
+    // The walk already showed the oldest entry; the next sequence starts over
+    // at the newest screenshot instead of staying stuck on the oldest one.
+    if PIN_WALK_EXHAUSTED.with(|slot| slot.get()) && PINS.with(|pins| pins.borrow().is_empty()) {
+        LAST_PIN_TRIGGER.with(|slot| slot.set(None));
+        PIN_WALK_EXHAUSTED.with(|slot| slot.set(false));
     }
     let mut clipboard_frame = None;
     let mut clipboard_signature = None;
@@ -545,7 +558,7 @@ pub fn pin_last(cx: &mut App) {
                 if text.is_empty() {
                     continue;
                 }
-                clipboard_text_signature = Some(clipboard_signature_of(text.as_bytes()));
+                clipboard_text_signature = Some(text_signature(text));
                 clipboard_text = Some(text.to_owned());
                 break;
             }
@@ -564,21 +577,30 @@ pub fn pin_last(cx: &mut App) {
             (None, Some(_)) => true,
             _ => false,
         };
-        if LAST_PIN_TRIGGER.with(|slot| slot.get()).is_none() || clipboard_changed {
-            pin_image(
-                crate::capture_history::HistoryImage {
-                    frame,
-                    pin_shadow: None,
-                    scale: None,
-                },
-                cx,
-            );
+        let walk_active = LAST_PIN_TRIGGER.with(|slot| slot.get()).is_some();
+        if walk_active && !clipboard_changed {
+            // The sequence is already walking the history. Even when it is
+            // exhausted, reopening the clipboard image would show the image
+            // the user just dismissed.
+            pin_history_step(cx);
             return;
         }
-        // The sequence is already walking the history. Even when it is
-        // exhausted, reopening the clipboard image would show the image the
-        // user just dismissed.
-        pin_history_step(cx);
+        // A new sequence starts with a changed clipboard. When the walk was
+        // reset by a finished capture instead, prefer that capture over a
+        // clipboard image that has not changed since the last pin.
+        let clipboard_image = crate::capture_history::HistoryImage {
+            frame,
+            pin_shadow: None,
+            scale: None,
+        };
+        let start_with_clipboard = clipboard_changed
+            || previous_clipboard.is_none()
+            || !crate::capture_history::has_entries();
+        if start_with_clipboard {
+            pin_image(clipboard_image, cx);
+        } else if let Some(image) = crate::capture_history::latest() {
+            pin_image(image, cx);
+        }
         return;
     }
 
@@ -588,14 +610,38 @@ pub fn pin_last(cx: &mut App) {
             (None, Some(_)) => true,
             _ => false,
         };
-        if LAST_PIN_TRIGGER.with(|slot| slot.get()).is_none() || text_changed {
-            open_pin_content(PinContent::Text(text), cx);
+        let walk_active = LAST_PIN_TRIGGER.with(|slot| slot.get()).is_some();
+        let hash = text_signature(&text);
+        let text_live = PINS.with(|pins| {
+            pins.borrow()
+                .values()
+                .any(|state| state.content_hash == Some(hash))
+        });
+        if walk_active && !text_changed {
+            if !text_live {
+                // A dismissed text pin reopens first, matching image pins.
+                open_text_pin(text, cx);
+                return;
+            }
+            if pin_history_step(cx) {
+                return;
+            }
+            open_text_pin(text, cx);
             return;
         }
-        if pin_history_step(cx) {
-            return;
+        // A changed clipboard or a fresh app start pins the text. A reset
+        // walk belongs to a finished capture, which is more recent than an
+        // unchanged clipboard text.
+        let start_with_text = text_changed
+            || PIN_CLIPBOARD_TEXT.get().is_none()
+            || !crate::capture_history::has_entries();
+        if start_with_text {
+            open_text_pin(text, cx);
+        } else if let Some(image) = crate::capture_history::latest() {
+            pin_image(image, cx);
+        } else {
+            open_text_pin(text, cx);
         }
-        open_pin_content(PinContent::Text(text), cx);
         return;
     }
 
@@ -610,10 +656,33 @@ pub fn pin_last(cx: &mut App) {
     }
 }
 
+/// Stable content signature for a text pin. The overlay and clipboard paths
+/// hash the same trimmed text so a text pin is recognised as already on
+/// screen and takes part in the history walk.
+fn text_signature(text: &str) -> u64 {
+    clipboard_signature_of(text.as_bytes())
+}
+
+/// Opens a clipboard text pin and records it as the current walk position.
+fn open_text_pin(text: String, cx: &mut App) {
+    let hash = text_signature(&text);
+    if open_pin_content(PinContent::Text(text), cx).is_some() {
+        LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
+        mark_walk();
+    }
+}
+
+/// Remembers that the current walk belongs to the current history generation
+/// and that it has not run out of older entries yet.
+fn mark_walk() {
+    PIN_WALK_GENERATION.with(|slot| slot.set(Some(crate::capture_history::generation())));
+    PIN_WALK_EXHAUSTED.with(|slot| slot.set(false));
+}
+
 /// Pins the next older screenshot in history. Respects the flash-current
 /// repeat preference while that pin is still on screen. Reaching the oldest
-/// entry consumes the shortcut without reopening anything, so a walk never
-/// shows an image twice.
+/// entry consumes the shortcut; the next press starts a new walk at the
+/// newest screenshot instead of reopening the oldest one.
 fn pin_history_step(cx: &mut App) -> bool {
     let Some(current) = LAST_PIN_TRIGGER.with(|slot| slot.get()) else {
         return false;
@@ -627,6 +696,7 @@ fn pin_history_step(cx: &mut App) -> bool {
     });
     if !live && let Some(image) = crate::capture_history::find(current) {
         open_history_pin(image, LAST_PIN_SHADOW.with(|slot| slot.get()), cx);
+        mark_walk();
         return true;
     }
     if settings_state::get().repeat_pin == settings_state::RepeatPinBehavior::FlashCurrent
@@ -636,6 +706,7 @@ fn pin_history_step(cx: &mut App) -> bool {
     }
     let Some(image) = crate::capture_history::cycle(current) else {
         log_info!("pin", "screenshot history has no older entry");
+        PIN_WALK_EXHAUSTED.with(|slot| slot.set(true));
         return true;
     };
     let hash = crate::capture_history::hash_frame(&image.frame);
@@ -643,6 +714,7 @@ fn pin_history_step(cx: &mut App) -> bool {
     if !flash_existing_pin(hash, cx) {
         open_history_pin(image, false, cx);
     }
+    mark_walk();
     true
 }
 
@@ -707,7 +779,9 @@ pub fn open_frame_with_hash(
     let bounds = default_bounds(cx, width, height);
     // Capture pins record their shadow-free export into history themselves;
     // the pinned image may carry a pin-only shadow.
-    open_pin_content_at(content, bounds, zoom, None, native_shadow, cx)
+    let id = open_pin_content_at(content, bounds, zoom, None, native_shadow, cx);
+    mark_walk();
+    id
 }
 
 /// Pins a capture at a screen rectangle using a hash already computed by the
@@ -738,14 +812,16 @@ pub fn open_frame_at_with_hash(
     let display_id = source
         .as_ref()
         .map(|monitor| DisplayId::new(monitor.id.raw()));
-    open_pin_content_at(
+    let id = open_pin_content_at(
         PinContent::from_frame_with_hash(frame, hash),
         bounds,
         zoom,
         display_id,
         native_shadow,
         cx,
-    )
+    );
+    mark_walk();
+    id
 }
 
 /// Opens a screenshot from history. Region exports leave the composed shadow
@@ -773,6 +849,7 @@ fn open_history_pin(
         } else {
             let _ = open_pin_content_with_shadow(content, native_shadow, cx);
         }
+        mark_walk();
         return;
     };
     let display_effects = crate::effects::RegionEffects {
@@ -795,10 +872,11 @@ fn open_history_pin(
     if let Some(id) = id {
         set_export_padding(id, display_padding);
     }
+    mark_walk();
 }
 
-fn open_pin_content(content: PinContent, cx: &mut App) {
-    let _ = open_pin_content_with_shadow(content, false, cx);
+fn open_pin_content(content: PinContent, cx: &mut App) -> Option<u64> {
+    open_pin_content_with_shadow(content, false, cx)
 }
 
 fn open_pin_content_with_shadow(
@@ -2021,6 +2099,22 @@ impl PinView {
             crate::ui::align_client_to_bounds(window, settle_bounds);
             window.refresh();
         });
+        // A pin created moments ago can miss the swap-chain resize for its
+        // first wheel step, which left the enlarged image cut off at the old
+        // surface until the next input repainted the window. Request one more
+        // frame after the resize settles instead of waiting for a click.
+        #[cfg(target_os = "windows")]
+        {
+            let handle = window.window_handle();
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(32))
+                    .await;
+                let _ = handle.update(cx, |_, window, _| window.refresh());
+                this.update(cx, |_, cx| cx.notify()).ok();
+            })
+            .detach();
+        }
         update_bounds_state(self.id, settle_bounds);
         update_meta(self.id, self.zoom, self.opacity);
         cx.notify();
@@ -2063,6 +2157,9 @@ impl PinView {
             self.zoom_center = None;
             let target = self.zoom_target;
             self.apply_zoom(target, window, cx);
+            // Keep the next wheel step relative to the zoom that was applied,
+            // not the unclamped target, so scrolling back starts immediately.
+            self.zoom_target = self.zoom;
             schedule_manifest_save(cx);
             self.show_hud(format!("{} {percent}%", t(language, "pin.zoom_hud")), cx);
             return;
@@ -2405,17 +2502,29 @@ impl PinView {
             .collect()
     }
 
-    fn body(&self, theme: &PinTheme, _language: Language) -> Div {
+    fn body(&self, theme: &PinTheme, viewport: Size<Pixels>) -> Div {
         match &self.content {
             PinContent::Image { image, .. } => {
-                // Size the image from the zoom target instead of the window:
-                // the native frame can reach its new size one frame before
-                // GPUI relayouts, which made the image visibly trail the
-                // border during wheel zoom.
+                // Size the image from the zoom instead of the window: the
+                // native frame can reach its new size one frame before GPUI
+                // relayouts, which made the image visibly trail the border
+                // during wheel zoom.
                 let (width, height) = self.content.size(self.zoom.max(MIN_PIN_ZOOM));
+                // Never paint past the client area. While a wheel step is
+                // still resizing the frame, an oversized body would lose its
+                // right and bottom edge until the next repaint.
+                let viewport_width = f32::from(viewport.width);
+                let viewport_height = f32::from(viewport.height);
+                let fit = if viewport_width <= 0.0 || viewport_height <= 0.0 {
+                    1.0
+                } else {
+                    (viewport_width / width.max(1.0))
+                        .min(viewport_height / height.max(1.0))
+                        .min(1.0)
+                };
                 div()
-                    .w(px(width))
-                    .h(px(height))
+                    .w(px(width * fit))
+                    .h(px(height * fit))
                     .child(img(image.clone()).size_full().object_fit(ObjectFit::Fill))
             }
             PinContent::Text(text) => div()
@@ -2436,14 +2545,15 @@ impl PinView {
 impl Render for PinView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = PinTheme::for_window(window);
-        let language = settings_state::get().language;
         let notice = self.notice.clone();
         let notice_serial = self.notice_serial;
         let notice_leaving = self.notice_leaving;
         let hud = self.hud.clone();
         let hud_serial = self.hud_serial;
         let hud_leaving = self.hud_leaving;
-        let body = self.body(&theme, language).opacity(self.opacity);
+        let body = self
+            .body(&theme, window.viewport_size())
+            .opacity(self.opacity);
         let zoom = self.zoom.max(MIN_PIN_ZOOM);
         let text_layers: Vec<Div> = self
             .selection_rects()

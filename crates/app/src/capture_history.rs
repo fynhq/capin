@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -45,20 +45,35 @@ pub struct HistoryImage {
 
 thread_local! {
     static ENTRIES: RefCell<Option<Vec<HistoryEntry>>> = const { RefCell::new(None) };
+    /// Bumped whenever an image is recorded. Pin walks reset when this
+    /// changes so the shortcut starts over at the newest screenshot instead
+    /// of continuing an old sequence.
+    static GENERATION: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Monotonic marker for "a new capture was recorded".
+pub fn generation() -> u64 {
+    GENERATION.with(Cell::get)
 }
 
 /// Records an already encoded PNG. Copying a screenshot to the clipboard
 /// produces PNG bytes; history writes those bytes instead of encoding the
 /// same image a second time.
+///
+/// Every successful record advances the generation. Pins anchor the walk to
+/// their image after opening, so their own record does not interrupt it.
 pub fn record_png_bytes(
     bytes: &[u8],
     hash: u64,
     pin_shadow: Option<HistoryPinShadow>,
     scale: Option<f32>,
 ) {
-    record_png(hash, pin_shadow, scale, |path| {
+    let recorded = record_png(hash, pin_shadow, scale, |path| {
         std::fs::write(path, bytes).is_ok()
     });
+    if recorded {
+        GENERATION.with(|cell| cell.set(cell.get().wrapping_add(1)));
+    }
 }
 
 /// Records an existing exported PNG by copying the file. Saving a screenshot
@@ -69,9 +84,13 @@ pub fn record_png_file(
     pin_shadow: Option<HistoryPinShadow>,
     scale: Option<f32>,
 ) -> bool {
-    record_png(hash, pin_shadow, scale, |path| {
+    let recorded = record_png(hash, pin_shadow, scale, |path| {
         std::fs::copy(source, path).is_ok()
-    })
+    });
+    if recorded {
+        GENERATION.with(|cell| cell.set(cell.get().wrapping_add(1)));
+    }
+    recorded
 }
 
 fn record_png(
@@ -172,6 +191,11 @@ fn older_index(entries: &[HistoryEntry], hash: u64) -> usize {
 /// Whether `hash` belongs to a screenshot in the current history.
 pub fn contains(hash: u64) -> bool {
     entries().iter().any(|entry| entry.hash == hash)
+}
+
+/// Whether the history has any entry, without decoding an image.
+pub fn has_entries() -> bool {
+    !entries().is_empty()
 }
 
 /// Loads the history entry matching `hash`. Used to reopen a pin that was just
