@@ -2942,9 +2942,10 @@ impl EditorView {
             return false;
         };
         self.annotation_clipboard = Some(annotation);
-        self.status =
-            Some(t(settings_state::get().language, "editor.annotation_copied").to_owned());
-        cx.notify();
+        self.show_status(
+            t(settings_state::get().language, "editor.annotation_copied").to_owned(),
+            cx,
+        );
         true
     }
 
@@ -2955,9 +2956,10 @@ impl EditorView {
         let id = self.document.paste(&annotation, 16, 16);
         self.tool = Tool::Select;
         self.select_annotation(Some(id));
-        self.status =
-            Some(t(settings_state::get().language, "editor.annotation_pasted").to_owned());
-        cx.notify();
+        self.show_status(
+            t(settings_state::get().language, "editor.annotation_pasted").to_owned(),
+            cx,
+        );
         true
     }
 
@@ -2971,9 +2973,10 @@ impl EditorView {
             return false;
         }
         log_info!("editor", "deleted annotation {id:?}");
-        self.status =
-            Some(t(settings_state::get().language, "editor.annotation_deleted").to_owned());
-        cx.notify();
+        self.show_status(
+            t(settings_state::get().language, "editor.annotation_deleted").to_owned(),
+            cx,
+        );
         true
     }
 
@@ -6650,7 +6653,6 @@ impl Render for EditorView {
                 }),
             );
 
-        let toolbar_rect = self.toolbar_rect(window);
         let region_bands = self.region_edge_bands(window, cx);
         let region_handles = self.region_handles(window, cx);
         let selection_layer = self.selection_layer(window);
@@ -6668,26 +6670,31 @@ impl Render for EditorView {
         let hints_panel = self.hints_panel(window, cx);
         let custom_color_panel = self.custom_color_panel(window, cx);
         let status_toast = status.map(|message| {
-            let top = (f32::from(toolbar_rect.origin.y) - 38.0).max(0.0);
             div()
                 .absolute()
-                .right(px(16.0))
-                .top(px(top))
-                .px(px(10.0))
-                .py(px(6.0))
-                .rounded(px(6.0))
-                .bg(self.chrome.surface_strong)
-                .border_1()
-                .border_color(self.chrome.border)
-                .shadow(self.chrome.shadow())
-                .text_size(px(12.0))
-                .text_color(self.chrome.text)
-                .child(message)
+                .bottom(px(46.0))
+                .left(px(0.0))
+                .right(px(0.0))
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .px(px(12.0))
+                        .py(px(6.0))
+                        .rounded(px(6.0))
+                        .bg(self.chrome.surface_strong)
+                        .border_1()
+                        .border_color(self.chrome.border)
+                        .shadow(self.chrome.shadow())
+                        .text_size(px(11.0))
+                        .text_color(self.chrome.text)
+                        .child(message),
+                )
                 .with_animation(
                     SharedString::from(format!("editor-status-{status_serial}")),
                     Animation::new(Duration::from_millis(120))
                         .with_easing(|delta| 1.0 - (1.0 - delta).powi(3)),
-                    move |toast, delta| toast.opacity(delta).top(px(top + (1.0 - delta) * 4.0)),
+                    move |toast, delta| toast.opacity(delta).bottom(px(46.0 - (1.0 - delta) * 4.0)),
                 )
         });
 
@@ -7397,10 +7404,7 @@ fn open_inline_editor_window(
             editor
         });
         if let Some(message) = notice {
-            editor.update(cx, |this, cx| {
-                this.status = Some(message);
-                cx.notify();
-            });
+            editor.update(cx, |this, cx| this.show_status(message, cx));
         }
         let focus = editor.read(cx).focus_handle.clone();
         register_view(&editor, window);
