@@ -451,10 +451,14 @@ fn draw_number(pixmap: &mut Pixmap, annotation: &Annotation) {
     let font_size = (bounds.size.height as f32 * 0.54).max(10.0);
     let text = value.to_string();
     let estimated_width = (font_size * 0.62 * text.chars().count() as f32).max(font_size);
+    let text_width = estimated_width.ceil() as u32 + 2;
+    // Center the padded glyph box on the badge and draw the text centered
+    // inside it. Left-in-box alignment pushed narrow digits such as "1" a few
+    // pixels off the circle centre in the exported image.
     let text_bounds = PhysicalRect::new(
-        bounds.origin.x + ((bounds.size.width as f32 - estimated_width) / 2.0).round() as i32,
+        bounds.origin.x + ((bounds.size.width as f32 - text_width as f32) / 2.0).round() as i32,
         bounds.origin.y + ((bounds.size.height as f32 - font_size * 1.3) / 2.0).round() as i32,
-        estimated_width.ceil() as u32 + 2,
+        text_width,
         (font_size * 1.3).ceil() as u32,
     );
     let text_annotation = Annotation {
@@ -467,6 +471,7 @@ fn draw_number(pixmap: &mut Pixmap, annotation: &Annotation) {
             color: foreground,
             stroke_width: 0.0,
             font_size,
+            text_alignment: TextAlignment::Center,
             ..Default::default()
         },
     };
