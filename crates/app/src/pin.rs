@@ -2095,8 +2095,13 @@ impl PinView {
         // The native frame and DWM can settle one turn after a resize; repeat
         // the client alignment and repaint so the image never stays clipped to
         // the previous window size.
-        window.defer(cx, move |window, _| {
+        window.defer(cx, move |window, cx| {
             crate::ui::align_client_to_bounds(window, settle_bounds);
+            // The platform resize callback cannot update GPUI's cached
+            // viewport while this view is being updated, so the layout kept
+            // fitting the pre-resize client area. Read the new client size
+            // here, before the next frame, instead of waiting for a click.
+            window.bounds_changed(cx);
             window.refresh();
         });
         // A pin created moments ago can miss the swap-chain resize for its
@@ -2522,10 +2527,22 @@ impl PinView {
                         .min(viewport_height / height.max(1.0))
                         .min(1.0)
                 };
+                // Centre the image while the client area still lags a wheel
+                // step. Anchoring it to the top-left corner made a growing pin
+                // look like the image was sliding up-left until the next
+                // click resized the surface.
                 div()
-                    .w(px(width * fit))
-                    .h(px(height * fit))
-                    .child(img(image.clone()).size_full().object_fit(ObjectFit::Fill))
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w(px(width * fit))
+                            .h(px(height * fit))
+                            .flex_shrink_0()
+                            .child(img(image.clone()).size_full().object_fit(ObjectFit::Fill)),
+                    )
             }
             PinContent::Text(text) => div()
                 .size_full()
