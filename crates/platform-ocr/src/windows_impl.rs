@@ -8,22 +8,22 @@ use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
 
 use crate::{OcrError, OcrLine, build_line, build_line_from_words, merge_recognition_overlap};
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use paddleocr_rs_onnx::{OcrEngine as PaddleEngine, OrderBy, TextRegion};
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 static PADDLE: OnceLock<Result<Mutex<PaddleEngine>, String>> = OnceLock::new();
 
 /// PaddleOCR confidence at or below this value is treated as icon noise. UI
 /// text normally scores above 0.8; low-confidence boxes are usually toolbar
 /// glyphs rather than copyable text.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const PADDLE_MIN_CONFIDENCE: f32 = 0.5;
 
 /// The bundled recognition model has a fixed 48x320 input, so a line wider
 /// than about 6.7:1 is squeezed horizontally and its punctuation degrades.
 /// Wide blocks are recognized in overlapping chunks instead.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const PADDLE_REC_ASPECT: f32 = 320.0 / 48.0;
 
 pub(super) fn recognize_text(frame: Arc<RgbaFrame>) -> Result<Vec<OcrLine>, OcrError> {
@@ -45,7 +45,7 @@ fn recognize_on_thread(frame: &RgbaFrame) -> Result<Vec<OcrLine>, OcrError> {
     recognize_with_windows(frame)
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn recognize_with_paddle(frame: &RgbaFrame) -> Option<Result<Vec<OcrLine>, OcrError>> {
     static DET: &[u8] = include_bytes!("../assets/ocr/ch_PP-OCRv3_det_infer.onnx");
     static REC: &[u8] = include_bytes!("../assets/ocr/ch_PP-OCRv3_rec_static.onnx");
@@ -106,7 +106,7 @@ fn recognize_with_paddle(frame: &RgbaFrame) -> Option<Result<Vec<OcrLine>, OcrEr
 /// Upscales small frames before PaddleOCR runs. Full-screen captures are left
 /// alone: the detector already resizes to a 960 px long side, and the extra
 /// copy would only cost memory.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn paddle_upscale(width: u32, height: u32) -> f32 {
     let pixels = u64::from(width).saturating_mul(u64::from(height));
     if pixels == 0 {
@@ -123,7 +123,7 @@ fn paddle_upscale(width: u32, height: u32) -> f32 {
 
 /// Returns the (possibly upscaled) image plus the factors that map its
 /// coordinates back to the original frame.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn paddle_source(image: &image::DynamicImage) -> (image::DynamicImage, f32, f32) {
     let upscale = paddle_upscale(image.width(), image.height());
     if upscale <= 1.0 {
@@ -143,7 +143,7 @@ fn paddle_source(image: &image::DynamicImage) -> (image::DynamicImage, f32, f32)
 /// Recognizes one detected block. Blocks much wider than the recognizer's
 /// fixed aspect ratio are cut into overlapping chunks; each chunk keeps a
 /// near-native character width instead of being squeezed into 320 px.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn paddle_block_text(
     engine: &PaddleEngine,
     image: &image::DynamicImage,
@@ -197,7 +197,7 @@ fn paddle_block_text(
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 fn recognize_with_paddle(_frame: &RgbaFrame) -> Option<Result<Vec<OcrLine>, OcrError>> {
     None
 }

@@ -13,7 +13,7 @@ image = { version = "0.25.10", default-features = false, features = ["png"] }
 rqrr = "0.11.0"
 thiserror.workspace = true
 
-[target.'cfg(all(target_os = "windows", target_arch = "x86_64"))'.dependencies]
+[target.'cfg(all(target_os = "windows", any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
 paddleocr_rs_onnx = "0.2.8"
 
 [target.'cfg(windows)'.dependencies]

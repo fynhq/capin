@@ -1,7 +1,7 @@
 # Bundled OCR models
 
 These files are the PaddleOCR PP-OCRv3 Chinese detection and recognition
-models used by the Windows x64 OCR backend.
+models used by the Windows OCR backend.
 
 - Source: PaddleOCR / RapidOCR redistributions (`ch_PP-OCRv3_det_infer.onnx`,
   `ch_PP-OCRv3_rec_infer.onnx`).
@@ -13,4 +13,5 @@ models used by the Windows x64 OCR backend.
   height/width from the ONNX input shape; the upstream model uses symbolic
   dimensions and would otherwise be treated as height 1.
 
-The models are embedded in the Windows x64 binary with `include_bytes!`.
+The models are embedded in the Windows x64 and ARM64 binaries with
+`include_bytes!`.

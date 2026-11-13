@@ -14,7 +14,7 @@ Capin 是面向 Windows 10+ 与 macOS 13+ 的截图、标注、贴图、OCR、�
 - **窗口质感**：窗口截图固定系统风格阴影、内边距和 1px 主题边框，背景透明或白色；macOS 保留原生效果。区域截图可单独设置圆角与阴影，并延续到后续截图。
 - **标注**：矩形/椭圆、直线/折线箭头、荧光笔、文字、高斯模糊、序号、聚光灯与撤销重做；点击对象即可选中，支持移动、缩放、复制粘贴、删除、改色与线宽。区域截图以冻结全屏为画布，标注后可拖选区边/角手柄调整导出范围，框外标注保留但不显示；贴图编辑支持裁剪、旋转与翻转，长截图只裁剪并支持缩放/平移。
 - **贴图**：图片/文本贴图，置顶、透明度、平滑缩放、旋转、多贴、鼠标穿透、重启恢复、标注与自动 OCR；保留最近 7 天最多 50 张截图历史，可按贴图键逐张回看。
-- **OCR**：贴图自动识别文字与二维码，结果可划选复制；Windows x64 使用随包 PaddleOCR，ARM64 或模型失败回落系统 OCR，macOS 使用 Vision；仅在本机处理。
+- **OCR**：贴图自动识别文字与二维码，结果可划选复制；Windows x64/ARM64 使用随包 PaddleOCR，模型加载失败回落系统 OCR，macOS 使用 Vision；仅在本机处理。
 - **长截图**：手动滚动、自动接图，重叠匹配与固定顶栏裁除；不注入滚轮，不自动滚动页面。
 - **录屏**：区域/窗口录制，MP4（系统 H.264，固定 30 fps，自动码率），无音频与摄像头；倒计时、暂停/继续、计时、光标录入与演示高亮；录制条和选区边框不入镜。
 - **系统**：托盘、全局热键、剪贴板、自动保存、开机自启、中英文界面；截图与录屏分目录保存，共用文件名模板；跟随系统亮暗与强调色；不上传，无遥测。
@@ -90,7 +90,7 @@ Capin is a screenshot, annotation, pin, OCR, scrolling-capture, and screen-recor
 - **Window finish** — system-style shadow, padding and a 1px theme border over a transparent or white background; macOS keeps its native presentation. Region captures can set corner radius and shadow, kept for later captures.
 - **Annotation** — rectangle/ellipse, straight/polyline arrows, highlighter, text, Gaussian blur, numbered badges, spotlight and undo/redo; click an object to select, move, resize, copy/paste, delete, recolor or change width. Region captures annotate the frozen full display and can resize the export frame afterwards; objects outside the frame stay in the document but are hidden and return when the frame grows. Pins support crop/rotate/flip; scrolling captures support crop plus zoom/pan.
 - **Pins** — image/text pins with always-on-top, opacity, smooth zoom, rotation, multiple pins, click-through, restart restore, annotation and automatic OCR; keep the last 7 days / 50 screenshot exports and walk them with the pin hotkey.
-- **OCR** — text and QR recognition on pins with selectable copy; Windows x64 uses bundled PaddleOCR, ARM64 or model failure falls back to system OCR, macOS uses Vision; local only.
+- **OCR** — text and QR recognition on pins with selectable copy; Windows x64 and ARM64 use bundled PaddleOCR, falling back to system OCR if the models fail to load; macOS uses Vision; local only.
 - **Scrolling capture** — manual scrolling with automatic stitching, overlap matching and fixed-header trimming; no wheel injection.
 - **Recording** — region/window MP4 via the system H.264 encoder at 30 fps and automatic bitrate; no audio or camera; countdown, pause/resume, timer, cursor and demo highlight; the control bar and selection border stay out of frame.
 - **System** — tray, global hotkeys, clipboard, autosave, launch at login, Chinese/English UI; separate Pictures/Videos folders and a shared filename template; follows system appearance and accent; no upload, no telemetry.

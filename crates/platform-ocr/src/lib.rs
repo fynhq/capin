@@ -227,7 +227,7 @@ fn normalize_mixed_char(ch: char, previous: Option<char>, next: Option<char>) ->
 }
 
 /// Joins two overlapping chunk decodes without repeating the shared seam.
-#[allow(dead_code)] // Windows x86_64 recognition only
+#[allow(dead_code)] // Windows recognition only
 pub(crate) fn merge_recognition_overlap(previous: &str, next: &str) -> String {
     let mut merged = String::with_capacity(previous.len() + next.len());
     merged.push_str(previous);
