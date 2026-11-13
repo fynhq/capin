@@ -190,9 +190,13 @@ impl image::GenericImageView for RenderFrameView<'_> {
     }
 }
 
-/// Builds a cropped blur preview whose alpha fades out across `feather`
-/// pixels, so the original image below shows through the edge band exactly
-/// like the exported feathered blur.
+/// Builds a cropped feathered blur preview.
+///
+/// The blurred pixels are blended back into the original crop across the
+/// `feather` band, exactly like the exported blur. The previous version faded
+/// the blurred layer's alpha instead, which let GPUI composite it against
+/// whatever happened to be below and read as a washed-out, white edge once
+/// the annotation was committed.
 pub fn feathered_blur_image(
     frame: &RgbaFrame,
     rect: PhysicalRect,
@@ -206,15 +210,18 @@ pub fn feathered_blur_image(
     if width == 0 || height == 0 {
         return None;
     }
-    let mut pixels = Vec::with_capacity(width * height * 4);
+    let mut original = Vec::with_capacity(width * height * 4);
     for row in 0..height {
         let start =
             ((rect.origin.y as usize + row) * frame.width() as usize + rect.origin.x as usize) * 4;
-        pixels.extend_from_slice(&frame.pixels()[start..start + width * 4]);
+        original.extend_from_slice(&frame.pixels()[start..start + width * 4]);
     }
-    let image = image::RgbaImage::from_raw(width as u32, height as u32, pixels)?;
+    let image = image::RgbaImage::from_raw(width as u32, height as u32, original)?;
     let sigma = (radius as f32).max(0.5);
     let blurred = image::imageops::blur(&image, sigma);
+    // Reclaim the source buffer instead of holding a second crop copy for the
+    // feather blend.
+    let original = image.into_raw();
     let feather = feather.min((width.min(height) / 2) as u32) as usize;
     let mut pixels = blurred.into_raw();
     if feather > 0 {
@@ -224,8 +231,13 @@ pub fn feathered_blur_image(
                     .min(width - 1 - column)
                     .min(row.min(height - 1 - row));
                 let t = (distance as f32 / feather as f32).clamp(0.0, 1.0);
-                let alpha = (t * t * (3.0 - 2.0 * t) * 255.0).round() as u8;
-                pixels[(row * width + column) * 4 + 3] = alpha;
+                let mix = t * t * (3.0 - 2.0 * t);
+                let index = (row * width + column) * 4;
+                for channel in 0..4 {
+                    let source = f32::from(original[index + channel]);
+                    let target = f32::from(pixels[index + channel]);
+                    pixels[index + channel] = (source + (target - source) * mix).round() as u8;
+                }
             }
         }
     }
