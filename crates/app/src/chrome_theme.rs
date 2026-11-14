@@ -22,6 +22,14 @@ const FALLBACK_ACCENT_LIGHT: u32 = 0x0067C0;
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 const FALLBACK_ACCENT_DARK: u32 = 0x4CC2FF;
 
+pub(crate) fn fallback_accent(dark: bool) -> u32 {
+    if dark {
+        FALLBACK_ACCENT_DARK
+    } else {
+        FALLBACK_ACCENT_LIGHT
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ChromeTheme {
     pub dark: bool,

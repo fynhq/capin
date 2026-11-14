@@ -8,7 +8,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use platform_window::{AutostartState, set_autostart, system_accent_hex};
 
-use crate::chrome_theme::accent_text_color;
+use crate::chrome_theme::{accent_text_color, fallback_accent};
 use crate::i18n::{Language, t};
 use crate::icons;
 use crate::logging::{log_error, log_info};
@@ -53,21 +53,6 @@ pub fn has_open_settings(cx: &mut App) -> bool {
     SETTINGS_WINDOWS.with(|handles| *handles.borrow_mut() = live);
     alive
 }
-
-#[cfg(target_os = "windows")]
-const FALLBACK_ACCENT_LIGHT: u32 = 0x0067C0;
-#[cfg(target_os = "windows")]
-const FALLBACK_ACCENT_DARK: u32 = 0x4CC2FF;
-
-#[cfg(target_os = "macos")]
-const FALLBACK_ACCENT_LIGHT: u32 = 0x007AFF;
-#[cfg(target_os = "macos")]
-const FALLBACK_ACCENT_DARK: u32 = 0x0A84FF;
-
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-const FALLBACK_ACCENT_LIGHT: u32 = 0x0067C0;
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-const FALLBACK_ACCENT_DARK: u32 = 0x4CC2FF;
 
 /// Native window metrics. Windows follows the system Settings layout, macOS
 /// follows System Settings, so paddings, corner radii and type sizes match the host.
@@ -412,11 +397,7 @@ impl Theme {
             window.appearance(),
             WindowAppearance::Dark | WindowAppearance::VibrantDark
         );
-        let accent_hex = accent.unwrap_or(if dark {
-            FALLBACK_ACCENT_DARK
-        } else {
-            FALLBACK_ACCENT_LIGHT
-        });
+        let accent_hex = accent.unwrap_or_else(|| fallback_accent(dark));
         Self::build(dark, accent_hex, window.scale_factor())
     }
 
