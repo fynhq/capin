@@ -11,7 +11,7 @@ Capin 是面向 Windows 10+ 与 macOS 13+ 的截图、标注、贴图、OCR、�
 ## 功能
 
 - **截图**：区域、窗口、元素、任务栏、贴图与设置页；悬停识别窗口/元素，滚轮切换层级，拖拽自由选区，桌面空白单击截整屏；支持固定比例、光标捕捉与 F5 刷新。Windows 使用 UI Automation，macOS 使用 Accessibility，未授权时回落窗口级。
-- **窗口质感**：窗口截图固定系统风格阴影、内边距和 1px 主题边框，背景透明或白色；macOS 保留原生效果。区域截图可单独设置圆角与阴影，并延续到后续截图。
+- **窗口质感**：窗口截图固定系统风格阴影、内边距和 1px 主题边框，背景透明或白色；macOS 13 保留原生效果，14+ 补合成阴影。区域截图可单独设置圆角与阴影，并延续到后续截图。
 - **标注**：矩形/椭圆、直线/折线箭头、荧光笔、文字、高斯模糊、序号、聚光灯与撤销重做；点击对象即可选中，支持移动、缩放、复制粘贴、删除、改色与线宽。区域截图以冻结全屏为画布，标注后可拖选区边/角手柄调整导出范围，框外标注保留但不显示；贴图编辑支持裁剪、旋转与翻转，长截图只裁剪并支持缩放/平移。
 - **贴图**：图片/文本贴图，置顶、透明度、平滑缩放、旋转、多贴、鼠标穿透、重启恢复、标注与自动 OCR；保留最近 7 天最多 50 张截图历史，可按贴图键逐张回看。
 - **OCR**：贴图自动识别文字与二维码，结果可划选复制；Windows x64/ARM64 使用随包 PaddleOCR，模型加载失败回落系统 OCR，macOS 使用 Vision；仅在本机处理。
@@ -87,7 +87,7 @@ Capin is a screenshot, annotation, pin, OCR, scrolling-capture, and screen-recor
 ## Features
 
 - **Capture** — regions, windows, elements, taskbar, pins and settings; hover detection, wheel to change level, free drag, empty-desktop click for the full display; fixed ratios, cursor capture and F5 refresh. Windows uses UI Automation; macOS uses Accessibility and falls back to whole windows without permission.
-- **Window finish** — system-style shadow, padding and a 1px theme border over a transparent or white background; macOS keeps its native presentation. Region captures can set corner radius and shadow, kept for later captures.
+- **Window finish** — system-style shadow, padding and a 1px theme border over a transparent or white background; macOS 13 keeps its native presentation and macOS 14+ composes a shadow. Region captures can set corner radius and shadow, kept for later captures.
 - **Annotation** — rectangle/ellipse, straight/polyline arrows, highlighter, text, Gaussian blur, numbered badges, spotlight and undo/redo; click an object to select, move, resize, copy/paste, delete, recolor or change width. Region captures annotate the frozen full display and can resize the export frame afterwards; objects outside the frame stay in the document but are hidden and return when the frame grows. Pins support crop/rotate/flip; scrolling captures support crop plus zoom/pan.
 - **Pins** — image/text pins with always-on-top, opacity, smooth zoom, rotation, multiple pins, click-through, restart restore, annotation and automatic OCR; keep the last 7 days / 50 screenshot exports and walk them with the pin hotkey.
 - **OCR** — text and QR recognition on pins with selectable copy; Windows x64 and ARM64 use bundled PaddleOCR, falling back to system OCR if the models fail to load; macOS uses Vision; local only.

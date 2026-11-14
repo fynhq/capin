@@ -13,8 +13,8 @@ const SHADOW_OPACITY: f32 = 0.35;
 
 /// Composes a window capture with the fixed window styling: the system corner
 /// radius, a system-style drop shadow, the configured background and padding.
-/// macOS captures already carry the native window shadow, so only the padding
-/// and background are added there.
+/// macOS 13 captures include the native shadow, so the composed shadow is
+/// skipped there; macOS 14+ captures drop it and receive the composed fallback.
 pub fn compose_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> RgbaFrame {
     let settings = settings_state::get();
     let scale = scale.max(0.1);

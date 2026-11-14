@@ -276,10 +276,10 @@ pub fn disable_native_shadow(window: &impl HasWindowHandle) {
     }
 }
 
-/// Restores the platform-drawn outer shadow for a borderless surface. Images
-/// without a composed edge shadow (region captures and long-capture results)
-/// use this so a pinned screenshot still reads as a floating object. No-op on
-/// platforms without a native window shadow.
+/// Restores the platform-drawn outer shadow for a borderless surface. Pins
+/// whose image has no composed edge shadow (currently long-capture results)
+/// use this so the pinned screenshot still reads as a floating object. No-op
+/// on platforms without a native window shadow.
 pub fn enable_native_shadow(window: &impl HasWindowHandle) {
     #[cfg(target_os = "windows")]
     {
@@ -296,7 +296,8 @@ pub fn enable_native_shadow(window: &impl HasWindowHandle) {
 }
 
 /// Whether the platform's window capture already includes the native window
-/// shadow. macOS 13's ScreenCaptureKit path does; macOS 14+ can ignore it.
+/// shadow. macOS 13's ScreenCaptureKit path does; macOS 14+ drops it, so
+/// callers compose one instead.
 pub fn window_capture_includes_native_shadow() -> bool {
     #[cfg(target_os = "macos")]
     {

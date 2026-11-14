@@ -19,9 +19,9 @@ use paddleocr_rs_onnx::{OcrEngine as PaddleEngine, TextRegion};
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 static PADDLE: OnceLock<Result<Mutex<PaddleEngine>, String>> = OnceLock::new();
 
-/// PaddleOCR confidence at or below this value is treated as icon noise. UI
-/// text normally scores above 0.8; low-confidence boxes are usually toolbar
-/// glyphs rather than copyable text.
+/// PaddleOCR confidence below this value is treated as icon noise. UI text
+/// normally scores above 0.8; low-confidence boxes are usually toolbar glyphs
+/// rather than copyable text.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const PADDLE_MIN_CONFIDENCE: f32 = 0.5;
 

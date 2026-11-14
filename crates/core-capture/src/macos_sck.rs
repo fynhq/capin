@@ -337,8 +337,9 @@ fn build_config(
         config.setQueueDepth(3);
         config.setScalesToFit(true);
         config.setPreservesAspectRatio(true);
-        // Screenshots of windows keep alpha so the window compositor can
-        // apply its own rounded corners and shadow.
+        // Screenshots of windows keep alpha for rounded corners. macOS 14+
+        // ignores the system window shadow here so the app can compose one
+        // consistent edge; macOS 13 keeps the native shadow.
         config.setShouldBeOpaque(!window);
         if window && config.respondsToSelector(objc2::sel!(setIgnoreShadowsSingleWindow:)) {
             config.setIgnoreShadowsSingleWindow(true);

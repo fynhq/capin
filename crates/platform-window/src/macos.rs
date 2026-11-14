@@ -242,7 +242,7 @@ pub(super) fn apply(
 }
 
 /// Re-enables AppKit's window shadow. Borderless windows turn it off in
-/// `apply` so pins do not clip their own pixels; region pins restore it.
+/// `apply` so pins do not clip their own pixels; long-capture pins restore it.
 pub(super) fn enable_native_shadow(window: &impl HasWindowHandle) {
     let Ok(handle) = window.window_handle() else {
         return;

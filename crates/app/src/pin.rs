@@ -389,8 +389,8 @@ enum PinBase {
     },
 }
 
-/// Bases above this size are kept compressed. 8 MiB covers 1080p screenshots,
-/// whose RGBA buffers are 8.3 MiB, while small crops remain uncompressed.
+/// Bases above this size are kept compressed. 8 MiB covers 1080p screenshots
+/// (about 7.9 MiB of RGBA); small crops stay raw and larger 4K bases become PNG.
 const PIN_BASE_KEEP_RAW_BYTES: usize = 8 * 1024 * 1024;
 
 impl PinEditState {
@@ -463,8 +463,8 @@ struct PinState {
     opacity: f32,
     zoom: f32,
     click_through: bool,
-    /// Region and long-capture pins have no composed edge shadow, so the
-    /// window itself supplies one. Window captures already bake it in.
+    /// Long-capture pins have no composed edge shadow, so the window itself
+    /// supplies one. Region and window captures already bake it in.
     native_shadow: bool,
     /// Present after the pin has been edited in this session. Rotating or
     /// replacing the image from another source clears it.
@@ -1000,9 +1000,9 @@ fn open_pin_inner(
         if let Err(error) = apply_window_style(&*window, WindowStyle::PIN) {
             log_error!("pin", "failed to style pin window: {error}");
         }
-        // Window captures bake their edge shadow into the image and must not
-        // get a second system shadow. Region and long-capture pins have no
-        // composed shadow, so the window supplies the floating edge.
+        // Window and region captures bake their edge shadow into the image
+        // and must not get a second system shadow. Long-capture results have
+        // no composed shadow, so the window supplies the floating edge.
         if native_shadow {
             enable_native_shadow(&*window);
         } else {

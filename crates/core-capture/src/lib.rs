@@ -27,8 +27,8 @@ pub use selection::{
 
 /// Returns best-effort bounds for UI elements inside a window.
 ///
-/// Windows uses UI Automation; other platforms currently return an empty list
-/// and fall back to whole-window selection.
+/// Windows uses UI Automation and macOS uses Accessibility; platforms without
+/// an element tree return an empty list and fall back to whole-window selection.
 pub fn ui_elements(id: core_types::WindowId) -> Vec<core_types::PhysicalRect> {
     #[cfg(target_os = "windows")]
     {
