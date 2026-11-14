@@ -717,4 +717,52 @@ mod tests {
         assert!(border[0] < 200, "border should darken the edge pixel");
         assert_eq!(output.pixel(6, 6).unwrap(), [200, 50, 50, 255]);
     }
+
+    #[test]
+    fn zero_padding_skips_the_shadow_and_keeps_the_canvas_size() {
+        let window = solid_frame(10, 10, [200, 50, 50, 255]);
+        let options = WindowCanvas {
+            padding: 0,
+            corner_radius: 4,
+            shadow: Some(Shadow {
+                offset_y: 0,
+                blur_radius: 8,
+                opacity: 1.0,
+            }),
+            background: Background::Solid([10, 20, 30, 255]),
+            border: None,
+        };
+        let output = compose_window(&window, &options).unwrap();
+
+        assert_eq!(output.width(), 10);
+        assert_eq!(output.height(), 10);
+        assert_eq!(output.pixel(0, 0).unwrap(), [10, 20, 30, 255]);
+        assert_eq!(output.pixel(5, 5).unwrap(), [200, 50, 50, 255]);
+    }
+
+    #[test]
+    fn shadow_blends_over_a_solid_background() {
+        let window = solid_frame(10, 10, [200, 50, 50, 255]);
+        let options = WindowCanvas {
+            padding: 12,
+            corner_radius: 0,
+            shadow: Some(Shadow {
+                offset_y: 0,
+                blur_radius: 6,
+                opacity: 1.0,
+            }),
+            background: Background::Solid([10, 20, 30, 255]),
+            border: None,
+        };
+        let output = compose_window(&window, &options).unwrap();
+
+        assert_eq!(output.pixel(0, 0).unwrap(), [10, 20, 30, 255]);
+        assert_eq!(output.pixel(12, 12).unwrap(), [200, 50, 50, 255]);
+        let shadowed = output.pixel(8, 12).unwrap();
+        assert_eq!(shadowed[3], 255);
+        assert!(
+            shadowed[0] < 10 && shadowed[1] < 20 && shadowed[2] < 30,
+            "the shadow should darken the solid background"
+        );
+    }
 }

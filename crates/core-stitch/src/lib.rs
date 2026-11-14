@@ -965,6 +965,37 @@ mod tests {
     }
 
     #[test]
+    fn fixed_header_and_footer_are_trimmed_together() {
+        let original = patterned_frame(48, 300, 61);
+        let header = 16;
+        let footer = 24;
+        let mut stitches = stitcher(48);
+        for (start, end) in [(0, 140), (100, 240), (200, 300)] {
+            let content = with_footer(
+                &with_header(&slice_rows(&original, start, end), header),
+                footer,
+            );
+            stitches.push(&content).unwrap();
+        }
+
+        let stitched = stitches.finish().unwrap();
+        assert_eq!(stitched.height(), header + 300 + footer);
+        let header_bytes = header as usize * 48 * 4;
+        let content_bytes = 300 * 48 * 4;
+        assert_eq!(
+            &stitched.pixels()[header_bytes..header_bytes + content_bytes],
+            original.pixels(),
+            "content between the fixed header and footer should match the original"
+        );
+        for pixel in stitched.pixels()[header_bytes + content_bytes..]
+            .as_chunks::<4>()
+            .0
+        {
+            assert_eq!(*pixel, [200, 80, 40, 255]);
+        }
+    }
+
+    #[test]
     fn blank_frames_append_nothing() {
         let width = 32;
         let pixels = vec![255u8; width as usize * 120 * 4];
