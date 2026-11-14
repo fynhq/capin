@@ -64,3 +64,12 @@ pub fn window_corner_radius(id: core_types::WindowId, scale: f32) -> u32 {
 pub use macos::{MacosCapture, display_backing_scale};
 #[cfg(target_os = "windows")]
 pub use windows::{WindowsCapture, init_process_dpi_awareness};
+
+/// Window ids macOS marks as helper surfaces (overlay, capture bars, region
+/// outline, demo cursor, pin menus). Recording reuses this list so pins and
+/// the settings page stay visible in the output, matching screenshots and the
+/// Windows recorder.
+#[cfg(target_os = "macos")]
+pub fn capture_excluded_window_ids() -> Vec<u32> {
+    macos::capture_excluded_window_ids()
+}

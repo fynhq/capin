@@ -52,7 +52,6 @@ pub(crate) fn start(
     ensure_permission()?;
     let content = shareable_content()?;
     let plan = build_plan(&content, &config, &excluded_windows)?;
-    flags.restart_started();
     let (tx, rx) = sync_channel::<EncodedFrame>(FRAME_QUEUE);
     let (width, height) = (plan.width, plan.height);
     let encoder_flags = Arc::clone(&flags);
@@ -274,17 +273,18 @@ fn build_plan(
     }
 }
 
-/// Excludes Capin's own windows (pins, menu, recording bar) from a display
-/// stream. `NSWindow.sharingType` no longer hides windows from
-/// ScreenCaptureKit on macOS 15, so the filter is the only reliable mechanism.
+/// Excludes Capin's helper windows (overlay, capture bar, region outline,
+/// demo cursor, pin menu) from a display stream. Pins and the settings page
+/// stay visible, matching screenshots and the Windows recorder.
+/// `NSWindow.sharingType` no longer hides windows from ScreenCaptureKit on
+/// macOS 15, so the filter is the only reliable mechanism.
 fn own_windows(content: &SCShareableContent, extra: &[u64]) -> Vec<Retained<SCWindow>> {
-    let process = std::process::id() as i32;
+    let excluded = core_capture::capture_excluded_window_ids();
     unsafe { content.windows() }
         .iter()
         .filter(|window| {
-            let own = unsafe { window.owningApplication() }
-                .is_some_and(|application| unsafe { application.processID() } == process);
-            own || extra.contains(&(unsafe { window.windowID() } as u64))
+            let id = unsafe { window.windowID() };
+            excluded.contains(&id) || extra.contains(&(id as u64))
         })
         .collect()
 }
@@ -557,11 +557,17 @@ define_class!(
             let Some(buffer) = (unsafe { sample_buffer.image_buffer() }) else {
                 return;
             };
-            let elapsed = ivars.flags.elapsed_active();
             let mut timeline = match ivars.timeline.lock() {
                 Ok(timeline) => timeline,
                 Err(poisoned) => poisoned.into_inner(),
             };
+            // Start the recording clock when the first frame actually
+            // arrives, matching Windows and keeping PTS at zero. Starting it
+            // before `startCapture` completed left a black leading gap.
+            if timeline.next_index() == 0 {
+                ivars.flags.restart_started();
+            }
+            let elapsed = ivars.flags.elapsed_active();
             let FrameDecision::Encode { index, .. } = timeline.submit(elapsed) else {
                 return;
             };

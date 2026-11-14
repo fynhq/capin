@@ -43,10 +43,14 @@ pub fn open(target: CaptureTarget, cx: &mut App) {
     let top = rect.origin.y as f32 / scale - BORDER_WIDTH;
     let width = rect.size.width as f32 / scale + BORDER_WIDTH * 2.0;
     let height = rect.size.height as f32 / scale + BORDER_WIDTH * 2.0;
-    let bounds = Bounds {
+    let logical = Bounds {
         origin: point(px(left), px(top)),
         size: size(px(width), px(height)),
     };
+    // macOS accepts display-local points in `WindowOptions`; Windows accepts
+    // virtual-desktop logical coordinates. The shared helper applies the
+    // platform-specific translation, matching the recording/scroll bars.
+    let bounds = crate::display::window_bounds_on_monitor(monitor, logical);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: None,
