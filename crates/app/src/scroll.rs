@@ -113,15 +113,28 @@ impl ScrollView {
         // session samples the selected region while the user scrolls. A slow
         // capture (macOS ScreenCaptureKit is the expensive case) backs off so
         // sampling never saturates the capture backend.
+        let capture_region = region;
         cx.spawn(async move |this, cx| {
             loop {
                 let started = Instant::now();
+                // Capture off the UI thread: WGC waits up to two seconds for a
+                // first frame and SCK queries can take longer, both of which
+                // used to freeze the control bar and the app.
+                let captured = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let mut backend = platform_backend();
+                        backend
+                            .capture(CaptureTarget::Region(capture_region))
+                            .map_err(|error| error.to_string())
+                    })
+                    .await;
                 let alive = this
                     .update(cx, |this, cx| {
                         if !this.running {
                             return false;
                         }
-                        this.capture_frame(cx);
+                        this.apply_capture(captured, cx);
                         true
                     })
                     .unwrap_or(false);
@@ -141,9 +154,16 @@ impl ScrollView {
     }
 
     fn capture_frame(&mut self, cx: &mut Context<Self>) {
-        let previous = self.status.clone();
         let mut backend = platform_backend();
-        match backend.capture(CaptureTarget::Region(self.region)) {
+        let captured = backend
+            .capture(CaptureTarget::Region(self.region))
+            .map_err(|error| error.to_string());
+        self.apply_capture(captured, cx);
+    }
+
+    fn apply_capture(&mut self, captured: Result<RgbaFrame, String>, cx: &mut Context<Self>) {
+        let previous = self.status.clone();
+        match captured {
             Ok(frame) => match self.stitcher.push(&frame) {
                 Ok(report) if report.appended_rows == 0 => {}
                 Ok(report) => {

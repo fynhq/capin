@@ -1,3 +1,4 @@
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use core_types::{PhysicalRect, RgbaFrame};
@@ -32,10 +33,40 @@ const PADDLE_REC_MAX_ASPECT: f32 = 64.0;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const PADDLE_REC_CHUNK_ASPECT: f32 = 48.0;
 
+struct OcrJob {
+    frame: Arc<RgbaFrame>,
+    reply: Sender<Result<Vec<OcrLine>, OcrError>>,
+}
+
+static OCR_WORKER: OnceLock<Result<Sender<OcrJob>, String>> = OnceLock::new();
+
 pub(super) fn recognize_text(frame: Arc<RgbaFrame>) -> Result<Vec<OcrLine>, OcrError> {
-    std::thread::spawn(move || recognize_on_thread(&frame))
-        .join()
-        .map_err(|_| OcrError::Platform("text recognition thread panicked".to_owned()))?
+    let (reply, response) = mpsc::channel();
+    let worker = match OCR_WORKER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<OcrJob>();
+        std::thread::Builder::new()
+            .name("capin-ocr".to_owned())
+            .spawn(move || {
+                while let Ok(job) = receiver.recv() {
+                    let _ = job.reply.send(recognize_on_thread(&job.frame));
+                }
+            })
+            .map(|_| sender)
+            .map_err(|error| error.to_string())
+    }) {
+        Ok(worker) => worker,
+        Err(error) => {
+            return Err(OcrError::Platform(format!(
+                "failed to start the OCR worker: {error}"
+            )));
+        }
+    };
+    worker
+        .send(OcrJob { frame, reply })
+        .map_err(|_| OcrError::Platform("the OCR worker is unavailable".to_owned()))?;
+    response
+        .recv()
+        .map_err(|_| OcrError::Platform("the OCR worker stopped unexpectedly".to_owned()))?
 }
 
 fn recognize_on_thread(frame: &RgbaFrame) -> Result<Vec<OcrLine>, OcrError> {
@@ -66,7 +97,11 @@ fn recognize_with_paddle(frame: &RgbaFrame) -> Option<Result<Vec<OcrLine>, OcrEr
         Ok(engine) => engine,
         Err(_) => return None,
     };
-    let image = image::RgbaImage::from_raw(frame.width(), frame.height(), frame.pixels().to_vec())?;
+    let image = image::RgbaImage::from_raw(
+        frame.width(),
+        frame.height(),
+        frame.packed_pixels().into_owned(),
+    )?;
     let image = image::DynamicImage::ImageRgba8(image);
     // Small crops (window titles, file names) gain stroke detail when
     // upscaled. Large screenshots are tiled instead so the detector never
@@ -484,7 +519,7 @@ fn ocr_upscale(width: u32, height: u32, max_dimension: u32) -> f32 {
 /// Returns BGRA bytes plus the bitmap dimensions after the upscale pass.
 fn ocr_bitmap(frame: &RgbaFrame, upscale: f32) -> (Vec<u8>, i32, i32) {
     if upscale <= 1.0 {
-        let mut bgra = frame.pixels().to_vec();
+        let mut bgra = frame.packed_pixels().into_owned();
         for pixel in bgra.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
         }
@@ -492,10 +527,12 @@ fn ocr_bitmap(frame: &RgbaFrame, upscale: f32) -> (Vec<u8>, i32, i32) {
     }
     let width = (frame.width() as f32 * upscale).round().max(1.0) as u32;
     let height = (frame.height() as f32 * upscale).round().max(1.0) as u32;
-    let Some(rgba) =
-        image::RgbaImage::from_raw(frame.width(), frame.height(), frame.pixels().to_vec())
-    else {
-        let mut bgra = frame.pixels().to_vec();
+    let Some(rgba) = image::RgbaImage::from_raw(
+        frame.width(),
+        frame.height(),
+        frame.packed_pixels().into_owned(),
+    ) else {
+        let mut bgra = frame.packed_pixels().into_owned();
         for pixel in bgra.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
         }

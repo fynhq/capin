@@ -524,7 +524,8 @@ fn char_weight(ch: char) -> f32 {
 
 fn decode_qr(frame: &RgbaFrame) -> Vec<String> {
     let mut gray = image::GrayImage::new(frame.width(), frame.height());
-    for (target, source) in gray.pixels_mut().zip(frame.pixels().as_chunks::<4>().0) {
+    let packed = frame.packed_pixels();
+    for (target, source) in gray.pixels_mut().zip(packed.as_ref().as_chunks::<4>().0) {
         let luminance =
             (u32::from(source[0]) * 299 + u32::from(source[1]) * 587 + u32::from(source[2]) * 114)
                 / 1000;

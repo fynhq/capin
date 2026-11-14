@@ -97,6 +97,9 @@ pub struct Stitcher {
     config: StitchConfig,
     samples: u32,
     pixels: Vec<u8>,
+    /// One luminance signature row per stitched row, kept in sync with
+    /// `pixels` so matching does not rescan the whole tail every frame.
+    signatures: Vec<u8>,
     height: u32,
     frames: u32,
     /// Row signatures of the previous frame's top rows, used to detect a
@@ -127,6 +130,7 @@ impl Stitcher {
             config,
             samples,
             pixels: Vec::new(),
+            signatures: Vec::new(),
             height: 0,
             frames: 0,
             previous_top: Vec::new(),
@@ -184,6 +188,7 @@ impl Stitcher {
             self.height = frame.height();
             self.frames = 1;
             self.remember_bands(&new, frame.height());
+            self.signatures = signatures;
             return Ok(self.report(0, 0, 0, self.height));
         }
 
@@ -199,6 +204,11 @@ impl Stitcher {
                 if remove <= self.pixels.len() {
                     self.pixels.truncate(self.pixels.len() - remove);
                     self.height = self.height.saturating_sub(footer_rows);
+                    let remove_signatures = footer_rows as usize * self.samples as usize;
+                    if remove_signatures <= self.signatures.len() {
+                        self.signatures
+                            .truncate(self.signatures.len() - remove_signatures);
+                    }
                 }
             }
             self.store_footer(frame, frame.height(), footer_rows);
@@ -235,6 +245,10 @@ impl Stitcher {
         }
         self.reserve_rows(appended as usize)?;
         self.append_frame_rows(frame, top_inset + overlap, appended);
+        let signature_start = (top_inset + overlap) as usize * self.samples as usize;
+        let signature_end = signature_start + appended as usize * self.samples as usize;
+        self.signatures
+            .extend_from_slice(&signatures[signature_start..signature_end]);
         self.height += appended;
         self.frames += 1;
         self.remember_bands(&new, frame.height());
@@ -277,8 +291,9 @@ impl Stitcher {
         };
         self.height = height;
         self.frames = 1;
-        self.pixels = frame.into_packed_pixels();
         self.remember_bands(&rows, height);
+        self.pixels = frame.into_packed_pixels();
+        self.signatures = signatures;
         Ok(self.report(0, 0, 0, height))
     }
 
@@ -325,6 +340,7 @@ impl Stitcher {
         let width = self.width;
         let height = self.height;
         let pixels = std::mem::take(&mut self.pixels);
+        self.signatures.clear();
         self.height = 0;
         self.frames = 0;
         Ok(RgbaFrame::from_pixels(width, height, pixels)?)
@@ -473,15 +489,11 @@ impl Stitcher {
             return false;
         }
         let samples = self.samples as usize;
-        let row_bytes = self.width as usize * BYTES_PER_PIXEL;
-        let start = (self.height - footer_rows) as usize * row_bytes;
-        let tail = row_signatures(
-            &self.pixels[start..],
-            row_bytes,
-            self.width,
-            footer_rows,
-            self.samples,
-        );
+        let stitched_start = (self.height - footer_rows) as usize * samples;
+        let stitched_end = stitched_start + footer_rows as usize * samples;
+        let Some(tail) = self.signatures.get(stitched_start..stitched_end) else {
+            return false;
+        };
         for row in 0..footer_rows as usize {
             let new_start = (height - footer_rows) as usize * samples + row * samples;
             let old_start = row * samples;
@@ -523,18 +535,12 @@ impl Stitcher {
             return None;
         }
 
-        let row_bytes = self.width as usize * BYTES_PER_PIXEL;
-        let tail_start = (self.height - max_overlap) as usize * row_bytes;
-        let previous_signatures = row_signatures(
-            &self.pixels[tail_start..],
-            row_bytes,
-            self.width,
-            max_overlap,
-            self.samples,
-        );
-        let previous_energies = row_energies(&previous_signatures, max_overlap, self.samples);
+        let sample_count = max_overlap as usize * self.samples as usize;
+        let tail_start = (self.height - max_overlap) as usize * self.samples as usize;
+        let previous_signatures = &self.signatures[tail_start..tail_start + sample_count];
+        let previous_energies = row_energies(previous_signatures, max_overlap, self.samples);
         let previous = RowSet {
-            signatures: &previous_signatures,
+            signatures: previous_signatures,
             energies: &previous_energies,
             samples: self.samples as usize,
         };
