@@ -1216,246 +1216,156 @@ pub(crate) fn resize_shape(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn state() -> EditorState {
-        EditorState::for_test(
-            AnnotationDocument::new(PhysicalSize::new(200, 100)),
-            PhysicalSize::new(200, 100),
-        )
+impl EditorState {
+    pub(crate) fn finish_polyline(&mut self) -> bool {
+        let Some(draft) = self.polyline_draft.take() else {
+            return false;
+        };
+        let mut points = draft.points;
+        if distance(*points.last().unwrap_or(&draft.current), draft.current) > 2.0 {
+            points.push(draft.current);
+        }
+        if points.len() >= 2 {
+            let style = self.effective_style();
+            self.document.add(Shape::Polyline { points }, style);
+        }
+        self.status = None;
+        true
     }
 
-    fn rect(x: i32, y: i32, width: u32, height: u32) -> Shape {
-        Shape::Rect(PhysicalRect::new(x, y, width, height))
+    pub(crate) fn cancel_polyline(&mut self) {
+        self.polyline_draft = None;
+        self.status = None;
     }
 
-    #[test]
-    fn rect_style_uses_tool_defaults_and_scaled_radius() {
-        let mut state = state();
-        state.tool = Tool::Rect;
-        state.rect_stroke_width = 7.0;
-        state.corner_radius = 8.0;
-        state.ui_scale = 2.0;
-        state.rect_filled = true;
-
-        let style = state.effective_style();
-        assert_eq!(style.stroke_width, 7.0);
-        assert_eq!(style.corner_radius, 16.0);
-        assert!(style.filled);
-        assert_eq!(style.color & 0xFF, 0xFF);
+    pub(crate) fn finish_resize(&mut self, point: PhysicalPoint) -> bool {
+        if self.resize_draft.is_none() {
+            return false;
+        }
+        self.update_resize(point);
+        self.resize_draft = None;
+        self.status = None;
+        true
     }
 
-    #[test]
-    fn ellipse_style_reads_its_own_fill_default() {
-        let mut state = state();
-        state.tool = Tool::Rect;
-        state.shape_ellipse = true;
-        state.ellipse_filled = true;
-        state.rect_filled = false;
-
-        assert!(state.effective_style().filled);
-
-        state.ellipse_filled = false;
-        assert!(!state.effective_style().filled);
+    pub(crate) fn edit_text_at(&mut self, point: PhysicalPoint) -> bool {
+        let Some(id) = self.document.hit_test(point) else {
+            return false;
+        };
+        let Some(annotation) = self.document.object(id) else {
+            return false;
+        };
+        let Shape::Text { bounds, text } = &annotation.shape else {
+            return false;
+        };
+        let bounds = *bounds;
+        let text = text.clone();
+        let style = annotation.style;
+        self.document.select(Some(id));
+        self.text_edit = Some(TextEdit::edit_existing(id, bounds, text, style));
+        self.style = style;
+        self.status = None;
+        true
     }
 
-    #[test]
-    fn highlighter_forces_translucent_wash_and_fixed_width() {
-        let mut state = state();
-        state.tool = Tool::Highlighter;
-        state.style.stroke_width = 3.0;
-
-        let style = state.effective_style();
-        assert_eq!(style.stroke_width, 12.0);
-        assert_eq!(style.color & 0xFF, core_annotate::HIGHLIGHTER_ALPHA);
+    pub(crate) fn commit_text(&mut self) -> bool {
+        let Some(mut edit) = self.text_edit.take() else {
+            return false;
+        };
+        // Clicking elsewhere can commit while a composition is still in
+        // flight; never persist the IME's pinyin buffer as user text.
+        if let Some(range) = edit.marked.take()
+            && range.end <= edit.content.len()
+        {
+            edit.content.replace_range(range.clone(), "");
+            edit.cursor = range.start;
+            edit.anchor = range.start;
+        }
+        let text = edit.content.trim_end().to_owned();
+        if text.is_empty() {
+            if let Some(id) = edit.target {
+                self.document.remove(id);
+                self.status = None;
+            }
+            return true;
+        }
+        edit.content = text.clone();
+        let bounds = edit.finish_bounds();
+        let shape = Shape::Text { bounds, text };
+        if let Some(id) = edit.target {
+            self.document.update_shape(id, shape, edit.style);
+        } else {
+            self.document.add(shape, edit.style);
+        }
+        self.style = edit.style;
+        self.status = None;
+        true
     }
 
-    #[test]
-    fn arrow_style_uses_the_arrow_width_and_heads() {
-        let mut state = state();
-        state.tool = Tool::Arrow;
-        state.arrow_stroke_width = 5.0;
-        state.rect_stroke_width = 2.0;
-        state.arrow_start = true;
-        state.arrow_end = false;
-
-        let style = state.effective_style();
-        assert_eq!(style.stroke_width, 5.0);
-        assert!(style.arrow_start);
-        assert!(!style.arrow_end);
+    pub(crate) fn cancel_text(&mut self) -> bool {
+        self.text_edit.take().is_some()
     }
 
-    #[test]
-    fn text_and_spotlight_styles_carry_their_options() {
-        let mut state = state();
-        state.tool = Tool::Text;
-        state.font_size = 28.0;
-        state.text_background = true;
-        state.text_outline = true;
-        state.text_alignment = TextAlignment::Center;
-
-        let style = state.effective_style();
-        assert_eq!(style.font_size, 28.0);
-        assert!(style.text_background);
-        assert!(style.text_outline);
-        assert_eq!(style.text_alignment, TextAlignment::Center);
-
-        state.tool = Tool::Spotlight;
-        state.spotlight_intensity = 60;
-        state.spotlight_radius = 10.0;
-        state.ui_scale = 2.0;
-        let style = state.effective_style();
-        assert_eq!(style.spotlight_intensity, 60);
-        assert_eq!(style.spotlight_radius, 20.0);
-    }
-
-    #[test]
-    fn selecting_a_shape_restores_its_tool_defaults() {
-        let mut state = state();
-        state.ui_scale = 2.0;
-        state.tool = Tool::Rect;
-        let id = state.document.add(
-            rect(10, 10, 40, 30),
-            AnnotationStyle {
-                corner_radius: 20.0,
-                filled: true,
-                stroke_width: 7.0,
-                ..AnnotationStyle::default()
-            },
-        );
-
-        state.select_annotation(Some(id));
-        assert_eq!(state.corner_radius, 10.0);
-        assert!(state.rect_filled);
-        assert_eq!(state.style.stroke_width, 7.0);
-
-        state.select_annotation(None);
-        assert_eq!(state.style.stroke_width, state.rect_stroke_width);
-    }
-
-    #[test]
-    fn a_move_gesture_records_one_undo_step() {
-        let mut state = state();
-        let original = rect(10, 10, 20, 20);
-        let id = state
-            .document
-            .add(original.clone(), AnnotationStyle::default());
-        state.move_draft = Some(MoveDraft {
-            id,
-            start: PhysicalPoint::new(10, 10),
-            current: PhysicalPoint::new(10, 10),
-            original,
-            recorded: false,
+    pub(crate) fn backspace_text(&mut self) -> bool {
+        let Some(edit) = &mut self.text_edit else {
+            return false;
+        };
+        let selection = edit.selection();
+        let range = edit.marked.take().or_else(|| {
+            if !selection.is_empty() {
+                Some(selection)
+            } else {
+                let cursor = edit.cursor_utf8();
+                (cursor > 0).then(|| edit.previous_boundary()..cursor)
+            }
         });
-
-        assert!(!state.update_move(PhysicalPoint::new(10, 10)));
-        assert!(state.update_move(PhysicalPoint::new(14, 18)));
-        assert_eq!(
-            state.document.object(id).unwrap().shape.bounds().origin,
-            PhysicalPoint::new(14, 18)
-        );
-        assert!(state.document.can_undo());
-
-        assert!(state.update_move(PhysicalPoint::new(20, 20)));
-        assert!(state.document.undo());
-        assert_eq!(
-            state.document.object(id).unwrap().shape.bounds().origin,
-            PhysicalPoint::new(10, 10)
-        );
+        if let Some(range) = range {
+            edit.content.replace_range(range.clone(), "");
+            edit.cursor = range.start;
+            edit.anchor = range.start;
+        }
+        true
     }
 
-    #[test]
-    fn resizing_a_number_keeps_it_square() {
-        let mut state = state();
-        let original = Shape::Number {
-            bounds: PhysicalRect::new(10, 10, 32, 32),
-            value: 1,
+    pub(crate) fn delete_text(&mut self) -> bool {
+        let Some(edit) = &mut self.text_edit else {
+            return false;
         };
-        let id = state
-            .document
-            .add(original.clone(), AnnotationStyle::default());
-        state.resize_draft = Some(ResizeDraft {
-            id,
-            handle: ResizeHandle::Se,
-            start: PhysicalPoint::new(42, 42),
-            current: PhysicalPoint::new(42, 42),
-            original,
-            recorded: false,
-        });
-
-        assert!(state.update_resize(PhysicalPoint::new(62, 52)));
-        let Shape::Number { bounds, value } = &state.document.object(id).unwrap().shape else {
-            panic!("expected a number shape");
+        let selection = edit.selection();
+        let range = if !selection.is_empty() {
+            Some(selection)
+        } else {
+            let cursor = edit.cursor_utf8();
+            (cursor < edit.content.len()).then(|| cursor..edit.next_boundary())
         };
-        assert_eq!(bounds.size.width, bounds.size.height);
-        assert_eq!(bounds.size.width, 52);
-        assert_eq!(*value, 1);
+        if let Some(range) = range {
+            edit.content.replace_range(range.clone(), "");
+            edit.cursor = range.start;
+            edit.anchor = range.start;
+        }
+        true
     }
 
-    #[test]
-    fn rect_drafts_are_normalized_and_minimum_sized() {
-        let draft = Draft {
-            tool: Tool::Rect,
-            start: PhysicalPoint::new(50, 30),
-            current: PhysicalPoint::new(10, 10),
-            shift: false,
-            ellipse: false,
-        };
-        let shape = finalize_shape(&draft, draft.current).expect("rect draft");
-        assert_eq!(shape.bounds(), PhysicalRect::new(10, 10, 40, 20));
-
-        let tiny = Draft {
-            current: PhysicalPoint::new(51, 31),
-            ..draft
-        };
-        assert!(finalize_shape(&tiny, tiny.current).is_none());
+    pub(crate) fn move_text_cursor(&mut self, cursor: usize, extend: bool) -> bool {
+        if let Some(edit) = &mut self.text_edit {
+            edit.move_cursor(cursor, extend);
+            true
+        } else {
+            false
+        }
     }
 
-    #[test]
-    fn shift_drag_constrains_rectangles_to_squares() {
-        let draft = Draft {
-            tool: Tool::Rect,
-            start: PhysicalPoint::new(10, 10),
-            current: PhysicalPoint::new(50, 30),
-            shift: true,
-            ellipse: false,
-        };
-        let shape = finalize_shape(&draft, draft.current).expect("square draft");
-        assert_eq!(shape.bounds().size.width, 40);
-        assert_eq!(shape.bounds().size.height, 40);
-    }
-
-    #[test]
-    fn ime_commit_replaces_the_in_flight_composition() {
-        let mut edit = TextEdit::start(
-            PhysicalPoint::new(0, 0),
-            PhysicalSize::new(200, 100),
-            AnnotationStyle::default(),
-        );
-        edit.replace(None, "cafe", true);
-        assert_eq!(edit.content, "cafe");
-        assert!(edit.marked.is_some());
-
-        edit.replace(None, "café", false);
-        assert_eq!(edit.content, "café");
-        assert!(edit.marked.is_none());
-    }
-
-    #[test]
-    fn utf16_offsets_round_trip_through_multibyte_text() {
-        let mut edit = TextEdit::start(
-            PhysicalPoint::new(0, 0),
-            PhysicalSize::new(200, 100),
-            AnnotationStyle::default(),
-        );
-        edit.content = "a😀b".to_owned();
-        assert_eq!(edit.offset_from_utf16(1), 1);
-        assert_eq!(edit.offset_from_utf16(3), 5);
-        assert_eq!(edit.offset_to_utf16(1), 1);
-        assert_eq!(edit.offset_to_utf16(5), 3);
-        assert_eq!(edit.range_from_utf16(&(1..3)), 1..5);
-        assert_eq!(edit.range_to_utf16(&(1..5)), 1..3);
+    pub(crate) fn select_all_text(&mut self) -> bool {
+        if let Some(edit) = &mut self.text_edit {
+            edit.anchor = 0;
+            edit.cursor = edit.content.len();
+            true
+        } else {
+            false
+        }
     }
 }
+
+#[cfg(test)]
+#[path = "editor_state_tests.rs"]
+mod tests;

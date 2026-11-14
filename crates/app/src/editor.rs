@@ -2021,35 +2021,20 @@ impl EditorView {
     }
 
     fn finish_polyline(&mut self, cx: &mut Context<Self>) {
-        let Some(draft) = self.polyline_draft.take() else {
-            return;
-        };
-        let mut points = draft.points;
-        if distance(*points.last().unwrap_or(&draft.current), draft.current) > 2.0 {
-            points.push(draft.current);
+        if self.state.finish_polyline() {
+            cx.notify();
         }
-        if points.len() >= 2 {
-            let style = self.effective_style();
-            self.document.add(Shape::Polyline { points }, style);
-        }
-        self.status = None;
-        cx.notify();
     }
 
     fn cancel_polyline(&mut self, cx: &mut Context<Self>) {
-        self.polyline_draft = None;
-        self.status = None;
+        self.state.cancel_polyline();
         cx.notify();
     }
 
     fn finish_resize(&mut self, point: PhysicalPoint, cx: &mut Context<Self>) {
-        if self.resize_draft.is_none() {
-            return;
+        if self.state.finish_resize(point) {
+            cx.notify();
         }
-        self.update_resize(point);
-        self.resize_draft = None;
-        self.status = None;
-        cx.notify();
     }
 
     fn copy_selected_annotation(&mut self, cx: &mut Context<Self>) -> bool {
@@ -2101,110 +2086,39 @@ impl EditorView {
     }
 
     fn edit_text_at(&mut self, point: PhysicalPoint, cx: &mut Context<Self>) -> bool {
-        let Some(id) = self.document.hit_test(point) else {
-            return false;
-        };
-        let Some(annotation) = self.document.object(id) else {
-            return false;
-        };
-        let Shape::Text { bounds, text } = &annotation.shape else {
-            return false;
-        };
-        let bounds = *bounds;
-        let text = text.clone();
-        let style = annotation.style;
-        self.document.select(Some(id));
-        self.text_edit = Some(TextEdit::edit_existing(id, bounds, text, style));
-        self.style = style;
-        self.status = None;
-        cx.notify();
-        true
+        let changed = self.state.edit_text_at(point);
+        if changed {
+            cx.notify();
+        }
+        changed
     }
 
     fn commit_text(&mut self, cx: &mut Context<Self>) {
-        let Some(mut edit) = self.text_edit.take() else {
-            return;
-        };
-        // Clicking elsewhere can commit while a composition is still in
-        // flight; never persist the IME's pinyin buffer as user text.
-        if let Some(range) = edit.marked.take()
-            && range.end <= edit.content.len()
-        {
-            edit.content.replace_range(range.clone(), "");
-            edit.cursor = range.start;
-            edit.anchor = range.start;
-        }
-        let text = edit.content.trim_end().to_owned();
-        if text.is_empty() {
-            if let Some(id) = edit.target {
-                self.document.remove(id);
-                self.status = None;
-            }
+        if self.state.commit_text() {
             cx.notify();
-            return;
         }
-        edit.content = text.clone();
-        let bounds = edit.finish_bounds();
-        let shape = Shape::Text { bounds, text };
-        if let Some(id) = edit.target {
-            self.document.update_shape(id, shape, edit.style);
-        } else {
-            self.document.add(shape, edit.style);
-        }
-        self.style = edit.style;
-        self.status = None;
-        cx.notify();
     }
 
     fn cancel_text(&mut self, cx: &mut Context<Self>) {
-        if self.text_edit.take().is_some() {
+        if self.state.cancel_text() {
             cx.notify();
         }
     }
 
     fn backspace_text(&mut self, cx: &mut Context<Self>) {
-        let Some(edit) = &mut self.text_edit else {
-            return;
-        };
-        let selection = edit.selection();
-        let range = edit.marked.take().or_else(|| {
-            if !selection.is_empty() {
-                Some(selection)
-            } else {
-                let cursor = edit.cursor_utf8();
-                (cursor > 0).then(|| edit.previous_boundary()..cursor)
-            }
-        });
-        if let Some(range) = range {
-            edit.content.replace_range(range.clone(), "");
-            edit.cursor = range.start;
-            edit.anchor = range.start;
+        if self.state.backspace_text() {
+            cx.notify();
         }
-        cx.notify();
     }
 
     fn delete_text(&mut self, cx: &mut Context<Self>) {
-        let Some(edit) = &mut self.text_edit else {
-            return;
-        };
-        let selection = edit.selection();
-        let range = if !selection.is_empty() {
-            Some(selection)
-        } else {
-            let cursor = edit.cursor_utf8();
-            (cursor < edit.content.len()).then(|| cursor..edit.next_boundary())
-        };
-        if let Some(range) = range {
-            edit.content.replace_range(range.clone(), "");
-            edit.cursor = range.start;
-            edit.anchor = range.start;
+        if self.state.delete_text() {
+            cx.notify();
         }
-        cx.notify();
     }
 
     fn move_text_cursor(&mut self, cursor: usize, extend: bool, cx: &mut Context<Self>) {
-        if let Some(edit) = &mut self.text_edit {
-            edit.move_cursor(cursor, extend);
+        if self.state.move_text_cursor(cursor, extend) {
             cx.notify();
         }
     }
@@ -2361,9 +2275,7 @@ impl EditorView {
     }
 
     fn select_all_text(&mut self, cx: &mut Context<Self>) {
-        if let Some(edit) = &mut self.text_edit {
-            edit.anchor = 0;
-            edit.cursor = edit.content.len();
+        if self.state.select_all_text() {
             cx.notify();
         }
     }
