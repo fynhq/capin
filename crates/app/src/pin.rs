@@ -851,9 +851,11 @@ fn open_history_pin(
         if let Some(zoom) = zoom {
             let (width, height) = content.size(zoom);
             let bounds = default_bounds(cx, width, height);
-            let _ = open_pin_content_at(content, bounds, zoom, None, native_shadow, cx);
-        } else {
-            let _ = open_pin_content_with_shadow(content, native_shadow, cx);
+            if open_pin_content_at(content, bounds, zoom, None, native_shadow, cx).is_none() {
+                crate::logging::log_warn!("pin", "failed to open a restored pin");
+            }
+        } else if open_pin_content_with_shadow(content, native_shadow, cx).is_none() {
+            crate::logging::log_warn!("pin", "failed to open a restored pin");
         }
         mark_walk();
         return;
@@ -1015,8 +1017,8 @@ fn open_pin_inner(
         // that split lifts the client area a few pixels above the requested
         // rect. Re-place the client area once the native frame is final.
         crate::ui::align_client_to_bounds(&*window, bounds);
-        if click_through {
-            let _ = set_click_through(&*window, true);
+        if click_through && let Err(error) = set_click_through(&*window, true) {
+            crate::logging::log_warn!("pin", "failed to enable click-through: {error}");
         }
         let view = cx.new(|cx| {
             PinView::new(
@@ -2273,6 +2275,8 @@ impl PinView {
         };
         let x = drag.window_start.0 + cursor_x - drag.cursor_start.0;
         let y = drag.window_start.1 + cursor_y - drag.cursor_start.1;
+        // Moving is best-effort and runs every pointer frame; a transient
+        // platform failure would only spam the log.
         let _ = platform_window::move_window_to(&*window, x, y);
     }
 

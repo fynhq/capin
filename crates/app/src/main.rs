@@ -4,6 +4,7 @@
 )]
 
 mod aux_window;
+mod build_info;
 mod capture_history;
 mod capture_panels;
 mod chrome_theme;

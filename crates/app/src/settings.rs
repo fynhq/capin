@@ -11,16 +11,13 @@ use platform_window::{AutostartState, set_autostart, system_accent_hex};
 use crate::chrome_theme::{accent_text_color, fallback_accent};
 use crate::i18n::{Language, t};
 use crate::icons;
-use crate::logging::{log_error, log_info};
+use crate::logging::{log_error, log_info, log_warn};
 use crate::settings_state::{
     self, AppSettings, RepeatPinBehavior, WINDOW_PADDINGS, WindowBackground,
 };
 use crate::storage;
 
 const PROJECT_URL: &str = "https://github.com/fynhq/capin";
-/// Short commit hash injected by dev packaging builds; formal releases leave
-/// it unset and show the bare semver version.
-const BUILD_ID: Option<&str> = option_env!("CAPIN_BUILD_ID");
 
 thread_local! {
     /// Status handed to the next settings window when a tray or hotkey action
@@ -932,10 +929,7 @@ impl SettingsView {
 
     fn sidebar_footer(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let accent = theme.accent;
-        let version = match BUILD_ID {
-            Some(id) => format!("Capin v{}+{id}", env!("CARGO_PKG_VERSION")),
-            None => format!("Capin v{}", env!("CARGO_PKG_VERSION")),
-        };
+        let version = crate::build_info::version_label();
         div()
             .mt_auto()
             .w_full()
@@ -1398,9 +1392,22 @@ impl SettingsView {
             .active(|style| style.opacity(0.88))
             .on_click(cx.listener(|_, _, _, cx| {
                 let directory = crate::logging::log_directory();
-                let _ = std::fs::create_dir_all(&directory);
+                if let Err(error) = std::fs::create_dir_all(&directory) {
+                    log_warn!("settings", "failed to create the log directory: {error}");
+                }
                 log_info!("settings", "opening log directory");
                 cx.open_with_system(&directory);
+            }));
+        let copy = action_button(theme, t(language, "settings.copy_diagnostics").to_owned())
+            .id("settings-copy-diagnostics")
+            .role(Role::Button)
+            .aria_label(t(language, "settings.copy_diagnostics"))
+            .active(|style| style.opacity(0.88))
+            .on_click(cx.listener(|this, _, _, cx| {
+                let report = this.diagnostics_report();
+                cx.write_to_clipboard(ClipboardItem::new_string(report));
+                let message = t(this.settings.language, "settings.diagnostics_copied").to_owned();
+                this.show_status(message, cx);
             }));
         a11y_row(
             "settings-row-logs",
@@ -1412,8 +1419,43 @@ impl SettingsView {
                     t(language, "settings.logs"),
                     t(language, "settings.logs_desc"),
                 ))
-                .child(open),
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(open)
+                        .child(copy),
+                ),
         )
+    }
+
+    /// Build label, platform, and the redacted log tail. This is what a field
+    /// report needs; screen contents never enter the string.
+    fn diagnostics_report(&self) -> String {
+        let settings = &self.settings;
+        let mut report = String::new();
+        report.push_str(&crate::build_info::version_label());
+        report.push('\n');
+        report.push_str(&format!(
+            "OS: {} {}\n",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ));
+        report.push_str(&format!("Language: {:?}\n", settings.language));
+        report.push_str(&format!("Capture hotkey: {}\n", settings.capture_hotkey));
+        report.push_str(&format!("Pin hotkey: {}\n", settings.pin_hotkey));
+        report.push_str(&format!("Autostart: {}\n", settings.auto_start));
+        report.push_str(&format!(
+            "Filename template: {}\n",
+            settings.filename_template
+        ));
+        report.push_str("Recent log:\n");
+        for line in crate::logging::recent_lines(40) {
+            report.push_str(&line);
+            report.push('\n');
+        }
+        report
     }
 
     fn capture_settings(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {

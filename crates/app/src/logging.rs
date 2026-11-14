@@ -153,6 +153,21 @@ pub fn log_directory() -> PathBuf {
     }
 }
 
+/// Returns up to `limit` most recent lines from today's log file.
+///
+/// Diagnostics copy this tail into the clipboard. The logger already removes
+/// screen contents, window titles, clipboard text, and file paths.
+pub fn recent_lines(limit: usize) -> Vec<String> {
+    let path = log_directory().join(log_file_name(Local::now().date_naive()));
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    let start = lines.len().saturating_sub(limit);
+    lines.drain(..start);
+    lines
+}
+
 fn log_file_name(date: NaiveDate) -> String {
     format!("{LOG_PREFIX}{}{LOG_SUFFIX}", date.format("%Y-%m-%d"))
 }
