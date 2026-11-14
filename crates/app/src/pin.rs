@@ -68,6 +68,10 @@ thread_local! {
     /// The walk already passed the oldest history entry, so the next press
     /// starts a new walk from the newest capture.
     static PIN_WALK_EXHAUSTED: Cell<bool> = const { Cell::new(false) };
+    /// Persisted pins beyond `MAX_RESTORED_PINS` that were not opened at
+    /// startup. They stay in the manifest so closing a restored pin cannot
+    /// silently delete them.
+    static DEFERRED_PINS: RefCell<Vec<PersistedPin>> = const { RefCell::new(Vec::new()) };
 }
 
 fn clipboard_signature_of(bytes: &[u8]) -> u64 {
@@ -470,7 +474,7 @@ struct PinState {
     export_padding: u32,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct PersistedPin {
     id: u64,
     kind: String,
@@ -501,9 +505,11 @@ pub fn pin_last(cx: &mut App) {
         LAST_PIN_TRIGGER.with(|slot| slot.set(None));
         PIN_WALK_EXHAUSTED.with(|slot| slot.set(false));
     }
-    // The walk already showed the oldest entry; the next sequence starts over
-    // at the newest screenshot instead of staying stuck on the oldest one.
-    if PIN_WALK_EXHAUSTED.with(|slot| slot.get()) && PINS.with(|pins| pins.borrow().is_empty()) {
+    // The walk already showed the oldest entry; the next press starts over at
+    // the newest screenshot instead of staying stuck on the oldest one. This
+    // must not depend on every pin being closed: older pins can stay on screen
+    // while the shortcut continues from the newest image.
+    if PIN_WALK_EXHAUSTED.with(|slot| slot.get()) {
         LAST_PIN_TRIGGER.with(|slot| slot.set(None));
         PIN_WALK_EXHAUSTED.with(|slot| slot.set(false));
     }
@@ -1093,7 +1099,15 @@ pub fn restore(cx: &mut App) {
         return;
     };
 
-    for entry in entries.into_iter().take(MAX_RESTORED_PINS) {
+    let mut deferred = Vec::new();
+    let mut restored = 0usize;
+    for entry in entries {
+        if restored >= MAX_RESTORED_PINS {
+            if persisted_pin_is_usable(&entry, &directory) {
+                deferred.push(entry);
+            }
+            continue;
+        }
         if !entry.x.is_finite()
             || !entry.y.is_finite()
             || !entry.width.is_finite()
@@ -1159,10 +1173,35 @@ pub fn restore(cx: &mut App) {
             cx,
         );
         if let Some(id) = id {
+            restored += 1;
             set_export_padding(id, entry.export_padding);
         }
     }
+    DEFERRED_PINS.with(|pins| *pins.borrow_mut() = deferred);
     save_manifest();
+}
+
+/// Cheap validation for entries kept in the manifest but not opened because
+/// the startup window budget is full.
+fn persisted_pin_is_usable(entry: &PersistedPin, directory: &Path) -> bool {
+    if !entry.x.is_finite()
+        || !entry.y.is_finite()
+        || !entry.width.is_finite()
+        || !entry.height.is_finite()
+        || entry.width < 1.0
+        || entry.height < 1.0
+    {
+        return false;
+    }
+    match entry.kind.as_str() {
+        "image" => entry
+            .image
+            .as_deref()
+            .and_then(|name| Path::new(name).file_name())
+            .is_some_and(|name| directory.join(name).exists()),
+        "text" => entry.text.as_deref().is_some_and(|text| !text.is_empty()),
+        _ => false,
+    }
 }
 
 /// Attaches the vector document to a pin that was just created from the
@@ -1221,7 +1260,7 @@ fn replace_image_inner(
     let path = if let Some(path) = image_path {
         if image::save_buffer(
             &path,
-            frame.pixels(),
+            frame.packed_pixels().as_ref(),
             frame.width(),
             frame.height(),
             image::ColorType::Rgba8,
@@ -1267,10 +1306,12 @@ pub fn close_pin(id: u64, cx: &mut App) {
     let _ = state
         .window
         .update(cx, |_, window, _| window.remove_window());
+    // Drop the manifest entry first; if the atomic write fails, the image is
+    // left as an orphan instead of a manifest pointing at deleted content.
+    save_manifest();
     if let Some(path) = state.image_path {
         let _ = std::fs::remove_file(path);
     }
-    save_manifest();
 }
 
 fn persist_rotated_image(id: u64, frame: &RgbaFrame, hash: u64, bounds: Bounds<Pixels>) -> bool {
@@ -1283,7 +1324,7 @@ fn persist_rotated_image(id: u64, frame: &RgbaFrame, hash: u64, bounds: Bounds<P
         Some(path) => {
             if image::save_buffer(
                 &path,
-                frame.pixels(),
+                frame.packed_pixels().as_ref(),
                 frame.width(),
                 frame.height(),
                 image::ColorType::Rgba8,
@@ -1449,7 +1490,7 @@ fn save_pin_image(id: u64, frame: &RgbaFrame) -> Option<PathBuf> {
     let path = directory.join(format!("pin-{id}.png"));
     image::save_buffer(
         &path,
-        frame.pixels(),
+        frame.packed_pixels().as_ref(),
         frame.width(),
         frame.height(),
         image::ColorType::Rgba8,
@@ -1469,7 +1510,7 @@ fn save_manifest() {
         return;
     };
     let path = directory.join("pins.json");
-    let entries: Vec<PersistedPin> = PINS.with(|pins| {
+    let mut entries: Vec<PersistedPin> = PINS.with(|pins| {
         let mut entries: Vec<PersistedPin> = pins
             .borrow()
             .iter()
@@ -1505,12 +1546,19 @@ fn save_manifest() {
         entries.sort_by_key(|entry| entry.id);
         entries
     });
+    // Pins beyond the startup window budget are not open, but they must stay
+    // in the manifest; otherwise closing a restored pin deletes them.
+    entries.extend(DEFERRED_PINS.with(|pins| pins.borrow().clone()));
+    entries.sort_by_key(|entry| entry.id);
+    entries.dedup_by_key(|entry| entry.id);
     if entries.is_empty() {
         let _ = std::fs::remove_file(path);
         return;
     }
-    if let Ok(text) = serde_json::to_string_pretty(&entries) {
-        let _ = std::fs::write(path, text);
+    if let Ok(text) = serde_json::to_string_pretty(&entries)
+        && let Err(error) = crate::persist::write_atomic(&path, text.as_bytes())
+    {
+        log_error!("pin", "failed to save the pin manifest: {error}");
     }
 }
 
@@ -1531,11 +1579,8 @@ impl PinTheme {
             window.appearance(),
             WindowAppearance::Dark | WindowAppearance::VibrantDark
         );
-        let accent_hex = system_accent_hex().unwrap_or(if cfg!(target_os = "macos") {
-            0x0A84FF
-        } else {
-            0x0067C0
-        });
+        let accent_hex =
+            system_accent_hex().unwrap_or_else(|| crate::chrome_theme::fallback_accent(dark));
         let accent = rgb(accent_hex);
         let selection = rgba(((accent_hex & 0x00FF_FFFF) << 8) | 0x66);
         if dark {
@@ -2443,7 +2488,7 @@ impl PinView {
         let Some(frame) = self.export_frame() else {
             return;
         };
-        match image_util::save_png(&frame) {
+        match crate::storage::save_png(&frame) {
             Ok(path) => {
                 self.show_notice(
                     format!("{} {}", t(language, "pin.saved"), path.display()),
@@ -2750,7 +2795,6 @@ impl Render for PinView {
                 cx.listener(|this, _, window, cx| {
                     if this.drag.take().is_some() {
                         update_bounds(this.id, window.bounds());
-                        schedule_manifest_save(cx);
                         cx.notify();
                         return;
                     }
@@ -2767,7 +2811,6 @@ impl Render for PinView {
                 // the pin would keep following the cursor afterwards.
                 if this.drag.take().is_some() {
                     update_bounds(this.id, window.bounds());
-                    schedule_manifest_save(cx);
                     cx.notify();
                 }
                 if this.selecting {

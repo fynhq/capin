@@ -1,5 +1,7 @@
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use core_annotate::TextAlignment;
 use platform_window::{AutostartState, set_autostart};
@@ -292,6 +294,13 @@ impl Default for AppSettings {
 }
 
 static SETTINGS: OnceLock<Mutex<Arc<AppSettings>>> = OnceLock::new();
+static LAST_PERSISTED: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static SAVE_TX: OnceLock<Option<Sender<SaveRequest>>> = OnceLock::new();
+
+enum SaveRequest {
+    Text(String),
+    Flush(Sender<()>),
+}
 
 /// Returns a cheap snapshot of the current settings. Callers that only read
 /// fields get an `Arc` clone instead of copying strings and paths on every
@@ -569,18 +578,84 @@ fn parse_rgba(value: &str) -> Option<u32> {
 }
 
 fn persist(settings: &AppSettings) {
-    let Some(path) = config_path() else {
-        return;
-    };
-    if let Some(parent) = path.parent()
-        && let Err(error) = std::fs::create_dir_all(parent)
-    {
-        log_error!("settings", "failed to create settings directory: {error}");
+    let text = serialize(settings);
+    let last = LAST_PERSISTED.get_or_init(|| Mutex::new(None));
+    let mut last = last.lock().unwrap_or_else(|poison| poison.into_inner());
+    if last.as_deref() == Some(text.as_str()) {
         return;
     }
-    let text = serialize(settings);
-    if let Err(error) = std::fs::write(&path, text) {
+    if let Some(worker) = save_worker()
+        && worker.send(SaveRequest::Text(text.clone())).is_ok()
+    {
+        *last = Some(text);
+        return;
+    }
+    if write_settings(&text).is_ok() {
+        *last = Some(text);
+    }
+}
+
+fn save_worker() -> Option<&'static Sender<SaveRequest>> {
+    SAVE_TX
+        .get_or_init(|| {
+            let (sender, receiver) = mpsc::channel();
+            let spawned = std::thread::Builder::new()
+                .name("capin-settings".to_owned())
+                .spawn(move || {
+                    let mut pending: Option<String> = None;
+                    loop {
+                        match receiver.recv_timeout(Duration::from_millis(300)) {
+                            Ok(SaveRequest::Text(text)) => pending = Some(text),
+                            Ok(SaveRequest::Flush(reply)) => {
+                                if let Some(text) = pending.take() {
+                                    let _ = write_settings(&text);
+                                }
+                                let _ = reply.send(());
+                            }
+                            Err(mpsc::RecvTimeoutError::Timeout) => {
+                                if let Some(text) = pending.take() {
+                                    let _ = write_settings(&text);
+                                }
+                            }
+                            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                if let Some(text) = pending.take() {
+                                    let _ = write_settings(&text);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                });
+            match spawned {
+                Ok(_) => Some(sender),
+                Err(error) => {
+                    log_error!("settings", "failed to start the settings writer: {error}");
+                    None
+                }
+            }
+        })
+        .as_ref()
+}
+
+fn write_settings(text: &str) -> std::io::Result<()> {
+    let Some(path) = config_path() else {
+        return Ok(());
+    };
+    if let Err(error) = crate::persist::write_atomic(&path, text.as_bytes()) {
         log_error!("settings", "failed to save settings: {error}");
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Flushes a debounced settings write before the event loop exits.
+pub fn flush() {
+    let Some(worker) = SAVE_TX.get().and_then(Option::as_ref) else {
+        return;
+    };
+    let (reply, response) = mpsc::channel();
+    if worker.send(SaveRequest::Flush(reply)).is_ok() {
+        let _ = response.recv_timeout(Duration::from_secs(2));
     }
 }
 

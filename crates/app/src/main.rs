@@ -15,11 +15,13 @@ mod image_util;
 mod logging;
 mod ocr_queue;
 mod overlay;
+mod persist;
 mod pin;
 mod record;
 mod record_spotlight;
 mod region_outline;
 mod scroll;
+mod selection_geometry;
 mod settings;
 mod settings_state;
 mod storage;
@@ -62,12 +64,19 @@ fn main() {
             tray::refresh_menu();
 
             let args: Vec<String> = std::env::args().skip(1).collect();
-            log_info!("app", "startup arguments: {args:?}");
-            if args.iter().any(|argument| argument == "--settings") {
+            let settings_requested = args.iter().any(|argument| argument == "--settings");
+            let capture_requested = args.iter().any(|argument| argument == "--capture");
+            log_info!(
+                "app",
+                "startup flags: settings={settings_requested} capture={capture_requested} argc={}",
+                args.len()
+            );
+            if settings_requested {
                 settings::open_settings(cx);
-            } else if args.iter().any(|argument| argument == "--capture") {
+            } else if capture_requested {
                 overlay::open_overlays(cx);
             }
         });
+    settings_state::flush();
     log_info!("app", "event loop exited");
 }

@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use core_types::RgbaFrame;
 use serde::{Deserialize, Serialize};
 
+use crate::logging::log_warn;
 use crate::storage;
 
 const HISTORY_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
@@ -67,13 +68,14 @@ pub fn record_png_bytes(
     hash: u64,
     pin_shadow: Option<HistoryPinShadow>,
     scale: Option<f32>,
-) {
+) -> bool {
     let recorded = record_png(hash, pin_shadow, scale, |path| {
-        std::fs::write(path, bytes).is_ok()
+        crate::persist::write_atomic(path, bytes).is_ok()
     });
     if recorded {
         GENERATION.with(|cell| cell.set(cell.get().wrapping_add(1)));
     }
+    recorded
 }
 
 /// Records an existing exported PNG by copying the file. Saving a screenshot
@@ -85,7 +87,7 @@ pub fn record_png_file(
     scale: Option<f32>,
 ) -> bool {
     let recorded = record_png(hash, pin_shadow, scale, |path| {
-        std::fs::copy(source, path).is_ok()
+        crate::persist::copy_atomic(source, path).is_ok()
     });
     if recorded {
         GENERATION.with(|cell| cell.set(cell.get().wrapping_add(1)));
@@ -232,7 +234,8 @@ pub fn latest() -> Option<HistoryImage> {
 /// Stable in-process hash for matching an image against history.
 pub fn hash_frame(frame: &RgbaFrame) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for byte in frame.pixels() {
+    let packed = frame.packed_pixels();
+    for byte in packed.as_ref() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x1000_0000_01b3);
     }
@@ -259,6 +262,11 @@ fn load_entries() -> Vec<HistoryEntry> {
         return Vec::new();
     };
     let Ok(mut entries) = serde_json::from_str::<Vec<HistoryEntry>>(&text) else {
+        log_warn!(
+            "history",
+            "history manifest is corrupt; keeping recent images"
+        );
+        cleanup_orphans(&directory, now_millis(), &HashSet::new());
         return Vec::new();
     };
     let before = entries.len();
@@ -267,6 +275,15 @@ fn load_entries() -> Vec<HistoryEntry> {
     if entries.len() != before {
         write_entries(&directory, &entries);
     }
+    let referenced = entries
+        .iter()
+        .filter_map(|entry| {
+            Path::new(&entry.file)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .collect::<HashSet<_>>();
+    cleanup_orphans(&directory, now, &referenced);
     entries
 }
 
@@ -298,8 +315,39 @@ fn write_entries(directory: &Path, entries: &[HistoryEntry]) {
         let _ = std::fs::remove_file(path);
         return;
     }
-    if let Ok(text) = serde_json::to_string_pretty(entries) {
-        let _ = std::fs::write(path, text);
+    if let Ok(text) = serde_json::to_string_pretty(entries)
+        && let Err(error) = crate::persist::write_atomic(&path, text.as_bytes())
+    {
+        log_warn!("history", "failed to save the history manifest: {error}");
+    }
+}
+
+/// Removes history images that no manifest entry references once they are
+/// older than the normal retention window. Recent orphans are kept so a
+/// concurrent record or a crash-recovery window cannot lose a fresh capture.
+fn cleanup_orphans(directory: &Path, now: u64, referenced: &HashSet<String>) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("history-") || !name.ends_with(".png") {
+            continue;
+        }
+        if referenced.contains(name.as_ref()) {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        if modified.saturating_add(HISTORY_TTL_MS) < now {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
 }
 
