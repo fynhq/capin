@@ -20,7 +20,7 @@ core-compose.workspace = true
 core-record.workspace = true
 core-stitch.workspace = true
 core-types.workspace = true
-gpui-kit = { version = "0.9.1", default-features = false }
+gpui-kit.workspace = true
 image = { version = "0.25.10", default-features = false, features = ["bmp", "jpeg", "png"] }
 platform-ocr.workspace = true
 platform-record.workspace = true

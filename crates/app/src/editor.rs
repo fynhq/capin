@@ -24,6 +24,7 @@ use crate::selection_geometry::{
     region_handle_cursor, resize_rect,
 };
 use crate::settings_state::AnnotationColorTool;
+use crate::ui::tooltip_view;
 use crate::{i18n::t, icons, image_util, settings_state};
 
 const COMPACT_TOOLBAR_HEIGHT: f32 = 40.0;
@@ -144,31 +145,6 @@ fn blur_image_index(radius: u32) -> usize {
         .min_by_key(|(_, candidate)| candidate.abs_diff(radius))
         .map(|(index, _)| index)
         .unwrap_or(0)
-}
-
-struct TooltipLabel {
-    text: SharedString,
-}
-
-impl Render for TooltipLabel {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let chrome = ChromeTheme::for_window(window, None);
-        div()
-            .px(px(8.0))
-            .py(px(4.0))
-            .rounded(px(6.0))
-            .bg(chrome.surface_strong)
-            .border_1()
-            .border_color(chrome.border)
-            .shadow(chrome.shadow())
-            .text_size(px(11.5))
-            .text_color(chrome.text)
-            .child(self.text.clone())
-    }
-}
-
-pub(crate) fn tooltip_view(text: String, cx: &mut App) -> AnyView {
-    cx.new(|_| TooltipLabel { text: text.into() }).into()
 }
 
 struct Draft {
@@ -3040,6 +3016,10 @@ impl EditorView {
         }
     }
 
+    fn refresh_capture_action(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.refresh_capture(cx);
+    }
+
     fn show_status(&mut self, message: String, cx: &mut Context<Self>) {
         self.status = Some(message);
         self.status_serial = self.status_serial.wrapping_add(1);
@@ -3057,6 +3037,38 @@ impl EditorView {
             .ok();
         })
         .detach();
+        cx.notify();
+    }
+
+    fn toggle_effects_panel(&mut self, cx: &mut Context<Self>) {
+        self.effects_open = !self.effects_open;
+        self.more_open = false;
+        self.hints_visible = false;
+        cx.notify();
+    }
+
+    fn set_region_radius(&mut self, radius: u32, cx: &mut Context<Self>) {
+        self.effects.corner_radius = radius;
+        settings_state::update(|settings| {
+            settings.region_corner_radius = radius;
+        });
+        cx.notify();
+    }
+
+    fn toggle_region_shadow(&mut self, cx: &mut Context<Self>) {
+        self.effects.shadow = !self.effects.shadow;
+        let shadow = self.effects.shadow;
+        settings_state::update(|settings| settings.region_shadow = shadow);
+        cx.notify();
+    }
+
+    fn dismiss_effects(&mut self, cx: &mut Context<Self>) {
+        self.effects_open = false;
+        cx.notify();
+    }
+
+    fn dismiss_hints(&mut self, cx: &mut Context<Self>) {
+        self.hints_visible = false;
         cx.notify();
     }
 
@@ -3197,6 +3209,87 @@ impl EditorView {
             edit.replace(None, &text, false);
             cx.notify();
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn label_option_chip<F>(
+        &self,
+        id: String,
+        label: String,
+        tooltip: String,
+        selected: bool,
+        width: f32,
+        cx: &mut Context<Self>,
+        apply: F,
+    ) -> AnyElement
+    where
+        F: Fn(&mut Self, &mut Context<Self>) + 'static,
+    {
+        let accent = self.chrome.accent;
+        let accent_tint = self.chrome.accent_tint;
+        let hover = self.chrome.hover;
+        let muted = self.chrome.muted;
+        div()
+            .id(id)
+            .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
+            .w(px(width))
+            .h(px(22.0))
+            .rounded(px(5.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(selected, |button| button.bg(accent_tint))
+            .when(!selected, move |button| {
+                button.hover(move |style| style.bg(hover))
+            })
+            .active(|style| style.opacity(0.85))
+            .on_click(cx.listener(move |this, _, _, cx| apply(this, cx)))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(if selected { accent } else { muted })
+                    .child(label),
+            )
+            .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn toolbar_button(
+        &self,
+        id: &'static str,
+        label: String,
+        icon: &'static [u8],
+        enabled: bool,
+        color: Rgba,
+        cx: &mut Context<Self>,
+        action: fn(&mut Self, &mut Context<Self>),
+    ) -> AnyElement {
+        let hover = self.chrome.hover;
+        if !enabled {
+            return div()
+                .w(px(TOOLBAR_SIZE as f32))
+                .h(px(TOOLBAR_SIZE as f32))
+                .flex()
+                .items_center()
+                .justify_center()
+                .opacity(0.35)
+                .child(icons::icon(icon, 18.0, self.chrome.muted))
+                .into_any_element();
+        }
+        div()
+            .id(id)
+            .tooltip(move |_, cx| tooltip_view(label.clone(), cx))
+            .w(px(TOOLBAR_SIZE as f32))
+            .h(px(TOOLBAR_SIZE as f32))
+            .rounded(px(7.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .hover(move |style| style.bg(hover))
+            .active(|style| style.opacity(0.85))
+            .on_click(cx.listener(move |this, _, _, cx| action(this, cx)))
+            .child(icons::icon(icon, 18.0, color))
+            .into_any_element()
     }
 
     fn toolbar(
@@ -3561,33 +3654,20 @@ impl EditorView {
                 let selected = (config_style.font_size - size).abs() < 0.1;
                 let label = format!("{size:.0}");
                 let tooltip = format!("{} {label}", t(language, "editor.font_size"));
-                let button = div()
-                    .id(format!("editor-font-{label}"))
-                    .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
-                    .w(px(24.0))
-                    .h(px(22.0))
-                    .rounded(px(5.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(selected, |button| button.bg(accent_selected))
-                    .when(!selected, |button| {
-                        button.hover(move |style| style.bg(hover))
-                    })
-                    .active(|style| style.opacity(0.85))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                sizes.push(self.label_option_chip(
+                    format!("editor-font-{label}"),
+                    label,
+                    tooltip,
+                    selected,
+                    24.0,
+                    cx,
+                    move |this, cx| {
                         this.commit_text(cx);
                         this.apply_font_size(size);
                         this.status = None;
                         cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(if selected { accent } else { muted })
-                            .child(label),
-                    );
-                sizes.push(button.into_any_element());
+                    },
+                ));
             }
             groups.push(
                 div()
@@ -3811,33 +3891,20 @@ impl EditorView {
                 let selected = (config_style.corner_radius - applied).abs() < 0.1;
                 let label = format!("{radius:.0}");
                 let tooltip = format!("{} {label}", t(language, "editor.corner_radius"));
-                let button = div()
-                    .id(format!("editor-corner-{label}"))
-                    .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
-                    .w(px(22.0))
-                    .h(px(22.0))
-                    .rounded(px(5.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(selected, |button| button.bg(accent_selected))
-                    .when(!selected, |button| {
-                        button.hover(move |style| style.bg(hover))
-                    })
-                    .active(|style| style.opacity(0.85))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                radii.push(self.label_option_chip(
+                    format!("editor-corner-{label}"),
+                    label,
+                    tooltip,
+                    selected,
+                    22.0,
+                    cx,
+                    move |this, cx| {
                         this.commit_text(cx);
                         this.apply_corner_radius(radius);
                         this.status = None;
                         cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(if selected { accent } else { muted })
-                            .child(label),
-                    );
-                radii.push(button.into_any_element());
+                    },
+                ));
             }
             groups.push(
                 div()
@@ -3858,33 +3925,20 @@ impl EditorView {
                 let selected = (config_style.highlighter_radius - applied).abs() < 0.1;
                 let label = format!("{radius:.0}");
                 let tooltip = format!("{} {label}", t(language, "editor.highlighter_radius"));
-                let button = div()
-                    .id(format!("editor-highlighter-radius-{label}"))
-                    .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
-                    .w(px(22.0))
-                    .h(px(22.0))
-                    .rounded(px(5.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(selected, |button| button.bg(accent_selected))
-                    .when(!selected, |button| {
-                        button.hover(move |style| style.bg(hover))
-                    })
-                    .active(|style| style.opacity(0.85))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                radii.push(self.label_option_chip(
+                    format!("editor-highlighter-radius-{label}"),
+                    label,
+                    tooltip,
+                    selected,
+                    22.0,
+                    cx,
+                    move |this, cx| {
                         this.commit_text(cx);
                         this.apply_highlighter_radius(radius);
                         this.status = None;
                         cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(if selected { accent } else { muted })
-                            .child(label),
-                    );
-                radii.push(button.into_any_element());
+                    },
+                ));
             }
             groups.push(
                 div()
@@ -3914,33 +3968,20 @@ impl EditorView {
                 let selected = current.abs_diff(applied) <= 1;
                 let label = format!("{size}");
                 let tooltip = format!("{} {label}", t(language, "editor.number_size"));
-                let button = div()
-                    .id(format!("editor-number-{label}"))
-                    .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
-                    .w(px(24.0))
-                    .h(px(22.0))
-                    .rounded(px(5.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(selected, |button| button.bg(accent_selected))
-                    .when(!selected, |button| {
-                        button.hover(move |style| style.bg(hover))
-                    })
-                    .active(|style| style.opacity(0.85))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                sizes.push(self.label_option_chip(
+                    format!("editor-number-{label}"),
+                    label,
+                    tooltip,
+                    selected,
+                    24.0,
+                    cx,
+                    move |this, cx| {
                         this.commit_text(cx);
                         this.apply_number_size(size);
                         this.status = None;
                         cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(if selected { accent } else { muted })
-                            .child(label),
-                    );
-                sizes.push(button.into_any_element());
+                    },
+                ));
             }
             groups.push(
                 div()
@@ -3960,33 +4001,20 @@ impl EditorView {
                 let selected = config_style.blur_radius == radius;
                 let label = format!("{radius}");
                 let tooltip = format!("{} {label}", t(language, "editor.blur_radius"));
-                let button = div()
-                    .id(format!("editor-blur-{label}"))
-                    .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
-                    .w(px(24.0))
-                    .h(px(22.0))
-                    .rounded(px(5.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(selected, |button| button.bg(accent_selected))
-                    .when(!selected, |button| {
-                        button.hover(move |style| style.bg(hover))
-                    })
-                    .active(|style| style.opacity(0.85))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                radii.push(self.label_option_chip(
+                    format!("editor-blur-{label}"),
+                    label,
+                    tooltip,
+                    selected,
+                    24.0,
+                    cx,
+                    move |this, cx| {
                         this.commit_text(cx);
                         this.apply_blur_radius(radius);
                         this.status = None;
                         cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(if selected { accent } else { muted })
-                            .child(label),
-                    );
-                radii.push(button.into_any_element());
+                    },
+                ));
             }
             groups.push(
                 div()
@@ -4006,33 +4034,20 @@ impl EditorView {
                 let selected = config_intensity == intensity;
                 let label = format!("{intensity}%");
                 let tooltip = format!("{} {label}", t(language, "editor.intensity"));
-                let button = div()
-                    .id(format!("editor-spotlight-{intensity}"))
-                    .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
-                    .w(px(32.0))
-                    .h(px(22.0))
-                    .rounded(px(5.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(selected, |button| button.bg(accent_selected))
-                    .when(!selected, |button| {
-                        button.hover(move |style| style.bg(hover))
-                    })
-                    .active(|style| style.opacity(0.85))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                levels.push(self.label_option_chip(
+                    format!("editor-spotlight-{intensity}"),
+                    label,
+                    tooltip,
+                    selected,
+                    32.0,
+                    cx,
+                    move |this, cx| {
                         this.commit_text(cx);
                         this.apply_spotlight_intensity(intensity);
                         this.status = None;
                         cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(if selected { accent } else { muted })
-                            .child(label),
-                    );
-                levels.push(button.into_any_element());
+                    },
+                ));
             }
             groups.push(
                 div()
@@ -4051,33 +4066,20 @@ impl EditorView {
                 let selected = (config_style.spotlight_radius - applied).abs() < 0.1;
                 let label = format!("{radius:.0}");
                 let tooltip = format!("{} {label}", t(language, "editor.spotlight_radius"));
-                let button = div()
-                    .id(format!("editor-spotlight-radius-{label}"))
-                    .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
-                    .w(px(22.0))
-                    .h(px(22.0))
-                    .rounded(px(5.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(selected, |button| button.bg(accent_selected))
-                    .when(!selected, |button| {
-                        button.hover(move |style| style.bg(hover))
-                    })
-                    .active(|style| style.opacity(0.85))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                radii.push(self.label_option_chip(
+                    format!("editor-spotlight-radius-{label}"),
+                    label,
+                    tooltip,
+                    selected,
+                    22.0,
+                    cx,
+                    move |this, cx| {
                         this.commit_text(cx);
                         this.apply_spotlight_radius(radius);
                         this.status = None;
                         cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(if selected { accent } else { muted })
-                            .child(label),
-                    );
-                radii.push(button.into_any_element());
+                    },
+                ));
             }
             groups.push(
                 div()
@@ -4100,191 +4102,109 @@ impl EditorView {
         }
 
         let undo_label = t(language, "editor.undo").to_owned();
-        let undo = if self.document.can_undo() || !self.canvas_undo.is_empty() {
-            div()
-                .id("editor-undo")
-                .tooltip(move |_, cx| tooltip_view(undo_label.clone(), cx))
-                .w(px(TOOLBAR_SIZE as f32))
-                .h(px(TOOLBAR_SIZE as f32))
-                .rounded(px(7.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .hover(move |style| style.bg(hover))
-                .active(|style| style.opacity(0.85))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if !this.document.undo() {
-                        this.undo_canvas(cx);
-                    }
-                    this.status = None;
-                    cx.notify();
-                }))
-                .child(icons::icon(icons::UNDO, 18.0, muted))
-                .into_any_element()
-        } else {
-            div()
-                .w(px(TOOLBAR_SIZE as f32))
-                .h(px(TOOLBAR_SIZE as f32))
-                .flex()
-                .items_center()
-                .justify_center()
-                .opacity(0.35)
-                .child(icons::icon(icons::UNDO, 18.0, muted))
-                .into_any_element()
-        };
+        let undo = self.toolbar_button(
+            "editor-undo",
+            undo_label,
+            icons::UNDO,
+            self.document.can_undo() || !self.canvas_undo.is_empty(),
+            muted,
+            cx,
+            |this, cx| {
+                if !this.document.undo() {
+                    this.undo_canvas(cx);
+                }
+                this.status = None;
+                cx.notify();
+            },
+        );
 
         let redo_label = t(language, "editor.redo").to_owned();
-        let redo = if self.document.can_redo() || !self.canvas_redo.is_empty() {
-            div()
-                .id("editor-redo")
-                .tooltip(move |_, cx| tooltip_view(redo_label.clone(), cx))
-                .w(px(TOOLBAR_SIZE as f32))
-                .h(px(TOOLBAR_SIZE as f32))
-                .rounded(px(7.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .hover(move |style| style.bg(hover))
-                .active(|style| style.opacity(0.85))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if !this.document.redo() {
-                        this.redo_canvas(cx);
-                    }
-                    this.status = None;
-                    cx.notify();
-                }))
-                .child(icons::icon(icons::REDO, 18.0, muted))
-                .into_any_element()
-        } else {
-            div()
-                .w(px(TOOLBAR_SIZE as f32))
-                .h(px(TOOLBAR_SIZE as f32))
-                .flex()
-                .items_center()
-                .justify_center()
-                .opacity(0.35)
-                .child(icons::icon(icons::REDO, 18.0, muted))
-                .into_any_element()
-        };
+        let redo = self.toolbar_button(
+            "editor-redo",
+            redo_label,
+            icons::REDO,
+            self.document.can_redo() || !self.canvas_redo.is_empty(),
+            muted,
+            cx,
+            |this, cx| {
+                if !this.document.redo() {
+                    this.redo_canvas(cx);
+                }
+                this.status = None;
+                cx.notify();
+            },
+        );
 
         let delete_label = t(language, "editor.delete").to_owned();
-        let delete = if self.document.selected().is_some() {
-            div()
-                .id("editor-delete")
-                .tooltip(move |_, cx| tooltip_view(delete_label.clone(), cx))
-                .w(px(TOOLBAR_SIZE as f32))
-                .h(px(TOOLBAR_SIZE as f32))
-                .rounded(px(7.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .hover(move |style| style.bg(hover))
-                .active(|style| style.opacity(0.85))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.commit_text(cx);
-                    this.delete_selected_annotation(cx);
-                }))
-                .child(icons::icon(icons::TRASH, 18.0, text))
-                .into_any_element()
-        } else {
-            div()
-                .w(px(TOOLBAR_SIZE as f32))
-                .h(px(TOOLBAR_SIZE as f32))
-                .flex()
-                .items_center()
-                .justify_center()
-                .opacity(0.35)
-                .child(icons::icon(icons::TRASH, 18.0, muted))
-                .into_any_element()
-        };
+        let delete = self.toolbar_button(
+            "editor-delete",
+            delete_label,
+            icons::TRASH,
+            self.document.selected().is_some(),
+            text,
+            cx,
+            |this, cx| {
+                this.commit_text(cx);
+                this.delete_selected_annotation(cx);
+            },
+        );
 
         let pin_label = t(language, "editor.pin").to_owned();
         let pin = (self.pin_target.is_none()).then(|| {
-            div()
-                .id("editor-pin")
-                .tooltip(move |_, cx| tooltip_view(pin_label.clone(), cx))
-                .w(px(TOOLBAR_SIZE as f32))
-                .h(px(TOOLBAR_SIZE as f32))
-                .rounded(px(7.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .hover(move |style| style.bg(hover))
-                .active(|style| style.opacity(0.85))
-                .on_click(cx.listener(|this, _, _, cx| this.pin(cx)))
-                .child(icons::icon(icons::PIN, 18.0, text))
-                .into_any_element()
+            self.toolbar_button(
+                "editor-pin",
+                pin_label,
+                icons::PIN,
+                true,
+                text,
+                cx,
+                |this, cx| this.pin(cx),
+            )
         });
 
         let copy_label = t(language, "editor.copy").to_owned();
-        let copy = div()
-            .id("editor-copy")
-            .tooltip(move |_, cx| tooltip_view(copy_label.clone(), cx))
-            .w(px(TOOLBAR_SIZE as f32))
-            .h(px(TOOLBAR_SIZE as f32))
-            .rounded(px(7.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .hover(move |style| style.bg(hover))
-            .active(|style| style.opacity(0.85))
-            .on_click(cx.listener(|this, _, _, cx| this.export(true, cx)))
-            .child(icons::icon(icons::COPY, 18.0, text))
-            .into_any_element();
+        let copy = self.toolbar_button(
+            "editor-copy",
+            copy_label,
+            icons::COPY,
+            true,
+            text,
+            cx,
+            |this, cx| this.export(true, cx),
+        );
 
         let save_label = t(language, "editor.save").to_owned();
-        let save = div()
-            .id("editor-save")
-            .tooltip(move |_, cx| tooltip_view(save_label.clone(), cx))
-            .w(px(TOOLBAR_SIZE as f32))
-            .h(px(TOOLBAR_SIZE as f32))
-            .rounded(px(7.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .hover(move |style| style.bg(hover))
-            .active(|style| style.opacity(0.85))
-            .on_click(cx.listener(|this, _, _, cx| this.export(false, cx)))
-            .child(icons::icon(icons::SAVE, 18.0, text))
-            .into_any_element();
+        let save = self.toolbar_button(
+            "editor-save",
+            save_label,
+            icons::SAVE,
+            true,
+            text,
+            cx,
+            |this, cx| this.export(false, cx),
+        );
 
         let capture_actions_enabled = self.inline.and_then(|inline| inline.capture).is_some();
         let mut capture_actions: Vec<AnyElement> = Vec::new();
         if capture_actions_enabled {
-            let scroll_label = t(language, "menu.scroll_capture").to_owned();
-            capture_actions.push(
-                div()
-                    .id("editor-scroll-capture")
-                    .tooltip(move |_, cx| tooltip_view(scroll_label.clone(), cx))
-                    .w(px(TOOLBAR_SIZE as f32))
-                    .h(px(TOOLBAR_SIZE as f32))
-                    .rounded(px(7.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .hover(move |style| style.bg(hover))
-                    .active(|style| style.opacity(0.85))
-                    .on_click(cx.listener(|this, _, _, cx| this.start_scroll_capture(cx)))
-                    .child(icons::icon(icons::SCROLL, 18.0, muted))
-                    .into_any_element(),
-            );
-            let record_label = t(language, "menu.record").to_owned();
-            capture_actions.push(
-                div()
-                    .id("editor-record")
-                    .tooltip(move |_, cx| tooltip_view(record_label.clone(), cx))
-                    .w(px(TOOLBAR_SIZE as f32))
-                    .h(px(TOOLBAR_SIZE as f32))
-                    .rounded(px(7.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .hover(move |style| style.bg(hover))
-                    .active(|style| style.opacity(0.85))
-                    .on_click(cx.listener(|this, _, _, cx| this.start_recording(cx)))
-                    .child(icons::icon(icons::RECORDING, 18.0, muted))
-                    .into_any_element(),
-            );
+            capture_actions.push(self.toolbar_button(
+                "editor-scroll-capture",
+                t(language, "menu.scroll_capture").to_owned(),
+                icons::SCROLL,
+                true,
+                muted,
+                cx,
+                |this, cx| this.start_scroll_capture(cx),
+            ));
+            capture_actions.push(self.toolbar_button(
+                "editor-record",
+                t(language, "menu.record").to_owned(),
+                icons::RECORDING,
+                true,
+                muted,
+                cx,
+                |this, cx| this.start_recording(cx),
+            ));
         }
 
         let capture_page = capture_actions_enabled;
@@ -4661,56 +4581,24 @@ impl EditorView {
             );
 
         if !matches!(capture.target, CaptureTarget::Window(_)) {
-            let effects_active = self.effects.active();
-            bar = bar.child(
-                div()
-                    .id("editor-info-effects")
-                    .px(px(6.0))
-                    .py(px(3.0))
-                    .rounded(px(5.0))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.0))
-                    .when(self.effects_open, |chip| chip.bg(self.chrome.selected))
-                    .hover(|style| style.bg(self.chrome.hover))
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.effects_open = !this.effects_open;
-                        this.more_open = false;
-                        this.hints_visible = false;
-                        cx.notify();
-                    }))
-                    .child(t(language, "overlay.info_effects"))
-                    .when(effects_active, |chip| {
-                        chip.child(
-                            div()
-                                .w(px(5.0))
-                                .h(px(5.0))
-                                .rounded(px(3.0))
-                                .bg(self.chrome.accent),
-                        )
-                    }),
-            );
+            bar = bar.child(crate::capture_panels::effects_chip(
+                "editor-info-effects",
+                self.chrome,
+                language,
+                self.effects_open,
+                self.effects.active(),
+                cx,
+                Self::toggle_effects_panel,
+            ));
         }
 
-        bar = bar.child(
-            div()
-                .id("editor-info-refresh")
-                .tooltip(move |_, cx| {
-                    tooltip_view(t(language, "overlay.info_refresh").to_owned(), cx)
-                })
-                .w(px(22.0))
-                .h(px(22.0))
-                .rounded(px(5.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .hover(|style| style.bg(self.chrome.hover))
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _, _, cx| this.refresh_capture(cx)))
-                .child(icons::icon(icons::REFRESH, 14.0, self.chrome.icon)),
-        );
+        bar = bar.child(crate::capture_panels::refresh_button(
+            "editor-info-refresh",
+            self.chrome,
+            language,
+            cx,
+            Self::refresh_capture_action,
+        ));
 
         Some(bar.into_any_element())
     }
@@ -4721,135 +4609,18 @@ impl EditorView {
         }
         let rect = self.effects_rect(window)?;
         let language = settings_state::get().language;
-        let mut corner_row = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(2.0))
-            .child(icons::icon(icons::RECT, 14.0, self.chrome.muted));
-        for radius in [0u32, 8, 16, 24] {
-            let selected_radius = self.effects.corner_radius == radius;
-            let label = if radius == 0 {
-                t(language, "overlay.effects_off").to_owned()
-            } else {
-                radius.to_string()
-            };
-            let tooltip = format!("{} {label}", t(language, "overlay.effects_corner"));
-            corner_row = corner_row.child(
-                div()
-                    .id(format!("editor-radius-{radius}"))
-                    .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
-                    .h(px(22.0))
-                    .px(px(6.0))
-                    .rounded(px(5.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(selected_radius, |chip| chip.bg(self.chrome.accent_tint))
-                    .when(!selected_radius, |chip| {
-                        chip.hover(|style| style.bg(self.chrome.hover))
-                    })
-                    .active(|style| style.opacity(0.85))
-                    .text_size(px(11.0))
-                    .text_color(if selected_radius {
-                        self.chrome.accent
-                    } else {
-                        self.chrome.muted
-                    })
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.effects.corner_radius = radius;
-                        settings_state::update(|settings| {
-                            settings.region_corner_radius = radius;
-                        });
-                        cx.notify();
-                    }))
-                    .child(label),
-            );
-        }
-        let shadow = self.effects.shadow;
-        let shadow_label = t(language, "overlay.effects_shadow").to_owned();
-        let shadow_chip = div()
-            .id("editor-effects-shadow")
-            .tooltip({
-                let label = shadow_label.clone();
-                move |_, cx| tooltip_view(label.clone(), cx)
-            })
-            .h(px(22.0))
-            .px(px(8.0))
-            .rounded(px(5.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .when(shadow, |chip| chip.bg(self.chrome.accent_tint))
-            .when(!shadow, |chip| {
-                chip.hover(|style| style.bg(self.chrome.hover))
-            })
-            .active(|style| style.opacity(0.85))
-            .text_size(px(11.0))
-            .text_color(if shadow {
-                self.chrome.accent
-            } else {
-                self.chrome.muted
-            })
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.effects.shadow = !this.effects.shadow;
-                let shadow = this.effects.shadow;
-                settings_state::update(|settings| settings.region_shadow = shadow);
-                cx.notify();
-            }))
-            .child(shadow_label);
-        let panel = div()
-            .id("editor-effects-panel")
-            .absolute()
-            .left(rect.origin.x)
-            .top(rect.origin.y)
-            .w(rect.size.width)
-            .h(rect.size.height)
-            .px(px(8.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .rounded(px(self.chrome.radius))
-            .bg(self.chrome.surface_strong)
-            .border_1()
-            .border_color(self.chrome.border)
-            .shadow(self.chrome.shadow())
-            .occlude()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_, _, _, cx| cx.stop_propagation()),
-            )
-            .child(corner_row)
-            .child(div().w(px(1.0)).h(px(18.0)).bg(self.chrome.separator))
-            .child(shadow_chip);
-        let panel = crate::ui::enter_slide_fade(
-            panel,
-            "editor-effects-enter",
-            f32::from(rect.origin.y),
+        Some(crate::capture_panels::effects_panel(
+            "editor",
+            self.chrome,
+            language,
+            rect,
+            self.effects,
             4.0,
-            Duration::from_millis(120),
-        );
-
-        Some(
-            div()
-                .id("editor-effects-layer")
-                .absolute()
-                .inset_0()
-                .occlude()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        this.effects_open = false;
-                        cx.stop_propagation();
-                        cx.notify();
-                    }),
-                )
-                .child(panel)
-                .into_any_element(),
-        )
+            cx,
+            Self::set_region_radius,
+            Self::toggle_region_shadow,
+            Self::dismiss_effects,
+        ))
     }
 
     fn hints_panel(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -4861,99 +4632,57 @@ impl EditorView {
         let window_height = f32::from(window.viewport_size().height);
         let width = 340.0_f32.min((window_width - 16.0).max(120.0));
         let height = 220.0;
-        let panel = div()
-            .id("editor-hints-panel")
-            .absolute()
-            .left(px((window_width - width) / 2.0))
-            .top(px((window_height - height) / 2.0))
-            .w(px(width))
-            .p(px(12.0))
-            .flex()
-            .flex_col()
-            .gap(px(5.0))
-            .rounded(px(self.chrome.radius))
-            .bg(self.chrome.surface_strong)
-            .border_1()
-            .border_color(self.chrome.border)
-            .shadow(self.chrome.shadow())
-            .occlude()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_, _, _, cx| cx.stop_propagation()),
-            )
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(self.chrome.text)
-                    .child(t(language, "editor.hints_title")),
-            );
+        let rect = Bounds {
+            origin: point(
+                px((window_width - width) / 2.0),
+                px((window_height - height) / 2.0),
+            ),
+            size: size(px(width), px(height)),
+        };
         let pin_hotkey = crate::hotkey::display_hotkey(&settings_state::get().pin_hotkey);
-        let mut rows: Vec<(String, &'static str)> = vec![
+        let mut rows: Vec<(String, String)> = vec![
             (
                 t(language, "editor.hint_key_copy").to_owned(),
-                t(language, "editor.hint_copy"),
+                t(language, "editor.hint_copy").to_owned(),
             ),
-            ("Cmd/Ctrl+S".to_owned(), t(language, "editor.hint_save")),
+            (
+                "Cmd/Ctrl+S".to_owned(),
+                t(language, "editor.hint_save").to_owned(),
+            ),
         ];
         if self.inline.and_then(|inline| inline.capture).is_some() {
-            rows.push((pin_hotkey, t(language, "editor.hint_pin")));
+            rows.push((pin_hotkey, t(language, "editor.hint_pin").to_owned()));
         }
         rows.push(if self.inline.is_some_and(|inline| inline.zoomable) {
-            ("Space".to_owned(), t(language, "editor.hint_pan"))
+            (
+                "Space".to_owned(),
+                t(language, "editor.hint_pan").to_owned(),
+            )
         } else {
-            ("Space".to_owned(), t(language, "editor.hint_space"))
+            (
+                "Space".to_owned(),
+                t(language, "editor.hint_space").to_owned(),
+            )
         });
         if self.inline.and_then(|inline| inline.capture).is_some() {
-            rows.push(("F5".to_owned(), t(language, "editor.hint_refresh")));
+            rows.push((
+                "F5".to_owned(),
+                t(language, "editor.hint_refresh").to_owned(),
+            ));
         }
-        rows.push(("Esc".to_owned(), t(language, "editor.hint_cancel")));
-        let mut panel = panel;
-        for (key, description) in rows {
-            panel = panel.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .text_size(px(10.5))
-                            .text_color(self.chrome.muted)
-                            .child(key),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(self.chrome.text)
-                            .child(description),
-                    ),
-            );
-        }
-        let panel = crate::ui::enter_slide_fade(
-            panel,
-            "editor-hints-enter",
-            (window_height - height) / 2.0,
-            4.0,
-            Duration::from_millis(120),
-        );
-        Some(
-            div()
-                .id("editor-hints-layer")
-                .absolute()
-                .inset_0()
-                .occlude()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        this.hints_visible = false;
-                        cx.stop_propagation();
-                        cx.notify();
-                    }),
-                )
-                .child(panel)
-                .into_any_element(),
-        )
+        rows.push((
+            "Esc".to_owned(),
+            t(language, "editor.hint_cancel").to_owned(),
+        ));
+        Some(crate::capture_panels::hints_panel(
+            "editor",
+            self.chrome,
+            language,
+            rect,
+            rows,
+            cx,
+            Self::dismiss_hints,
+        ))
     }
 
     fn refresh_full_canvas(&mut self, cx: &mut Context<Self>) {
@@ -7213,20 +6942,14 @@ fn open_inline_editor_window(
     notice: Option<String>,
     cx: &mut App,
 ) -> bool {
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(window_bounds)),
-        titlebar: None,
-        focus: true,
-        show: true,
-        kind: inline_editor_window_kind(),
-        is_movable: false,
-        is_resizable: false,
-        is_minimizable: false,
+    let options = crate::aux_window::popup_options(
+        "capin-editor-inline",
+        window_bounds,
         display_id,
-        window_background: WindowBackgroundAppearance::Transparent,
-        app_id: Some("capin-editor-inline".to_owned()),
-        ..Default::default()
-    };
+        true,
+        inline_editor_window_kind(),
+        WindowBackgroundAppearance::Transparent,
+    );
 
     // Accessories are not brought forward by ordering a window front; make
     // sure the pin/long-capture editor can become key before opening it.
@@ -7720,22 +7443,7 @@ fn paint_shape(
             } else {
                 PathBuilder::stroke(stroke)
             };
-            if radius < 0.5 {
-                builder.move_to(to_point(left, top));
-                builder.line_to(to_point(right, top));
-                builder.line_to(to_point(right, bottom));
-                builder.line_to(to_point(left, bottom));
-            } else {
-                builder.move_to(to_point(left + radius, top));
-                builder.line_to(to_point(right - radius, top));
-                builder.curve_to(to_point(right, top + radius), to_point(right, top));
-                builder.line_to(to_point(right, bottom - radius));
-                builder.curve_to(to_point(right - radius, bottom), to_point(right, bottom));
-                builder.line_to(to_point(left + radius, bottom));
-                builder.curve_to(to_point(left, bottom - radius), to_point(left, bottom));
-                builder.line_to(to_point(left, top + radius));
-                builder.curve_to(to_point(left + radius, top), to_point(left, top));
-            }
+            push_preview_rounded_rect(&mut builder, &to_point, left, top, right, bottom, radius);
             builder.close();
             if let Ok(path) = builder.build() {
                 window.paint_path(path, color);
@@ -7798,22 +7506,7 @@ fn paint_shape(
             let radius = (style.highlighter_radius * scale)
                 .clamp(0.0, (right - left).min(bottom - top) / 2.0);
             let mut builder = PathBuilder::fill();
-            if radius < 0.5 {
-                builder.move_to(to_point(left, top));
-                builder.line_to(to_point(right, top));
-                builder.line_to(to_point(right, bottom));
-                builder.line_to(to_point(left, bottom));
-            } else {
-                builder.move_to(to_point(left + radius, top));
-                builder.line_to(to_point(right - radius, top));
-                builder.curve_to(to_point(right, top + radius), to_point(right, top));
-                builder.line_to(to_point(right, bottom - radius));
-                builder.curve_to(to_point(right - radius, bottom), to_point(right, bottom));
-                builder.line_to(to_point(left + radius, bottom));
-                builder.curve_to(to_point(left, bottom - radius), to_point(left, bottom));
-                builder.line_to(to_point(left, top + radius));
-                builder.curve_to(to_point(left + radius, top), to_point(left, top));
-            }
+            push_preview_rounded_rect(&mut builder, &to_point, left, top, right, bottom, radius);
             builder.close();
             if let Ok(path) = builder.build() {
                 window.paint_path(path, color);
@@ -7829,6 +7522,33 @@ fn paint_shape(
             style.spotlight_radius,
         ),
     }
+}
+
+fn push_preview_rounded_rect(
+    builder: &mut PathBuilder,
+    to_point: &impl Fn(f32, f32) -> Point<Pixels>,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    radius: f32,
+) {
+    if radius < 0.5 {
+        builder.move_to(to_point(left, top));
+        builder.line_to(to_point(right, top));
+        builder.line_to(to_point(right, bottom));
+        builder.line_to(to_point(left, bottom));
+        return;
+    }
+    builder.move_to(to_point(left + radius, top));
+    builder.line_to(to_point(right - radius, top));
+    builder.curve_to(to_point(right, top + radius), to_point(right, top));
+    builder.line_to(to_point(right, bottom - radius));
+    builder.curve_to(to_point(right - radius, bottom), to_point(right, bottom));
+    builder.line_to(to_point(left + radius, bottom));
+    builder.curve_to(to_point(left, bottom - radius), to_point(left, bottom));
+    builder.line_to(to_point(left, top + radius));
+    builder.curve_to(to_point(left + radius, top), to_point(left, top));
 }
 
 fn paint_spotlight(
@@ -7851,27 +7571,18 @@ fn paint_spotlight(
     if hole_right <= hole_left || hole_bottom <= hole_top {
         return;
     }
-
-    let mut builder = PathBuilder::fill().with_style(PathStyle::Fill(
-        FillOptions::default().with_fill_rule(FillRule::EvenOdd),
-    ));
-    builder.move_to(point(px(image_left), px(image_top)));
-    builder.line_to(point(px(image_right), px(image_top)));
-    builder.line_to(point(px(image_right), px(image_bottom)));
-    builder.line_to(point(px(image_left), px(image_bottom)));
-    builder.close();
-    let radius = (radius * scale).clamp(
-        0.0,
-        (hole_right - hole_left).min(hole_bottom - hole_top) / 2.0,
-    );
     let hole = Bounds {
         origin: point(px(hole_left), px(hole_top)),
         size: size(px(hole_right - hole_left), px(hole_bottom - hole_top)),
     };
-    crate::ui::push_rounded_rect(&mut builder, hole, radius);
-    if let Ok(path) = builder.build() {
-        window.paint_path(path, rgba(u32::from(alpha)));
-    }
+    crate::ui::paint_rounded_mask(
+        window,
+        bounds,
+        hole,
+        (radius * scale).max(0.0),
+        rgba(u32::from(alpha)),
+        None,
+    );
 }
 
 #[cfg(test)]

@@ -51,20 +51,14 @@ pub fn open(target: CaptureTarget, cx: &mut App) {
     // virtual-desktop logical coordinates. The shared helper applies the
     // platform-specific translation, matching the recording/scroll bars.
     let bounds = crate::display::window_bounds_on_monitor(monitor, logical);
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: None,
-        focus: false,
-        show: true,
-        kind: WindowKind::PopUp,
-        is_movable: false,
-        is_resizable: false,
-        is_minimizable: false,
-        display_id: Some(DisplayId::new(monitor_id.raw())),
-        window_background: WindowBackgroundAppearance::Transparent,
-        app_id: Some("capin-region-outline".to_owned()),
-        ..Default::default()
-    };
+    let options = crate::aux_window::popup_options(
+        "capin-region-outline",
+        bounds,
+        Some(DisplayId::new(monitor_id.raw())),
+        false,
+        WindowKind::PopUp,
+        WindowBackgroundAppearance::Transparent,
+    );
     match gpui_kit::open_window(options, cx, move |window, cx| {
         let visible = match apply_window_style(&*window, WindowStyle::CAPTURE_OUTLINE) {
             Ok(()) => true,
@@ -87,44 +81,10 @@ pub fn open(target: CaptureTarget, cx: &mut App) {
 }
 
 fn target_rect(target: CaptureTarget) -> Option<(core_types::PhysicalRect, core_types::MonitorId)> {
-    let monitors = platform_backend().monitors().ok()?;
-    match target {
-        CaptureTarget::Region(region) => {
-            let monitor = monitors
-                .iter()
-                .find(|monitor| monitor.id == region.monitor)?;
-            Some((
-                core_types::PhysicalRect::new(
-                    monitor.bounds.origin.x + region.rect.origin.x,
-                    monitor.bounds.origin.y + region.rect.origin.y,
-                    region.rect.size.width,
-                    region.rect.size.height,
-                ),
-                region.monitor,
-            ))
-        }
-        CaptureTarget::Window(id) => {
-            let window = platform_backend()
-                .windows()
-                .ok()?
-                .into_iter()
-                .find(|window| window.id == id)?;
-            let monitor = window.monitor.or_else(|| {
-                let center = core_types::PhysicalPoint::new(
-                    window.bounds.origin.x + window.bounds.size.width as i32 / 2,
-                    window.bounds.origin.y + window.bounds.size.height as i32 / 2,
-                );
-                monitors
-                    .iter()
-                    .find(|monitor| monitor.bounds.contains(center))
-                    .map(|monitor| monitor.id)
-            })?;
-            Some((window.bounds, monitor))
-        }
-        // A full-screen recording needs no frame; the screen edge already
-        // shows the recorded area.
-        CaptureTarget::Monitor(_) => None,
+    if matches!(target, CaptureTarget::Monitor(_)) {
+        return None;
     }
+    crate::aux_window::target_area(target).map(|(area, monitor)| (area, monitor.id))
 }
 
 struct RegionOutline {

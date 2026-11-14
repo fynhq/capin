@@ -10,6 +10,31 @@ use gpui_kit::*;
 use crate::chrome_theme::ChromeTheme;
 use crate::icons;
 
+struct TooltipLabel {
+    text: SharedString,
+}
+
+impl Render for TooltipLabel {
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let chrome = ChromeTheme::for_window(window, None);
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(px(6.0))
+            .bg(chrome.surface_strong)
+            .border_1()
+            .border_color(chrome.border)
+            .shadow(chrome.shadow())
+            .text_size(px(11.5))
+            .text_color(chrome.text)
+            .child(self.text.clone())
+    }
+}
+
+pub(crate) fn tooltip_view(text: String, cx: &mut App) -> AnyView {
+    cx.new(|_| TooltipLabel { text: text.into() }).into()
+}
+
 /// Centers a window on the primary display, or falls back to a stable origin
 /// when no display information is available.
 pub fn centered_bounds(cx: &App, width: f32, height: f32) -> Bounds<Pixels> {
@@ -174,6 +199,30 @@ pub fn paint_rounded_mask(
     }
 }
 
+/// Horizontal placement for a popover anchored to a control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PopoverAlign {
+    Center,
+    End,
+}
+
+/// Places a popover horizontally at the anchor edge or center, keeping an
+/// 8px margin inside the window.
+pub fn popover_left(
+    anchor: Bounds<Pixels>,
+    width: f32,
+    window_width: f32,
+    align: PopoverAlign,
+) -> f32 {
+    let anchor_left = f32::from(anchor.origin.x);
+    let anchor_width = f32::from(anchor.size.width);
+    let left = match align {
+        PopoverAlign::Center => anchor_left + anchor_width / 2.0 - width / 2.0,
+        PopoverAlign::End => anchor_left + anchor_width - width,
+    };
+    left.clamp(8.0, (window_width - width - 8.0).max(8.0))
+}
+
 /// Places a popover beside its anchor without covering the anchor or another
 /// chrome bar. Preferring the space below keeps a card from clamping back over
 /// the info bar when the selection sits near the bottom of the screen.
@@ -183,9 +232,19 @@ pub fn popover_top(
     window_height: f32,
     avoid: Option<Bounds<Pixels>>,
 ) -> f32 {
-    const GAP: f32 = 6.0;
-    let above = f32::from(anchor.origin.y) - height - GAP;
-    let below = f32::from(anchor.origin.y) + f32::from(anchor.size.height) + GAP;
+    popover_top_with_gap(anchor, height, window_height, avoid, 6.0)
+}
+
+/// [`popover_top`] with an explicit gap between the anchor and the popover.
+pub fn popover_top_with_gap(
+    anchor: Bounds<Pixels>,
+    height: f32,
+    window_height: f32,
+    avoid: Option<Bounds<Pixels>>,
+    gap: f32,
+) -> f32 {
+    let above = f32::from(anchor.origin.y) - height - gap;
+    let below = f32::from(anchor.origin.y) + f32::from(anchor.size.height) + gap;
     let fits_above = above >= 8.0;
     let fits_below = below + height <= window_height - 8.0;
     let overlaps = |top: f32| {

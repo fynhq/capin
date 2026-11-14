@@ -353,9 +353,7 @@ fn cleanup_orphans(directory: &Path, now: u64, referenced: &HashSet<String>) {
 
 fn load_entry(directory: &Path, entry: &HistoryEntry) -> Option<RgbaFrame> {
     let file = Path::new(&entry.file).file_name()?;
-    let image = image::open(directory.join(file)).ok()?.into_rgba8();
-    let (width, height) = image.dimensions();
-    RgbaFrame::from_pixels(width, height, image.into_raw()).ok()
+    crate::image_util::load_frame(&directory.join(file))
 }
 
 fn unique_history_path(directory: &Path, now: u64) -> PathBuf {

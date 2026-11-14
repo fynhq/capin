@@ -1817,16 +1817,13 @@ impl SettingsView {
         let viewport = window.viewport_size();
         let viewport_width = f32::from(viewport.width);
         let viewport_height = f32::from(viewport.height);
-        let anchor_x = f32::from(menu.anchor.origin.x);
-        let anchor_y = f32::from(menu.anchor.origin.y);
-        let anchor_width = f32::from(menu.anchor.size.width);
-        let anchor_height = f32::from(menu.anchor.size.height);
-        let mut x = anchor_x + anchor_width - width;
-        let mut y = anchor_y + anchor_height + 4.0;
-        if y + height > viewport_height - 8.0 {
-            y = (anchor_y - height - 4.0).max(8.0);
-        }
-        x = x.clamp(8.0, (viewport_width - width - 8.0).max(8.0));
+        let x = crate::ui::popover_left(
+            menu.anchor,
+            width,
+            viewport_width,
+            crate::ui::PopoverAlign::End,
+        );
+        let y = crate::ui::popover_top_with_gap(menu.anchor, height, viewport_height, None, 4.0);
 
         let mut popup = div()
             .id("settings-select-popup")
@@ -2265,7 +2262,7 @@ impl SettingsView {
         let custom_tooltip = t(language, "editor.custom_color").to_owned();
         let custom = div()
             .id("settings-record-highlight-custom")
-            .tooltip(move |_, cx| crate::editor::tooltip_view(custom_tooltip.clone(), cx))
+            .tooltip(move |_, cx| crate::ui::tooltip_view(custom_tooltip.clone(), cx))
             .relative()
             .w(px(28.0))
             .h(px(28.0))
@@ -2420,16 +2417,13 @@ impl SettingsView {
         let viewport = window.viewport_size();
         let viewport_width = f32::from(viewport.width);
         let viewport_height = f32::from(viewport.height);
-        let anchor_x = f32::from(picker.anchor.origin.x);
-        let anchor_y = f32::from(picker.anchor.origin.y);
-        let anchor_width = f32::from(picker.anchor.size.width);
-        let anchor_height = f32::from(picker.anchor.size.height);
-        let mut x = anchor_x + anchor_width / 2.0 - width / 2.0;
-        let mut y = anchor_y + anchor_height + 4.0;
-        if y + height > viewport_height - 8.0 {
-            y = (anchor_y - height - 4.0).max(8.0);
-        }
-        x = x.clamp(8.0, (viewport_width - width - 8.0).max(8.0));
+        let x = crate::ui::popover_left(
+            picker.anchor,
+            width,
+            viewport_width,
+            crate::ui::PopoverAlign::Center,
+        );
+        let y = crate::ui::popover_top_with_gap(picker.anchor, height, viewport_height, None, 4.0);
 
         let preview_rgb = picker.buffer.trim().trim_start_matches('#');
         let preview = u32::from_str_radix(preview_rgb, 16)

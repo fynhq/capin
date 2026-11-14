@@ -1,4 +1,5 @@
 use std::io::Cursor;
+use std::path::Path;
 use std::sync::Arc;
 
 use core_types::{PhysicalRect, PhysicalSize, RgbaFrame};
@@ -228,6 +229,12 @@ fn blur_from_view(
         image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(small_width, small_height, pixels)
             .expect("blurred image size is valid");
     Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))
+}
+
+pub fn load_frame(path: &Path) -> Option<RgbaFrame> {
+    let image = image::open(path).ok()?.into_rgba8();
+    let (width, height) = image.dimensions();
+    RgbaFrame::from_pixels(width, height, image.into_raw()).ok()
 }
 
 pub fn encode_png(frame: &RgbaFrame) -> Result<Vec<u8>, image::ImageError> {

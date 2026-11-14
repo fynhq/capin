@@ -7,7 +7,7 @@
 use std::cell::RefCell;
 use std::time::Duration;
 
-use core_capture::{CaptureTarget, platform_backend};
+use core_capture::CaptureTarget;
 use core_record::{CURSOR_HIGHLIGHT_ALPHA, CURSOR_HIGHLIGHT_RADIUS};
 use core_types::PhysicalRect;
 use gpui_kit::prelude::*;
@@ -35,7 +35,7 @@ pub fn close(cx: &mut App) {
 
 pub fn open(target: CaptureTarget, color: u32, cx: &mut App) {
     close(cx);
-    let Some((area, monitor)) = target_area(target) else {
+    let Some((area, monitor)) = crate::aux_window::target_area(target) else {
         return;
     };
     let scale = monitor.scale.get().max(0.1);
@@ -50,20 +50,14 @@ pub fn open(target: CaptureTarget, color: u32, cx: &mut App) {
         ),
     };
     let bounds = crate::display::window_bounds_on_monitor(&monitor, logical);
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: None,
-        focus: false,
-        show: true,
-        kind: WindowKind::PopUp,
-        is_movable: false,
-        is_resizable: false,
-        is_minimizable: false,
-        display_id: Some(DisplayId::new(monitor.id.raw())),
-        window_background: WindowBackgroundAppearance::Transparent,
-        app_id: Some("capin-record-spotlight".to_owned()),
-        ..Default::default()
-    };
+    let options = crate::aux_window::popup_options(
+        "capin-record-spotlight",
+        bounds,
+        Some(DisplayId::new(monitor.id.raw())),
+        false,
+        WindowKind::PopUp,
+        WindowBackgroundAppearance::Transparent,
+    );
 
     match gpui_kit::open_window(options, cx, move |window, cx| {
         let _ = apply_window_style(&*window, WindowStyle::RECORD_HIGHLIGHT);
@@ -154,48 +148,4 @@ impl Render for SpotlightView {
         });
         div().size_full().children(disc.flatten())
     }
-}
-
-fn target_area(target: CaptureTarget) -> Option<(PhysicalRect, core_capture::MonitorInfo)> {
-    let monitors = platform_backend().monitors().ok()?;
-    let (area, monitor_id) = match target {
-        CaptureTarget::Region(region) => {
-            let monitor = monitors
-                .iter()
-                .find(|monitor| monitor.id == region.monitor)?;
-            let area = PhysicalRect::new(
-                monitor.bounds.origin.x + region.rect.origin.x,
-                monitor.bounds.origin.y + region.rect.origin.y,
-                region.rect.size.width,
-                region.rect.size.height,
-            );
-            (area, monitor.id)
-        }
-        CaptureTarget::Window(id) => {
-            let window = platform_backend()
-                .windows()
-                .ok()?
-                .into_iter()
-                .find(|window| window.id == id)?;
-            let center = core_types::PhysicalPoint::new(
-                window.bounds.origin.x + window.bounds.size.width as i32 / 2,
-                window.bounds.origin.y + window.bounds.size.height as i32 / 2,
-            );
-            let monitor_id = window.monitor.or_else(|| {
-                monitors
-                    .iter()
-                    .find(|monitor| monitor.bounds.contains(center))
-                    .map(|monitor| monitor.id)
-            })?;
-            (window.bounds, monitor_id)
-        }
-        CaptureTarget::Monitor(id) => {
-            let monitor = monitors.iter().find(|monitor| monitor.id == id)?;
-            (monitor.bounds, monitor.id)
-        }
-    };
-    let monitor = monitors
-        .into_iter()
-        .find(|monitor| monitor.id == monitor_id)?;
-    Some((area, monitor))
 }

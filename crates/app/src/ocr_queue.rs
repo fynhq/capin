@@ -24,7 +24,7 @@ pub(crate) fn recognize(source: Source, options: OcrOptions) -> OcrOutput {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let frame = match source {
         Source::Frame(frame) => frame,
-        Source::Path(path) => match load_frame(&path) {
+        Source::Path(path) => match crate::image_util::load_frame(&path) {
             Some(frame) => Arc::new(frame),
             None => {
                 return OcrOutput {
@@ -35,10 +35,4 @@ pub(crate) fn recognize(source: Source, options: OcrOptions) -> OcrOutput {
         },
     };
     platform_ocr::recognize_shared(frame, options)
-}
-
-fn load_frame(path: &std::path::Path) -> Option<RgbaFrame> {
-    let image = image::open(path).ok()?.into_rgba8();
-    let (width, height) = image.dimensions();
-    RgbaFrame::from_pixels(width, height, image.into_raw()).ok()
 }

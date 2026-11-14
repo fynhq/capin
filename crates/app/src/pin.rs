@@ -984,20 +984,14 @@ fn open_pin_inner(
     // for every new pin; the frame is released as soon as the window exists.
     let initial_ocr_path = image_path.clone();
     let display_id = display_id.or_else(|| display_for_bounds(cx, bounds));
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: None,
-        focus: false,
-        show: true,
-        kind: pin_window_kind(),
-        is_movable: false,
-        is_resizable: false,
-        is_minimizable: false,
+    let options = crate::aux_window::popup_options(
+        "capin-pin",
+        bounds,
         display_id,
-        window_background: WindowBackgroundAppearance::Transparent,
-        app_id: Some("capin-pin".to_owned()),
-        ..Default::default()
-    };
+        false,
+        pin_window_kind(),
+        WindowBackgroundAppearance::Transparent,
+    );
 
     let content_for_view = content.clone();
     match gpui_kit::open_window(options, cx, move |window, cx| {
@@ -1127,7 +1121,7 @@ pub fn restore(cx: &mut App) {
                     continue;
                 };
                 let path = directory.join(name);
-                let Some(frame) = load_pin_image(&path) else {
+                let Some(frame) = image_util::load_frame(&path) else {
                     continue;
                 };
                 PinContent::from_frame(frame)
@@ -1499,12 +1493,6 @@ fn save_pin_image(id: u64, frame: &RgbaFrame) -> Option<PathBuf> {
     Some(path)
 }
 
-fn load_pin_image(path: &Path) -> Option<RgbaFrame> {
-    let image = image::open(path).ok()?.into_rgba8();
-    let (width, height) = image.dimensions();
-    RgbaFrame::from_pixels(width, height, image.into_raw()).ok()
-}
-
 fn save_manifest() {
     let Some(directory) = storage::pins_dir() else {
         return;
@@ -1736,7 +1724,7 @@ impl PinView {
     fn frame_for_action(&self) -> Option<Arc<RgbaFrame>> {
         self.content.frame_arc().or_else(|| {
             self.persisted_path()
-                .and_then(|path| load_pin_image(&path))
+                .and_then(|path| image_util::load_frame(&path))
                 .map(Arc::new)
         })
     }
@@ -3106,23 +3094,17 @@ fn open_pin_menu(
         px(position_x.clamp(left, (right - width).max(left))),
         px(position_y.clamp(top, (bottom - height).max(top))),
     );
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds {
+    let options = crate::aux_window::popup_options(
+        "capin-pin-menu",
+        Bounds {
             origin,
             size: size(px(width), px(height)),
-        })),
-        titlebar: None,
-        focus: true,
-        show: true,
-        kind: pin_window_kind(),
-        is_movable: false,
-        is_resizable: false,
-        is_minimizable: false,
+        },
         display_id,
-        window_background: WindowBackgroundAppearance::Transparent,
-        app_id: Some("capin-pin-menu".to_owned()),
-        ..Default::default()
-    };
+        true,
+        pin_window_kind(),
+        WindowBackgroundAppearance::Transparent,
+    );
 
     match gpui_kit::open_window(options, cx, move |window, cx| {
         let _ = apply_window_style(

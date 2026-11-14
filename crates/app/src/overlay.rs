@@ -18,7 +18,7 @@ use platform_window::{WindowStyle, apply as apply_window_style, system_accent_he
 use crate::{
     capture_history::HistoryPinShadow,
     chrome_theme::ChromeTheme,
-    editor::{EditorView, FullCanvasInit, InlineCapture, Tool, tooltip_view},
+    editor::{EditorView, FullCanvasInit, InlineCapture, Tool},
     effects::RegionEffects,
     i18n::{Language, t},
     icons, image_util,
@@ -28,6 +28,7 @@ use crate::{
         region_handle_cursor, resize_rect,
     },
     settings_state,
+    ui::tooltip_view,
 };
 
 /// Backdrop shade outside the live selection. Forty percent black keeps the
@@ -581,20 +582,14 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
 }
 
 fn overlay_options(monitor: MonitorId, bounds: Bounds<Pixels>) -> WindowOptions {
-    WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: None,
-        focus: true,
-        show: true,
-        kind: overlay_window_kind(),
-        is_movable: false,
-        is_resizable: false,
-        is_minimizable: false,
-        display_id: Some(DisplayId::new(monitor.raw())),
-        window_background: WindowBackgroundAppearance::Opaque,
-        app_id: Some("capin-overlay".to_owned()),
-        ..Default::default()
-    }
+    crate::aux_window::popup_options(
+        "capin-overlay",
+        bounds,
+        Some(DisplayId::new(monitor.raw())),
+        true,
+        overlay_window_kind(),
+        WindowBackgroundAppearance::Opaque,
+    )
 }
 
 /// macOS needs a normal window so AppKit can give it key status (a
@@ -2568,6 +2563,44 @@ impl OverlayView {
         cx.notify();
     }
 
+    fn toggle_effects_panel(&mut self, cx: &mut Context<Self>) {
+        if let Some(selected) = self.selected.as_mut() {
+            selected.effects_open = !selected.effects_open;
+            selected.hints_open = false;
+            selected.edit = None;
+        }
+        cx.notify();
+    }
+
+    fn set_region_radius(&mut self, radius: u32, cx: &mut Context<Self>) {
+        self.effects.corner_radius = radius;
+        settings_state::update(|settings| {
+            settings.region_corner_radius = radius;
+        });
+        cx.notify();
+    }
+
+    fn toggle_region_shadow(&mut self, cx: &mut Context<Self>) {
+        self.effects.shadow = !self.effects.shadow;
+        let shadow = self.effects.shadow;
+        settings_state::update(|settings| settings.region_shadow = shadow);
+        cx.notify();
+    }
+
+    fn dismiss_effects(&mut self, cx: &mut Context<Self>) {
+        if let Some(selected) = self.selected.as_mut() {
+            selected.effects_open = false;
+        }
+        cx.notify();
+    }
+
+    fn dismiss_hints(&mut self, cx: &mut Context<Self>) {
+        if let Some(selected) = self.selected.as_mut() {
+            selected.hints_open = false;
+        }
+        cx.notify();
+    }
+
     fn info_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let selected = self.selected.as_ref()?;
         let rect = self.info_rect()?;
@@ -2703,63 +2736,24 @@ impl OverlayView {
             );
 
         if !matches!(selected.target, CaptureTarget::Window(_)) {
-            let effects_active = self.effects.active();
-            bar = bar.child(
-                div()
-                    .id("overlay-info-effects")
-                    .px(px(6.0))
-                    .py(px(3.0))
-                    .rounded(px(5.0))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.0))
-                    .text_color(self.chrome.text)
-                    .when(selected.effects_open, |chip| chip.bg(self.chrome.selected))
-                    .when(!selected.effects_open, |chip| {
-                        chip.hover(|style| style.bg(self.chrome.hover))
-                    })
-                    .active(|style| style.opacity(0.85))
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(selected) = this.selected.as_mut() {
-                            selected.effects_open = !selected.effects_open;
-                            selected.hints_open = false;
-                            selected.edit = None;
-                        }
-                        cx.notify();
-                    }))
-                    .child(t(language, "overlay.info_effects"))
-                    .when(effects_active, |chip| {
-                        chip.child(
-                            div()
-                                .w(px(5.0))
-                                .h(px(5.0))
-                                .rounded(px(3.0))
-                                .bg(self.chrome.accent),
-                        )
-                    }),
-            );
+            bar = bar.child(crate::capture_panels::effects_chip(
+                "overlay-info-effects",
+                self.chrome,
+                language,
+                selected.effects_open,
+                self.effects.active(),
+                cx,
+                Self::toggle_effects_panel,
+            ));
         }
 
-        bar = bar.child(
-            div()
-                .id("overlay-info-refresh")
-                .tooltip(move |_, cx| {
-                    tooltip_view(t(language, "overlay.info_refresh").to_owned(), cx)
-                })
-                .w(px(22.0))
-                .h(px(22.0))
-                .rounded(px(5.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .hover(|style| style.bg(self.chrome.hover))
-                .active(|style| style.opacity(0.85))
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _, window, cx| this.refresh_frame(window, cx)))
-                .child(icons::icon(icons::REFRESH, 14.0, self.chrome.icon)),
-        );
+        bar = bar.child(crate::capture_panels::refresh_button(
+            "overlay-info-refresh",
+            self.chrome,
+            language,
+            cx,
+            Self::refresh_frame,
+        ));
 
         Some(
             crate::ui::enter_slide_fade(
@@ -2792,145 +2786,53 @@ impl OverlayView {
             f32::from(self.window_size.height),
             self.toolbar_rect(),
         );
-
-        let mut corner_row = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(2.0))
-            .child(icons::icon(icons::RECT, 14.0, self.chrome.muted));
-        for radius in [0u32, 8, 16, 24] {
-            let selected_radius = self.effects.corner_radius == radius;
-            let label = if radius == 0 {
-                t(language, "overlay.effects_off").to_owned()
-            } else {
-                radius.to_string()
-            };
-            let tooltip = format!("{} {label}", t(language, "overlay.effects_corner"));
-            corner_row = corner_row.child(
-                div()
-                    .id(format!("overlay-radius-{radius}"))
-                    .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
-                    .h(px(22.0))
-                    .px(px(6.0))
-                    .rounded(px(5.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(selected_radius, |chip| chip.bg(self.chrome.accent_tint))
-                    .when(!selected_radius, |chip| {
-                        chip.hover(|style| style.bg(self.chrome.hover))
-                    })
-                    .active(|style| style.opacity(0.85))
-                    .text_size(px(11.0))
-                    .text_color(if selected_radius {
-                        self.chrome.accent
-                    } else {
-                        self.chrome.muted
-                    })
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.effects.corner_radius = radius;
-                        settings_state::update(|settings| {
-                            settings.region_corner_radius = radius;
-                        });
-                        cx.notify();
-                    }))
-                    .child(label),
-            );
-        }
-
-        let shadow = self.effects.shadow;
-        let shadow_label = t(language, "overlay.effects_shadow").to_owned();
-        let shadow_chip = div()
-            .id("overlay-effects-shadow")
-            .tooltip({
-                let label = shadow_label.clone();
-                move |_, cx| tooltip_view(label.clone(), cx)
-            })
-            .h(px(22.0))
-            .px(px(8.0))
-            .rounded(px(5.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .when(shadow, |chip| chip.bg(self.chrome.accent_tint))
-            .when(!shadow, |chip| {
-                chip.hover(|style| style.bg(self.chrome.hover))
-            })
-            .active(|style| style.opacity(0.85))
-            .text_size(px(11.0))
-            .text_color(if shadow {
-                self.chrome.accent
-            } else {
-                self.chrome.muted
-            })
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.effects.shadow = !this.effects.shadow;
-                let shadow = this.effects.shadow;
-                settings_state::update(|settings| settings.region_shadow = shadow);
-                cx.notify();
-            }))
-            .child(shadow_label);
-
-        let panel = div()
-            .id("overlay-effects-panel")
-            .absolute()
-            .left(px(left))
-            .top(px(top))
-            .w(px(width))
-            .h(px(height))
-            .px(px(8.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .rounded(px(self.chrome.radius))
-            .bg(self.chrome.surface_strong)
-            .border_1()
-            .border_color(self.chrome.border)
-            .shadow(self.chrome.shadow())
-            .occlude()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_, _, _, cx| cx.stop_propagation()),
-            )
-            .child(corner_row)
-            .child(div().w(px(1.0)).h(px(18.0)).bg(self.chrome.separator))
-            .child(shadow_chip);
+        let rect = Bounds {
+            origin: point(px(left), px(top)),
+            size: size(px(width), px(height)),
+        };
         let offset = if top >= f32::from(info.origin.y) {
             5.0
         } else {
             -5.0
         };
-        let panel = crate::ui::enter_slide_fade(
-            panel,
-            "overlay-effects-enter",
-            top,
+        Some(crate::capture_panels::effects_panel(
+            "overlay",
+            self.chrome,
+            language,
+            rect,
+            self.effects,
             offset,
-            Duration::from_millis(120),
-        );
+            cx,
+            Self::set_region_radius,
+            Self::toggle_region_shadow,
+            Self::dismiss_effects,
+        ))
+    }
 
-        Some(
-            div()
-                .id("overlay-effects-layer")
-                .absolute()
-                .inset_0()
-                .occlude()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        if let Some(selected) = this.selected.as_mut() {
-                            selected.effects_open = false;
-                        }
-                        cx.stop_propagation();
-                        cx.notify();
-                    }),
-                )
-                .child(panel)
-                .into_any_element(),
-        )
+    fn action_button(
+        &self,
+        id: &'static str,
+        label: String,
+        icon: &'static [u8],
+        color: Rgba,
+        cx: &mut Context<Self>,
+        action: fn(&mut Self, &mut Context<Self>),
+    ) -> AnyElement {
+        div()
+            .id(id)
+            .tooltip(move |_, cx| tooltip_view(label.clone(), cx))
+            .w(px(30.0))
+            .h(px(30.0))
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .hover(move |style| style.bg(self.chrome.hover))
+            .active(|style| style.opacity(0.85))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| action(this, cx)))
+            .child(icons::icon(icon, 17.0, color))
+            .into_any_element()
     }
 
     fn selection_toolbar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -2964,108 +2866,54 @@ impl OverlayView {
         }
 
         let mut actions = div().flex().flex_row().items_center().gap(px(1.0));
-        let pin_label = t(language, "editor.pin").to_owned();
-        actions = actions.child(
-            div()
-                .id("overlay-action-pin")
-                .tooltip(move |_, cx| tooltip_view(pin_label.clone(), cx))
-                .w(px(30.0))
-                .h(px(30.0))
-                .rounded(px(6.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .hover(|style| style.bg(self.chrome.hover))
-                .active(|style| style.opacity(0.85))
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _, _, cx| this.pin_selected(cx)))
-                .child(icons::icon(icons::PIN, 17.0, self.chrome.icon)),
-        );
-        let copy_label = t(language, "editor.copy").to_owned();
-        actions = actions.child(
-            div()
-                .id("overlay-action-copy")
-                .tooltip(move |_, cx| tooltip_view(copy_label.clone(), cx))
-                .w(px(30.0))
-                .h(px(30.0))
-                .rounded(px(6.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .hover(|style| style.bg(self.chrome.hover))
-                .active(|style| style.opacity(0.85))
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _, _, cx| this.copy_selected(cx)))
-                .child(icons::icon(icons::COPY, 17.0, self.chrome.icon)),
-        );
-        let save_label = t(language, "editor.save").to_owned();
-        actions = actions.child(
-            div()
-                .id("overlay-action-save")
-                .tooltip(move |_, cx| tooltip_view(save_label.clone(), cx))
-                .w(px(30.0))
-                .h(px(30.0))
-                .rounded(px(6.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .hover(|style| style.bg(self.chrome.hover))
-                .active(|style| style.opacity(0.85))
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _, _, cx| this.save_selected(cx)))
-                .child(icons::icon(icons::SAVE, 17.0, self.chrome.icon)),
-        );
-        let scroll_label = t(language, "menu.scroll_capture").to_owned();
-        actions = actions.child(
-            div()
-                .id("overlay-action-scroll")
-                .tooltip(move |_, cx| tooltip_view(scroll_label.clone(), cx))
-                .w(px(30.0))
-                .h(px(30.0))
-                .rounded(px(6.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .hover(|style| style.bg(self.chrome.hover))
-                .active(|style| style.opacity(0.85))
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _, _, cx| this.scroll_selected(cx)))
-                .child(icons::icon(icons::SCROLL, 17.0, self.chrome.icon)),
-        );
-        let record_label = t(language, "menu.record").to_owned();
-        actions = actions.child(
-            div()
-                .id("overlay-action-record")
-                .tooltip(move |_, cx| tooltip_view(record_label.clone(), cx))
-                .w(px(30.0))
-                .h(px(30.0))
-                .rounded(px(6.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .hover(|style| style.bg(self.chrome.hover))
-                .active(|style| style.opacity(0.85))
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _, _, cx| this.record_selected(cx)))
-                .child(icons::icon(icons::RECORDING, 17.0, self.chrome.icon)),
-        );
-        let close_label = t(language, "editor.close").to_owned();
-        actions = actions.child(
-            div()
-                .id("overlay-action-close")
-                .tooltip(move |_, cx| tooltip_view(close_label.clone(), cx))
-                .w(px(30.0))
-                .h(px(30.0))
-                .rounded(px(6.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .hover(|style| style.bg(self.chrome.hover))
-                .active(|style| style.opacity(0.85))
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _, _, cx| this.close_overlays(cx)))
-                .child(icons::icon(icons::CLOSE, 17.0, self.chrome.muted)),
-        );
+        actions = actions.child(self.action_button(
+            "overlay-action-pin",
+            t(language, "editor.pin").to_owned(),
+            icons::PIN,
+            self.chrome.icon,
+            cx,
+            Self::pin_selected,
+        ));
+        actions = actions.child(self.action_button(
+            "overlay-action-copy",
+            t(language, "editor.copy").to_owned(),
+            icons::COPY,
+            self.chrome.icon,
+            cx,
+            Self::copy_selected,
+        ));
+        actions = actions.child(self.action_button(
+            "overlay-action-save",
+            t(language, "editor.save").to_owned(),
+            icons::SAVE,
+            self.chrome.icon,
+            cx,
+            Self::save_selected,
+        ));
+        actions = actions.child(self.action_button(
+            "overlay-action-scroll",
+            t(language, "menu.scroll_capture").to_owned(),
+            icons::SCROLL,
+            self.chrome.icon,
+            cx,
+            Self::scroll_selected,
+        ));
+        actions = actions.child(self.action_button(
+            "overlay-action-record",
+            t(language, "menu.record").to_owned(),
+            icons::RECORDING,
+            self.chrome.icon,
+            cx,
+            Self::record_selected,
+        ));
+        actions = actions.child(self.action_button(
+            "overlay-action-close",
+            t(language, "editor.close").to_owned(),
+            icons::CLOSE,
+            self.chrome.muted,
+            cx,
+            Self::close_overlays,
+        ));
 
         Some(
             crate::ui::enter_slide_fade(
@@ -3120,95 +2968,43 @@ impl OverlayView {
         let height = 154.0;
         let left = (f32::from(self.window_size.width) - width) / 2.0;
         let top = (f32::from(self.window_size.height) - height) / 2.0;
+        let rect = Bounds {
+            origin: point(px(left), px(top)),
+            size: size(px(width), px(height)),
+        };
         let pin_hotkey = crate::hotkey::display_hotkey(&settings_state::get().pin_hotkey);
-        let rows = [
+        let rows = vec![
             (
                 t(language, "editor.hint_key_copy").to_owned(),
-                t(language, "editor.hint_copy"),
+                t(language, "editor.hint_copy").to_owned(),
             ),
-            ("Cmd/Ctrl+S".to_owned(), t(language, "editor.hint_save")),
-            (pin_hotkey, t(language, "editor.hint_pin")),
-            ("Space".to_owned(), t(language, "editor.hint_space")),
+            (
+                "Cmd/Ctrl+S".to_owned(),
+                t(language, "editor.hint_save").to_owned(),
+            ),
+            (pin_hotkey, t(language, "editor.hint_pin").to_owned()),
+            (
+                "Space".to_owned(),
+                t(language, "editor.hint_space").to_owned(),
+            ),
             (
                 "R / F5".to_owned(),
-                t(language, "editor.hint_ratio_refresh"),
+                t(language, "editor.hint_ratio_refresh").to_owned(),
             ),
-            ("Esc".to_owned(), t(language, "editor.hint_cancel")),
+            (
+                "Esc".to_owned(),
+                t(language, "editor.hint_cancel").to_owned(),
+            ),
         ];
-        let mut panel = div()
-            .id("overlay-hints-panel")
-            .absolute()
-            .left(px(left))
-            .top(px(top))
-            .w(px(width))
-            .flex()
-            .flex_col()
-            .gap(px(5.0))
-            .p(px(12.0))
-            .rounded(px(self.chrome.radius))
-            .bg(self.chrome.surface_strong)
-            .border_1()
-            .border_color(self.chrome.border)
-            .shadow(self.chrome.shadow())
-            .occlude()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_, _, _, cx| cx.stop_propagation()),
-            )
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(self.chrome.text)
-                    .child(t(language, "editor.hints_title")),
-            );
-        for (key, description) in rows {
-            panel = panel.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .text_size(px(10.5))
-                            .text_color(self.chrome.muted)
-                            .child(key),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(self.chrome.text)
-                            .child(description),
-                    ),
-            );
-        }
-        let panel = crate::ui::enter_slide_fade(
-            panel,
-            "overlay-hints-enter",
-            top,
-            4.0,
-            Duration::from_millis(120),
-        );
-        Some(
-            div()
-                .id("overlay-hints-layer")
-                .absolute()
-                .inset_0()
-                .occlude()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        if let Some(selected) = this.selected.as_mut() {
-                            selected.hints_open = false;
-                        }
-                        cx.stop_propagation();
-                        cx.notify();
-                    }),
-                )
-                .child(panel)
-                .into_any_element(),
-        )
+        Some(crate::capture_panels::hints_panel(
+            "overlay",
+            self.chrome,
+            language,
+            rect,
+            rows,
+            cx,
+            Self::dismiss_hints,
+        ))
     }
 
     fn selection_handles(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -3296,7 +3092,7 @@ impl OverlayView {
         )
     }
 
-    fn close_overlays(&self, cx: &mut Context<Self>) {
+    fn close_overlays(&mut self, cx: &mut Context<Self>) {
         platform_window::set_cursor_hidden(false);
         let handles = cx.windows();
         cx.defer(move |cx| {

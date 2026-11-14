@@ -3,7 +3,9 @@
     windows_subsystem = "windows"
 )]
 
+mod aux_window;
 mod capture_history;
+mod capture_panels;
 mod chrome_theme;
 mod display;
 mod editor;

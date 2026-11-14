@@ -82,20 +82,14 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
         crate::display::window_bounds_on_monitor(monitor, desktop_bounds)
     });
     let display_id = monitor_id.map(|id| DisplayId::new(id.raw()));
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: None,
-        focus: false,
-        show: true,
-        kind: WindowKind::PopUp,
-        is_movable: false,
-        is_resizable: false,
-        is_minimizable: false,
+    let options = crate::aux_window::popup_options(
+        "capin-record",
+        bounds,
         display_id,
-        window_background: WindowBackgroundAppearance::Transparent,
-        app_id: Some("capin-record".to_owned()),
-        ..Default::default()
-    };
+        false,
+        WindowKind::PopUp,
+        WindowBackgroundAppearance::Transparent,
+    );
 
     match gpui_kit::open_window(options, cx, move |window, cx| {
         let exclusion_ok = match apply_window_style(&*window, WindowStyle::CAPTURE_BAR) {
