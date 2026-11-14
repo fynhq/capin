@@ -21,6 +21,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all --check
+      - name: Code shape
+        run: python3 scripts/check_code_shape.py
       - name: Clippy
         run: cargo clippy -p core-types -p core-capture -p core-compose -p core-annotate -p core-record -p core-stitch -p platform-record -p platform-ocr --all-targets --locked -- -D warnings
       - name: Test
