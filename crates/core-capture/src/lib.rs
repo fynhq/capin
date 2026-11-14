@@ -1,4 +1,8 @@
-//! Platform-neutral capture API shared by the overlay, editor, and recorder.
+//! Cross-platform capture API shared by the overlay, editor, and recorder.
+//!
+//! The public surface is platform-neutral; the Windows/macOS backends live in
+//! gated modules inside this crate. OS service adapters that are not part of
+//! the capture abstraction belong in the `platform-*` crates.
 
 mod backend;
 mod error;
