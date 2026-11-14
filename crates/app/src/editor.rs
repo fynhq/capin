@@ -19,9 +19,9 @@ use platform_window::{
 use crate::chrome_theme::ChromeTheme;
 use crate::effects::RegionEffects;
 use crate::logging::{log_error, log_info};
-use crate::overlay::{
+use crate::selection_geometry::{
     ResizeHandle as RegionHandle, corner_handle_offset, edge_resize_handle, handle_positions,
-    resize_rect,
+    region_handle_cursor, resize_rect,
 };
 use crate::settings_state::AnnotationColorTool;
 use crate::{i18n::t, icons, image_util, settings_state};
@@ -5205,12 +5205,11 @@ impl EditorView {
                 };
                 let hash = crate::capture_history::hash_frame(&export);
                 let record_history = self.pin_target.is_none();
-                let pin_shadow =
-                    (record_history && self.region_effects_active() && !self.effects.shadow)
-                        .then_some(crate::capture_history::HistoryPinShadow {
-                            corner_radius: self.effects.corner_radius,
-                            scale: effects_scale,
-                        });
+                let pin_shadow = (record_history && self.region_pin() && !self.effects.shadow)
+                    .then_some(crate::capture_history::HistoryPinShadow {
+                        corner_radius: self.effects.corner_radius,
+                        scale: effects_scale,
+                    });
                 let export_padding = if self.effects.shadow { 0 } else { pin_padding };
                 let placement = inline_host.map(|inline| {
                     // The editor image may already be zoomed; use its displayed
@@ -5321,6 +5320,7 @@ impl EditorView {
         let mut copy_ok = false;
         let mut save_ok = false;
         let mut pin_ok = false;
+        let mut history_recorded = false;
         let document = self.action_document();
         match rasterize(&document, &self.frame) {
             Ok(raw) => {
@@ -5353,18 +5353,17 @@ impl EditorView {
                 };
                 let hash = crate::capture_history::hash_frame(&output);
                 let record_history = self.pin_target.is_none();
-                let pin_shadow =
-                    (record_history && self.region_effects_active() && !self.effects.shadow)
-                        .then_some(crate::capture_history::HistoryPinShadow {
-                            corner_radius: self.effects.corner_radius,
-                            scale,
-                        });
+                let pin_shadow = (record_history && self.region_pin() && !self.effects.shadow)
+                    .then_some(crate::capture_history::HistoryPinShadow {
+                        corner_radius: self.effects.corner_radius,
+                        scale,
+                    });
                 if copy_only || settings_state::get().copy_to_clipboard {
                     match image_util::encode_png(&output) {
                         Ok(bytes) => {
                             copy_ok = true;
                             if record_history {
-                                crate::capture_history::record_png_bytes(
+                                history_recorded = crate::capture_history::record_png_bytes(
                                     &bytes,
                                     hash,
                                     pin_shadow,
@@ -5380,15 +5379,17 @@ impl EditorView {
                     }
                 }
                 if !copy_only && self.pin_target.is_none() {
-                    match image_util::save_png(&output) {
+                    match crate::storage::save_png(&output) {
                         Ok(path) => {
                             save_ok = true;
-                            crate::capture_history::record_png_file(
-                                &path,
-                                hash,
-                                pin_shadow,
-                                Some(scale),
-                            );
+                            if record_history && !history_recorded {
+                                crate::capture_history::record_png_file(
+                                    &path,
+                                    hash,
+                                    pin_shadow,
+                                    Some(scale),
+                                );
+                            }
                             messages.push(format!(
                                 "{} {}",
                                 t(language, "editor.saved"),
@@ -7380,15 +7381,6 @@ fn distance(a: PhysicalPoint, b: PhysicalPoint) -> f32 {
     let dx = (a.x - b.x) as f32;
     let dy = (a.y - b.y) as f32;
     (dx * dx + dy * dy).sqrt()
-}
-
-fn region_handle_cursor(handle: RegionHandle) -> CursorStyle {
-    match handle {
-        RegionHandle::NorthWest | RegionHandle::SouthEast => CursorStyle::ResizeUpLeftDownRight,
-        RegionHandle::NorthEast | RegionHandle::SouthWest => CursorStyle::ResizeUpRightDownLeft,
-        RegionHandle::North | RegionHandle::South => CursorStyle::ResizeUpDown,
-        RegionHandle::East | RegionHandle::West => CursorStyle::ResizeLeftRight,
-    }
 }
 
 fn handle_cursor(handle: ResizeHandle) -> CursorStyle {

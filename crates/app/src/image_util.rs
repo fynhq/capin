@@ -1,5 +1,4 @@
 use std::io::Cursor;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use core_types::{PhysicalRect, PhysicalSize, RgbaFrame};
@@ -233,8 +232,9 @@ fn blur_from_view(
 
 pub fn encode_png(frame: &RgbaFrame) -> Result<Vec<u8>, image::ImageError> {
     let mut cursor = Cursor::new(Vec::new());
+    let packed = frame.packed_pixels();
     image::codecs::png::PngEncoder::new(&mut cursor).write_image(
-        frame.pixels(),
+        packed.as_ref(),
         frame.width(),
         frame.height(),
         image::ExtendedColorType::Rgba8,
@@ -253,7 +253,7 @@ pub fn copy_png_bytes(bytes: Vec<u8>, frame: &RgbaFrame, cx: &mut App) {
         if platform_window::set_image_clipboard(
             frame.width(),
             frame.height(),
-            frame.pixels(),
+            frame.packed_pixels().as_ref(),
             Some(&bytes),
         )
         .is_ok()
@@ -265,10 +265,6 @@ pub fn copy_png_bytes(bytes: Vec<u8>, frame: &RgbaFrame, cx: &mut App) {
     let _ = frame;
     let image = Image::from_bytes(ImageFormat::Png, bytes);
     cx.write_to_clipboard(ClipboardItem::new_image(&image));
-}
-
-pub fn save_png(frame: &RgbaFrame) -> Result<PathBuf, std::io::Error> {
-    crate::storage::save_png(frame)
 }
 
 #[cfg(test)]

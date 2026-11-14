@@ -23,6 +23,10 @@ use crate::{
     i18n::{Language, t},
     icons, image_util,
     logging::{log_error, log_info, log_warn},
+    selection_geometry::{
+        MIN_REGION_SIZE, ResizeHandle, corner_handle_offset, edge_resize_handle, handle_positions,
+        region_handle_cursor, resize_rect,
+    },
     settings_state,
 };
 
@@ -49,7 +53,6 @@ const SELECTION_TOOLBAR_HEIGHT: f32 = 40.0;
 const SELECTION_TOOLBAR_WIDTH: f32 = 560.0;
 const HANDLE_SIZE: f32 = 9.0;
 const REGION_GAP: f32 = 8.0;
-const MIN_REGION_SIZE: i32 = 2;
 
 /// Number of live overlay views. The global capture shortcut uses this to
 /// close an overlay even when keyboard focus was lost, which is the safety
@@ -192,18 +195,6 @@ enum InfoField {
     Y,
     Width,
     Height,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ResizeHandle {
-    North,
-    South,
-    East,
-    West,
-    NorthEast,
-    NorthWest,
-    SouthEast,
-    SouthWest,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1921,7 +1912,7 @@ impl OverlayView {
                     selected.effects_open = false;
                     selected.hints_open = false;
                 }
-                self.cursor_style = overlay_handle_cursor(handle);
+                self.cursor_style = region_handle_cursor(handle);
                 cx.notify();
                 return;
             }
@@ -2045,7 +2036,7 @@ impl OverlayView {
         };
         let hash = crate::capture_history::hash_frame(&output);
         let pin_shadow = self.history_pin_shadow();
-        match image_util::save_png(&output) {
+        match crate::storage::save_png(&output) {
             Ok(path) => {
                 log_info!("overlay", "selection saved");
                 crate::capture_history::record_png_file(
@@ -2414,28 +2405,33 @@ impl OverlayView {
                 );
             }
             InfoField::Width => {
-                let mut width = physical.max(MIN_REGION_SIZE);
-                let max_width = monitor.size.width as i32 - rect.origin.x;
-                width = width.clamp(MIN_REGION_SIZE, max_width.max(MIN_REGION_SIZE));
+                let width = physical.max(MIN_REGION_SIZE);
+                let max_width = (monitor.size.width as i32 - rect.origin.x).max(MIN_REGION_SIZE);
+                let max_height = (monitor.size.height as i32 - rect.origin.y).max(MIN_REGION_SIZE);
+                let (width, height) = if let Some(ratio) = ratio {
+                    fit_ratio_to_bounds(width, ratio, max_width, max_height)
+                } else {
+                    (width.min(max_width), rect.size.height as i32)
+                };
                 rect.size.width = width as u32;
-                if let Some(ratio) = ratio {
-                    let height = (width as f32 / ratio).round().max(1.0) as i32;
-                    let max_height = monitor.size.height as i32 - rect.origin.y;
-                    rect.size.height =
-                        height.clamp(MIN_REGION_SIZE, max_height.max(MIN_REGION_SIZE)) as u32;
-                }
+                rect.size.height = height.max(MIN_REGION_SIZE) as u32;
             }
             InfoField::Height => {
-                let mut height = physical.max(MIN_REGION_SIZE);
-                let max_height = monitor.size.height as i32 - rect.origin.y;
-                height = height.clamp(MIN_REGION_SIZE, max_height.max(MIN_REGION_SIZE));
+                let height = physical.max(MIN_REGION_SIZE);
+                let max_width = (monitor.size.width as i32 - rect.origin.x).max(MIN_REGION_SIZE);
+                let max_height = (monitor.size.height as i32 - rect.origin.y).max(MIN_REGION_SIZE);
+                let (width, height) = if let Some(ratio) = ratio {
+                    fit_ratio_to_bounds(
+                        (height as f32 * ratio).round() as i32,
+                        ratio,
+                        max_width,
+                        max_height,
+                    )
+                } else {
+                    (rect.size.width as i32, height.min(max_height))
+                };
+                rect.size.width = width.max(MIN_REGION_SIZE) as u32;
                 rect.size.height = height as u32;
-                if let Some(ratio) = ratio {
-                    let width = (height as f32 * ratio).round().max(1.0) as i32;
-                    let max_width = monitor.size.width as i32 - rect.origin.x;
-                    rect.size.width =
-                        width.clamp(MIN_REGION_SIZE, max_width.max(MIN_REGION_SIZE)) as u32;
-                }
             }
         }
         if let Some(selected) = self.selected.as_mut() {
@@ -3223,7 +3219,7 @@ impl OverlayView {
         let radius = self.selection_effects_radius();
         for (handle, position) in handle_positions(selection) {
             let (dx, dy) = corner_handle_offset(handle, radius);
-            let cursor = overlay_handle_cursor(handle);
+            let cursor = region_handle_cursor(handle);
             handles.push(
                 div()
                     .id(format!("overlay-handle-{:?}", handle))
@@ -3808,7 +3804,7 @@ impl OverlayView {
                     this.cursor_style = if let Some(handle) =
                         edge_resize_handle(selected.rect, local, edge_tolerance)
                     {
-                        overlay_handle_cursor(handle)
+                        region_handle_cursor(handle)
                     } else if inside {
                         crate::ui::open_hand_cursor()
                     } else {
@@ -3994,228 +3990,36 @@ fn fit_ratio_rect(rect: PhysicalRect, ratio: f32, size: core_types::PhysicalSize
     clamp_to_monitor(clamped, size)
 }
 
-fn overlay_handle_cursor(handle: ResizeHandle) -> CursorStyle {
-    match handle {
-        ResizeHandle::North | ResizeHandle::South => CursorStyle::ResizeUpDown,
-        ResizeHandle::East | ResizeHandle::West => CursorStyle::ResizeLeftRight,
-        ResizeHandle::NorthEast | ResizeHandle::SouthWest => CursorStyle::ResizeUpRightDownLeft,
-        ResizeHandle::NorthWest | ResizeHandle::SouthEast => CursorStyle::ResizeUpLeftDownRight,
+/// Keeps a ratio-locked selection inside the monitor while preserving the
+/// requested edge. Used by the info-bar width/height editor, where clamping
+/// only one dimension used to leave a 16:9 box at an arbitrary ratio.
+fn fit_ratio_to_bounds(
+    desired_width: i32,
+    ratio: f32,
+    max_width: i32,
+    max_height: i32,
+) -> (i32, i32) {
+    let ratio = ratio.max(0.01);
+    let max_width = max_width.max(MIN_REGION_SIZE);
+    let max_height = max_height.max(MIN_REGION_SIZE);
+    let mut width = desired_width.max(MIN_REGION_SIZE) as f32;
+    let mut height = (width / ratio).max(MIN_REGION_SIZE as f32);
+    if width > max_width as f32 {
+        width = max_width as f32;
+        height = (width / ratio).max(MIN_REGION_SIZE as f32);
     }
-}
-
-fn handle_has_west(handle: ResizeHandle) -> bool {
-    matches!(
-        handle,
-        ResizeHandle::West | ResizeHandle::NorthWest | ResizeHandle::SouthWest
+    if height > max_height as f32 {
+        height = max_height as f32;
+        width = (height * ratio).max(MIN_REGION_SIZE as f32);
+    }
+    if width > max_width as f32 {
+        width = max_width as f32;
+        height = (width / ratio).max(MIN_REGION_SIZE as f32);
+    }
+    (
+        (width.round() as i32).clamp(MIN_REGION_SIZE, max_width),
+        (height.round() as i32).clamp(MIN_REGION_SIZE, max_height),
     )
-}
-
-fn handle_has_east(handle: ResizeHandle) -> bool {
-    matches!(
-        handle,
-        ResizeHandle::East | ResizeHandle::NorthEast | ResizeHandle::SouthEast
-    )
-}
-
-fn handle_has_north(handle: ResizeHandle) -> bool {
-    matches!(
-        handle,
-        ResizeHandle::North | ResizeHandle::NorthEast | ResizeHandle::NorthWest
-    )
-}
-
-fn handle_has_south(handle: ResizeHandle) -> bool {
-    matches!(
-        handle,
-        ResizeHandle::South | ResizeHandle::SouthEast | ResizeHandle::SouthWest
-    )
-}
-
-/// Maps a press near a selection edge or corner to the matching resize handle.
-/// The painted dots stay small, while the whole border becomes a grab target
-/// so the selection can be adjusted again after the initial drag.
-pub(crate) fn edge_resize_handle(
-    rect: PhysicalRect,
-    point: PhysicalPoint,
-    tolerance: f32,
-) -> Option<ResizeHandle> {
-    let left = rect.origin.x as f32;
-    let top = rect.origin.y as f32;
-    let right = left + rect.size.width as f32;
-    let bottom = top + rect.size.height as f32;
-    let x = point.x as f32;
-    let y = point.y as f32;
-    if x < left - tolerance
-        || x > right + tolerance
-        || y < top - tolerance
-        || y > bottom + tolerance
-    {
-        return None;
-    }
-    let west = (x - left).abs() <= tolerance;
-    let east = (x - right).abs() <= tolerance;
-    let north = (y - top).abs() <= tolerance;
-    let south = (y - bottom).abs() <= tolerance;
-    match (west, east, north, south) {
-        (true, _, true, _) => Some(ResizeHandle::NorthWest),
-        (_, true, true, _) => Some(ResizeHandle::NorthEast),
-        (true, _, _, true) => Some(ResizeHandle::SouthWest),
-        (_, true, _, true) => Some(ResizeHandle::SouthEast),
-        (true, _, _, _) => Some(ResizeHandle::West),
-        (_, true, _, _) => Some(ResizeHandle::East),
-        (_, _, true, _) => Some(ResizeHandle::North),
-        (_, _, _, true) => Some(ResizeHandle::South),
-        _ => None,
-    }
-}
-
-pub(crate) fn resize_rect(
-    original: PhysicalRect,
-    handle: ResizeHandle,
-    cursor: PhysicalPoint,
-    ratio: Option<f32>,
-    shift: bool,
-    alt: bool,
-    size: core_types::PhysicalSize,
-) -> PhysicalRect {
-    let original_left = i64::from(original.origin.x);
-    let original_top = i64::from(original.origin.y);
-    let original_right = original_left + i64::from(original.size.width);
-    let original_bottom = original_top + i64::from(original.size.height);
-    let center_x = (original_left + original_right) / 2;
-    let center_y = (original_top + original_bottom) / 2;
-    let cursor_x = i64::from(cursor.x).clamp(0, i64::from(size.width));
-    let cursor_y = i64::from(cursor.y).clamp(0, i64::from(size.height));
-
-    let mut left = original_left;
-    let mut top = original_top;
-    let mut right = original_right;
-    let mut bottom = original_bottom;
-    if handle_has_west(handle) {
-        left = cursor_x;
-    }
-    if handle_has_east(handle) {
-        right = cursor_x;
-    }
-    if handle_has_north(handle) {
-        top = cursor_y;
-    }
-    if handle_has_south(handle) {
-        bottom = cursor_y;
-    }
-
-    if alt {
-        if handle_has_west(handle) {
-            left = center_x * 2 - right;
-        } else if handle_has_east(handle) {
-            right = center_x * 2 - left;
-        }
-        if handle_has_north(handle) {
-            top = center_y * 2 - bottom;
-        } else if handle_has_south(handle) {
-            bottom = center_y * 2 - top;
-        }
-    }
-
-    if right < left + i64::from(MIN_REGION_SIZE) {
-        if handle_has_west(handle) {
-            left = right - i64::from(MIN_REGION_SIZE);
-        } else {
-            right = left + i64::from(MIN_REGION_SIZE);
-        }
-    }
-    if bottom < top + i64::from(MIN_REGION_SIZE) {
-        if handle_has_north(handle) {
-            top = bottom - i64::from(MIN_REGION_SIZE);
-        } else {
-            bottom = top + i64::from(MIN_REGION_SIZE);
-        }
-    }
-
-    let ratio = ratio.or_else(|| shift.then_some(1.0));
-    if let Some(ratio) = ratio {
-        let anchor_right = handle_has_west(handle);
-        let anchor_bottom = handle_has_north(handle);
-        let horizontal = handle_has_west(handle) || handle_has_east(handle);
-        let mut width = (right - left).max(i64::from(MIN_REGION_SIZE));
-        let mut height = (bottom - top).max(i64::from(MIN_REGION_SIZE));
-        if horizontal {
-            height = (width as f32 / ratio).round().max(1.0) as i64;
-        } else {
-            width = (height as f32 * ratio).round().max(1.0) as i64;
-        }
-        let max_width = if anchor_right {
-            right
-        } else {
-            i64::from(size.width) - left
-        };
-        let max_height = if anchor_bottom {
-            bottom
-        } else {
-            i64::from(size.height) - top
-        };
-        if width > max_width.max(1) || height > max_height.max(1) {
-            let scale = (max_width as f32 / width as f32)
-                .min(max_height as f32 / height as f32)
-                .max(0.0);
-            width = (width as f32 * scale).max(1.0) as i64;
-            height = (height as f32 * scale).max(1.0) as i64;
-        }
-        if anchor_right {
-            left = right - width;
-        } else {
-            right = left + width;
-        }
-        if anchor_bottom {
-            top = bottom - height;
-        } else {
-            bottom = top + height;
-        }
-    }
-
-    left = left.clamp(0, i64::from(size.width).saturating_sub(1));
-    top = top.clamp(0, i64::from(size.height).saturating_sub(1));
-    right = right.clamp(left + 1, i64::from(size.width));
-    bottom = bottom.clamp(top + 1, i64::from(size.height));
-    PhysicalRect::new(
-        left as i32,
-        top as i32,
-        (right - left) as u32,
-        (bottom - top) as u32,
-    )
-}
-
-pub(crate) fn handle_positions(rect: Bounds<Pixels>) -> Vec<(ResizeHandle, Point<Pixels>)> {
-    let left = f32::from(rect.origin.x);
-    let top = f32::from(rect.origin.y);
-    let right = left + f32::from(rect.size.width);
-    let bottom = top + f32::from(rect.size.height);
-    let mid_x = (left + right) / 2.0;
-    let mid_y = (top + bottom) / 2.0;
-    vec![
-        (ResizeHandle::North, point(px(mid_x), px(top))),
-        (ResizeHandle::South, point(px(mid_x), px(bottom))),
-        (ResizeHandle::West, point(px(left), px(mid_y))),
-        (ResizeHandle::East, point(px(right), px(mid_y))),
-        (ResizeHandle::NorthWest, point(px(left), px(top))),
-        (ResizeHandle::NorthEast, point(px(right), px(top))),
-        (ResizeHandle::SouthWest, point(px(left), px(bottom))),
-        (ResizeHandle::SouthEast, point(px(right), px(bottom))),
-    ]
-}
-
-/// Corner handles normally sit on the square corner. On a rounded selection
-/// that point falls outside the visible shape and the white handle floats in
-/// the dimmed corner, so pull it onto the 45-degree point of the arc.
-pub(crate) fn corner_handle_offset(handle: ResizeHandle, radius: f32) -> (f32, f32) {
-    let inset = radius.max(0.0) * (1.0 - std::f32::consts::FRAC_1_SQRT_2);
-    match handle {
-        ResizeHandle::NorthWest => (inset, inset),
-        ResizeHandle::NorthEast => (-inset, inset),
-        ResizeHandle::SouthWest => (inset, -inset),
-        ResizeHandle::SouthEast => (-inset, -inset),
-        _ => (0.0, 0.0),
-    }
 }
 
 fn dim_rect(left: f32, top: f32, width: f32, height: f32) -> Div {
@@ -4291,9 +4095,9 @@ fn camera_cursor(x: f32, y: f32, dark: bool) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::{ResizeHandle, edge_resize_handle, frame_matches_monitor};
+    use super::{fit_ratio_to_bounds, frame_matches_monitor};
     use core_capture::MonitorInfo;
-    use core_types::{DpiScale, MonitorId, PhysicalPoint, PhysicalRect, RgbaFrame};
+    use core_types::{DpiScale, MonitorId, PhysicalRect, RgbaFrame};
 
     fn monitor(width: u32, height: u32) -> MonitorInfo {
         MonitorInfo {
@@ -4318,14 +4122,14 @@ mod tests {
     }
 
     #[test]
-    fn selection_borders_map_to_resize_handles() {
-        let rect = PhysicalRect::new(10, 20, 100, 80);
-        let handle = |x, y| edge_resize_handle(rect, PhysicalPoint::new(x, y), 6.0);
-        assert_eq!(handle(110, 60), Some(ResizeHandle::East));
-        assert_eq!(handle(10, 100), Some(ResizeHandle::SouthWest));
-        assert_eq!(handle(60, 20), Some(ResizeHandle::North));
-        assert_eq!(handle(110, 100), Some(ResizeHandle::SouthEast));
-        assert_eq!(handle(60, 60), None);
-        assert_eq!(handle(140, 60), None);
+    fn ratio_edit_stays_inside_the_monitor() {
+        assert_eq!(
+            fit_ratio_to_bounds(1000, 16.0 / 9.0, 1920, 1080),
+            (1000, 563)
+        );
+        let (width, height) = fit_ratio_to_bounds(3000, 16.0 / 9.0, 1920, 1080);
+        assert!(width <= 1920);
+        assert!(height <= 1080);
+        assert!((width as f32 / height as f32 - 16.0 / 9.0).abs() < 0.01);
     }
 }
