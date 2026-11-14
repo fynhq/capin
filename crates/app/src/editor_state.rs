@@ -1366,6 +1366,31 @@ impl EditorState {
     }
 }
 
+/// Canvas history depth. Each step stores a full frame, so keep it small.
+pub(crate) const CANVAS_HISTORY_LIMIT: usize = 3;
+
+impl EditorState {
+    pub(crate) fn record_canvas_snapshot(&mut self, snapshot: EditorSnapshot) {
+        self.canvas_undo.push(snapshot);
+        if self.canvas_undo.len() > CANVAS_HISTORY_LIMIT {
+            self.canvas_undo.remove(0);
+        }
+        self.canvas_redo.clear();
+    }
+
+    pub(crate) fn take_undo_snapshot(&mut self, current: EditorSnapshot) -> Option<EditorSnapshot> {
+        let snapshot = self.canvas_undo.pop()?;
+        self.canvas_redo.push(current);
+        Some(snapshot)
+    }
+
+    pub(crate) fn take_redo_snapshot(&mut self, current: EditorSnapshot) -> Option<EditorSnapshot> {
+        let snapshot = self.canvas_redo.pop()?;
+        self.canvas_undo.push(current);
+        Some(snapshot)
+    }
+}
+
 #[cfg(test)]
 #[path = "editor_state_tests.rs"]
 mod tests;

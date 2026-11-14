@@ -419,3 +419,42 @@ fn cancel_text_reports_whether_an_edit_was_open() {
     assert!(state.cancel_text());
     assert!(state.text_edit.is_none());
 }
+
+fn snapshot(tag: u8) -> EditorSnapshot {
+    let frame = core_types::RgbaFrame::from_pixels(1, 1, vec![tag, 0, 0, 255]).expect("frame");
+    EditorSnapshot {
+        frame: std::sync::Arc::new(frame),
+        image_size: PhysicalSize::new(1, 1),
+        document: AnnotationDocument::new(PhysicalSize::new(1, 1)),
+    }
+}
+
+#[test]
+fn canvas_history_keeps_three_steps_and_clears_redo() {
+    let mut state = state();
+    for tag in 0..4 {
+        state.record_canvas_snapshot(snapshot(tag));
+    }
+    assert_eq!(state.canvas_undo.len(), 3);
+    assert_eq!(state.canvas_undo[0].frame.pixel(0, 0).unwrap()[0], 1);
+
+    let restored = state.take_undo_snapshot(snapshot(9)).expect("undo step");
+    assert_eq!(restored.frame.pixel(0, 0).unwrap()[0], 3);
+    assert_eq!(state.canvas_redo.len(), 1);
+
+    state.record_canvas_snapshot(snapshot(8));
+    assert!(state.canvas_redo.is_empty());
+    assert_eq!(state.canvas_undo.len(), 3);
+}
+
+#[test]
+fn redo_moves_the_current_canvas_back_to_undo() {
+    let mut state = state();
+    state.record_canvas_snapshot(snapshot(1));
+    let undone = state.take_undo_snapshot(snapshot(2)).expect("undo step");
+    assert_eq!(undone.frame.pixel(0, 0).unwrap()[0], 1);
+
+    let redone = state.take_redo_snapshot(snapshot(1)).expect("redo step");
+    assert_eq!(redone.frame.pixel(0, 0).unwrap()[0], 2);
+    assert_eq!(state.canvas_undo.len(), 1);
+}

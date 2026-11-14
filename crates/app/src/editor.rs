@@ -46,7 +46,6 @@ const CORNER_RADII: [f32; 4] = [0.0, 8.0, 16.0, 24.0];
 const NUMBER_SIZES: [u32; 4] = [24, 32, 40, 48];
 const BLUR_RADII: [u32; 4] = [8, 16, 24, 32];
 const SPOTLIGHT_INTENSITIES: [u8; 3] = [20, 40, 60];
-const CANVAS_HISTORY_LIMIT: usize = 3;
 
 fn stroke_id(width: f32) -> &'static str {
     match width as u32 {
@@ -1211,11 +1210,7 @@ impl EditorView {
             image_size: self.image_size,
             document: self.document.clone(),
         };
-        self.canvas_undo.push(snapshot);
-        if self.canvas_undo.len() > CANVAS_HISTORY_LIMIT {
-            self.canvas_undo.remove(0);
-        }
-        self.canvas_redo.clear();
+        self.state.record_canvas_snapshot(snapshot);
     }
 
     /// Rebuilds the GPUI images for the current frame and returns the old
@@ -1300,29 +1295,27 @@ impl EditorView {
     }
 
     fn undo_canvas(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(snapshot) = self.canvas_undo.pop() else {
-            return false;
-        };
         let current = EditorSnapshot {
             frame: Arc::clone(&self.frame),
             image_size: self.image_size,
             document: self.document.clone(),
         };
-        self.canvas_redo.push(current);
+        let Some(snapshot) = self.state.take_undo_snapshot(current) else {
+            return false;
+        };
         self.restore_canvas_snapshot(snapshot, cx);
         true
     }
 
     fn redo_canvas(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(snapshot) = self.canvas_redo.pop() else {
-            return false;
-        };
         let current = EditorSnapshot {
             frame: Arc::clone(&self.frame),
             image_size: self.image_size,
             document: self.document.clone(),
         };
-        self.canvas_undo.push(current);
+        let Some(snapshot) = self.state.take_redo_snapshot(current) else {
+            return false;
+        };
         self.restore_canvas_snapshot(snapshot, cx);
         true
     }
