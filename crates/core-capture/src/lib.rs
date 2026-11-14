@@ -4,21 +4,22 @@ mod backend;
 mod error;
 mod info;
 mod selection;
-mod target;
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+pub mod macos_sck_support;
 #[cfg(target_os = "windows")]
 mod windows;
 
 pub use backend::{CaptureBackend, platform_backend};
+pub use core_types::CaptureTarget;
 pub use error::{CaptureError, Result};
 pub use info::{MonitorInfo, WindowInfo};
 pub use selection::{
     DRAG_THRESHOLD_PX, SelectionAction, SelectionOutcome, SelectionSession, element_candidates,
     region_from_drag,
 };
-pub use target::CaptureTarget;
 
 /// Returns best-effort bounds for UI elements inside a window.
 ///

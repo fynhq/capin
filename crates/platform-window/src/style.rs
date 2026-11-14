@@ -77,14 +77,7 @@ impl WindowStyle {
 
     /// Live demo-cursor disc shown while recording. Click-through and
     /// excluded from capture; the recorded frames carry their own disc.
-    pub const RECORD_HIGHLIGHT: Self = Self {
-        always_on_top: true,
-        skip_taskbar: true,
-        no_activate: true,
-        exclude_from_capture: true,
-        borderless: true,
-        opaque: false,
-    };
+    pub const RECORD_HIGHLIGHT: Self = Self::CAPTURE_OUTLINE;
 
     /// Full-screen inline annotation surface used for pin editing and long
     /// captures. It must stay focusable for keyboard input, be borderless and

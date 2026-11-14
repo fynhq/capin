@@ -30,6 +30,8 @@ use objc2_screen_capture_kit::{
 
 use crate::{CaptureError, CaptureTarget, Result};
 
+use crate::macos_sck_support as support;
+
 fn supports_screenshot_manager() -> bool {
     AnyClass::get(c"SCScreenshotManager").is_some()
 }
@@ -110,7 +112,7 @@ fn capture_stream(filter: &SCContentFilter, config: &SCStreamConfiguration) -> R
 
     let (start_tx, start_rx) = channel::<Option<String>>();
     let start_block = RcBlock::new(move |error: *mut NSError| {
-        let _ = start_tx.send(error_message(error));
+        let _ = start_tx.send(unsafe { support::error_message(error) });
     });
     unsafe { stream.startCaptureWithCompletionHandler(Some(&start_block)) };
     match start_rx.recv_timeout(Duration::from_secs(10)) {
@@ -146,13 +148,6 @@ fn capture_stream(filter: &SCContentFilter, config: &SCStreamConfiguration) -> R
         stream.removeStreamOutput_type_error(output_protocol, SCStreamOutputType::Screen)
     };
     frame
-}
-
-fn error_message(error: *mut NSError) -> Option<String> {
-    if error.is_null() {
-        return None;
-    }
-    unsafe { Retained::retain(error) }.map(|error| error.localizedDescription().to_string())
 }
 
 struct OutputIvars {
@@ -286,12 +281,17 @@ fn build_config(
         CaptureTarget::Monitor(id) => {
             let display = find_display(content, id.raw())?;
             let (width, height) = super::display_pixel_size(unsafe { display.displayID() })
-                .unwrap_or_else(|| (display_width(&display), display_height(&display)));
+                .unwrap_or_else(|| {
+                    (
+                        support::display_width(&display),
+                        support::display_height(&display),
+                    )
+                });
             (width, height, false)
         }
         CaptureTarget::Region(region) => {
             let display = find_display(content, region.monitor.raw())?;
-            let scale = backing_scale(&display);
+            let scale = support::display_scale(&display);
             let rect = CGRect::new(
                 CGPoint::new(
                     region.rect.origin.x as f64 / scale,
@@ -315,7 +315,7 @@ fn build_config(
             if frame.size.width < 1.0 || frame.size.height < 1.0 {
                 return Err(CaptureError::WindowNotFound(id));
             }
-            let scale = window_scale(&window, content).unwrap_or(1.0);
+            let scale = support::window_scale(&window, content).unwrap_or(1.0);
             (
                 (frame.size.width * scale).round().max(1.0) as usize,
                 (frame.size.height * scale).round().max(1.0) as usize,
@@ -368,107 +368,18 @@ fn own_windows(content: &SCShareableContent) -> Vec<Retained<SCWindow>> {
 }
 
 fn find_display(content: &SCShareableContent, raw: u64) -> Result<Retained<SCDisplay>> {
-    let displays = unsafe { content.displays() };
-    let target = raw as u32;
-    displays
-        .iter()
-        .find(|display| unsafe { display.displayID() } == target)
+    support::find_display(content, raw)
         .ok_or_else(|| CaptureError::MonitorNotFound(core_types::MonitorId::from_raw(raw)))
 }
 
 fn find_window(content: &SCShareableContent, raw: u64) -> Result<Retained<SCWindow>> {
-    let windows = unsafe { content.windows() };
-    let target = raw as u32;
-    windows
-        .iter()
-        .find(|window| unsafe { window.windowID() } == target)
+    support::find_window(content, raw)
         .ok_or_else(|| CaptureError::WindowNotFound(core_types::WindowId::from_raw(raw)))
 }
 
-fn display_width(display: &SCDisplay) -> usize {
-    unsafe { display.width() }.max(1) as usize
-}
-
-fn display_height(display: &SCDisplay) -> usize {
-    unsafe { display.height() }.max(1) as usize
-}
-
-/// Backing-store pixels per point. SCDisplay reports pixel dimensions that can
-/// come from the panel rather than the window server's scaled backing store,
-/// so prefer the display mode's pixel size for capture geometry.
-fn backing_scale(display: &SCDisplay) -> f64 {
-    super::display_backing_scale(u64::from(unsafe { display.displayID() }))
-        .map(f64::from)
-        .unwrap_or_else(|| display_scale(display))
-}
-
-fn display_scale(display: &SCDisplay) -> f64 {
-    let frame = unsafe { display.frame() };
-    if frame.size.width > 0.0 {
-        display_width(display) as f64 / frame.size.width
-    } else {
-        1.0
-    }
-}
-
-fn window_scale(window: &SCWindow, content: &SCShareableContent) -> Option<f64> {
-    let frame = unsafe { window.frame() };
-    let center_x = frame.origin.x + frame.size.width / 2.0;
-    let center_y = frame.origin.y + frame.size.height / 2.0;
-    let displays = unsafe { content.displays() };
-    displays
-        .iter()
-        .find(|display| {
-            let bounds = unsafe { display.frame() };
-            center_x >= bounds.origin.x
-                && center_y >= bounds.origin.y
-                && center_x <= bounds.origin.x + bounds.size.width
-                && center_y <= bounds.origin.y + bounds.size.height
-        })
-        .map(|display| backing_scale(&display))
-}
-
 fn shareable_content() -> Result<Retained<SCShareableContent>> {
-    let (tx, rx) = channel::<std::result::Result<usize, String>>();
-    let block = RcBlock::new(
-        move |content: *mut SCShareableContent, error: *mut NSError| {
-            if content.is_null() {
-                let message = if error.is_null() {
-                    "unknown error".to_owned()
-                } else {
-                    unsafe { Retained::retain(error) }
-                        .map(|error| error.localizedDescription().to_string())
-                        .unwrap_or_else(|| "unknown error".to_owned())
-                };
-                let _ = tx.send(Err(message));
-                return;
-            }
-            let retained = unsafe { Retained::retain(content) };
-            let pointer = retained.map_or(0, |content| Retained::into_raw(content) as usize);
-            let _ = tx.send(Ok(pointer));
-        },
-    );
-    unsafe {
-        SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
-            true,
-            true,
-            &block,
-        );
-    }
-    let pointer = rx
-        .recv_timeout(Duration::from_secs(10))
-        .map_err(|_| CaptureError::Platform {
-            operation: "SCShareableContent",
-            message: "the content request timed out".to_owned(),
-        })?
-        .map_err(|message| CaptureError::Platform {
-            operation: "SCShareableContent",
-            message,
-        })?;
-    unsafe { Retained::from_raw(pointer as *mut SCShareableContent) }.ok_or_else(|| {
-        CaptureError::Platform {
-            operation: "SCShareableContent",
-            message: "the system returned empty content".to_owned(),
-        }
+    support::shareable_content().map_err(|message| CaptureError::Platform {
+        operation: "SCShareableContent",
+        message,
     })
 }

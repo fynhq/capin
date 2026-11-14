@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use block2::RcBlock;
 use core_capture::CaptureTarget;
+use core_capture::macos_sck_support as sck;
 use core_record::{
     CURSOR_HIGHLIGHT_ALPHA, CURSOR_HIGHLIGHT_RADIUS, CursorHighlight, FRAME_RATE, FrameDecision,
     FrameTimeline, RecordConfig, paint_cursor_highlight_bgra, video_bitrate,
@@ -50,7 +51,7 @@ pub(crate) fn start(
     flags: Arc<Flags>,
 ) -> Result<(), String> {
     ensure_permission()?;
-    let content = shareable_content()?;
+    let content = sck::shareable_content()?;
     let plan = build_plan(&content, &config, &excluded_windows)?;
     let (tx, rx) = sync_channel::<EncodedFrame>(FRAME_QUEUE);
     let (width, height) = (plan.width, plan.height);
@@ -186,8 +187,8 @@ fn build_plan(
             // region and window targets use the backing-store space the app
             // now shares with screenshots. Cursor scaling follows the actual
             // stream-to-point ratio so the disc stays the same screen size.
-            let output_width = display_width(&display);
-            let output_height = display_height(&display);
+            let output_width = sck::display_width(&display);
+            let output_height = sck::display_height(&display);
             let output_scale = output_width as f64 / frame.size.width.max(1.0);
             Ok(SessionPlan {
                 filter,
@@ -210,7 +211,7 @@ fn build_plan(
             let display = find_display(content, region.monitor.raw())?;
             let frame = unsafe { display.frame() };
             let (width, height) = region_size(region.rect)?;
-            let scale = display_scale(&display);
+            let scale = sck::display_scale(&display);
             let source_rect = CGRect::new(
                 CGPoint::new(
                     region.rect.origin.x as f64 / scale,
@@ -251,7 +252,7 @@ fn build_plan(
             let window = find_window(content, id.raw())?;
             let frame = unsafe { window.frame() };
             let (width, height) = window_size(&window, content)?;
-            let scale = window_scale(&window, content).unwrap_or(1.0);
+            let scale = sck::window_scale(&window, content).unwrap_or(1.0);
             let filter = unsafe {
                 SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &window)
             };
@@ -290,11 +291,7 @@ fn own_windows(content: &SCShareableContent, extra: &[u64]) -> Vec<Retained<SCWi
 }
 
 fn find_display(content: &SCShareableContent, raw: u64) -> Result<Retained<SCDisplay>, String> {
-    let displays = unsafe { content.displays() };
-    let target = raw as u32;
-    displays
-        .iter()
-        .find(|display| unsafe { display.displayID() } == target)
+    sck::find_display(content, raw)
         .ok_or_else(|| "the display to record no longer exists".to_owned())
 }
 
@@ -312,64 +309,20 @@ fn even(value: usize) -> usize {
     (value & !1).max(2)
 }
 
-fn display_width(display: &SCDisplay) -> usize {
-    unsafe { display.width() }.max(1) as usize
-}
-
-fn display_height(display: &SCDisplay) -> usize {
-    unsafe { display.height() }.max(1) as usize
-}
-
-fn display_scale(display: &SCDisplay) -> f64 {
-    if let Some(scale) =
-        core_capture::display_backing_scale(u64::from(unsafe { display.displayID() }))
-    {
-        return f64::from(scale);
-    }
-    let frame = unsafe { display.frame() };
-    if frame.size.width > 0.0 {
-        display_width(display) as f64 / frame.size.width
-    } else {
-        1.0
-    }
-}
-
 fn window_size(window: &SCWindow, content: &SCShareableContent) -> Result<(usize, usize), String> {
     let frame = unsafe { window.frame() };
     if frame.size.width < 1.0 || frame.size.height < 1.0 {
         return Err("the window to record has no drawable area".to_owned());
     }
-    let scale = window_scale(window, content).unwrap_or(1.0);
+    let scale = sck::window_scale(window, content).unwrap_or(1.0);
     Ok((
         even((frame.size.width * scale).round().max(1.0) as usize),
         even((frame.size.height * scale).round().max(1.0) as usize),
     ))
 }
 
-fn window_scale(window: &SCWindow, content: &SCShareableContent) -> Option<f64> {
-    let frame = unsafe { window.frame() };
-    let center_x = frame.origin.x + frame.size.width / 2.0;
-    let center_y = frame.origin.y + frame.size.height / 2.0;
-    let displays = unsafe { content.displays() };
-    displays
-        .iter()
-        .find(|display| {
-            let bounds = unsafe { display.frame() };
-            center_x >= bounds.origin.x
-                && center_y >= bounds.origin.y
-                && center_x <= bounds.origin.x + bounds.size.width
-                && center_y <= bounds.origin.y + bounds.size.height
-        })
-        .map(|display| display_scale(&display))
-}
-
 fn find_window(content: &SCShareableContent, raw: u64) -> Result<Retained<SCWindow>, String> {
-    let windows = unsafe { content.windows() };
-    let target = raw as u32;
-    windows
-        .iter()
-        .find(|window| unsafe { window.windowID() } == target)
-        .ok_or_else(|| "the window to record no longer exists".to_owned())
+    sck::find_window(content, raw).ok_or_else(|| "the window to record no longer exists".to_owned())
 }
 
 fn capture_session(
@@ -409,7 +362,7 @@ fn capture_session(
 
     let (start_tx, start_rx) = std::sync::mpsc::channel::<Option<String>>();
     let start_block = RcBlock::new(move |error: *mut NSError| {
-        let _ = start_tx.send(error_message(error));
+        let _ = start_tx.send(unsafe { sck::error_message(error) });
     });
     unsafe { stream.startCaptureWithCompletionHandler(Some(&start_block)) };
     match start_rx.recv_timeout(Duration::from_secs(10)) {
@@ -424,7 +377,7 @@ fn capture_session(
 
     let (stop_tx, stop_rx) = std::sync::mpsc::channel::<Option<String>>();
     let stop_block = RcBlock::new(move |error: *mut NSError| {
-        let _ = stop_tx.send(error_message(error));
+        let _ = stop_tx.send(unsafe { sck::error_message(error) });
     });
     unsafe { stream.stopCaptureWithCompletionHandler(Some(&stop_block)) };
     let stop_error = stop_rx.recv_timeout(Duration::from_secs(5)).ok().flatten();
@@ -479,44 +432,6 @@ fn ensure_permission() -> Result<(), String> {
         return Ok(());
     }
     Err("screen recording permission was not granted".to_owned())
-}
-
-fn shareable_content() -> Result<Retained<SCShareableContent>, String> {
-    let (tx, rx) = std::sync::mpsc::channel::<Result<usize, String>>();
-    let block = RcBlock::new(
-        move |content: *mut SCShareableContent, error: *mut NSError| {
-            if content.is_null() {
-                let message = error_message(error).unwrap_or_else(|| "unknown error".to_owned());
-                let _ = tx.send(Err(message));
-                return;
-            }
-            // The completion handler only lends the object; retain it before the
-            // block returns and transfer ownership through the raw pointer.
-            let retained = unsafe { Retained::retain(content) };
-            let pointer = retained.map_or(0, |object| Retained::into_raw(object) as usize);
-            let _ = tx.send(Ok(pointer));
-        },
-    );
-    unsafe {
-        SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
-            true,
-            true,
-            &block,
-        );
-    }
-    let pointer = rx
-        .recv_timeout(Duration::from_secs(10))
-        .map_err(|_| "timed out while querying shareable content".to_owned())??;
-    unsafe { Retained::from_raw(pointer as *mut SCShareableContent) }
-        .ok_or_else(|| "the system returned empty shareable content".to_owned())
-}
-
-fn error_message(error: *mut NSError) -> Option<String> {
-    if error.is_null() {
-        return None;
-    }
-    let error = unsafe { Retained::retain(error) }?;
-    Some(error.localizedDescription().to_string())
 }
 
 fn ns_error(error: &NSError) -> String {
