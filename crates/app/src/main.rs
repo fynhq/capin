@@ -10,6 +10,7 @@ mod capture_panels;
 mod chrome_theme;
 mod display;
 mod editor;
+mod editor_state;
 mod effects;
 mod hotkey;
 mod i18n;
