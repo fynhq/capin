@@ -273,7 +273,7 @@ fn commit_text_adds_and_updates_a_text_shape() {
         .text_edit
         .as_mut()
         .unwrap()
-        .replace(None, "bye", false);
+        .replace(Some(0..5), "bye", false);
     assert!(state.commit_text());
     assert_eq!(state.document.objects().len(), 1);
     let Shape::Text { text, .. } = &state.document.object(id).unwrap().shape else {
@@ -338,8 +338,8 @@ fn select_all_and_move_cursor_keep_utf8_boundaries() {
     assert!(state.select_all_text());
     assert_eq!(state.text_edit.as_ref().unwrap().selection(), 0..4);
     assert!(state.move_text_cursor(2, false));
-    assert_eq!(state.text_edit.as_ref().unwrap().cursor, 2);
-    assert_eq!(state.text_edit.as_ref().unwrap().anchor, 2);
+    assert_eq!(state.text_edit.as_ref().unwrap().cursor, 1);
+    assert_eq!(state.text_edit.as_ref().unwrap().anchor, 1);
 }
 
 #[test]

@@ -335,19 +335,22 @@ impl TextEdit {
 
 pub(crate) fn previous_char_boundary(content: &str, cursor: usize) -> usize {
     let cursor = cursor.min(content.len());
-    content[..cursor]
-        .char_indices()
-        .next_back()
-        .map(|(index, _)| index)
-        .unwrap_or(0)
+    let mut boundary = 0;
+    for (index, _) in content.char_indices() {
+        if index >= cursor {
+            break;
+        }
+        boundary = index;
+    }
+    boundary
 }
 
 pub(crate) fn next_char_boundary(content: &str, cursor: usize) -> usize {
     let cursor = cursor.min(content.len());
-    content[cursor..]
-        .chars()
-        .next()
-        .map(|ch| cursor + ch.len_utf8())
+    content
+        .char_indices()
+        .find(|(index, ch)| *index + ch.len_utf8() > cursor)
+        .map(|(index, ch)| index + ch.len_utf8())
         .unwrap_or(cursor)
 }
 
