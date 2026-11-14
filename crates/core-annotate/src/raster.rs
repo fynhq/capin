@@ -43,7 +43,7 @@ pub fn rasterize(
         return Ok(frame.clone());
     }
 
-    let mut pixels = frame.pixels().to_vec();
+    let mut pixels = frame.packed_pixels().into_owned();
     premultiply(&mut pixels);
     let size = IntSize::from_wh(expected.width, expected.height).ok_or(RasterError::Pixmap)?;
     let mut pixmap = Pixmap::from_vec(pixels, size).ok_or(RasterError::Pixmap)?;

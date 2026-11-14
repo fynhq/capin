@@ -82,7 +82,7 @@ pub fn convert_frame_to_srgb(
     if source == ColorSpace::Srgb && !tone_map {
         return Ok(frame.clone());
     }
-    let mut pixels = frame.pixels().to_vec();
+    let mut pixels = frame.packed_pixels().into_owned();
     for pixel in pixels.as_chunks_mut::<4>().0 {
         let converted = convert_rgb_to_srgb(
             [

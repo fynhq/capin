@@ -734,9 +734,10 @@ fn crop(frame: &RgbaFrame, region: PhysicalRect) -> Result<RgbaFrame> {
         return Err(CaptureError::RegionOutOfBounds);
     }
     let row_bytes = region.size.width as usize * 4;
+    let stride = frame.stride();
     let mut pixels = Vec::with_capacity(row_bytes * region.size.height as usize);
     for row in y0..y1 {
-        let start = (row as usize * frame.width() as usize + x0 as usize) * 4;
+        let start = row as usize * stride + x0 as usize * 4;
         pixels.extend_from_slice(&frame.pixels()[start..start + row_bytes]);
     }
     Ok(RgbaFrame::from_pixels(

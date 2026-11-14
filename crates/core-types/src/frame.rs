@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt;
 
 pub const BYTES_PER_PIXEL: usize = 4;
@@ -73,6 +74,29 @@ impl RgbaFrame {
         &self.pixels
     }
 
+    /// Returns tightly packed `width * height * 4` pixels.
+    ///
+    /// Most caller paths expect a packed image; this helper borrows the
+    /// existing buffer for ordinary frames and compacts padded rows only when
+    /// a platform actually supplied a larger stride.
+    pub fn packed_pixels(&self) -> Cow<'_, [u8]> {
+        if self.stride == self.width as usize * BYTES_PER_PIXEL {
+            Cow::Borrowed(&self.pixels)
+        } else {
+            Cow::Owned(self.packed_pixels_owned())
+        }
+    }
+
+    fn packed_pixels_owned(&self) -> Vec<u8> {
+        let row_bytes = self.width as usize * BYTES_PER_PIXEL;
+        let mut packed = Vec::with_capacity(row_bytes * self.height as usize);
+        for y in 0..self.height as usize {
+            let start = y * self.stride;
+            packed.extend_from_slice(&self.pixels[start..start + row_bytes]);
+        }
+        packed
+    }
+
     /// Takes the owned buffer without copying.
     pub fn into_pixels(self) -> Vec<u8> {
         self.pixels
@@ -85,13 +109,7 @@ impl RgbaFrame {
         if self.stride == self.width as usize * BYTES_PER_PIXEL {
             return self.pixels;
         }
-        let row_bytes = self.width as usize * BYTES_PER_PIXEL;
-        let mut packed = Vec::with_capacity(row_bytes * self.height as usize);
-        for y in 0..self.height as usize {
-            let start = y * self.stride;
-            packed.extend_from_slice(&self.pixels[start..start + row_bytes]);
-        }
-        packed
+        self.packed_pixels_owned()
     }
 
     pub fn row(&self, y: u32) -> Option<&[u8]> {
@@ -218,6 +236,27 @@ mod tests {
                 actual: 15
             })
         );
+    }
+
+    #[test]
+    fn packed_pixels_compacts_padded_rows() {
+        let frame = RgbaFrame::new(
+            1,
+            2,
+            8,
+            vec![1, 2, 3, 4, 0, 0, 0, 0, 5, 6, 7, 8, 0, 0, 0, 0],
+        )
+        .unwrap();
+        assert_eq!(frame.packed_pixels().as_ref(), &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn packed_pixels_borrows_tight_rows() {
+        let frame = RgbaFrame::from_pixels(1, 1, vec![1, 2, 3, 4]).unwrap();
+        assert!(matches!(
+            frame.packed_pixels(),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 
     #[test]

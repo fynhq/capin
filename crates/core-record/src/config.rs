@@ -1,5 +1,4 @@
-use core_capture::CaptureTarget;
-use core_types::PhysicalSize;
+use core_types::{CaptureTarget, PhysicalSize};
 use thiserror::Error;
 
 /// Fixed output frame rate for every recording.
@@ -65,7 +64,6 @@ pub enum RecordError {
 
 #[cfg(test)]
 mod tests {
-    use core_capture::CaptureTarget;
     use core_types::{CaptureRegion, MonitorId, PhysicalRect, PhysicalSize};
 
     use super::*;

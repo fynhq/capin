@@ -113,9 +113,10 @@ pub fn save_png(frame: &RgbaFrame) -> Result<PathBuf, std::io::Error> {
     let template = settings_state::get().filename_template.clone();
     let stem = render_filename(&template, frame.width(), frame.height());
     let (path, mut file) = create_unique_file(&directory, &stem, "png")?;
+    let packed = frame.packed_pixels();
     if let Err(error) = image::write_buffer_with_format(
         &mut file,
-        frame.pixels(),
+        packed.as_ref(),
         frame.width(),
         frame.height(),
         image::ColorType::Rgba8,

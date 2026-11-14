@@ -8,7 +8,6 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-core-capture.workspace = true
 core-types.workspace = true
 thiserror.workspace = true
 
