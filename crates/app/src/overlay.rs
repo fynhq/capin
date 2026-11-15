@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -68,6 +68,10 @@ thread_local! {
     /// Live overlay views for global actions such as the pin shortcut, which
     /// reaches the app through the hotkey manager rather than the key event.
     static OVERLAY_VIEWS: RefCell<Vec<WeakEntity<OverlayView>>> = const { RefCell::new(Vec::new()) };
+    /// Last non-Capin application seen in front before a capture. Closing the
+    /// overlay hands focus back to it, so the captured window does not stay
+    /// in its inactive state with gray traffic lights.
+    static RETURN_APP_PID: Cell<Option<i32>> = const { Cell::new(None) };
 }
 
 pub fn has_open_overlays() -> bool {
@@ -81,6 +85,45 @@ pub fn close_open_overlays(cx: &mut App) {
     crate::windows::close_capture_auxiliary(cx, handles);
     OPEN_OVERLAYS.store(0, Ordering::Relaxed);
     OVERLAY_VIEWS.with(|views| views.borrow_mut().clear());
+}
+
+/// Keeps the last non-Capin foreground application for focus restoration.
+pub(crate) fn remember_frontmost_application() {
+    if let Some(pid) = platform_window::frontmost_other_application_pid() {
+        RETURN_APP_PID.with(|slot| slot.set(Some(pid)));
+    }
+}
+
+/// Ctrl state, including native AppKit flags when no modifier event arrived.
+fn control_down(modifiers: &Modifiers) -> bool {
+    modifiers.control || platform_window::control_modifier_down()
+}
+
+/// Returns focus to the app the user came from. A remaining Capin surface
+/// that needs keyboard input keeps the app frontmost instead.
+pub(crate) fn restore_previous_application(cx: &mut App) {
+    let Some(pid) = RETURN_APP_PID.with(Cell::get) else {
+        return;
+    };
+    if crate::settings::has_open_settings(cx) {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(Duration::from_millis(60))
+            .await;
+        cx.update(|cx| {
+            if has_open_overlays()
+                || crate::settings::has_open_settings(cx)
+                || crate::editor::has_open_editors()
+            {
+                return;
+            }
+            log_info!("overlay", "restoring focus to application {pid}");
+            platform_window::activate_application_by_pid(pid);
+        });
+    })
+    .detach();
 }
 
 /// Windows owned by the capture overlays. Pins and the settings page are
@@ -317,6 +360,7 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
     if has_open_overlays() {
         return;
     }
+    remember_frontmost_application();
     // Capture is a menu-bar utility mode: return to the accessory policy even
     // if the settings window was force-closed by the tray, which bypasses its
     // close callback. The overlay itself still gets key status below.
@@ -757,7 +801,7 @@ impl OverlayView {
             aspect: AspectPreset::Free,
             color_format: ColorFormat::Hex,
             shift_held: false,
-            window_only: false,
+            window_only: platform_window::control_modifier_down(),
             click_opens_editor: false,
             ctrl_click_primary: false,
             cursor_style: CursorStyle::Crosshair,
@@ -1718,6 +1762,7 @@ impl OverlayView {
                         false
                     }
                 };
+                log_info!("overlay", "window {} frozen capture: {frozen}", id.raw());
                 if frozen {
                     crate::window_frame::compose_window_capture(
                         id,
@@ -3124,7 +3169,7 @@ impl OverlayView {
     ) {
         let point = self.to_physical(event.position);
         self.cursor = Some(point);
-        self.set_window_only(event.modifiers.control || ctrl_click, cx);
+        self.set_window_only(control_down(&event.modifiers) || ctrl_click, cx);
         self.click_opens_editor = self.window_only && self.selected.is_none();
         if let Some(selected) = self.selected.clone() {
             if selected.edit.is_some() {
@@ -3450,7 +3495,7 @@ impl OverlayView {
                     }
                     this.shift_held = shift;
 
-                    this.set_window_only(event.modifiers.control, cx);
+                    this.set_window_only(control_down(&event.modifiers), cx);
                     cx.notify();
                 },
             ))
@@ -3635,7 +3680,7 @@ impl OverlayView {
                 this.cursor = Some(point);
                 // Covers the case where Ctrl was already held before the
                 // overlay became key and no modifier-change event arrives.
-                this.set_window_only(event.modifiers.control, cx);
+                this.set_window_only(control_down(&event.modifiers), cx);
                 if this.window_only && this.selected.is_none() {
                     // WM_SETCURSOR can restore the arrow while moving; keep it
                     // hidden so only the painted camera cursor is visible.
@@ -3722,7 +3767,7 @@ impl OverlayView {
                         && this.mode == OverlayMode::Capture
                         && this.selected.is_none()
                         && this.editor.is_none()
-                        && (this.window_only || event.modifiers.control)
+                        && (this.window_only || control_down(&event.modifiers))
                     {
                         this.ctrl_click_primary = true;
                         this.primary_pointer_down(event, true, cx);

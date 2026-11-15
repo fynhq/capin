@@ -11,7 +11,9 @@ mod imp {
     };
 
     use crate::i18n::t;
-    use crate::logging::{log_error, log_info, log_warn};
+    #[cfg(target_os = "windows")]
+    use crate::logging::log_warn;
+    use crate::logging::{log_error, log_info};
     use crate::settings_state;
 
     const MENU_START: &str = "start";
@@ -22,9 +24,10 @@ mod imp {
 
     thread_local! {
         static TRAY: RefCell<Option<TrayIcon>> = const { RefCell::new(None) };
-        /// Tracks the surface variant currently painted so a light/dark switch
-        /// swaps the glyph without rebuilding the tray. On macOS the menu bar
-        /// follows the system appearance; Windows tracks the taskbar.
+        /// Tracks the Windows taskbar variant currently painted so a light/dark
+        /// switch swaps the glyph without rebuilding the tray. macOS uses a
+        /// template image and lets AppKit recolour it, so it has no such state.
+        #[cfg(target_os = "windows")]
         static TRAY_LIGHT: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     }
 
@@ -42,14 +45,22 @@ mod imp {
             log_error!("tray", "failed to load tray icon");
             return false;
         };
+        #[cfg(target_os = "windows")]
         TRAY_LIGHT.with(|slot| slot.set(Some(surface_is_light())));
 
         let builder = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
             .with_menu_on_right_click(true)
-            .with_tooltip("Capin")
-            .with_icon(icon);
+            .with_tooltip("Capin");
+        // The macOS menu bar can be tinted independently of the app
+        // appearance, so a glyph picked from `NSApp.effectiveAppearance` can
+        // turn black on a dark menu bar. A template image lets AppKit draw
+        // the glyph in the colour the menu bar actually uses.
+        #[cfg(target_os = "macos")]
+        let builder = builder.with_icon_templated(icon);
+        #[cfg(not(target_os = "macos"))]
+        let builder = builder.with_icon(icon);
 
         let tray = match builder.build() {
             Ok(tray) => tray,
@@ -110,13 +121,11 @@ mod imp {
         // Windows uses the raw 32 px glyph on the taskbar. macOS menu bar
         // items follow the HIG at 16 pt with breathing room, so that platform
         // ships a 44 px asset whose 32 px glyph is centred in a transparent
-        // margin; AppKit scales it to 22 pt (the menu bar cap).
+        // margin; AppKit scales it to 22 pt (the menu bar cap). The macOS
+        // asset is installed as a template image, so only its alpha shape is
+        // used and the two-ring glyph stays identical to the Windows icon.
         #[cfg(target_os = "macos")]
-        let bytes: &[u8] = if surface_is_light() {
-            include_bytes!("../../../assets/icon/tray/capin_tray_light_macos.png")
-        } else {
-            include_bytes!("../../../assets/icon/tray/capin_tray_dark_macos.png")
-        };
+        let bytes: &[u8] = include_bytes!("../../../assets/icon/tray/capin_tray_light_macos.png");
         #[cfg(not(target_os = "macos"))]
         let bytes: &[u8] = if surface_is_light() {
             include_bytes!("../../../assets/icon/tray/capin_tray_light.png")
@@ -134,20 +143,15 @@ mod imp {
         platform_window::system_taskbar_uses_light_theme().unwrap_or(false)
     }
 
+    /// macOS recolours the template image itself, so there is nothing to swap.
     #[cfg(target_os = "macos")]
-    fn surface_is_light() -> bool {
-        platform_window::system_uses_light_theme().unwrap_or(false)
-    }
+    fn refresh_icon_for_theme() {}
 
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    fn surface_is_light() -> bool {
-        false
-    }
-
-    /// Re-picks the tray glyph when the taskbar or menu bar flips between
-    /// light and dark. The tray surface is owned by the platform, so no GPUI
+    /// Re-picks the Windows taskbar glyph when the taskbar flips between light
+    /// and dark. The tray surface is owned by the platform, so no GPUI
     /// appearance callback reaches us; a low-frequency poll is the portable
     /// signal.
+    #[cfg(target_os = "windows")]
     fn refresh_icon_for_theme() {
         let light = surface_is_light();
         if TRAY_LIGHT.with(|slot| slot.get()) == Some(light) {
@@ -178,6 +182,9 @@ mod imp {
                 ticks = ticks.wrapping_add(1);
                 if ticks.is_multiple_of(10) {
                     refresh_icon_for_theme();
+                    // Keeps the focus-return target current even when Capin
+                    // is active (a tray click can consume the previous app).
+                    crate::overlay::remember_frontmost_application();
                 }
 
                 let mut actions = Vec::new();
