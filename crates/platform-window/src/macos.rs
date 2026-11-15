@@ -12,7 +12,7 @@ use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 use foreign_types_shared::ForeignType;
 use objc2::rc::Retained;
-use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{ClassType, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSColor, NSScreenSaverWindowLevel, NSView,
     NSWindowCollectionBehavior, NSWindowSharingType, NSWindowStyleMask, NSWorkspace,
@@ -215,6 +215,10 @@ pub(super) fn apply(
         window.setStyleMask(NSWindowStyleMask::Borderless);
         window.setFrame_display(content, true);
         window.setHasShadow(false);
+        // Changing the style mask resigns the first responder, and without it
+        // the view never receives keyDown/insertText. Restore the GPUI view so
+        // shortcuts and annotation text input keep working.
+        let _ = window.makeFirstResponder(Some(view.as_super()));
     }
     if style.opaque {
         window.setOpaque(true);

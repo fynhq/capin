@@ -45,6 +45,32 @@ pub fn ui_elements(id: core_types::WindowId) -> Vec<core_types::PhysicalRect> {
     }
 }
 
+/// Returns the accessible element chain under a desktop point, smallest first.
+///
+/// macOS answers through `AXUIElementCopyElementAtPosition` and the parent
+/// chain, which stays cheap for large windows and avoids a full-tree scan on
+/// every pointer move. Windows keeps the cached descendant list; callers must
+/// continue caching it per window there.
+pub fn ui_elements_at(
+    id: core_types::WindowId,
+    point: core_types::PhysicalPoint,
+) -> Vec<core_types::PhysicalRect> {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = point;
+        windows::ui_elements(id)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::ui_elements_at(id, point)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = (id, point);
+        Vec::new()
+    }
+}
+
 /// Returns the window's effective corner radius in physical pixels.
 ///
 /// Windows 11 reports its DWM corner preference; Windows 10 keeps square

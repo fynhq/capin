@@ -1,6 +1,6 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ptr::NonNull;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 #[path = "macos_sck.rs"]
 mod sck;
@@ -342,14 +342,9 @@ fn displays() -> Result<Vec<DisplayGeometry>> {
         // space from NSScreen keeps capture, the frozen overlay and window
         // placement in one coordinate system; CGDisplayPixelsWide only
         // describes the panel and can differ on scaled HiDPI modes.
-        let scale = screen_backing_scale(id).unwrap_or_else(|| {
-            let pixels_wide = u32::try_from(display.pixels_wide()).unwrap_or(0);
-            if point_bounds.size.width > 0.0 && pixels_wide > 0 {
-                f64::from(pixels_wide) / point_bounds.size.width
-            } else {
-                1.0
-            }
-        });
+        let scale = display_backing_scale(u64::from(id))
+            .map(f64::from)
+            .unwrap_or(1.0);
         let width = (point_bounds.size.width * scale).round().max(1.0) as u32;
         let height = (point_bounds.size.height * scale).round().max(1.0) as u32;
         let raw_scale = scale as f32;
@@ -369,6 +364,21 @@ fn displays() -> Result<Vec<DisplayGeometry>> {
         });
     }
     Ok(displays)
+}
+
+/// Scales collected from NSScreen on the main thread.
+///
+/// ScreenCaptureKit and the scroll session query captures from background
+/// threads, where `MainThreadMarker` is unavailable. Remembering the values
+/// observed on the main thread keeps `sourceRect` and output sizes in the
+/// same backing-store space as the overlay and GPUI surface.
+fn screen_scale_cache() -> &'static Mutex<HashMap<u32, f64>> {
+    static CACHE: OnceLock<Mutex<HashMap<u32, f64>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_screen_scale(id: u32) -> Option<f64> {
+    screen_scale_cache().lock().ok()?.get(&id).copied()
 }
 
 /// Backing scale of the NSScreen that hosts a CGDirectDisplayID.
@@ -393,20 +403,47 @@ fn screen_backing_scale(id: u32) -> Option<f64> {
             && (frame.size.width - point_bounds.size.width).abs() <= 1.0
             && (frame.size.height - point_bounds.size.height).abs() <= 1.0
         {
-            return Some(screen.backingScaleFactor());
+            let scale = screen.backingScaleFactor();
+            if let Ok(mut cache) = screen_scale_cache().lock() {
+                cache.insert(id, scale);
+            }
+            return Some(scale);
         }
     }
     None
+}
+
+/// CGDisplay reports display modes in pixels for the current resolution.
+///
+/// This is the fallback when the NSScreen match or cache is unavailable; on
+/// scaled HiDPI modes the panel ratio can differ from the window server's
+/// backing scale, so the cached NSScreen value is preferred.
+fn cg_display_scale(id: u32) -> Option<f64> {
+    let display = CGDisplay::new(id);
+    let bounds = display.bounds();
+    let pixels_wide = u32::try_from(display.pixels_wide()).unwrap_or(0);
+    if bounds.size.width > 0.0 && pixels_wide > 0 {
+        Some(f64::from(pixels_wide) / bounds.size.width)
+    } else {
+        None
+    }
 }
 
 /// Returns the backing-store pixel scale of a display.
 ///
 /// On HiDPI scaled modes this is the window server's render scale (usually
 /// 2.0), not the panel's native pixel ratio. Capture targets must use it so
-/// the frozen frame lines up one-to-one with GPUI's surface.
+/// the frozen frame lines up one-to-one with GPUI's surface. The cache is
+/// filled on the main thread; background captures fall back to the CGDisplay
+/// mode ratio until then.
 pub fn display_backing_scale(raw: u64) -> Option<f32> {
     let id = u32::try_from(raw).ok()?;
-    screen_backing_scale(id).map(|scale| scale as f32)
+    // Refresh from AppKit on the main thread; background captures use the
+    // value observed there because NSScreen needs a MainThreadMarker.
+    screen_backing_scale(id)
+        .or_else(|| cached_screen_scale(id))
+        .or_else(|| cg_display_scale(id))
+        .map(|scale| scale as f32)
 }
 
 /// Backing-store pixel size of a display, used as the capture output size.
@@ -438,14 +475,30 @@ fn capture_display(id: MonitorId) -> Result<RgbaFrame> {
     image_to_frame(&image)
 }
 
-/// AppKit uses a 10-point corner radius for standard windows.
+/// Standard window corner radius in points.
+///
+/// macOS 26 (Tahoe) enlarged the standard window shape to roughly 20 points;
+/// earlier releases use the 10-point AppKit radius. Windows ask for the
+/// actual radius through their alpha channel before this fallback is used.
+fn standard_window_corner_points() -> f64 {
+    use objc2_foundation::NSProcessInfo;
+
+    let version = NSProcessInfo::processInfo().operatingSystemVersion();
+    if version.majorVersion >= 26 {
+        20.0
+    } else {
+        10.0
+    }
+}
+
 pub fn window_corner_radius(_id: WindowId, scale: f32) -> u32 {
-    (10.0 * scale.max(0.0)).round() as u32
+    (standard_window_corner_points() * f64::from(scale.max(0.0))).round() as u32
 }
 
 const MAX_AX_ELEMENTS: usize = 512;
 const MAX_AX_VISITS: usize = 1024;
 const MAX_AX_DEPTH: usize = 32;
+const AX_QUERY_BUDGET: std::time::Duration = std::time::Duration::from_millis(800);
 
 struct AxWindowInfo {
     pid: i32,
@@ -460,19 +513,9 @@ struct AxWindowInfo {
 /// The caller must grant Accessibility permission; without it macOS hides the
 /// element tree and the overlay falls back to whole-window targeting.
 pub fn ui_elements(id: WindowId) -> Vec<PhysicalRect> {
-    if !unsafe { AXIsProcessTrusted() } {
-        return Vec::new();
-    }
-    let Some(info) = ax_window_info(id) else {
+    let Some((info, _application, window)) = ax_window_context(id) else {
         return Vec::new();
     };
-    let application = unsafe { AXUIElement::new_application(info.pid) };
-    unsafe { application.set_messaging_timeout(0.25) };
-    let Some(window) = ax_window(&application, &info) else {
-        return Vec::new();
-    };
-    unsafe { window.set_messaging_timeout(0.25) };
-
     let window_rect = ax_physical_rect(info.bounds, info.scale);
     let mut result = Vec::new();
     let mut queue: VecDeque<(CFRetained<AXUIElement>, usize)> = VecDeque::new();
@@ -486,7 +529,7 @@ pub fn ui_elements(id: WindowId) -> Vec<PhysicalRect> {
         visits += 1;
         if visits > MAX_AX_VISITS
             || result.len() >= MAX_AX_ELEMENTS
-            || started.elapsed() > std::time::Duration::from_millis(300)
+            || started.elapsed() > AX_QUERY_BUDGET
         {
             break;
         }
@@ -509,6 +552,102 @@ pub fn ui_elements(id: WindowId) -> Vec<PhysicalRect> {
         }
     }
     result
+}
+
+/// Returns the accessibility chain under `point`, smallest first.
+///
+/// Hit-testing the application at the pointer is far cheaper than walking the
+/// whole tree and keeps working for large Chromium/Electron windows that never
+/// finish a full traversal inside the time budget. The parent chain also
+/// matches the overlay's wheel walk: each level is the next larger container.
+/// When the hit test cannot answer, the bounded full-tree result is used.
+pub fn ui_elements_at(id: WindowId, point: core_types::PhysicalPoint) -> Vec<PhysicalRect> {
+    let Some((info, application, _window)) = ax_window_context(id) else {
+        return Vec::new();
+    };
+    let x = f64::from(point.x) / info.scale;
+    let y = f64::from(point.y) / info.scale;
+    let Some(element) = ax_element_at_position(&application, x, y) else {
+        return ui_elements(id);
+    };
+
+    let window_rect = ax_physical_rect(info.bounds, info.scale);
+    let mut chain = Vec::new();
+    let mut current = Some(element);
+    while let Some(element) = current {
+        if chain.len() >= MAX_AX_DEPTH {
+            break;
+        }
+        if let Some(frame) = ax_frame(&element) {
+            let rect = ax_physical_rect(frame, info.scale);
+            if rect.size.width > 1
+                && rect.size.height > 1
+                && rect != window_rect
+                && rect.size.width <= window_rect.size.width
+                && rect.size.height <= window_rect.size.height
+                && rect.intersection(window_rect).is_some()
+            {
+                chain.push(rect);
+            }
+            // The window frame ends the chain; parents above it cover other
+            // windows and would make every hover ambiguous.
+            if rect == window_rect {
+                break;
+            }
+        }
+        current = ax_parent(&element);
+    }
+    chain.sort_by_key(|rect| u64::from(rect.size.width) * u64::from(rect.size.height));
+    chain.dedup();
+    chain
+}
+
+fn ax_window_context(
+    id: WindowId,
+) -> Option<(
+    AxWindowInfo,
+    CFRetained<AXUIElement>,
+    CFRetained<AXUIElement>,
+)> {
+    if !unsafe { AXIsProcessTrusted() } {
+        return None;
+    }
+    let info = ax_window_info(id)?;
+    let application = unsafe { AXUIElement::new_application(info.pid) };
+    unsafe { application.set_messaging_timeout(0.25) };
+    // Chromium and Electron expose their tree only after the assistive client
+    // opts in; without this Chrome, VS Code and Slack report no elements.
+    enable_manual_accessibility(&application);
+    let window = ax_window(&application, &info)?;
+    unsafe { window.set_messaging_timeout(0.25) };
+    Some((info, application, window))
+}
+
+fn enable_manual_accessibility(application: &AXUIElement) {
+    let name = AxString::from_str("AXManualAccessibility");
+    let value = objc2_core_foundation::CFBoolean::new(true);
+    // SAFETY: every CoreFoundation object shares the CFType representation.
+    let value = unsafe { &*(value as *const objc2_core_foundation::CFBoolean as *const AxType) };
+    let _ = unsafe { application.set_attribute_value(&name, value) };
+}
+
+fn ax_element_at_position(
+    application: &AXUIElement,
+    x: f64,
+    y: f64,
+) -> Option<CFRetained<AXUIElement>> {
+    let mut value: *const AXUIElement = std::ptr::null();
+    let error = unsafe {
+        application.copy_element_at_position(x as f32, y as f32, NonNull::from(&mut value))
+    };
+    if error != AXError::Success || value.is_null() {
+        return None;
+    }
+    NonNull::new(value as *mut AXUIElement).map(|pointer| unsafe { CFRetained::from_raw(pointer) })
+}
+
+fn ax_parent(element: &AXUIElement) -> Option<CFRetained<AXUIElement>> {
+    ax_attribute(element, "AXParent").and_then(|value| value.downcast::<AXUIElement>().ok())
 }
 
 fn ax_window_info(id: WindowId) -> Option<AxWindowInfo> {

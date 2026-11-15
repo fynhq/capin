@@ -23,11 +23,24 @@ pub fn compose_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> Rgb
     // dark windows; trim the fringe instead and keep the visible edge clean.
     #[cfg(target_os = "windows")]
     let frame = trim_capture_fringe(frame);
+    let fallback_radius = core_capture::window_corner_radius(id, scale);
+    // macOS 14+ captures keep the native window shape in their alpha channel.
+    // Measuring it matches Tahoe's larger window corners and any app-specific
+    // radius instead of assuming one value per release.
+    #[cfg(target_os = "macos")]
+    let corner_radius = if platform_window::window_capture_includes_native_shadow() {
+        fallback_radius
+    } else {
+        core_compose::estimate_corner_radius(&frame, (64.0 * scale).round() as u32)
+            .unwrap_or(fallback_radius)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let corner_radius = fallback_radius;
     let canvas = WindowCanvas {
         padding: (settings.window_padding as f32 * scale)
             .round()
             .clamp(0.0, 2048.0) as u32,
-        corner_radius: core_capture::window_corner_radius(id, scale),
+        corner_radius,
         shadow: (!platform_window::window_capture_includes_native_shadow()).then_some(Shadow {
             offset_y: (SHADOW_OFFSET * scale).round() as i32,
             blur_radius: (SHADOW_BLUR * scale).round() as u32,
@@ -49,7 +62,8 @@ pub fn compose_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> Rgb
 /// macOS window screenshots carry a one-point hairline around the window.
 /// ScreenCaptureKit's desktop-independent window image exposes only the
 /// window's content, so the system outline has to be painted back on the
-/// composed frame.
+/// composed frame. Keep the dark outline close to the system's subtle edge;
+/// a brighter white line was reading as an extra frame inside the window.
 #[cfg(target_os = "macos")]
 fn system_border(scale: f32) -> Option<Border> {
     let width = (scale.max(0.1)).round().max(1.0) as u32;
@@ -59,7 +73,7 @@ fn system_border(scale: f32) -> Option<Border> {
         color: if light {
             [0x00, 0x00, 0x00, 0x28]
         } else {
-            [0xFF, 0xFF, 0xFF, 0x34]
+            [0xFF, 0xFF, 0xFF, 0x1E]
         },
         outside: false,
     })

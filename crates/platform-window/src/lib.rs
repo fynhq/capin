@@ -45,6 +45,20 @@ pub fn accessibility_trusted() -> bool {
     }
 }
 
+/// Asks macOS to list the app under Accessibility. The system shows the
+/// prompt only while the app is not yet listed; later calls just return the
+/// current decision. No-op on other platforms.
+pub fn request_accessibility_permission() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos::request_accessibility_permission()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
 /// Whether the process currently has macOS screen-recording permission.
 pub fn screen_capture_trusted() -> bool {
     #[cfg(target_os = "macos")]

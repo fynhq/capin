@@ -23,6 +23,10 @@ use crate::{
     i18n::{Language, t},
     icons, image_util,
     logging::{log_error, log_info, log_warn},
+    overlay_ui::{
+        border, camera_cursor, clamp_to_monitor, element_border, fit_ratio_rect,
+        fit_ratio_to_bounds, screen_border,
+    },
     selection_geometry::{
         MIN_REGION_SIZE, ResizeHandle, corner_handle_offset, edge_resize_handle, handle_positions,
         region_handle_cursor, resize_rect,
@@ -688,11 +692,15 @@ struct OverlayView {
     notice_serial: u64,
     notice_leaving: bool,
     element_cache: HashMap<WindowId, Vec<PhysicalRect>>,
+    /// macOS samples the element chain at the cursor, so the cache is only
+    /// valid for the point it was queried at. Windows keeps a per-window list.
+    element_cache_point: Option<PhysicalPoint>,
     /// Windows whose empty element list was retried once. Self-drawn windows
     /// only expose their accessibility nodes one frame after the first query.
     element_retry: HashSet<WindowId>,
     element_window: Option<WindowId>,
     element_pending: Option<WindowId>,
+    element_pending_point: Option<PhysicalPoint>,
     element_candidates: Vec<PhysicalRect>,
     element_level: usize,
     /// Wheel targeting climbed past the hovered window; the whole screen is
@@ -759,9 +767,11 @@ impl OverlayView {
             notice_serial: 0,
             notice_leaving: false,
             element_cache: HashMap::new(),
+            element_cache_point: None,
             element_retry: HashSet::new(),
             element_window: None,
             element_pending: None,
+            element_pending_point: None,
             element_candidates: Vec::new(),
             element_level: 0,
             screen_targeting: false,
@@ -961,6 +971,7 @@ impl OverlayView {
         let Some(window) = self.session.window_under_pointer().cloned() else {
             self.element_window = None;
             self.element_pending = None;
+            self.element_pending_point = None;
             self.element_candidates.clear();
             self.element_level = 0;
             self.screen_targeting = false;
@@ -971,6 +982,7 @@ impl OverlayView {
         if !self.element_targeting || self.window_only {
             self.element_window = None;
             self.element_pending = None;
+            self.element_pending_point = None;
             self.element_candidates.clear();
             self.element_level = 0;
             self.screen_targeting = false;
@@ -980,12 +992,30 @@ impl OverlayView {
         }
         if self.element_window != Some(window.id) {
             self.element_window = Some(window.id);
+            self.element_cache_point = None;
             self.element_level = 0;
             self.element_candidates.clear();
             self.session.set_hovered_element(None);
         }
-        if !self.element_cache.contains_key(&window.id) && self.element_pending.is_none() {
-            self.query_elements(window.id, cx);
+        let cached_for_point = {
+            #[cfg(target_os = "macos")]
+            {
+                self.element_cache.contains_key(&window.id)
+                    && self.element_cache_point == Some(point)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                self.element_cache.contains_key(&window.id)
+            }
+        };
+        if !cached_for_point {
+            if self.element_pending.is_none() {
+                self.query_elements(window.id, point, cx);
+            }
+            // Do not highlight from a chain sampled at another point; the
+            // background query refreshes it on the next frame.
+            self.session.set_hovered_element(None);
+            return;
         }
         let Some(cached) = self.element_cache.get(&window.id) else {
             self.session.set_hovered_element(None);
@@ -1004,28 +1034,50 @@ impl OverlayView {
         self.session.set_hovered_element(selected);
     }
 
-    /// Resolves a window's UI Automation descendants off the UI thread and
-    /// retries once when the list comes back empty. Self-drawn GPUI windows
-    /// report no nodes until a frame after the first client connects, so a
-    /// single empty answer is not conclusive.
-    fn query_elements(&mut self, window_id: WindowId, cx: &mut Context<Self>) {
-        // UIA's FindAll walks the whole descendant tree. Running it
-        // on the UI thread stalled the first hover on complex windows
-        // (browsers, Explorer), so resolve the element list off-thread.
+    /// Resolves the element chain under the cursor off the UI thread.
+    ///
+    /// macOS hit-tests the accessibility tree at the pointer, so the cached
+    /// chain is tied to its query point and refreshed as the pointer moves.
+    /// Windows enumerates the window's UIA descendants once and caches them
+    /// per window. An empty answer is retried once because self-drawn windows
+    /// report no nodes until a frame after the first accessibility client
+    /// connects.
+    fn query_elements(
+        &mut self,
+        window_id: WindowId,
+        point: PhysicalPoint,
+        cx: &mut Context<Self>,
+    ) {
+        // UIA's FindAll walks the whole descendant tree; AX hit-testing still
+        // crosses into the target process. Both are resolved off-thread.
         self.element_pending = Some(window_id);
+        self.element_pending_point = Some(point);
         cx.spawn(async move |this, cx| {
             let elements = cx
                 .background_executor()
-                .spawn(async move { core_capture::ui_elements(window_id) })
+                .spawn(async move { core_capture::ui_elements_at(window_id, point) })
                 .await;
             let empty = elements.is_empty();
             let applied = this
                 .update(cx, |this, cx| {
-                    if this.element_pending != Some(window_id) {
+                    if this.element_pending != Some(window_id)
+                        || this.element_pending_point != Some(point)
+                    {
                         return false;
                     }
                     this.element_pending = None;
+                    this.element_pending_point = None;
+                    // Do not pin an empty accessibility answer while the
+                    // process is untrusted: the grant may arrive while the
+                    // overlay is open, and the next pointer move should retry.
+                    if empty && !platform_window::accessibility_trusted() {
+                        return false;
+                    }
                     this.element_cache.insert(window_id, elements);
+                    #[cfg(target_os = "macos")]
+                    {
+                        this.element_cache_point = Some(point);
+                    }
                     if let Some(point) = this.cursor {
                         this.refresh_auto_target(point, cx);
                     }
@@ -1047,7 +1099,7 @@ impl OverlayView {
             }
             let elements = cx
                 .background_executor()
-                .spawn(async move { core_capture::ui_elements(window_id) })
+                .spawn(async move { core_capture::ui_elements_at(window_id, point) })
                 .await;
             this.update(cx, |this, cx| {
                 if this
@@ -1056,6 +1108,10 @@ impl OverlayView {
                     .is_some_and(Vec::is_empty)
                 {
                     this.element_cache.insert(window_id, elements);
+                    #[cfg(target_os = "macos")]
+                    {
+                        this.element_cache_point = Some(point);
+                    }
                     if let Some(point) = this.cursor {
                         this.refresh_auto_target(point, cx);
                     }
@@ -1112,6 +1168,7 @@ impl OverlayView {
         self.window_only = enabled;
         self.element_window = None;
         self.element_pending = None;
+        self.element_pending_point = None;
         self.element_candidates.clear();
         self.element_level = 0;
         self.screen_targeting = false;
@@ -1884,64 +1941,6 @@ impl OverlayView {
         });
     }
 
-    fn primary_pointer_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
-        let point = self.to_physical(event.position);
-        self.cursor = Some(point);
-        self.set_window_only(event.modifiers.control, cx);
-        self.click_opens_editor = self.window_only && self.selected.is_none();
-        if let Some(selected) = self.selected.clone() {
-            if selected.edit.is_some() {
-                self.commit_edit(cx);
-            }
-            let monitor = self.session.monitor_bounds();
-            let local = PhysicalPoint::new(point.x - monitor.origin.x, point.y - monitor.origin.y);
-            let edge_tolerance = 8.0 * self.effective_scale();
-            if let Some(handle) = edge_resize_handle(selected.rect, local, edge_tolerance) {
-                if let Some(selected) = self.selected.as_mut() {
-                    selected.drag = Some(RegionDrag {
-                        kind: RegionDragKind::Resize(handle),
-                        start: point,
-                        original: selected.rect,
-                    });
-                    selected.edit = None;
-                    selected.effects_open = false;
-                    selected.hints_open = false;
-                }
-                self.cursor_style = region_handle_cursor(handle);
-                cx.notify();
-                return;
-            }
-            if local.x >= selected.rect.origin.x
-                && local.y >= selected.rect.origin.y
-                && local.x <= selected.rect.origin.x + selected.rect.size.width as i32
-                && local.y <= selected.rect.origin.y + selected.rect.size.height as i32
-            {
-                if event.click_count >= 2 {
-                    self.copy_selected(cx);
-                    return;
-                }
-                if let Some(selected) = self.selected.as_mut() {
-                    selected.drag = Some(RegionDrag {
-                        kind: RegionDragKind::Move,
-                        start: point,
-                        original: selected.rect,
-                    });
-                    selected.effects_open = false;
-                    selected.hints_open = false;
-                }
-                self.cursor_style = crate::ui::closed_hand_cursor();
-                cx.notify();
-                return;
-            }
-            self.selected = None;
-            self.cursor_style = CursorStyle::Crosshair;
-        }
-        self.session.pointer_moved(point);
-        self.refresh_auto_target(point, cx);
-        self.session.pointer_pressed(point);
-        cx.notify();
-    }
-
     fn primary_pointer_up(
         &mut self,
         event: &MouseUpEvent,
@@ -2181,9 +2180,11 @@ impl OverlayView {
             log_warn!("overlay", "failed to release magnifier frame: {error}");
         }
         self.element_cache.clear();
+        self.element_cache_point = None;
         self.element_retry.clear();
         self.element_window = None;
         self.element_pending = None;
+        self.element_pending_point = None;
         self.element_candidates.clear();
         self.element_level = 0;
         self.screen_targeting = false;
@@ -3115,6 +3116,69 @@ impl Drop for OverlayView {
 }
 
 impl OverlayView {
+    fn primary_pointer_down(
+        &mut self,
+        event: &MouseDownEvent,
+        ctrl_click: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let point = self.to_physical(event.position);
+        self.cursor = Some(point);
+        self.set_window_only(event.modifiers.control || ctrl_click, cx);
+        self.click_opens_editor = self.window_only && self.selected.is_none();
+        if let Some(selected) = self.selected.clone() {
+            if selected.edit.is_some() {
+                self.commit_edit(cx);
+            }
+            let monitor = self.session.monitor_bounds();
+            let local = PhysicalPoint::new(point.x - monitor.origin.x, point.y - monitor.origin.y);
+            let edge_tolerance = 8.0 * self.effective_scale();
+            if let Some(handle) = edge_resize_handle(selected.rect, local, edge_tolerance) {
+                if let Some(selected) = self.selected.as_mut() {
+                    selected.drag = Some(RegionDrag {
+                        kind: RegionDragKind::Resize(handle),
+                        start: point,
+                        original: selected.rect,
+                    });
+                    selected.edit = None;
+                    selected.effects_open = false;
+                    selected.hints_open = false;
+                }
+                self.cursor_style = region_handle_cursor(handle);
+                cx.notify();
+                return;
+            }
+            if local.x >= selected.rect.origin.x
+                && local.y >= selected.rect.origin.y
+                && local.x <= selected.rect.origin.x + selected.rect.size.width as i32
+                && local.y <= selected.rect.origin.y + selected.rect.size.height as i32
+            {
+                if event.click_count >= 2 {
+                    self.copy_selected(cx);
+                    return;
+                }
+                if let Some(selected) = self.selected.as_mut() {
+                    selected.drag = Some(RegionDrag {
+                        kind: RegionDragKind::Move,
+                        start: point,
+                        original: selected.rect,
+                    });
+                    selected.effects_open = false;
+                    selected.hints_open = false;
+                }
+                self.cursor_style = crate::ui::closed_hand_cursor();
+                cx.notify();
+                return;
+            }
+            self.selected = None;
+            self.cursor_style = CursorStyle::Crosshair;
+        }
+        self.session.pointer_moved(point);
+        self.refresh_auto_target(point, cx);
+        self.session.pointer_pressed(point);
+        cx.notify();
+    }
+
     fn render_inner(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.chrome = ChromeTheme::for_window(window, Some(self.accent_hex));
         if self.window_only
@@ -3319,7 +3383,7 @@ impl OverlayView {
                 layers.push(border(rect, self.accent, 0.0).into_any_element());
             }
         } else if let Some(rect) = hovered_element {
-            layers.push(element_border(rect).into_any_element());
+            layers.push(element_border(rect, rgba((ELEMENT_HOVER << 8) | 0xFF)).into_any_element());
         } else if let Some(rect) = hovered_window {
             layers.push(border(rect, self.accent, 0.0).into_any_element());
         } else if let Some(rect) = screen_bounds {
@@ -3540,6 +3604,8 @@ impl OverlayView {
                         this.copy_color(cx);
                     } else if key == "tab" {
                         this.element_targeting = !this.element_targeting;
+                        this.element_pending = None;
+                        this.element_pending_point = None;
                         this.element_candidates.clear();
                         this.element_level = 0;
                         this.screen_targeting = false;
@@ -3647,16 +3713,19 @@ impl OverlayView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                    // macOS delivers Ctrl+click as a secondary click. Window
-                    // mode is a primary-click action, so route it through the
-                    // normal capture path instead of the context-menu path.
+                    // macOS delivers Ctrl+click as a secondary click, and GPUI
+                    // clears the control modifier while converting it. Window
+                    // mode is a primary-click action, so rely on the tracked
+                    // Ctrl state (or a real control-modified right click) to
+                    // keep it on the normal capture path.
                     if cfg!(target_os = "macos")
-                        && event.modifiers.control
                         && this.mode == OverlayMode::Capture
                         && this.selected.is_none()
+                        && this.editor.is_none()
+                        && (this.window_only || event.modifiers.control)
                     {
                         this.ctrl_click_primary = true;
-                        this.primary_pointer_down(event, cx);
+                        this.primary_pointer_down(event, true, cx);
                         cx.stop_propagation();
                         return;
                     }
@@ -3693,7 +3762,7 @@ impl OverlayView {
                     if this.ctrl_click_primary {
                         return;
                     }
-                    this.primary_pointer_down(event, cx);
+                    this.primary_pointer_down(event, false, cx);
                 }),
             )
             .on_mouse_up(
@@ -3723,6 +3792,7 @@ impl OverlayView {
                 this.ctrl_click_primary = false;
                 this.element_window = None;
                 this.element_pending = None;
+                this.element_pending_point = None;
                 this.element_candidates.clear();
                 this.element_level = 0;
                 this.screen_targeting = false;
@@ -3758,66 +3828,6 @@ impl Render for OverlayView {
     }
 }
 
-fn clamp_to_monitor(rect: PhysicalRect, size: core_types::PhysicalSize) -> PhysicalRect {
-    let width = rect.size.width.clamp(1, size.width);
-    let height = rect.size.height.clamp(1, size.height);
-    let max_x = size.width.saturating_sub(width) as i32;
-    let max_y = size.height.saturating_sub(height) as i32;
-    PhysicalRect::new(
-        rect.origin.x.clamp(0, max_x.max(0)),
-        rect.origin.y.clamp(0, max_y.max(0)),
-        width,
-        height,
-    )
-}
-
-fn fit_ratio_rect(rect: PhysicalRect, ratio: f32, size: core_types::PhysicalSize) -> PhysicalRect {
-    let max_width = (size.width as f32).min(size.height as f32 * ratio).max(1.0);
-    let width = (rect.size.width as f32).min(max_width).max(1.0);
-    let height = (width / ratio).max(1.0);
-    let center_x = rect.origin.x as f32 + rect.size.width as f32 / 2.0;
-    let center_y = rect.origin.y as f32 + rect.size.height as f32 / 2.0;
-    let clamped = PhysicalRect::new(
-        (center_x - width / 2.0).round() as i32,
-        (center_y - height / 2.0).round() as i32,
-        width.round() as u32,
-        height.round() as u32,
-    );
-    clamp_to_monitor(clamped, size)
-}
-
-/// Keeps a ratio-locked selection inside the monitor while preserving the
-/// requested edge. Used by the info-bar width/height editor, where clamping
-/// only one dimension used to leave a 16:9 box at an arbitrary ratio.
-fn fit_ratio_to_bounds(
-    desired_width: i32,
-    ratio: f32,
-    max_width: i32,
-    max_height: i32,
-) -> (i32, i32) {
-    let ratio = ratio.max(0.01);
-    let max_width = max_width.max(MIN_REGION_SIZE);
-    let max_height = max_height.max(MIN_REGION_SIZE);
-    let mut width = desired_width.max(MIN_REGION_SIZE) as f32;
-    let mut height = (width / ratio).max(MIN_REGION_SIZE as f32);
-    if width > max_width as f32 {
-        width = max_width as f32;
-        height = (width / ratio).max(MIN_REGION_SIZE as f32);
-    }
-    if height > max_height as f32 {
-        height = max_height as f32;
-        width = (height * ratio).max(MIN_REGION_SIZE as f32);
-    }
-    if width > max_width as f32 {
-        width = max_width as f32;
-        height = (width / ratio).max(MIN_REGION_SIZE as f32);
-    }
-    (
-        (width.round() as i32).clamp(MIN_REGION_SIZE, max_width),
-        (height.round() as i32).clamp(MIN_REGION_SIZE, max_height),
-    )
-}
-
 fn dim_rect(left: f32, top: f32, width: f32, height: f32) -> Div {
     div()
         .absolute()
@@ -3828,70 +3838,10 @@ fn dim_rect(left: f32, top: f32, width: f32, height: f32) -> Div {
         .bg(rgba(DIM))
 }
 
-fn border(rect: Bounds<Pixels>, color: Rgba, radius: f32) -> Div {
-    div()
-        .absolute()
-        .left(rect.origin.x)
-        .top(rect.origin.y)
-        .w(rect.size.width)
-        .h(rect.size.height)
-        .rounded(px(radius.max(0.0)))
-        .border_3()
-        .border_color(color)
-}
-
-fn element_border(rect: Bounds<Pixels>) -> Div {
-    div()
-        .absolute()
-        .left(rect.origin.x)
-        .top(rect.origin.y)
-        .w(rect.size.width)
-        .h(rect.size.height)
-        .border_2()
-        .border_dashed()
-        .border_color(rgba((ELEMENT_HOVER << 8) | 0xFF))
-}
-
-fn screen_border(rect: Bounds<Pixels>, color: Rgba) -> Div {
-    div()
-        .absolute()
-        .left(rect.origin.x + px(1.0))
-        .top(rect.origin.y + px(1.0))
-        .w(px((f32::from(rect.size.width) - 2.0).max(0.0)))
-        .h(px((f32::from(rect.size.height) - 2.0).max(0.0)))
-        .border_2()
-        .border_dashed()
-        .border_color(rgba((u32::from(color) & 0x00FF_FFFF) << 8 | 0xCC))
-}
-
-fn camera_cursor(x: f32, y: f32, dark: bool) -> Div {
-    let (background, border, icon, shadow) = if dark {
-        (rgba(0x000000C0), rgba(0xFFFFFF80), rgb(0xFFFFFF), 0.35)
-    } else {
-        (rgba(0xFFFFFFE8), rgba(0x00000033), rgb(0x1B1B1B), 0.18)
-    };
-    div()
-        .absolute()
-        .left(px(x + 2.0))
-        .top(px(y + 2.0))
-        .w(px(28.0))
-        .h(px(28.0))
-        .rounded(px(7.0))
-        .bg(background)
-        .border_1()
-        .border_color(border)
-        .shadow(vec![
-            BoxShadow::new(px(0.0), px(2.0), hsla(0.0, 0.0, 0.0, shadow)).blur_radius(px(6.0)),
-        ])
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(icons::icon(icons::CAMERA, 17.0, icon))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{fit_ratio_to_bounds, frame_matches_monitor};
+    use super::frame_matches_monitor;
+    use crate::overlay_ui::fit_ratio_to_bounds;
     use core_capture::MonitorInfo;
     use core_types::{DpiScale, MonitorId, PhysicalRect, RgbaFrame};
 

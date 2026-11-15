@@ -87,6 +87,58 @@ pub enum ComposeError {
     SizeOverflow,
 }
 
+/// Estimates the alpha-rounded corner radius of a captured window frame.
+///
+/// macOS ScreenCaptureKit keeps the native window shape in the alpha channel.
+/// Measuring the first opaque pixel of the top corner rows recovers the radius
+/// without hard-coding a system version value. Returns `None` for opaque
+/// (square-cornered) frames or when the corner cannot be measured.
+pub fn estimate_corner_radius(frame: &RgbaFrame, max_radius: u32) -> Option<u32> {
+    let width = frame.width();
+    let height = frame.height();
+    let max_radius = max_radius.min(width.min(height) / 2);
+    if max_radius < 4 || width < 8 || height < 8 {
+        return None;
+    }
+    let stride = frame.stride();
+    let pixels = frame.pixels();
+    let rows = (max_radius as usize / 2).max(4);
+    let mut estimates = Vec::new();
+    for row in 0..rows {
+        let mut first = None;
+        for x in 0..max_radius as usize {
+            if pixels[row * stride + x * 4 + 3] >= 128 {
+                first = Some(x);
+                break;
+            }
+        }
+        let Some(x) = first else {
+            continue;
+        };
+        if x == 0 {
+            // A straight edge means the rounded part has ended. Stop once a
+            // few rows already described the arc.
+            if !estimates.is_empty() {
+                break;
+            }
+            continue;
+        }
+        // Circle centre (R, R): the left boundary at distance d from the top
+        // is x = R - sqrt(2Rd - d^2), solved for R.
+        let d = row as f64 + 0.5;
+        let x = x as f64;
+        let radius = x + d + (2.0 * x * d).sqrt();
+        if radius >= 2.0 && radius <= f64::from(max_radius) + 2.0 {
+            estimates.push(radius);
+        }
+    }
+    if estimates.len() < 2 {
+        return None;
+    }
+    estimates.sort_by(|left, right| left.total_cmp(right));
+    Some((estimates[estimates.len() / 2].round() as u32).clamp(1, max_radius))
+}
+
 /// Composites `window` onto a new canvas according to `canvas`.
 ///
 /// The returned frame is larger than the input by `canvas.padding` on every
@@ -764,5 +816,39 @@ mod tests {
             shadowed[0] < 10 && shadowed[1] < 20 && shadowed[2] < 30,
             "the shadow should darken the solid background"
         );
+    }
+
+    fn rounded_frame(width: u32, height: u32, radius: u32) -> RgbaFrame {
+        let mut pixels = vec![0u8; width as usize * height as usize * 4];
+        for y in 0..height {
+            for x in 0..width {
+                let coverage = rounded_coverage(x, y, width, height, radius);
+                let index = (y as usize * width as usize + x as usize) * 4;
+                pixels[index] = 200;
+                pixels[index + 1] = 50;
+                pixels[index + 2] = 50;
+                pixels[index + 3] = (coverage * 255.0).round() as u8;
+            }
+        }
+        RgbaFrame::from_pixels(width, height, pixels).expect("test frame is valid")
+    }
+
+    #[test]
+    fn corner_radius_is_measured_from_the_alpha_channel() {
+        for radius in [12, 20, 40] {
+            let frame = rounded_frame(160, 120, radius);
+            let estimated =
+                estimate_corner_radius(&frame, 64).expect("rounded alpha is measurable");
+            assert!(
+                estimated.abs_diff(radius) <= 2,
+                "expected about {radius}, measured {estimated}"
+            );
+        }
+    }
+
+    #[test]
+    fn opaque_frames_report_no_corner_radius() {
+        let frame = solid_frame(80, 60, [200, 50, 50, 255]);
+        assert_eq!(estimate_corner_radius(&frame, 64), None);
     }
 }

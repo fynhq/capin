@@ -183,17 +183,18 @@ fn build_plan(
                     &windows,
                 )
             };
-            // Full-display recording keeps the platform's stream resolution;
-            // region and window targets use the backing-store space the app
-            // now shares with screenshots. Cursor scaling follows the actual
-            // stream-to-point ratio so the disc stays the same screen size.
-            let output_width = sck::display_width(&display);
-            let output_height = sck::display_height(&display);
-            let output_scale = output_width as f64 / frame.size.width.max(1.0);
+            // SCDisplay reports points; the stream needs backing-store pixels.
+            // Recording the point size produced non-Retina files, and a wrong
+            // source scale left black bars outside the captured rect.
+            let scale = sck::display_scale(&display);
+            let output_width = (frame.size.width * scale).round().max(2.0) as usize;
+            let output_height = (frame.size.height * scale).round().max(2.0) as usize;
+            let (width, height) = fitted_output(output_width, output_height);
+            let output_scale = width as f64 / frame.size.width.max(1.0);
             Ok(SessionPlan {
                 filter,
-                width: even(output_width),
-                height: even(output_height),
+                width,
+                height,
                 source_rect: None,
                 single_window: false,
                 cursor_space: CursorSpace::Screen {
@@ -231,6 +232,7 @@ fn build_plan(
                     &windows,
                 )
             };
+            let output_scale = width as f64 / source_rect.size.width.max(1.0);
             Ok(SessionPlan {
                 filter,
                 width,
@@ -244,7 +246,7 @@ fn build_plan(
                     source_y: source_rect.origin.y,
                     source_width: source_rect.size.width,
                     source_height: source_rect.size.height,
-                    scale,
+                    scale: output_scale,
                 },
             })
         }
@@ -252,10 +254,10 @@ fn build_plan(
             let window = find_window(content, id.raw())?;
             let frame = unsafe { window.frame() };
             let (width, height) = window_size(&window, content)?;
-            let scale = sck::window_scale(&window, content).unwrap_or(1.0);
             let filter = unsafe {
                 SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &window)
             };
+            let output_scale = width as f64 / frame.size.width.max(1.0);
             Ok(SessionPlan {
                 filter,
                 width,
@@ -267,7 +269,7 @@ fn build_plan(
                     origin_y: frame.origin.y,
                     width: frame.size.width,
                     height: frame.size.height,
-                    scale,
+                    scale: output_scale,
                 },
             })
         }
@@ -299,10 +301,30 @@ fn region_size(rect: PhysicalRect) -> Result<(usize, usize), String> {
     if rect.size.width == 0 || rect.size.height == 0 {
         return Err("empty recording region".to_owned());
     }
-    Ok((
-        even(rect.size.width as usize),
-        even(rect.size.height as usize),
+    Ok(fitted_output(
+        rect.size.width as usize,
+        rect.size.height as usize,
     ))
+}
+
+/// H.264 encoders reject frames above 4K. Scale larger displays and windows
+/// down proportionally; ScreenCaptureKit and the writer both use this size so
+/// the sample buffers and the encoder never disagree.
+fn fitted_output(width: usize, height: usize) -> (usize, usize) {
+    const MAX_WIDTH: usize = 4096;
+    const MAX_HEIGHT: usize = 2304;
+
+    let width = width.max(2);
+    let height = height.max(2);
+    let ratio = (width as f64 / MAX_WIDTH as f64).max(height as f64 / MAX_HEIGHT as f64);
+    if ratio > 1.0 {
+        (
+            even((width as f64 / ratio).floor() as usize),
+            even((height as f64 / ratio).floor() as usize),
+        )
+    } else {
+        (even(width), even(height))
+    }
 }
 
 fn even(value: usize) -> usize {
@@ -315,9 +337,9 @@ fn window_size(window: &SCWindow, content: &SCShareableContent) -> Result<(usize
         return Err("the window to record has no drawable area".to_owned());
     }
     let scale = sck::window_scale(window, content).unwrap_or(1.0);
-    Ok((
-        even((frame.size.width * scale).round().max(1.0) as usize),
-        even((frame.size.height * scale).round().max(1.0) as usize),
+    Ok(fitted_output(
+        (frame.size.width * scale).round().max(1.0) as usize,
+        (frame.size.height * scale).round().max(1.0) as usize,
     ))
 }
 

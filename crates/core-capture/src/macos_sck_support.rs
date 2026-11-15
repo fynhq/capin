@@ -77,20 +77,13 @@ pub fn display_height(display: &SCDisplay) -> usize {
     unsafe { display.height() }.max(1) as usize
 }
 
-/// Backing-store pixels per point. SCDisplay reports pixel dimensions that can
-/// come from the panel rather than the window server's scaled backing store,
-/// so prefer the display mode's pixel size for capture geometry.
+/// Backing-store pixels per point. SCDisplay reports dimensions in points, so
+/// its width cannot be used to derive the scale; the display's NSScreen/CG
+/// scale is the same value GPUI uses for the overlay surface.
 pub fn display_scale(display: &SCDisplay) -> f64 {
     crate::display_backing_scale(u64::from(unsafe { display.displayID() }))
         .map(f64::from)
-        .unwrap_or_else(|| {
-            let frame = unsafe { display.frame() };
-            if frame.size.width > 0.0 {
-                display_width(display) as f64 / frame.size.width
-            } else {
-                1.0
-            }
-        })
+        .unwrap_or(1.0)
 }
 
 pub fn window_scale(window: &SCWindow, content: &SCShareableContent) -> Option<f64> {
