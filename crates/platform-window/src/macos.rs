@@ -14,7 +14,8 @@ use foreign_types_shared::ForeignType;
 use objc2::rc::Retained;
 use objc2::{ClassType, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSColor, NSScreenSaverWindowLevel, NSView,
+    NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy, NSColor, NSEvent,
+    NSEventModifierFlags, NSRunningApplication, NSScreenSaverWindowLevel, NSView,
     NSWindowCollectionBehavior, NSWindowSharingType, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL};
@@ -148,6 +149,30 @@ pub(super) fn activate_application() {
     app.activate();
 }
 
+/// Current Control key state from AppKit. GPUI's modifier-changed event is
+/// not delivered when Control was already held before a window became key,
+/// and its synthesized secondary click clears the modifier. The capture
+/// overlay therefore checks the native flag at button-down time so window
+/// mode still sees the real Ctrl state.
+pub(super) fn control_modifier_down() -> bool {
+    NSEvent::modifierFlags_class().contains(NSEventModifierFlags::Control)
+}
+
+/// PID of the frontmost application when it is not Capin. Recording it before
+/// the capture overlay activates lets the overlay hand focus back afterwards.
+pub(super) fn frontmost_other_application_pid() -> Option<i32> {
+    let frontmost = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+    let pid = frontmost.processIdentifier();
+    (pid != std::process::id() as i32).then_some(pid)
+}
+
+/// Activates a previously recorded application. No-op when it has quit.
+pub(super) fn activate_application_by_pid(pid: i32) {
+    if let Some(application) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
+        application.activateWithOptions(NSApplicationActivationOptions(0));
+    }
+}
+
 pub(super) fn request_accessibility_permission() -> bool {
     let key = CFString::from_static_string("AXTrustedCheckOptionPrompt");
     let value = CFBoolean::true_value();
@@ -229,6 +254,14 @@ pub(super) fn apply(
 
     if style.always_on_top {
         window.setLevel(NSScreenSaverWindowLevel);
+    }
+
+    // NSPanel hides itself when the application deactivates (the default is
+    // `true` for panels). Pins, the recording bar and capture outlines must
+    // survive an app switch; without this a pin vanishes as soon as the user
+    // clicks another app and only comes back when Capin is activated again.
+    if style.keeps_visible_when_inactive {
+        window.setHidesOnDeactivate(false);
     }
 
     let mut behavior = window.collectionBehavior();

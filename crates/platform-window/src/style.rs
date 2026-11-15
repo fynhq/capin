@@ -16,6 +16,10 @@ pub struct WindowStyle {
     /// screen with a frozen frame, so a transparent AppKit layer only invites
     /// compositor artifacts.
     pub opaque: bool,
+    /// Keep the window on screen when the application deactivates. AppKit
+    /// panels (NSPanel) hide themselves by default; pins, capture bars and
+    /// outlines must stay visible while the user works in another app.
+    pub keeps_visible_when_inactive: bool,
 }
 
 impl WindowStyle {
@@ -26,6 +30,7 @@ impl WindowStyle {
         exclude_from_capture: false,
         borderless: false,
         opaque: false,
+        keeps_visible_when_inactive: false,
     };
 
     pub const OVERLAY: Self = Self {
@@ -35,6 +40,7 @@ impl WindowStyle {
         exclude_from_capture: true,
         borderless: true,
         opaque: true,
+        keeps_visible_when_inactive: true,
     };
 
     pub const PIN: Self = Self {
@@ -51,6 +57,19 @@ impl WindowStyle {
         // only the pixels it owns.
         borderless: true,
         opaque: false,
+        keeps_visible_when_inactive: true,
+    };
+
+    /// Pin context menu. It follows the app activation that opened it, so it
+    /// keeps AppKit's default panel hiding instead of staying on screen.
+    pub const PIN_MENU: Self = Self {
+        always_on_top: true,
+        skip_taskbar: true,
+        no_activate: false,
+        exclude_from_capture: true,
+        borderless: false,
+        opaque: false,
+        keeps_visible_when_inactive: false,
     };
 
     pub const CAPTURE_BAR: Self = Self {
@@ -60,6 +79,7 @@ impl WindowStyle {
         exclude_from_capture: true,
         borderless: false,
         opaque: false,
+        keeps_visible_when_inactive: true,
     };
 
     /// Transparent, click-through frame drawn around a scroll or recording
@@ -73,6 +93,7 @@ impl WindowStyle {
         exclude_from_capture: true,
         borderless: true,
         opaque: false,
+        keeps_visible_when_inactive: true,
     };
 
     /// Live demo-cursor disc shown while recording. Click-through and
@@ -90,5 +111,6 @@ impl WindowStyle {
         exclude_from_capture: true,
         borderless: true,
         opaque: false,
+        keeps_visible_when_inactive: true,
     };
 }

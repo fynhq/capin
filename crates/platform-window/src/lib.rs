@@ -108,6 +108,47 @@ pub fn activate_application() {
     macos::activate_application();
 }
 
+/// Whether Control is currently held, read from AppKit at call time.
+///
+/// macOS turns Ctrl+left-click into a secondary click before GPUI sees it and
+/// clears the control modifier from the event. It also sends no
+/// modifier-changed event when Control was already down before a window
+/// became key, so callers that need the real state query it here.
+pub fn control_modifier_down() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos::control_modifier_down()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// PID of the frontmost application when it is not this process. Used to
+/// restore focus after a capture overlay closes.
+pub fn frontmost_other_application_pid() -> Option<i32> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::frontmost_other_application_pid()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// Activates a previously recorded application by PID. No-op elsewhere or
+/// when the process has quit.
+pub fn activate_application_by_pid(pid: i32) {
+    #[cfg(target_os = "macos")]
+    macos::activate_application_by_pid(pid);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+    }
+}
+
 /// A macOS Privacy & Security pane that the settings page can open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrivacyPane {

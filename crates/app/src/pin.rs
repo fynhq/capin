@@ -3111,17 +3111,7 @@ fn open_pin_menu(
     );
 
     match gpui_kit::open_window(options, cx, move |window, cx| {
-        let _ = apply_window_style(
-            &*window,
-            WindowStyle {
-                always_on_top: true,
-                skip_taskbar: true,
-                no_activate: false,
-                exclude_from_capture: true,
-                borderless: false,
-                opaque: false,
-            },
-        );
+        let _ = apply_window_style(&*window, WindowStyle::PIN_MENU);
         let view = cx.new(|cx| PinMenuView {
             pin_id,
             items,
