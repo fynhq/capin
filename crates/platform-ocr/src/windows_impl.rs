@@ -93,6 +93,7 @@ fn recognize_with_paddle(frame: &RgbaFrame) -> Option<Result<Vec<OcrLine>, OcrEr
         frame.packed_pixels().into_owned(),
     )?;
     let image = image::DynamicImage::ImageRgba8(image);
+    let image = maybe_invert_dark(image);
     let (width, height) = (image.width(), image.height());
     let tiled = width.max(height) > TILE;
     let (source, scale_x, scale_y) = if tiled {
@@ -337,7 +338,7 @@ fn paddle_upscale(width: u32, height: u32) -> f32 {
     if pixels == 0 {
         return 1.0;
     }
-    if pixels <= 1_200_000 {
+    if pixels <= 2_000_000 {
         2.0
     } else if pixels <= 4_000_000 {
         1.5
@@ -361,6 +362,29 @@ fn paddle_source(image: &image::DynamicImage) -> (image::DynamicImage, f32, f32)
         image.width() as f32 / width as f32,
         image.height() as f32 / height as f32,
     )
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn maybe_invert_dark(image: image::DynamicImage) -> image::DynamicImage {
+    let rgb = image.to_rgb8();
+    let (width, height) = rgb.dimensions();
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels == 0 {
+        return image;
+    }
+    let mean_luma = rgb
+        .pixels()
+        .map(|p| u64::from(p[0]) * 299 + u64::from(p[1]) * 587 + u64::from(p[2]) * 114)
+        .sum::<u64>()
+        / (pixels * 1000);
+    if mean_luma >= 100 {
+        return image;
+    }
+    let inverted = image::RgbImage::from_fn(width, height, |x, y| {
+        let p = rgb.get_pixel(x, y);
+        image::Rgb([255 - p[0], 255 - p[1], 255 - p[2]])
+    });
+    image::DynamicImage::ImageRgb8(inverted)
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -529,5 +553,47 @@ mod tests {
         let fitted = ocr_upscale(846, 62, 2000);
         assert!((fitted - 2000.0 / 846.0).abs() < 0.001);
         assert_eq!(ocr_upscale(9000, 5000, 10000), 1.0);
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn paddle_upscale_covers_terminal_screenshots() {
+        use super::paddle_upscale;
+        assert_eq!(paddle_upscale(1156, 1076), 2.0);
+        assert_eq!(paddle_upscale(800, 600), 2.0);
+        assert_eq!(paddle_upscale(1920, 1080), 1.5);
+        assert_eq!(paddle_upscale(3840, 2160), 1.0);
+        assert_eq!(paddle_upscale(0, 0), 1.0);
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn dark_image_is_inverted() {
+        use super::maybe_invert_dark;
+        let dark = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            4,
+            4,
+            image::Rgb([30, 30, 40]),
+        ));
+        let result = maybe_invert_dark(dark);
+        let rgb = result.to_rgb8();
+        let p = rgb.get_pixel(0, 0);
+        assert!(p[0] > 200);
+        assert!(p[1] > 200);
+        assert!(p[2] > 200);
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn light_image_is_unchanged() {
+        use super::maybe_invert_dark;
+        let light = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            4,
+            4,
+            image::Rgb([240, 240, 240]),
+        ));
+        let result = maybe_invert_dark(light);
+        let rgb = result.to_rgb8();
+        assert_eq!(rgb.get_pixel(0, 0)[0], 240);
     }
 }

@@ -97,6 +97,7 @@ pub fn recognize_shared(frame: Arc<RgbaFrame>, options: OcrOptions) -> OcrOutput
     }
     match platform::recognize_text(frame) {
         Ok(mut lines) => {
+            lines.retain(|line| !is_decorative_noise(&line.text));
             for line in &mut lines {
                 normalize_latin_punctuation(line);
             }
@@ -238,10 +239,112 @@ fn is_cjk(ch: char) -> bool {
     )
 }
 
+fn is_decorative_noise(text: &str) -> bool {
+    let meaningful: Vec<char> = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+    if meaningful.is_empty() {
+        return false;
+    }
+    if meaningful
+        .iter()
+        .all(|ch| matches!(*ch as u32, 0x2500..=0x259F))
+    {
+        return true;
+    }
+    if meaningful.len() == 1 && matches!(meaningful[0] as u32, 0x25A0..=0x25FF) {
+        return true;
+    }
+    false
+}
+
+fn identify_tabular_lines(lines: &[OcrLine]) -> Vec<bool> {
+    let n = lines.len();
+    let mut tabular = vec![false; n];
+    if n < 3 {
+        return tabular;
+    }
+    let heights: Vec<f32> = lines.iter().map(|l| l.rect.size.height as f32).collect();
+    let lefts: Vec<f32> = lines.iter().map(|l| l.rect.origin.x as f32).collect();
+    let gaps: Vec<f32> = (0..n - 1)
+        .map(|i| {
+            let prev_bottom = lines[i].rect.origin.y as f32 + lines[i].rect.size.height as f32;
+            (lines[i + 1].rect.origin.y as f32 - prev_bottom).max(0.0)
+        })
+        .collect();
+
+    let mut i = 0;
+    while i < n - 2 {
+        let h = heights[i];
+        if h <= 0.0 {
+            i += 1;
+            continue;
+        }
+        if !is_record_line(&lines[i].text)
+            || !is_record_line(&lines[i + 1].text)
+            || !is_record_line(&lines[i + 2].text)
+        {
+            i += 1;
+            continue;
+        }
+        if gaps[i] > h * 0.35 || gaps[i + 1] > h * 0.35 {
+            i += 1;
+            continue;
+        }
+        if (heights[i + 1] - h).abs() > h * 0.2 || (heights[i + 2] - h).abs() > h * 0.2 {
+            i += 1;
+            continue;
+        }
+        if (lefts[i + 1] - lefts[i]).abs() > h * 0.5 || (lefts[i + 2] - lefts[i]).abs() > h * 0.5 {
+            i += 1;
+            continue;
+        }
+        let mut end = i + 3;
+        while end < n {
+            if gaps[end - 1] > h * 0.35 {
+                break;
+            }
+            if (heights[end] - h).abs() > h * 0.2 {
+                break;
+            }
+            if (lefts[end] - lefts[i]).abs() > h * 0.5 {
+                break;
+            }
+            if !is_record_line(&lines[end].text) {
+                break;
+            }
+            end += 1;
+        }
+        for item in tabular.iter_mut().take(end).skip(i) {
+            *item = true;
+        }
+        i = end;
+    }
+    tabular
+}
+
+fn is_record_line(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.starts_with(|ch: char| ch.is_ascii_digit()) {
+        return true;
+    }
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+    if tokens.len() < 3 {
+        return false;
+    }
+    let numeric = tokens
+        .iter()
+        .filter(|t| t.chars().any(|ch| ch.is_ascii_digit()))
+        .count();
+    numeric >= 2
+}
+
 pub fn join_ocr_lines(lines: &[OcrLine]) -> String {
     let Some((first, rest)) = lines.split_first() else {
         return String::new();
     };
+    let tabular = identify_tabular_lines(lines);
     let max_right = lines
         .iter()
         .map(|line| line.rect.origin.x + line.rect.size.width as i32)
@@ -249,8 +352,12 @@ pub fn join_ocr_lines(lines: &[OcrLine]) -> String {
         .unwrap_or(0);
     let mut text = first.text.clone();
     let mut previous = first;
-    for next in rest {
-        let separator = line_join_separator(previous, next, max_right);
+    for (index, next) in rest.iter().enumerate() {
+        let separator = if tabular[index] && tabular[index + 1] {
+            "\n"
+        } else {
+            line_join_separator(previous, next, max_right)
+        };
         if separator == " "
             && text.ends_with('-')
             && next
@@ -692,6 +799,66 @@ mod tests {
     #[test]
     fn blank_frame_has_no_qr_codes() {
         assert!(decode_qr(&blank_frame()).is_empty());
+    }
+
+    #[test]
+    fn decorative_noise_filters_box_drawing_and_shapes() {
+        assert!(is_decorative_noise("│"));
+        assert!(is_decorative_noise("┌──────────────────┐"));
+        assert!(is_decorative_noise("└──────────────────┘"));
+        assert!(is_decorative_noise("▀▄█"));
+        assert!(is_decorative_noise("▼"));
+        assert!(is_decorative_noise("▲"));
+        assert!(!is_decorative_noise("Mem(m)▼"));
+        assert!(!is_decorative_noise("│ Processes │"));
+        assert!(!is_decorative_noise("hello"));
+        assert!(!is_decorative_noise(""));
+    }
+
+    #[test]
+    fn terminal_rows_keep_hard_breaks() {
+        let lines = vec![
+            build_line(
+                "216517 rclone 0.0% 75MiB 0B/s".to_owned(),
+                PhysicalRect::new(80, 180, 600, 18),
+            ),
+            build_line(
+                "26119 sing-box 0.5% 35MiB 0B/s".to_owned(),
+                PhysicalRect::new(80, 200, 600, 18),
+            ),
+            build_line(
+                "216504 windwatch 0.0% 28MiB 0B/s".to_owned(),
+                PhysicalRect::new(80, 220, 600, 18),
+            ),
+            build_line(
+                "167 dockerd 0.0% 26MiB 0B/s".to_owned(),
+                PhysicalRect::new(80, 240, 600, 18),
+            ),
+        ];
+        let joined = join_ocr_lines(&lines);
+        assert_eq!(joined.matches('\n').count(), 3);
+        assert!(joined.starts_with("216517 rclone"));
+        assert!(joined.contains("\n26119 sing-box"));
+    }
+
+    #[test]
+    fn prose_paragraphs_still_soft_join() {
+        let lines = vec![
+            build_line(
+                "The quick brown fox".to_owned(),
+                PhysicalRect::new(0, 0, 190, 20),
+            ),
+            build_line(
+                "jumps over the lazy dog near".to_owned(),
+                PhysicalRect::new(0, 22, 190, 20),
+            ),
+            build_line(
+                "the river bank on a sunny day".to_owned(),
+                PhysicalRect::new(0, 44, 190, 20),
+            ),
+        ];
+        let joined = join_ocr_lines(&lines);
+        assert!(!joined.contains('\n'));
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
