@@ -2564,8 +2564,7 @@ impl SettingsView {
                             self.shortcut_row(ShortcutSlot::Capture, theme, cx),
                             self.shortcut_row(ShortcutSlot::Pin, theme, cx),
                         ],
-                    ))
-                    .child(note(theme, t(language, "shortcuts.editor_note"))),
+                    )),
             )
             .child(group(
                 "settings-group-capture-keys",
