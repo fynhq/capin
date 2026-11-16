@@ -1341,7 +1341,10 @@ impl OverlayView {
         );
 
         let color_row = color.map(|(red, green, blue)| {
-            let text = self.color_text(red, green, blue);
+            let text = match self.color_format {
+                ColorFormat::Hex => format!("#{red:02x}{green:02x}{blue:02x}"),
+                ColorFormat::Rgb => format!("{red}, {green}, {blue}"),
+            };
             let format_label = match self.color_format {
                 ColorFormat::Hex => "HEX",
                 ColorFormat::Rgb => "RGB",
