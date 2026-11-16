@@ -21,29 +21,21 @@ const PROJECT_URL: &str = "https://github.com/fynhq/capin";
 
 thread_local! {
     static PENDING_STATUS: RefCell<Option<String>> = const { RefCell::new(None) };
-    static SETTINGS_WINDOWS: RefCell<Vec<AnyWindowHandle>> = const { RefCell::new(Vec::new()) };
 }
 
-pub fn is_settings_window(handle: &AnyWindowHandle) -> bool {
-    SETTINGS_WINDOWS.with(|handles| {
-        handles
-            .borrow()
-            .iter()
-            .any(|open| open.window_id() == handle.window_id())
-    })
-}
-
-pub fn has_open_settings(cx: &mut App) -> bool {
-    let handles = SETTINGS_WINDOWS.with(|handles| handles.borrow().clone());
-    let mut live = Vec::with_capacity(handles.len());
-    for handle in handles {
-        if handle.update(cx, |_, _, _| {}).is_ok() {
-            live.push(handle);
-        }
+fn focus_settings_window(cx: &mut App) -> bool {
+    let Some((handle, view)) = crate::windows::live_settings_windows(cx).into_iter().next() else {
+        return false;
+    };
+    let pending = PENDING_STATUS.with(|slot| slot.borrow_mut().take());
+    if let Some(pending) = pending
+        && let Some(view) = view.upgrade()
+    {
+        view.update(cx, |this, cx| this.show_status(pending, cx));
     }
-    let alive = !live.is_empty();
-    SETTINGS_WINDOWS.with(|handles| *handles.borrow_mut() = live);
-    alive
+    let _ = handle.update(cx, |_, window, _| window.activate_window());
+    cx.activate(true);
+    true
 }
 
 #[cfg(target_os = "windows")]
@@ -539,7 +531,7 @@ fn card_border(_dark: bool) -> Rgba {
     rgba(0x00000000)
 }
 
-struct SettingsView {
+pub(crate) struct SettingsView {
     section: SettingsSection,
     settings: AppSettings,
     accent: Option<u32>,
@@ -3032,6 +3024,9 @@ impl Render for SettingsView {
 }
 
 pub fn open_settings(cx: &mut App) {
+    if focus_settings_window(cx) {
+        return;
+    }
     let bounds = settings_bounds(cx);
     let display_id = cx.primary_display().map(|display| display.id());
     let language = settings_state::get().language;
@@ -3067,12 +3062,8 @@ pub fn open_settings(cx: &mut App) {
                 this.commit_filename_template(&input, window, cx);
             });
             let handle = window.window_handle();
-            SETTINGS_WINDOWS.with(|handles| {
-                handles
-                    .borrow_mut()
-                    .retain(|open| open.window_id() != handle.window_id());
-            });
-            if !has_open_settings(cx) {
+            crate::windows::unregister_settings_window(&handle);
+            if !crate::windows::has_open_settings(cx) {
                 platform_window::set_macos_accessory_activation_policy();
             }
             true
@@ -3081,8 +3072,8 @@ pub fn open_settings(cx: &mut App) {
         window.defer(cx, move |window, cx| window.focus(&focus, cx));
         view
     }) {
-        Ok((handle, _)) => {
-            SETTINGS_WINDOWS.with(|handles| handles.borrow_mut().push(handle));
+        Ok((handle, view)) => {
+            crate::windows::register_settings_window(handle, view.downgrade());
             let _ = handle.update(cx, |_, window, _| window.activate_window());
             cx.activate(true);
         }

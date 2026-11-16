@@ -84,7 +84,7 @@ pub(crate) fn restore_previous_application(cx: &mut App) {
     let Some(pid) = RETURN_APP_PID.with(Cell::get) else {
         return;
     };
-    if crate::settings::has_open_settings(cx) {
+    if crate::windows::has_open_settings(cx) {
         return;
     }
     cx.spawn(async move |cx| {
@@ -93,7 +93,7 @@ pub(crate) fn restore_previous_application(cx: &mut App) {
             .await;
         cx.update(|cx| {
             if has_open_overlays()
-                || crate::settings::has_open_settings(cx)
+                || crate::windows::has_open_settings(cx)
                 || crate::editor::has_open_editors()
             {
                 return;
@@ -325,7 +325,7 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
         return;
     }
     remember_frontmost_application();
-    if !crate::settings::has_open_settings(cx) {
+    if !crate::windows::has_open_settings(cx) {
         platform_window::set_macos_accessory_activation_policy();
     }
     #[cfg(target_os = "windows")]

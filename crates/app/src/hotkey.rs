@@ -35,7 +35,7 @@ mod imp {
             && !crate::overlay::has_open_overlays()
             && !crate::editor::has_open_editors()
             && !crate::pin::is_pin_menu_open()
-            && !crate::settings::has_open_settings(cx);
+            && !crate::windows::has_open_settings(cx);
         let active = THROUGH_ESCAPE_ID.with(|id| id.get() != 0);
         if wanted == active {
             return;
