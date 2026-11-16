@@ -1072,6 +1072,22 @@ impl SettingsView {
             vec![
                 self.language_row(theme, cx),
                 self.auto_start_row(theme, cx),
+                self.toggle_row(
+                    theme,
+                    cx,
+                    ToggleRow {
+                        id: "settings-hide-tray",
+                        icon: icons::GENERAL,
+                        title_key: "settings.hide_tray",
+                        description_key: Some("settings.hide_tray_desc"),
+                        value: self.settings.hide_tray,
+                        set: |settings, value| {
+                            settings.hide_tray = value;
+                            crate::tray::set_visible(!value);
+                        },
+                        refresh_pin: false,
+                    },
+                ),
                 self.logs_row(theme, cx),
                 self.filename_template_row(theme, window, cx),
             ],

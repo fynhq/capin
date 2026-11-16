@@ -64,9 +64,24 @@ mod imp {
         };
 
         TRAY.with(|slot| *slot.borrow_mut() = Some(tray));
+        if settings_state::get().hide_tray {
+            TRAY.with(|slot| {
+                if let Some(tray) = slot.borrow().as_ref() {
+                    let _ = tray.set_visible(false);
+                }
+            });
+        }
         log_info!("tray", "tray icon installed");
         start_events(cx);
         true
+    }
+
+    pub fn set_visible(visible: bool) {
+        TRAY.with(|slot| {
+            if let Some(tray) = slot.borrow().as_ref() {
+                let _ = tray.set_visible(visible);
+            }
+        });
     }
 
     fn build_menu() -> Option<Menu> {
@@ -275,7 +290,7 @@ mod imp {
 #[cfg(target_os = "macos")]
 pub use imp::restart;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-pub use imp::{install, refresh_menu};
+pub use imp::{install, refresh_menu, set_visible};
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn install(_cx: &mut gpui_kit::App) -> bool {
@@ -284,6 +299,9 @@ pub fn install(_cx: &mut gpui_kit::App) -> bool {
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn refresh_menu() {}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn set_visible(_visible: bool) {}
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn replace_windows(cx: &mut gpui_kit::App, open: impl FnOnce(&mut gpui_kit::App) + 'static) {

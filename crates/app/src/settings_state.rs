@@ -188,6 +188,7 @@ pub struct AppSettings {
     pub annotation_spotlight_radius: f32,
     pub pin_text_ocr: bool,
     pub pin_qr: bool,
+    pub hide_tray: bool,
 }
 
 impl AppSettings {
@@ -253,6 +254,7 @@ impl Default for AppSettings {
             annotation_spotlight_radius: 0.0,
             pin_text_ocr: true,
             pin_qr: true,
+            hide_tray: false,
         }
     }
 }
@@ -466,6 +468,7 @@ fn parse(text: &str) -> AppSettings {
             }
             "pin_text_ocr" => settings.pin_text_ocr = value != "false",
             "pin_qr" => settings.pin_qr = value != "false",
+            "hide_tray" => settings.hide_tray = value == "true",
             _ => {}
         }
     }
@@ -640,10 +643,11 @@ fn serialize(settings: &AppSettings) -> String {
         settings.pin_qr,
     );
     text.push_str(&format!(
-        "record_cursor_highlight={}\nrecord_cursor_highlight_color={:06x}\nrepeat_pin={}\n",
+        "record_cursor_highlight={}\nrecord_cursor_highlight_color={:06x}\nrepeat_pin={}\nhide_tray={}\n",
         settings.record_cursor_highlight,
         settings.record_cursor_highlight_color & 0x00FF_FFFF,
         settings.repeat_pin.code(),
+        settings.hide_tray,
     ));
     text.push_str(&format!(
         "annotation_uniform_color={}\nannotation_rect_stroke_width={}\nannotation_arrow_stroke_width={}\nannotation_font_size={}\nannotation_arrow_start={}\nannotation_arrow_end={}\nannotation_arrow_polyline={}\nannotation_text_background={}\nannotation_text_outline={}\nannotation_text_alignment={}\nannotation_corner_radius={}\nannotation_highlighter_radius={}\nannotation_number_size={}\nannotation_blur_radius={}\nannotation_rect_filled={}\nannotation_ellipse_filled={}\nannotation_rect_ellipse={}\nannotation_spotlight_intensity={}\nannotation_spotlight_radius={}\n",

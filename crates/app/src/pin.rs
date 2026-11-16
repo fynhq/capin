@@ -134,6 +134,7 @@ enum PinMenuAction {
     Copy,
     Save,
     CopyQr,
+    Settings,
     Through,
     Close,
 }
@@ -146,6 +147,7 @@ impl PinMenuAction {
             Self::Copy => "pin-menu-copy",
             Self::Save => "pin-menu-save",
             Self::CopyQr => "pin-menu-copy-qr",
+            Self::Settings => "pin-menu-settings",
             Self::Through => "pin-menu-through",
             Self::Close => "pin-menu-close",
         }
@@ -158,13 +160,14 @@ impl PinMenuAction {
             Self::Copy => "pin.copy",
             Self::Save => "pin.save",
             Self::CopyQr => "pin.copy_qr",
+            Self::Settings => "pin.settings",
             Self::Through => "pin.through",
             Self::Close => "pin.close",
         }
     }
 
     fn separated(self) -> bool {
-        matches!(self, Self::Through | Self::Close)
+        matches!(self, Self::Settings | Self::Through | Self::Close)
     }
 }
 
@@ -2309,6 +2312,7 @@ impl PinView {
                 items.push(PinMenuAction::Copy);
             }
         }
+        items.push(PinMenuAction::Settings);
         items.push(PinMenuAction::Through);
         items.push(PinMenuAction::Close);
         items
@@ -2911,6 +2915,9 @@ fn perform_pin_action(id: u64, action: PinMenuAction, cx: &mut App) {
         }
         PinMenuAction::CopyQr => {
             entity.update(cx, |view, cx| view.copy_qr(cx));
+        }
+        PinMenuAction::Settings => {
+            crate::settings::open_settings(cx);
         }
         PinMenuAction::Through => {
             enable_click_through(id, &entity, window_handle, cx);
