@@ -4873,8 +4873,6 @@ dependencies = [
 [[package]]
 name = "paddleocr_rs_onnx"
 version = "0.2.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97a34be1f0af08ecd38b9fa61b4a96774e40750e5001f5fc74f964b3fe28baca"
 dependencies = [
  "geo",
  "image",

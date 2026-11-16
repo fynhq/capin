@@ -25,3 +25,6 @@ thiserror = "2.0.21"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+
+[patch.crates-io]
+paddleocr_rs_onnx = { path = "vendor/paddleocr-rs-onnx" }

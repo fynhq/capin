@@ -1,0 +1,23 @@
+[package]
+name = "paddleocr_rs_onnx"
+version = "0.2.8"
+edition = "2021"
+rust-version = "1.92"
+license = "MIT"
+description = "Vendored fork: PaddleOCR ONNX engine with PP-OCRv6 detection parameters"
+publish = false
+
+[lib]
+name = "paddleocr_rs_onnx"
+path = "src/lib.rs"
+
+[dependencies]
+geo = "0.33"
+image = "0.25"
+imageproc = "0.27"
+log = "0.4"
+ort = "2.0.0-rc.15"
+parking_lot = "0.13"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2.0"
