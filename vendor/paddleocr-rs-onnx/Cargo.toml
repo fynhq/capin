@@ -5,6 +5,7 @@ edition = "2021"
 rust-version = "1.92"
 license = "MIT"
 description = "Vendored fork: PaddleOCR ONNX engine with PP-OCRv6 detection parameters"
+repository = "https://github.com/Craun718/PaddleOCR-rs"
 publish = false
 
 [lib]
