@@ -1,8 +1,3 @@
-//! ScreenCaptureKit single-shot screenshots.
-//!
-//! macOS 14 and later use `SCScreenshotManager`. macOS 13 uses a one-frame
-//! `SCStream`, because the single-shot manager was introduced in macOS 14.
-
 use std::mem::ManuallyDrop;
 use std::sync::mpsc::{SyncSender, channel, sync_channel};
 use std::time::Duration;
@@ -61,8 +56,6 @@ fn capture_image(filter: &SCContentFilter, config: &SCStreamConfiguration) -> Re
             let _ = tx.send(Err("the system returned an empty screenshot".to_owned()));
             return;
         }
-        // The callback lends the image for its duration; convert it before
-        // returning instead of retaining a CoreGraphics object across threads.
         let borrowed = ManuallyDrop::new(unsafe {
             core_graphics::image::CGImage::from_ptr(image as *mut core_graphics::sys::CGImage)
         });
@@ -337,9 +330,6 @@ fn build_config(
         config.setQueueDepth(3);
         config.setScalesToFit(true);
         config.setPreservesAspectRatio(true);
-        // Screenshots of windows keep alpha for rounded corners. macOS 14+
-        // ignores the system window shadow here so the app can compose one
-        // consistent edge; macOS 13 keeps the native shadow.
         config.setShouldBeOpaque(!window);
         if window && config.respondsToSelector(objc2::sel!(setIgnoreShadowsSingleWindow:)) {
             config.setIgnoreShadowsSingleWindow(true);
@@ -348,13 +338,6 @@ fn build_config(
     Ok(config)
 }
 
-/// Returns Capin's own capture-helper windows so display captures never
-/// include overlays, capture bars, inline editors, or pin menus. Pins and the
-/// settings page stay capturable, exactly as the user sees them.
-///
-/// `NSWindow.sharingType` is ignored by ScreenCaptureKit on macOS 15, so the
-/// exclusion must happen in the filter. The sharing flag is still readable
-/// from the window server, which is what marks the helper windows.
 fn own_windows(content: &SCShareableContent) -> Vec<Retained<SCWindow>> {
     let process = std::process::id() as i32;
     let excluded = super::capture_excluded_window_ids();

@@ -1,5 +1,3 @@
-//! Shared value types used across capture, annotation, recording, and UI code.
-
 mod color;
 mod color_space;
 mod dpi;

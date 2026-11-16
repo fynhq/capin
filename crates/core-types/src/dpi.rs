@@ -1,11 +1,9 @@
-/// Ratio between physical pixels and logical pixels for one monitor.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DpiScale(f32);
 
 impl DpiScale {
     pub const ONE: Self = Self(1.0);
 
-    /// Returns `None` for zero, negative, NaN, or infinite scales.
     pub fn new(scale: f32) -> Option<Self> {
         (scale.is_finite() && scale > 0.0).then_some(Self(scale))
     }

@@ -1,5 +1,3 @@
-//! Vector annotation objects, undo history, hit-testing, and rasterization.
-
 mod document;
 mod outline;
 mod raster;

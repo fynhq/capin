@@ -2,23 +2,11 @@ use core_types::RgbaFrame;
 
 use crate::{CaptureError, CaptureTarget, MonitorInfo, WindowInfo};
 
-/// One-shot capture backend. Recording uses the same frame type and builds its
-/// own streaming pipeline on top of the platform capture APIs.
 pub trait CaptureBackend {
     fn monitors(&mut self) -> Result<Vec<MonitorInfo>, CaptureError>;
 
-    /// Returns top-level windows in top-to-bottom z-order.
-    ///
-    /// Implementations include other windows owned by this process (pins and
-    /// settings are valid capture targets) and the taskbar, but must omit
-    /// invisible windows, cloaked windows, and the desktop shell so callers
-    /// can use the returned order for hover hit-testing. Callers that show
-    /// their own full-screen helper windows pass them to
-    /// [`Self::windows_excluding`].
     fn windows(&mut self) -> Result<Vec<WindowInfo>, CaptureError>;
 
-    /// Same as [`Self::windows`], without the given windows. Capture overlays
-    /// use this to hide themselves without hiding pins or the settings page.
     fn windows_excluding(
         &mut self,
         excluded: &[core_types::WindowId],
@@ -30,17 +18,11 @@ pub trait CaptureBackend {
 
     fn capture(&mut self, target: CaptureTarget) -> Result<RgbaFrame, CaptureError>;
 
-    /// Captures with the system cursor when the platform supports it. The
-    /// default falls back to a cursor-free frame.
     fn capture_with_cursor(&mut self, target: CaptureTarget) -> Result<RgbaFrame, CaptureError> {
         self.capture(target)
     }
 }
 
-/// Returns the capture backend for the current platform.
-///
-/// Platforms without an implementation return [`CaptureError::UnsupportedPlatform`]
-/// from every operation instead of failing at startup.
 pub fn platform_backend() -> Box<dyn CaptureBackend> {
     #[cfg(target_os = "windows")]
     {

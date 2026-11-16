@@ -1,5 +1,3 @@
-//! Recording configuration and frame pacing shared by platform encoders.
-
 mod config;
 mod cursor;
 mod timing;

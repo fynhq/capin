@@ -2,15 +2,10 @@ use core_types::{FrameError, RgbaFrame};
 use thiserror::Error;
 
 const BYTES_PER_PIXEL: usize = 4;
-/// Rows compared per candidate during the coarse pass.
 const COARSE_ROWS: usize = 16;
-/// Rows compared per candidate when a sparse fallback cannot use anchors.
 const FULL_ROWS: usize = 32;
-/// A candidate must beat the best one by this margin to avoid ambiguity.
 const REFINE_RADIUS: u32 = 4;
 const AMBIGUITY_MARGIN: f64 = 0.5;
-/// Scores at or below this are treated as an exact match, where periodic
-/// content cannot be told apart but any offset reproduces the same pixels.
 const EXACT_MATCH_SCORE: f64 = 2.0;
 const MAX_CANDIDATES: usize = 5;
 const MIN_ANCHOR_ROWS: u32 = 6;
@@ -18,29 +13,15 @@ const MIN_ANCHOR_ROWS: u32 = 6;
 #[derive(Clone, Debug)]
 pub struct StitchConfig {
     pub min_overlap_rows: u32,
-    /// Upper bound for overlap candidates. `0` searches the full frame height,
-    /// so a gentle scroll that leaves a large overlap can still be matched.
     pub max_overlap_rows: u32,
-    /// Sampled columns per row. `0` derives one sample per four pixels,
-    /// clamped to `48..=384`.
     pub sample_columns: u32,
-    /// Mean absolute luminance difference allowed per sampled pixel.
     pub tolerance: u32,
-    /// Rows that may be ignored at the top of later frames, for fixed headers.
     pub max_top_inset_rows: u32,
-    /// Rows that may be ignored at the bottom of later frames, for fixed
-    /// footers such as a chat input box.
     pub max_bottom_inset_rows: u32,
-    /// Minimum height of a static band before it is treated as chrome.
     pub min_static_rows: u32,
-    /// Mean difference allowed between rows of a fixed header or footer.
     pub static_tolerance: u32,
-    /// Mean difference above which a row counts as a visual anchor.
     pub anchor_threshold: u32,
     pub max_height: u32,
-    /// Upper bound for the retained RGBA buffer. `0` disables the byte cap.
-    /// This prevents a very wide monitor from turning `max_height` into an
-    /// unexpectedly large allocation.
     pub max_bytes: usize,
 }
 
@@ -97,20 +78,13 @@ pub struct Stitcher {
     config: StitchConfig,
     samples: u32,
     pixels: Vec<u8>,
-    /// One luminance signature row per stitched row, kept in sync with
-    /// `pixels` so matching does not rescan the whole tail every frame.
     signatures: Vec<u8>,
     height: u32,
     frames: u32,
-    /// Row signatures of the previous frame's top rows, used to detect a
-    /// fixed header without comparing raw pixels again.
     previous_top: Vec<u8>,
     previous_top_rows: u32,
-    /// Row signatures of the previous frame's bottom rows, used to detect a
-    /// fixed footer.
     previous_bottom: Vec<u8>,
     previous_bottom_rows: u32,
-    /// Fixed footer rows kept out of the stitched content and appended once.
     footer_rows: u32,
     footer_pixels: Vec<u8>,
 }
@@ -192,9 +166,6 @@ impl Stitcher {
             return Ok(self.report(0, 0, 0, self.height));
         }
 
-        // A fixed footer is identical at the same distance from the bottom in
-        // consecutive frames. Detect it before matching, keep it out of the
-        // appended content, and append it once at the end.
         let footer_rows = self.detect_static_bottom(&new, frame.height());
         if footer_rows > 0 {
             if self.footer_rows == 0 && self.buffer_tail_matches(&new, frame.height(), footer_rows)
@@ -255,10 +226,6 @@ impl Stitcher {
         Ok(self.report(overlap, top_inset, footer_rows, appended))
     }
 
-    /// Starts a session from an owned first frame without copying it.
-    ///
-    /// Later frames still go through [`Self::push`]; only the first frame can
-    /// donate its buffer to the stitched image.
     pub fn push_owned(&mut self, frame: RgbaFrame) -> Result<AppendReport, StitchError> {
         if self.frames != 0 {
             return self.push(&frame);
@@ -297,9 +264,6 @@ impl Stitcher {
         Ok(self.report(0, 0, 0, height))
     }
 
-    /// Grows the stitched buffer geometrically but never past the configured
-    /// byte budget. `extend_from_slice` alone may double the capacity, which
-    /// turned a 256 MiB cap into a 512 MiB allocation on wide captures.
     fn reserve_rows(&mut self, rows: usize) -> Result<(), StitchError> {
         let row_bytes = (self.width as usize).saturating_mul(4).max(1);
         let needed = self
@@ -318,7 +282,6 @@ impl Stitcher {
             .map_err(|_| StitchError::AllocationFailed(target))
     }
 
-    /// Consumes the accumulated pixels without cloning the full stitched image.
     pub fn finish(&mut self) -> Result<RgbaFrame, StitchError> {
         if self.frames == 0 || self.height == 0 {
             return Err(StitchError::EmptyFrame);
@@ -415,9 +378,6 @@ impl Stitcher {
         self.previous_bottom_rows = bottom_rows;
     }
 
-    /// Height of the static band at the top of the frame, or `0` when the top
-    /// matches the previous frame all the way to the cap (no scrolled frame can
-    /// be told apart from a duplicate) or is shorter than a real header.
     fn detect_static_top(&self, rows: &RowSet, height: u32) -> u32 {
         if self.frames == 0 || self.previous_top_rows == 0 {
             return 0;
@@ -482,8 +442,6 @@ impl Stitcher {
         }
     }
 
-    /// Whether the stitched tail still ends with the footer that is about to
-    /// be kept out of the content. Only then can it be trimmed safely.
     fn buffer_tail_matches(&self, rows: &RowSet, height: u32, footer_rows: u32) -> bool {
         if self.height < footer_rows {
             return false;
@@ -550,9 +508,6 @@ impl Stitcher {
             .collect();
         let samples = self.samples as usize;
 
-        // Coarse pass over every candidate, keeping the best few. The last
-        // row is always part of the refinement window, so an off-by-one
-        // alignment cannot win by matching only the middle of the overlap.
         let mut candidates: Vec<(f64, u32)> = Vec::with_capacity(MAX_CANDIDATES);
         for overlap in (min_overlap..=max_overlap).rev() {
             let window = OverlapWindow {
@@ -585,13 +540,8 @@ impl Stitcher {
             .find(|(_, overlap)| overlap.abs_diff(best_overlap) > REFINE_RADIUS)
             .map_or(f64::INFINITY, |entry| entry.0);
 
-        // Refine every row around the best candidate; sampled rows alone can
-        // let a one-row-shifted alignment through, which duplicates or drops a
-        // line at the seam.
         let low = best_overlap.saturating_sub(REFINE_RADIUS).max(min_overlap);
         let high = (best_overlap + REFINE_RADIUS).min(max_overlap);
-        // Walk from the largest overlap down: on uniform content every offset
-        // scores zero and appending nothing is the safe choice.
         let mut refined = (f64::INFINITY, best_overlap);
         for overlap in (low..=high).rev() {
             let window = OverlapWindow {
@@ -641,12 +591,6 @@ impl RowSet<'_> {
     }
 }
 
-/// Mean absolute difference for one candidate alignment.
-///
-/// Rows with visual edges are compared first: blank rows score equally well
-/// for every offset and would otherwise dominate the mean. When the overlap
-/// has too few anchors, evenly spread rows are compared instead so uniform
-/// content still produces a usable score.
 fn candidate_score(
     samples: usize,
     previous: &RowSet,
@@ -681,9 +625,6 @@ fn candidate_score(
     total as f64 / (compared.max(1) as f64 * samples as f64)
 }
 
-/// Mean absolute difference over every row of the candidate alignment. The
-/// seam is decided with this score so a single unmatched edge row cannot hide
-/// behind blank rows or anchor sampling.
 fn full_row_score(samples: usize, previous: &RowSet, new: &RowSet, window: OverlapWindow) -> f64 {
     let prev_offset = window.max_overlap - window.overlap;
     let mut total = 0u64;

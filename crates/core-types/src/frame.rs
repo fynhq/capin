@@ -3,7 +3,6 @@ use std::fmt;
 
 pub const BYTES_PER_PIXEL: usize = 4;
 
-/// A non-premultiplied RGBA8 image, stored top-down with no color conversion.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RgbaFrame {
     width: u32,
@@ -74,11 +73,6 @@ impl RgbaFrame {
         &self.pixels
     }
 
-    /// Returns tightly packed `width * height * 4` pixels.
-    ///
-    /// Most caller paths expect a packed image; this helper borrows the
-    /// existing buffer for ordinary frames and compacts padded rows only when
-    /// a platform actually supplied a larger stride.
     pub fn packed_pixels(&self) -> Cow<'_, [u8]> {
         if self.stride == self.width as usize * BYTES_PER_PIXEL {
             Cow::Borrowed(&self.pixels)
@@ -97,14 +91,10 @@ impl RgbaFrame {
         packed
     }
 
-    /// Takes the owned buffer without copying.
     pub fn into_pixels(self) -> Vec<u8> {
         self.pixels
     }
 
-    /// Takes the owned buffer and repacks padded rows to `width * 4` bytes.
-    ///
-    /// Tightly packed frames move their buffer; padded frames compact it once.
     pub fn into_packed_pixels(self) -> Vec<u8> {
         if self.stride == self.width as usize * BYTES_PER_PIXEL {
             return self.pixels;

@@ -2,7 +2,6 @@ use core_types::{CaptureRegion, MonitorId, PhysicalPoint, PhysicalRect, WindowId
 
 use crate::WindowInfo;
 
-/// Pointer travel, in logical pixels, before a press becomes a region drag.
 pub const DRAG_THRESHOLD_PX: i32 = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,15 +27,6 @@ struct Drag {
     active: bool,
 }
 
-/// Interaction state for one monitor's screenshot overlay.
-///
-/// Pointer coordinates are in the virtual desktop's physical pixel space.
-/// Window bounds arrive in z-order from the backend, topmost first. Selection
-/// geometry is exposed in monitor-local physical pixels for rendering.
-///
-/// Region selection is the default. The screenshot overlay enables
-/// `window_targeting` for the whole session so hovering identifies a window or
-/// element and clicking captures it; dragging still produces a free region.
 pub struct SelectionSession {
     monitor: MonitorId,
     monitor_bounds: PhysicalRect,
@@ -46,9 +36,6 @@ pub struct SelectionSession {
     drag: Option<Drag>,
     aspect_ratio: Option<f32>,
     window_targeting: bool,
-    /// Wheel targeting climbed past the hovered window: the next click
-    /// captures the whole monitor. Window and element hovers are suppressed
-    /// so the overlay can paint the full-screen hole.
     screen_targeting: bool,
     drag_threshold: i32,
 }
@@ -58,9 +45,6 @@ impl SelectionSession {
         Self::with_scale(monitor, monitor_bounds, windows, 1.0)
     }
 
-    /// Builds a session for one monitor. Windows reported for other monitors
-    /// are discarded so mixed-DPI macOS desktops cannot hover a window that
-    /// visually belongs to a neighboring display.
     pub fn with_scale(
         monitor: MonitorId,
         monitor_bounds: PhysicalRect,
@@ -94,8 +78,6 @@ impl SelectionSession {
         self.monitor_bounds
     }
 
-    /// Updates the logical-to-physical scale used for pointer thresholds when
-    /// the overlay window ends up on a different DPI than the monitor claimed.
     pub fn set_scale(&mut self, scale: f32) {
         self.drag_threshold = ((DRAG_THRESHOLD_PX as f32 * scale.max(0.1)).round() as i32).max(1);
     }
@@ -104,9 +86,6 @@ impl SelectionSession {
         &self.windows
     }
 
-    /// Enables automatic window picking. Disabling it clears any
-    /// window/element highlight so the caller can fall back to pure region
-    /// selection.
     pub fn set_window_targeting(&mut self, enabled: bool) {
         self.window_targeting = enabled;
         if !enabled {
@@ -116,9 +95,6 @@ impl SelectionSession {
         }
     }
 
-    /// Enables whole-monitor targeting. The overlay's wheel walk uses it once
-    /// it climbs past the hovered window, so a click captures the full screen
-    /// even though the pointer is over a window.
     pub fn set_screen_targeting(&mut self, enabled: bool) {
         self.screen_targeting = enabled && self.window_targeting;
         if self.screen_targeting {
@@ -143,8 +119,6 @@ impl SelectionSession {
         self.window(hovered)
     }
 
-    /// Window under the pointer even while whole-screen targeting is active.
-    /// The overlay needs it to climb back down from the screen level.
     pub fn window_under_pointer(&self) -> Option<&WindowInfo> {
         let hovered = self.hovered?;
         self.window(hovered)
@@ -158,7 +132,6 @@ impl SelectionSession {
         self.drag.as_ref().is_some_and(|drag| drag.active)
     }
 
-    /// Returns whether a press is pending or a drag is active.
     pub fn has_drag(&self) -> bool {
         self.drag.is_some()
     }
@@ -167,8 +140,6 @@ impl SelectionSession {
         self.hovered_element
     }
 
-    /// Sets the UI element under the pointer. The overlay resolves platform
-    /// accessibility bounds and keeps this session free of platform code.
     pub fn set_hovered_element(&mut self, element: Option<PhysicalRect>) {
         if self.drag.as_ref().is_some_and(|drag| drag.active) || self.screen_targeting {
             self.hovered_element = None;
@@ -181,7 +152,6 @@ impl SelectionSession {
         self.aspect_ratio
     }
 
-    /// Locks drag geometry to `width / height`. `None` restores free selection.
     pub fn set_aspect_ratio(&mut self, ratio: Option<f32>) {
         self.aspect_ratio = ratio.filter(|ratio| ratio.is_finite() && *ratio > 0.0);
         if let Some(drag) = &mut self.drag {
@@ -194,7 +164,6 @@ impl SelectionSession {
         }
     }
 
-    /// Returns the active region in monitor-local physical pixels.
     pub fn selection_rect(&self) -> Option<PhysicalRect> {
         let drag = self.drag.as_ref()?;
         if !drag.active {
@@ -227,7 +196,6 @@ impl SelectionSession {
         }
     }
 
-    /// Clears hover when the pointer leaves the overlay, unless a drag is active.
     pub fn pointer_left(&mut self) {
         if self.drag.is_none() {
             self.hovered = None;
@@ -237,9 +205,6 @@ impl SelectionSession {
     }
 
     pub fn pointer_pressed(&mut self, point: PhysicalPoint) {
-        // Replace a stale press left behind by a mouse-up that happened outside
-        // the overlay. Without this, the next click would capture a region from
-        // the old origin.
         self.drag = None;
 
         let over_window = self.hit_test(point).is_some();
@@ -291,8 +256,6 @@ impl SelectionSession {
         if let Some(window) = drag.start_window {
             SelectionAction::Capture(SelectionOutcome::Window(window))
         } else if drag.over_window && !self.screen_targeting {
-            // Window targeting is disabled, so a click over a window does not
-            // implicitly capture it.
             SelectionAction::None
         } else {
             SelectionAction::Capture(SelectionOutcome::Monitor(self.monitor))
@@ -313,8 +276,6 @@ impl SelectionSession {
     }
 }
 
-/// Returns the accessible elements under `point`, smallest first. This is the
-/// element hierarchy used by the overlay's scroll-wheel targeting.
 pub fn element_candidates(
     elements: &[PhysicalRect],
     window: PhysicalRect,
@@ -406,8 +367,6 @@ fn region_from_rect(
     ))
 }
 
-/// Builds a monitor-local capture region from a drag in virtual desktop
-/// coordinates. Returns `None` when the drag has no area after clamping.
 pub fn region_from_drag(
     monitor: MonitorId,
     monitor_bounds: PhysicalRect,
@@ -439,7 +398,6 @@ pub fn region_from_drag(
 }
 
 fn clamp_to_bounds(point: PhysicalPoint, bounds: PhysicalRect) -> PhysicalPoint {
-    // Region edges are exclusive, so the far edge may equal right()/bottom().
     let max_x = bounds.right();
     let max_y = bounds.bottom();
     PhysicalPoint::new(

@@ -1,28 +1,18 @@
 use core_types::{CaptureTarget, PhysicalSize};
 use thiserror::Error;
 
-/// Fixed output frame rate for every recording.
 pub const FRAME_RATE: u32 = 30;
 
-/// Encoder bitrate for screen content, in bits per second.
-///
-/// Screen recordings spend bits on sharp text and flat UI rather than camera
-/// motion, so one bit per eight pixels per frame keeps 1080p30 near 7.8 Mbps
-/// instead of the 15.5 Mbps of a one-bit-per-four budget.
 pub fn video_bitrate(width: u32, height: u32) -> u32 {
     let bits = u64::from(width) * u64::from(height) * u64::from(FRAME_RATE) / 8;
     bits.clamp(2_000_000, 24_000_000) as u32
 }
 
-/// The translucent disc painted under the system cursor during a recording.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CursorHighlight {
-    /// Disc color as packed `0xRRGGBB`. Opacity is fixed by the recorder.
     pub color: u32,
 }
 
-/// Inputs for one recording session. Audio and format choice are intentionally
-/// absent: recordings are always MP4 without sound.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordConfig {
     pub target: CaptureTarget,
@@ -39,7 +29,6 @@ impl RecordConfig {
         }
     }
 
-    /// Validates the target before a recorder starts.
     pub fn validate(&self, dimensions: PhysicalSize) -> Result<(), RecordError> {
         if dimensions.is_empty() {
             return Err(RecordError::EmptyDimensions);

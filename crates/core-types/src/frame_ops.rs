@@ -2,10 +2,6 @@ use crate::frame::RgbaFrame;
 use crate::geometry::PhysicalRect;
 
 impl RgbaFrame {
-    /// Returns the frame cropped to `rect`, clamped to the frame bounds.
-    ///
-    /// Returns `None` when the intersection is empty. The result is packed at
-    /// `width * 4` bytes per row; padded input rows are handled correctly.
     pub fn cropped(&self, rect: PhysicalRect) -> Option<Self> {
         let bounds = PhysicalRect::new(0, 0, self.width(), self.height());
         let overlap = bounds.intersection(rect)?;
@@ -21,9 +17,6 @@ impl RgbaFrame {
         Self::from_pixels(width as u32, overlap.size.height, pixels).ok()
     }
 
-    /// Crops an owned frame, reusing its buffer when the rows are tightly
-    /// packed. This avoids allocating a second full image for the common
-    /// one-pixel border trim and similar whole-width crops.
     pub fn into_cropped(self, rect: PhysicalRect) -> Option<Self> {
         let frame_width = self.width();
         let frame_height = self.height();
@@ -50,8 +43,6 @@ impl RgbaFrame {
         Self::from_pixels(width as u32, height as u32, pixels).ok()
     }
 
-    /// Rotates the frame 90 degrees clockwise. Padded input rows are handled
-    /// correctly; the result is tightly packed.
     pub fn rotated_cw(&self) -> Self {
         let width = self.width();
         let height = self.height();
@@ -69,8 +60,6 @@ impl RgbaFrame {
         Self::from_pixels(height, width, pixels).expect("rotated frame keeps valid dimensions")
     }
 
-    /// Returns a horizontally or vertically flipped frame. Padded input rows
-    /// are handled correctly; the result is tightly packed.
     pub fn flipped(&self, horizontal: bool) -> Self {
         let width = self.width();
         let height = self.height();

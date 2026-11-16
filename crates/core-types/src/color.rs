@@ -1,9 +1,7 @@
-/// Converts a Windows Explorer accent value stored as ABGR to packed RGB.
 pub const fn abgr_to_rgb(abgr: u32) -> u32 {
     ((abgr & 0xFF) << 16) | (abgr & 0xFF00) | ((abgr >> 16) & 0xFF)
 }
 
-/// WCAG relative luminance of a packed `0xRRGGBB` color.
 pub fn relative_luminance(hex: u32) -> f64 {
     fn linearize(channel: u8) -> f64 {
         let channel = f64::from(channel) / 255.0;
@@ -20,11 +18,6 @@ pub fn relative_luminance(hex: u32) -> f64 {
     0.2126 * red + 0.7152 * green + 0.0722 * blue
 }
 
-/// Whether a dark label reads better than a light one on `hex`.
-///
-/// The dark label must beat the light one by 15% rather than merely tie, so
-/// mid-tone system accents keep the familiar white-on-blue look while bright
-/// accents such as gold switch to dark text.
 pub fn prefers_dark_foreground(hex: u32) -> bool {
     let luminance = relative_luminance(hex);
     let contrast_black = (luminance + 0.05) / 0.05;

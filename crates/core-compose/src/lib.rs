@@ -1,9 +1,3 @@
-//! Window screenshot composition: rounded corners, soft shadows, and a
-//! configurable background canvas.
-//!
-//! The input is a raw window frame in non-premultiplied RGBA. The output keeps
-//! alpha so callers can save a transparent PNG or paste the image directly.
-
 use core_types::RgbaFrame;
 use thiserror::Error;
 
@@ -11,14 +5,10 @@ const MAX_PADDING: u32 = 2048;
 const MAX_BLUR_RADIUS: u32 = 512;
 const BLUR_PASSES: usize = 3;
 
-/// A soft shadow placed behind the window.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Shadow {
-    /// Vertical offset in physical pixels. Positive values move the shadow down.
     pub offset_y: i32,
-    /// Blur radius in physical pixels.
     pub blur_radius: u32,
-    /// Final opacity multiplier, clamped to `0.0..=1.0`.
     pub opacity: f32,
 }
 
@@ -32,35 +22,22 @@ impl Default for Shadow {
     }
 }
 
-/// A border painted inside the window edges.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Border {
-    /// Border width in physical pixels.
     pub width: u32,
-    /// Non-premultiplied border color.
     pub color: [u8; 4],
-    /// Paint the ring on the canvas outside the window instead of inside its
-    /// content. Window captures use this so the border covers the first
-    /// shadow pixel; an inside border leaves a light 1px gap outside it.
     pub outside: bool,
 }
 
-/// The background painted behind the window.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Background {
-    /// Leave the canvas transparent, producing a transparent PNG.
     Transparent,
-    /// Paint every canvas pixel with this non-premultiplied RGBA color.
     Solid([u8; 4]),
 }
 
-/// Layout and paint options for a window capture.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindowCanvas {
-    /// Transparent margin around the window, in physical pixels. The shadow is
-    /// clipped to this margin.
     pub padding: u32,
-    /// Corner radius in physical pixels. Use `0` for square corners.
     pub corner_radius: u32,
     pub shadow: Option<Shadow>,
     pub background: Background,
@@ -87,12 +64,6 @@ pub enum ComposeError {
     SizeOverflow,
 }
 
-/// Estimates the alpha-rounded corner radius of a captured window frame.
-///
-/// macOS ScreenCaptureKit keeps the native window shape in the alpha channel.
-/// Measuring the first opaque pixel of the top corner rows recovers the radius
-/// without hard-coding a system version value. Returns `None` for opaque
-/// (square-cornered) frames or when the corner cannot be measured.
 pub fn estimate_corner_radius(frame: &RgbaFrame, max_radius: u32) -> Option<u32> {
     let width = frame.width();
     let height = frame.height();
@@ -116,15 +87,11 @@ pub fn estimate_corner_radius(frame: &RgbaFrame, max_radius: u32) -> Option<u32>
             continue;
         };
         if x == 0 {
-            // A straight edge means the rounded part has ended. Stop once a
-            // few rows already described the arc.
             if !estimates.is_empty() {
                 break;
             }
             continue;
         }
-        // Circle centre (R, R): the left boundary at distance d from the top
-        // is x = R - sqrt(2Rd - d^2), solved for R.
         let d = row as f64 + 0.5;
         let x = x as f64;
         let radius = x + d + (2.0 * x * d).sqrt();
@@ -139,11 +106,6 @@ pub fn estimate_corner_radius(frame: &RgbaFrame, max_radius: u32) -> Option<u32>
     Some((estimates[estimates.len() / 2].round() as u32).clamp(1, max_radius))
 }
 
-/// Composites `window` onto a new canvas according to `canvas`.
-///
-/// The returned frame is larger than the input by `canvas.padding` on every
-/// side. Alpha is preserved for transparent backgrounds and outside rounded
-/// corners.
 pub fn compose_window(
     window: &RgbaFrame,
     canvas: &WindowCanvas,
@@ -229,10 +191,6 @@ fn paint_shadow(pixels: &mut [u8], layout: CanvasLayout, shadow: &Shadow) {
         return;
     }
 
-    // Three box passes spread the shadow roughly `3 * radius` pixels beyond
-    // the window. Clamp the radius to the padding on the tighter side (the
-    // vertical offset eats into one edge) so the canvas never cuts a partially
-    // transparent shadow into a hard line.
     let available = layout
         .padding
         .saturating_sub(shadow.offset_y.unsigned_abs());
@@ -318,8 +276,6 @@ fn paint_window(
             let target_y = padding + y;
             let target_offset = (target_y as usize * canvas_width as usize + target_x as usize) * 4;
             if alpha == 255 {
-                // Opaque window pixels are the common case. Copying avoids
-                // the float alpha blend for every interior pixel.
                 pixels[target_offset..target_offset + 4].copy_from_slice(source);
             } else {
                 blend_pixel(
@@ -394,9 +350,6 @@ fn paint_border(
     }
 }
 
-/// Paints the border into the padding around the window. The ring is the
-/// difference between a rounded rectangle expanded by `width` and the window
-/// itself, so it follows the corners and covers the first shadow pixels.
 fn paint_border_outside(
     pixels: &mut [u8],
     canvas_width: u32,
@@ -472,9 +425,6 @@ fn rounded_coverage(x: u32, y: u32, width: u32, height: u32, radius: u32) -> f32
     )
 }
 
-/// Coverage of a rounded rectangle at an arbitrary (possibly out-of-bounds)
-/// point. `point_x`/`point_y` are absolute canvas coordinates; the rectangle
-/// starts at the origin.
 fn rounded_coverage_point(point_x: f32, point_y: f32, width: f32, height: f32, radius: f32) -> f32 {
     if width <= 0.0 || height <= 0.0 {
         return 0.0;
@@ -491,9 +441,6 @@ fn rounded_coverage_point(point_x: f32, point_y: f32, width: f32, height: f32, r
 
     let outside_box = point_x < 0.0 || point_y < 0.0 || point_x > width || point_y > height;
 
-    // Every interior row/column is a straight edge; only the four corner
-    // quadrants need the rounded-distance sqrt. This keeps 4K window
-    // captures from evaluating the corner math for millions of pixels.
     if qx <= 0.0 || qy <= 0.0 {
         return if outside_box { 0.0 } else { 1.0 };
     }
@@ -501,7 +448,6 @@ fn rounded_coverage_point(point_x: f32, point_y: f32, width: f32, height: f32, r
         return 0.0;
     }
 
-    // Supersample the arc instead of estimating a one-pixel distance band.
     const STEPS: u32 = 8;
     let mut covered = 0u32;
     for step_y in 0..STEPS {
@@ -682,7 +628,6 @@ mod tests {
             }),
         };
         let output = compose_window(&window, &options).unwrap();
-        // The ring sits at x/y 1..3, outside the window content at 2..12.
         assert_eq!(output.pixel(1, 6).unwrap(), [0, 255, 0, 255]);
         assert_eq!(output.pixel(2, 6).unwrap(), [200, 50, 50, 255]);
         assert_eq!(output.pixel(13, 6).unwrap()[3], 0);

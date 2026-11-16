@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use crate::FRAME_RATE;
 
-/// Maps capture timestamps onto a fixed 30 fps output frame index.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrameTimeline {
     start: Option<Duration>,
@@ -17,9 +16,6 @@ impl FrameTimeline {
         }
     }
 
-    /// The first timestamp defines frame zero. Frames that map to an already
-    /// emitted index are dropped; gaps report how many previous frames the
-    /// encoder must duplicate.
     pub fn submit(&mut self, timestamp: Duration) -> FrameDecision {
         let start = *self.start.get_or_insert(timestamp);
         let elapsed = timestamp.saturating_sub(start);
@@ -34,7 +30,6 @@ impl FrameTimeline {
         FrameDecision::Encode { index, duplicates }
     }
 
-    /// Index that the next encoded frame will receive.
     pub const fn next_index(&self) -> u64 {
         self.next_index
     }
@@ -53,12 +48,7 @@ impl Default for FrameTimeline {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameDecision {
-    /// Encode this frame as `index`; duplicate the previous frame
-    /// `duplicates` times first to fill a gap.
-    Encode {
-        index: u64,
-        duplicates: u64,
-    },
+    Encode { index: u64, duplicates: u64 },
     Drop,
 }
 

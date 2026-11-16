@@ -1,9 +1,3 @@
-//! Shared ScreenCaptureKit helpers used by screenshots and recording.
-//!
-//! These functions intentionally return `Option`/`String` rather than a
-//! capture error so both `core-capture` and `platform-record` can map failures
-//! into their own error types.
-
 use std::sync::mpsc::channel;
 use std::time::Duration;
 
@@ -12,9 +6,6 @@ use objc2::rc::Retained;
 use objc2_foundation::NSError;
 use objc2_screen_capture_kit::{SCDisplay, SCShareableContent, SCWindow};
 
-/// Queries shareable content once, excluding desktop windows and off-screen
-/// windows. The completion handler only lends the object, so retain it before
-/// the block returns and transfer ownership through the raw pointer.
 pub fn shareable_content() -> Result<Retained<SCShareableContent>, String> {
     let (tx, rx) = channel::<Result<usize, String>>();
     let block = RcBlock::new(
@@ -77,9 +68,6 @@ pub fn display_height(display: &SCDisplay) -> usize {
     unsafe { display.height() }.max(1) as usize
 }
 
-/// Backing-store pixels per point. SCDisplay reports dimensions in points, so
-/// its width cannot be used to derive the scale; the display's NSScreen/CG
-/// scale is the same value GPUI uses for the overlay surface.
 pub fn display_scale(display: &SCDisplay) -> f64 {
     crate::display_backing_scale(u64::from(unsafe { display.displayID() }))
         .map(f64::from)

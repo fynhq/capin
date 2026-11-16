@@ -15,41 +15,24 @@ pub enum TextAlignment {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AnnotationStyle {
-    /// Packed straight-alpha RGBA (`0xRRGGBBAA`).
     pub color: u32,
     pub stroke_width: f32,
     pub font_size: f32,
-    /// Corner radius in image pixels for `Shape::Rect`.
     pub corner_radius: f32,
-    /// Corner radius in image pixels for `Shape::HighlighterBox`.
     pub highlighter_radius: f32,
-    /// Box-blur radius in image pixels for `Shape::Blur`.
     pub blur_radius: u32,
-    /// Whether `Shape::Rect` and `Shape::Ellipse` render as solid fills.
     pub filled: bool,
-    /// Draw an arrow head at the start of `Shape::Arrow`.
     pub arrow_start: bool,
-    /// Draw an arrow head at the end of `Shape::Arrow`.
     pub arrow_end: bool,
-    /// Draw a contrasting panel behind `Shape::Text`.
     pub text_background: bool,
-    /// Draw a contrasting outline around `Shape::Text` glyphs.
     pub text_outline: bool,
-    /// Horizontal alignment for `Shape::Text`.
     pub text_alignment: TextAlignment,
-    /// Spotlight dimming strength in percent (0-100).
     pub spotlight_intensity: u8,
-    /// Corner radius in image pixels for the `Shape::Spotlight` hole.
     pub spotlight_radius: f32,
 }
 
-/// Opacity used by the highlighter wash. The marker keeps the pure accent
-/// color and only lowers its alpha, so content underneath stays readable
-/// without the pale white film a lightened color would add.
 pub const HIGHLIGHTER_ALPHA: u32 = 0x66;
 
-/// Turns an annotation color into the translucent wash used by the
-/// highlighter. RGB is preserved; only the alpha changes.
 pub fn highlighter_color(color: u32) -> u32 {
     (color & 0xFFFF_FF00) | HIGHLIGHTER_ALPHA
 }
@@ -86,7 +69,6 @@ pub enum Shape {
     Polyline {
         points: Vec<PhysicalPoint>,
     },
-    /// Rectangular highlighter stroke, filled with the highlighter color.
     HighlighterBox(PhysicalRect),
     Blur(PhysicalRect),
     Text {
@@ -101,7 +83,6 @@ pub enum Shape {
 }
 
 impl Shape {
-    /// Axis-aligned bounds in image physical pixels.
     pub fn bounds(&self) -> PhysicalRect {
         match self {
             Self::Rect(rect)
@@ -145,9 +126,6 @@ impl Shape {
         }
     }
 
-    /// Returns a copy shifted by `dx`/`dy` image pixels. Interactive edits use
-    /// this against the shape captured at drag start so live updates never
-    /// accumulate rounding drift.
     pub fn translated(mut self, dx: i32, dy: i32) -> Self {
         self.translate(dx, dy);
         self
@@ -322,11 +300,6 @@ impl AnnotationDocument {
         true
     }
 
-    /// Replaces the geometry of an existing object without duplicating the
-    /// text/style arguments used by [`Self::update_shape`].
-    ///
-    /// Interactive drags call this for every pointer move. `record` is true
-    /// only on the first move of a gesture so the whole drag is one undo step.
     pub fn update_shape_live(&mut self, id: AnnotationId, shape: Shape, record: bool) -> bool {
         let Some(index) = self
             .objects
@@ -342,8 +315,6 @@ impl AnnotationDocument {
         true
     }
 
-    /// Replaces the geometry and text of an existing object, used by the
-    /// editor's in-place text editing and resize paths.
     pub fn update_shape(&mut self, id: AnnotationId, shape: Shape, style: AnnotationStyle) -> bool {
         let Some(index) = self
             .objects
@@ -359,14 +330,11 @@ impl AnnotationDocument {
         true
     }
 
-    /// Clones an existing object, offsets it, and selects the copy. Sequence
-    /// badges always receive a fresh number instead of duplicating the source.
     pub fn duplicate(&mut self, id: AnnotationId, dx: i32, dy: i32) -> Option<AnnotationId> {
         let annotation = self.object(id)?.clone();
         Some(self.paste(&annotation, dx, dy))
     }
 
-    /// Pastes a copied annotation at the given offset and selects it.
     pub fn paste(&mut self, annotation: &Annotation, dx: i32, dy: i32) -> AnnotationId {
         self.record_before_edit();
         let id = AnnotationId(self.next_id);
@@ -381,7 +349,6 @@ impl AnnotationDocument {
         id
     }
 
-    /// Keeps sequence badges contiguous after deleting one of them.
     fn renumber_numbers(&mut self) {
         let mut numbers: Vec<(u32, usize)> = self
             .objects
@@ -400,8 +367,6 @@ impl AnnotationDocument {
         }
     }
 
-    /// Returns the next sequence badge number. Sequence badges are kept
-    /// contiguous, so this is the highest badge plus one.
     pub fn next_number(&self) -> u32 {
         self.objects
             .iter()
@@ -422,8 +387,6 @@ impl AnnotationDocument {
         !self.redo.is_empty()
     }
 
-    /// Drops object-level history after rebuilding a document from an
-    /// external transform such as cropping. The editor owns that undo step.
     pub fn clear_history(&mut self) {
         self.undo.clear();
         self.redo.clear();

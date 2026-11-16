@@ -1,11 +1,3 @@
-//! Filled polygon outlines for line annotations.
-//!
-//! Both the GPU preview and the CPU exporter fill these polygons instead of
-//! stroking the centre line. Stroke tessellation gave the preview butt caps
-//! and miter spikes, while the exporter used round caps, so the two surfaces
-//! could never match. The outline is cheap to build and gives both paths the
-//! same vector geometry.
-
 use core_types::PhysicalPoint;
 
 use crate::{AnnotationStyle, Shape};
@@ -17,8 +9,6 @@ const HEAD_HALF_WIDTH: f32 = 0.55;
 const HEAD_NOTCH: f32 = 0.55;
 const CAP_SEGMENTS: usize = 24;
 
-/// A vector vertex with sub-pixel precision. Keeping the outline in floats
-/// avoids faceted round caps on thin strokes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OutlinePoint {
     pub x: f32,
@@ -31,8 +21,6 @@ impl OutlinePoint {
     }
 }
 
-/// Returns the closed polygons that make up a line annotation, or `None` for
-/// shapes that are not arrows/polylines.
 pub fn stroke_outline(shape: &Shape, style: &AnnotationStyle) -> Option<Vec<Vec<OutlinePoint>>> {
     let points = match shape {
         Shape::Arrow { start, end } => vec![*start, *end],
@@ -95,8 +83,6 @@ fn arrow_outline(
     polygons
 }
 
-/// Builds a solid dart pointing at `tip`; `previous` is the neighbouring
-/// point on the shaft and therefore gives the inward direction.
 fn arrow_head(
     tip: OutlinePoint,
     previous: OutlinePoint,

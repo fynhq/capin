@@ -1,9 +1,3 @@
-//! Small, testable color-management primitives shared by capture and export.
-//!
-//! Platform capture code is responsible for reporting the source color space.
-//! This module deliberately stays in encoded/linear RGB and does not depend on
-//! an ICC profile parser.
-
 use crate::RgbaFrame;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -14,7 +8,6 @@ pub enum ColorSpace {
     LinearSrgb,
 }
 
-/// Decodes an sRGB-encoded channel to linear light.
 pub fn srgb_to_linear(value: f32) -> f32 {
     let value = value.clamp(0.0, 1.0);
     if value <= 0.040_45 {
@@ -24,7 +17,6 @@ pub fn srgb_to_linear(value: f32) -> f32 {
     }
 }
 
-/// Encodes a linear-light channel with the sRGB transfer function.
 pub fn linear_to_srgb(value: f32) -> f32 {
     let value = value.max(0.0);
     let encoded = if value <= 0.003_130_8 {
@@ -35,9 +27,6 @@ pub fn linear_to_srgb(value: f32) -> f32 {
     encoded.clamp(0.0, 1.0)
 }
 
-/// Converts linear Display P3 RGB to linear sRGB RGB.
-///
-/// Values can fall outside `0..=1`; callers clamp after the conversion.
 pub fn linear_p3_to_srgb(rgb: [f32; 3]) -> [f32; 3] {
     [
         1.224_940_1 * rgb[0] - 0.224_940_4 * rgb[1],
@@ -46,7 +35,6 @@ pub fn linear_p3_to_srgb(rgb: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-/// Extended Reinhard tone mapping for linear-light values above SDR white.
 pub fn tone_map_reinhard(rgb: [f32; 3], exposure: f32) -> [f32; 3] {
     let exposure = exposure.max(0.0);
     rgb.map(|channel| {
@@ -55,7 +43,6 @@ pub fn tone_map_reinhard(rgb: [f32; 3], exposure: f32) -> [f32; 3] {
     })
 }
 
-/// Converts one encoded/linear RGB triple to encoded sRGB.
 pub fn convert_rgb_to_srgb(rgb: [f32; 3], source: ColorSpace, tone_map: bool) -> [f32; 3] {
     let linear = match source {
         ColorSpace::Srgb => rgb.map(srgb_to_linear),
@@ -70,10 +57,6 @@ pub fn convert_rgb_to_srgb(rgb: [f32; 3], source: ColorSpace, tone_map: bool) ->
     linear.map(linear_to_srgb)
 }
 
-/// Converts an RGBA8 frame to encoded sRGB while preserving alpha.
-///
-/// This is intentionally lossy for HDR input: the output is SDR sRGB. It is
-/// the common denominator for clipboard, PNG export and pin preview.
 pub fn convert_frame_to_srgb(
     frame: &RgbaFrame,
     source: ColorSpace,

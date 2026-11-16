@@ -64,9 +64,6 @@ impl CaptureBackend for MacosCapture {
             if integer_field(&info, "kCGWindowIsOnscreen").unwrap_or(1) != 1 {
                 continue;
             }
-            // Windows with sharing disabled (capture overlays, capture bars
-            // and pin menus) cannot appear in a screenshot, so they must not
-            // be hover targets.
             if integer_field(&info, "kCGWindowSharingState").unwrap_or(1) == 0 {
                 continue;
             }
@@ -130,8 +127,6 @@ impl CaptureBackend for MacosCapture {
                 error.to_string()
             }
         };
-        // Legacy CoreGraphics fallback, mainly for macOS 13 environments where
-        // the ScreenCaptureKit path is unavailable.
         let fallback = match target {
             CaptureTarget::Monitor(id) => capture_display(id),
             CaptureTarget::Window(id) => capture_window(id),
@@ -337,11 +332,6 @@ fn displays() -> Result<Vec<DisplayGeometry>> {
         }
         let display = CGDisplay::new(id);
         let point_bounds = display.bounds();
-        // GPUI renders every window at the screen's backing scale, and macOS
-        // screenshots use the same backing-store pixels. Deriving the pixel
-        // space from NSScreen keeps capture, the frozen overlay and window
-        // placement in one coordinate system; CGDisplayPixelsWide only
-        // describes the panel and can differ on scaled HiDPI modes.
         let scale = display_backing_scale(u64::from(id))
             .map(f64::from)
             .unwrap_or(1.0);
@@ -366,12 +356,6 @@ fn displays() -> Result<Vec<DisplayGeometry>> {
     Ok(displays)
 }
 
-/// Scales collected from NSScreen on the main thread.
-///
-/// ScreenCaptureKit and the scroll session query captures from background
-/// threads, where `MainThreadMarker` is unavailable. Remembering the values
-/// observed on the main thread keeps `sourceRect` and output sizes in the
-/// same backing-store space as the overlay and GPUI surface.
 fn screen_scale_cache() -> &'static Mutex<HashMap<u32, f64>> {
     static CACHE: OnceLock<Mutex<HashMap<u32, f64>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -381,11 +365,6 @@ fn cached_screen_scale(id: u32) -> Option<f64> {
     screen_scale_cache().lock().ok()?.get(&id).copied()
 }
 
-/// Backing scale of the NSScreen that hosts a CGDirectDisplayID.
-///
-/// AppKit is the source of truth for the scale GPUI uses; the display-mode
-/// width can be reported in either points or pixels depending on the OS and
-/// display, so it is only used as a fallback elsewhere.
 fn screen_backing_scale(id: u32) -> Option<f64> {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSScreen;
@@ -395,8 +374,6 @@ fn screen_backing_scale(id: u32) -> Option<f64> {
     let point_bounds = CGDisplay::new(id).bounds();
     for screen in NSScreen::screens(marker).iter() {
         let frame = screen.frame();
-        // NSScreen frames use a bottom-left origin; CGDisplay bounds are
-        // top-left relative to the primary display.
         let top = main_height - (frame.origin.y + frame.size.height);
         if (frame.origin.x - point_bounds.origin.x).abs() <= 1.0
             && (top - point_bounds.origin.y).abs() <= 1.0
@@ -413,11 +390,6 @@ fn screen_backing_scale(id: u32) -> Option<f64> {
     None
 }
 
-/// CGDisplay reports display modes in pixels for the current resolution.
-///
-/// This is the fallback when the NSScreen match or cache is unavailable; on
-/// scaled HiDPI modes the panel ratio can differ from the window server's
-/// backing scale, so the cached NSScreen value is preferred.
 fn cg_display_scale(id: u32) -> Option<f64> {
     let display = CGDisplay::new(id);
     let bounds = display.bounds();
@@ -429,24 +401,14 @@ fn cg_display_scale(id: u32) -> Option<f64> {
     }
 }
 
-/// Returns the backing-store pixel scale of a display.
-///
-/// On HiDPI scaled modes this is the window server's render scale (usually
-/// 2.0), not the panel's native pixel ratio. Capture targets must use it so
-/// the frozen frame lines up one-to-one with GPUI's surface. The cache is
-/// filled on the main thread; background captures fall back to the CGDisplay
-/// mode ratio until then.
 pub fn display_backing_scale(raw: u64) -> Option<f32> {
     let id = u32::try_from(raw).ok()?;
-    // Refresh from AppKit on the main thread; background captures use the
-    // value observed there because NSScreen needs a MainThreadMarker.
     screen_backing_scale(id)
         .or_else(|| cached_screen_scale(id))
         .or_else(|| cg_display_scale(id))
         .map(|scale| scale as f32)
 }
 
-/// Backing-store pixel size of a display, used as the capture output size.
 pub(super) fn display_pixel_size(id: u32) -> Option<(usize, usize)> {
     let scale = screen_backing_scale(id)?;
     let point_bounds = CGDisplay::new(id).bounds();
@@ -475,11 +437,6 @@ fn capture_display(id: MonitorId) -> Result<RgbaFrame> {
     image_to_frame(&image)
 }
 
-/// Standard window corner radius in points.
-///
-/// macOS 26 (Tahoe) enlarged the standard window shape to roughly 20 points;
-/// earlier releases use the 10-point AppKit radius. Windows ask for the
-/// actual radius through their alpha channel before this fallback is used.
 fn standard_window_corner_points() -> f64 {
     use objc2_foundation::NSProcessInfo;
 
@@ -507,11 +464,6 @@ struct AxWindowInfo {
     scale: f64,
 }
 
-/// Returns the accessibility element bounds inside a window, in the same
-/// physical desktop coordinates as [`WindowInfo`].
-///
-/// The caller must grant Accessibility permission; without it macOS hides the
-/// element tree and the overlay falls back to whole-window targeting.
 pub fn ui_elements(id: WindowId) -> Vec<PhysicalRect> {
     let Some((info, _application, window)) = ax_window_context(id) else {
         return Vec::new();
@@ -554,13 +506,6 @@ pub fn ui_elements(id: WindowId) -> Vec<PhysicalRect> {
     result
 }
 
-/// Returns the accessibility chain under `point`, smallest first.
-///
-/// Hit-testing the application at the pointer is far cheaper than walking the
-/// whole tree and keeps working for large Chromium/Electron windows that never
-/// finish a full traversal inside the time budget. The parent chain also
-/// matches the overlay's wheel walk: each level is the next larger container.
-/// When the hit test cannot answer, the bounded full-tree result is used.
 pub fn ui_elements_at(id: WindowId, point: core_types::PhysicalPoint) -> Vec<PhysicalRect> {
     let Some((info, application, _window)) = ax_window_context(id) else {
         return Vec::new();
@@ -589,8 +534,6 @@ pub fn ui_elements_at(id: WindowId, point: core_types::PhysicalPoint) -> Vec<Phy
             {
                 chain.push(rect);
             }
-            // The window frame ends the chain; parents above it cover other
-            // windows and would make every hover ambiguous.
             if rect == window_rect {
                 break;
             }
@@ -615,8 +558,6 @@ fn ax_window_context(
     let info = ax_window_info(id)?;
     let application = unsafe { AXUIElement::new_application(info.pid) };
     unsafe { application.set_messaging_timeout(0.25) };
-    // Chromium and Electron expose their tree only after the assistive client
-    // opts in; without this Chrome, VS Code and Slack report no elements.
     enable_manual_accessibility(&application);
     let window = ax_window(&application, &info)?;
     unsafe { window.set_messaging_timeout(0.25) };
@@ -828,10 +769,6 @@ fn image_to_frame(image: &CGImage) -> Result<RgbaFrame> {
             message: "captured image is empty".to_owned(),
         });
     }
-    // Convert into explicit sRGB instead of the device-dependent RGB space.
-    // ScreenCaptureKit can hand back Display P3 frames; device RGB resolves to
-    // the display profile, and leaving the pixels in a wide-gamut space makes
-    // the pinned preview and exported PNG look washed out next to the source.
     let color_space = core_graphics::color_space::CGColorSpace::create_with_name(unsafe {
         core_graphics::color_space::kCGColorSpaceSRGB
     })
@@ -915,12 +852,6 @@ fn ensure_permission() -> Result<()> {
     Err(CaptureError::PermissionDenied)
 }
 
-/// Window ids whose owner disabled sharing (`NSWindowSharingType::None`).
-///
-/// The capture helpers (overlay, capture bars, inline editor and pin menus)
-/// are the only Capin windows that set it. ScreenCaptureKit excludes those
-/// windows so they never appear in a frozen frame, while pins and the
-/// settings page must stay capturable and visible.
 pub(super) fn capture_excluded_window_ids() -> Vec<u32> {
     let option = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements;
     let raw = unsafe { core_graphics::window::CGWindowListCopyWindowInfo(option, kCGNullWindowID) };
@@ -961,8 +892,6 @@ fn string_field(info: &CFDictionary<CFString, CFType>, key: &str) -> Option<Stri
 fn bounds_field(info: &CFDictionary<CFString, CFType>) -> Option<(f64, f64, f64, f64)> {
     let key = CFString::new("kCGWindowBounds");
     let untyped = info.find(&key)?.downcast::<CFDictionary>()?;
-    // The bounds value is a nested dictionary; re-wrap it with typed keys so
-    // the numeric fields can be read through the safe dictionary API.
     let bounds: CFDictionary<CFString, CFType> =
         unsafe { TCFType::wrap_under_get_rule(untyped.as_concrete_TypeRef()) };
     Some((

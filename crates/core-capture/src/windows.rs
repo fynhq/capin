@@ -1,5 +1,3 @@
-//! Windows backend built on Windows Graphics Capture, DWM, and Win32 enumeration.
-
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -47,7 +45,6 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(2);
 
 type CropRect = (u32, u32, u32, u32);
 
-/// Enables Per-Monitor V2 DPI awareness. Call once before creating any window.
 pub fn init_process_dpi_awareness() {
     // SAFETY: callers invoke this before creating UI windows. Failure usually
     // means awareness was already fixed by the manifest or an earlier call.
@@ -154,10 +151,6 @@ fn automation() -> Option<windows::Win32::UI::Accessibility::IUIAutomation> {
     })
 }
 
-/// Returns best-effort UI Automation descendant bounds for a window.
-///
-/// The overlay is excluded by querying from the target window handle instead
-/// of the screen point, so a normal topmost overlay does not mask the tree.
 pub fn ui_elements(id: WindowId) -> Vec<PhysicalRect> {
     let hwnd = HWND(id.raw() as usize as *mut c_void);
     let Some(automation) = automation() else {
@@ -195,13 +188,8 @@ pub fn ui_elements(id: WindowId) -> Vec<PhysicalRect> {
     result
 }
 
-/// Returns the window's effective corner radius in physical pixels.
-///
-/// The DWM corner preference was added in Windows 11. Windows 10 returns an
-/// error for the attribute and keeps square corners.
 pub fn window_corner_radius(id: WindowId, scale: f32) -> u32 {
     let hwnd = HWND(id.raw() as usize as *mut c_void);
-    // Maximized windows use square corners even when DWM reports rounding.
     // SAFETY: hwnd belongs to the live window that is being captured.
     if unsafe { IsZoomed(hwnd) }.as_bool() {
         return 0;
@@ -315,9 +303,6 @@ unsafe fn monitor_info(monitor: HMONITOR) -> Option<MonitorInfo> {
 
 fn enumerate_windows() -> Result<Vec<WindowInfo>> {
     let mut handles: Vec<HWND> = Vec::new();
-    // EnumWindows walks top-level windows in z-order, topmost first.
-    // windows_capture::Window::enumerate is not used because it rejects every
-    // WS_EX_TOOLWINDOW, which includes the taskbar and notification area.
     // SAFETY: the callback only writes to the Vec borrowed for the duration of
     // the call, and EnumWindows runs callbacks synchronously.
     unsafe {
@@ -431,15 +416,9 @@ fn is_cloaked(hwnd: HWND) -> bool {
 }
 
 fn is_shell_surface(hwnd: HWND) -> bool {
-    // The taskbar is a valid capture target. Only the desktop host windows
-    // are excluded; their content is the wallpaper, not a window the user
-    // can pick.
     window_class(hwnd).is_some_and(|class| matches!(class.as_str(), "Progman" | "WorkerW"))
 }
 
-/// Windows marked with `WDA_EXCLUDEFROMCAPTURE` cannot appear in a capture
-/// (the overlay, capture bars and pin menus use this). They must not be
-/// offered as hover targets, or a click would capture black content.
 fn is_capture_excluded(hwnd: HWND) -> bool {
     let mut affinity = 0u32;
     // SAFETY: the affinity value is a caller-owned output buffer.

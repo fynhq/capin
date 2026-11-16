@@ -16,9 +16,6 @@ use crate::{
     TextAlignment, highlighter_color, stroke_outline,
 };
 
-/// Label color for a sequence badge. Badges read as solid chips, so the
-/// foreground only flips to dark on light fills; mid-tone colors such as the
-/// default red keep white text instead of picking the slightly better contrast.
 pub fn badge_foreground(color: u32) -> u32 {
     if core_types::relative_luminance(color & 0x00FF_FFFF) > 0.55 {
         0x111111FF
@@ -37,8 +34,6 @@ pub fn rasterize(
         return Err(RasterError::SizeMismatch { expected, actual });
     }
 
-    // Plain screenshots have no objects. Returning the frame directly avoids
-    // building and premultiplying a full pixmap only to copy the pixels back.
     if document.objects().is_empty() {
         return Ok(frame.clone());
     }
@@ -175,9 +170,6 @@ fn build_path(annotation: &Annotation) -> Result<Path, RasterError> {
     }
 }
 
-/// Measures the rendered height of wrapped text using the same layout engine
-/// as the exporter. The editor uses this for hit-testing and selection boxes so
-/// CJK and long wrapped lines do not drift from the exported bitmap.
 pub fn measure_text_height(text: &str, font_size: f32, width: u32) -> u32 {
     if text.is_empty() || width == 0 {
         return 0;
@@ -371,9 +363,6 @@ fn rounded_rect_path(rect: PhysicalRect, radius: f32) -> Result<Path, RasterErro
     builder.finish().ok_or(RasterError::InvalidGeometry)
 }
 
-/// Appends one closed rounded rectangle to `builder`. The radius is clamped to
-/// half of the shorter side so extreme corner values still produce a valid
-/// path.
 fn push_rounded_rect(
     builder: &mut PathBuilder,
     rect: PhysicalRect,
@@ -451,9 +440,6 @@ fn draw_number(pixmap: &mut Pixmap, annotation: &Annotation) {
     let text = value.to_string();
     let estimated_width = (font_size * 0.62 * text.chars().count() as f32).max(font_size);
     let text_width = estimated_width.ceil() as u32 + 2;
-    // Center the padded glyph box on the badge and draw the text centered
-    // inside it. Left-in-box alignment pushed narrow digits such as "1" a few
-    // pixels off the circle centre in the exported image.
     let text_bounds = PhysicalRect::new(
         bounds.origin.x + ((bounds.size.width as f32 - text_width as f32) / 2.0).round() as i32,
         bounds.origin.y + ((bounds.size.height as f32 - font_size * 1.3) / 2.0).round() as i32,
@@ -559,7 +545,6 @@ fn blur_region(data: &mut [u8], width: u32, height: u32, rect: PhysicalRect, rad
     }
     let mut scratch = vec![0u8; region_width * region_height * 4];
 
-    // Three box passes are a close, separable approximation of a Gaussian blur.
     for _ in 0..3 {
         box_blur_horizontal(&blurred, &mut scratch, region_width, region_height, radius);
         box_blur_vertical(&scratch, &mut blurred, region_width, region_height, radius);
@@ -1128,8 +1113,6 @@ mod tests {
             },
         );
         let output = rasterize(&rounded, &frame).unwrap();
-        // The sharp hole corner is dimmed once the hole gets a radius, while
-        // the centre stays fully clear.
         assert!(pixel(&output, 21, 21)[0] < 100);
         assert_eq!(pixel(&output, 30, 30), [255, 255, 255, 255]);
         let mut square = document(60, 60);

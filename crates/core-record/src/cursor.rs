@@ -1,20 +1,7 @@
-//! Cursor highlight compositing for recorded frames.
-//!
-//! Screen capture APIs composite the system cursor themselves, so the demo
-//! highlight is painted into the captured frame at the cursor position. The
-//! circle is translucent and leaves the pointer itself readable.
-
-/// Radius of the highlight disc in logical points.
 pub const CURSOR_HIGHLIGHT_RADIUS: f32 = 24.0;
 
-/// Opacity of the highlight disc, applied over the configured color.
 pub const CURSOR_HIGHLIGHT_ALPHA: u8 = 0x66;
 
-/// Paints a translucent filled circle into a top-down BGRA frame.
-///
-/// `center_x`/`center_y` are physical pixels from the top-left corner. The
-/// edge is anti-aliased over one pixel; pixels outside the disc are untouched.
-/// `color` is packed `0xRRGGBB`.
 #[allow(clippy::too_many_arguments)]
 pub fn paint_cursor_highlight_bgra(
     pixels: &mut [u8],

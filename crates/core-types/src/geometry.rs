@@ -1,6 +1,5 @@
 use crate::MonitorId;
 
-/// A point in physical pixels.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct PhysicalPoint {
     pub x: i32,
@@ -13,7 +12,6 @@ impl PhysicalPoint {
     }
 }
 
-/// A width and height in physical pixels.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct PhysicalSize {
     pub width: u32,
@@ -30,10 +28,6 @@ impl PhysicalSize {
     }
 }
 
-/// An axis-aligned rectangle in physical pixels.
-///
-/// Monitor and window bounds use the virtual desktop coordinate space, whose
-/// origin can be negative when a monitor sits left of or above the primary one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct PhysicalRect {
     pub origin: PhysicalPoint,
@@ -56,12 +50,10 @@ impl PhysicalRect {
         self.size.is_empty()
     }
 
-    /// Exclusive right edge. Widened to `i64` so extreme origins cannot overflow.
     pub const fn right(self) -> i64 {
         self.origin.x as i64 + self.size.width as i64
     }
 
-    /// Exclusive bottom edge. Widened to `i64` so extreme origins cannot overflow.
     pub const fn bottom(self) -> i64 {
         self.origin.y as i64 + self.size.height as i64
     }
@@ -82,8 +74,6 @@ impl PhysicalRect {
             && (other.origin.y as i64) < self.bottom()
     }
 
-    /// Returns the overlapping area, or `None` when the rectangles only touch
-    /// or do not overlap.
     pub fn intersection(self, other: Self) -> Option<Self> {
         if self.is_empty() || other.is_empty() {
             return None;
@@ -107,7 +97,6 @@ impl PhysicalRect {
     }
 }
 
-/// A region selected for capture, relative to its monitor's top-left corner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CaptureRegion {
     pub monitor: MonitorId,

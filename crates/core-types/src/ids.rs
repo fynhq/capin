@@ -1,7 +1,3 @@
-/// Identifies a monitor within the current process session.
-///
-/// The value is derived from the platform handle and is not stable across
-/// reboots or display topology changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MonitorId(u64);
 
@@ -15,10 +11,6 @@ impl MonitorId {
     }
 }
 
-/// Identifies a window within the current process session.
-///
-/// The value is derived from the platform handle and may be reused by the
-/// operating system after the window is destroyed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct WindowId(u64);
 
