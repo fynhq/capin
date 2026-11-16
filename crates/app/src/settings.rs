@@ -20,12 +20,7 @@ use crate::storage;
 const PROJECT_URL: &str = "https://github.com/fynhq/capin";
 
 thread_local! {
-    /// Status handed to the next settings window when a tray or hotkey action
-    /// fails before it can open its own surface (for example a denied screen
-    /// recording permission), so the click never ends as a silent no-op.
     static PENDING_STATUS: RefCell<Option<String>> = const { RefCell::new(None) };
-    /// Open settings windows. Capture only freezes the screen, so its close
-    /// path must leave these windows alive.
     static SETTINGS_WINDOWS: RefCell<Vec<AnyWindowHandle>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -51,8 +46,6 @@ pub fn has_open_settings(cx: &mut App) -> bool {
     alive
 }
 
-/// Native window metrics. Windows follows the system Settings layout, macOS
-/// follows System Settings, so paddings, corner radii and type sizes match the host.
 #[cfg(target_os = "windows")]
 mod layout {
     pub const WINDOW_WIDTH: f32 = 870.0;
@@ -327,10 +320,6 @@ struct ToggleRow {
     refresh_pin: bool,
 }
 
-/// Popup menu for settings presented as a dropdown (repeat-pin behavior). The
-/// anchor is the trigger's window-space bounds captured during paint; the menu
-/// itself renders at the window root so it is not clipped by the card or the
-/// scrolling page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SelectKind {
     WindowBackground,
@@ -360,7 +349,6 @@ struct Theme {
     border: Rgba,
     accent: Rgba,
     accent_text: Rgba,
-    /// Neutral fill behind the selected dropdown option and its hover row.
     option_selected: Rgba,
     option_hover: Rgba,
     hover: Rgba,
@@ -469,9 +457,6 @@ fn native_palette(dark: bool) -> Palette {
             selected: rgba(0xFFFFFF1F),
             toggle_off: rgba(0xFFFFFF1F),
             popover: rgb(0x2C2C2E),
-            // Native settings tint: 0.72 dark / 0.82 light over the live
-            // window blur, using the same neutral-950 / white base palette as
-            // the system popovers instead of a lighter custom grey.
             page: Some(rgba(0x0A0A0AB8)),
         }
     } else {
@@ -523,14 +508,11 @@ fn native_palette(dark: bool) -> Palette {
 
 #[cfg(target_os = "windows")]
 fn card_color(dark: bool) -> Rgba {
-    // Opaque Windows cards: GPUI's Windows alpha blending accumulates
-    // translucency across layers, so opaque cards are the stable surface.
     if dark { rgb(0x2B2B2B) } else { rgb(0xFAFAFA) }
 }
 
 #[cfg(target_os = "macos")]
 fn card_color(dark: bool) -> Rgba {
-    // macOS grouped cards: a translucent lift over the page tint.
     if dark {
         rgba(0xFFFFFF1A)
     } else {
@@ -648,9 +630,6 @@ impl SettingsView {
         view
     }
 
-    /// Shows the bottom-right toast for a few seconds. Status used to stay
-    /// forever after a filename or folder edit, so every user-visible message
-    /// goes through this serial-guarded timer.
     fn show_status(&mut self, message: String, cx: &mut Context<Self>) {
         self.status = Some(message);
         self.status_leaving = false;
@@ -689,11 +668,6 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// The platform appearance observer only fires on light/dark changes, so
-    /// an accent-only change needs a poll. The sentinel `None` seed forces a
-    /// first re-apply even if startup read the accent before the window was
-    /// ready. The probe runs inside `update` because AppKit color reads are
-    /// main-thread work.
     fn start_accent_watch(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
@@ -844,10 +818,6 @@ impl SettingsView {
             .px(px(layout::SIDEBAR_PAD))
             .pb(px(layout::SIDEBAR_PAD));
 
-        // macOS puts the traffic lights over the sidebar, so the title sits
-        // below them at the top of the pane. The strip around the lights and
-        // the title itself move the window; the content page starts at the
-        // very top of the window to the right.
         #[cfg(target_os = "macos")]
         {
             sidebar = sidebar
@@ -863,8 +833,6 @@ impl SettingsView {
                 ))
                 .child(div().w_full().mt(px(12.0)).child(nav));
         }
-        // Windows keeps the system caption buttons and drag strip, so the
-        // navigation starts below the 34pt caption.
         #[cfg(not(target_os = "macos"))]
         {
             sidebar = sidebar.pt(px(layout::TITLEBAR_HEIGHT + 8.0)).child(nav);
@@ -952,10 +920,6 @@ impl SettingsView {
             )
     }
 
-    /// The Windows caption is drawn inside the client area so it shares the
-    /// window backdrop with the page while keeping the system caption hit
-    /// testing (drag, snap, double-click). macOS uses the native title bar;
-    /// its drag surface lives in the sidebar.
     #[cfg(target_os = "windows")]
     fn titlebar(&self, theme: &Theme, window: &mut Window, _cx: &mut Context<Self>) -> Div {
         let leading = div()
@@ -1012,18 +976,10 @@ impl SettingsView {
     }
 
     fn content(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // macOS draws the settings title in the sidebar, so the page reaches
-        // the top edge; System Settings keeps the same-width strip above the
-        // content pane draggable, so this window adds one here. Windows keeps
-        // the caption strip clear of scrolling content so rows never slide
-        // under the caption buttons.
         #[cfg(target_os = "macos")]
         let top = 0.0;
         #[cfg(not(target_os = "macos"))]
         let top = layout::TITLEBAR_HEIGHT;
-        // Pin the card column to the window width instead of letting flex
-        // content decide it. Language changes alter label lengths; without a
-        // fixed width the cards visibly jumped between Chinese and English.
         let content_width = (f32::from(window.bounds().size.width)
             - layout::SIDEBAR_WIDTH
             - layout::CONTENT_PAD_X * 2.0)
@@ -1036,8 +992,6 @@ impl SettingsView {
             .pt(px(layout::CONTENT_PAD_TOP))
             .pb(px(layout::HEADER_GAP))
             .child(div().w(px(content_width)).child(self.section_header(theme)));
-        // macOS extends the draggable titlebar band across the content pane,
-        // like System Settings; the title row itself stays draggable too.
         #[cfg(target_os = "macos")]
         let top_block = self
             .macos_drag_area(
@@ -1146,10 +1100,6 @@ impl SettingsView {
         page
     }
 
-    /// Rebuilds the permission guidance that accompanies the status rows.
-    /// macOS binds TCC grants to the ad-hoc code signature, and screen
-    /// recording only takes effect after a relaunch, so an existing System
-    /// Settings entry can look enabled while this process is still denied.
     #[cfg(target_os = "macos")]
     fn permission_hint(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
@@ -1430,8 +1380,6 @@ impl SettingsView {
         )
     }
 
-    /// Build label, platform, and the redacted log tail. This is what a field
-    /// report needs; screen contents never enter the string.
     fn diagnostics_report(&self) -> String {
         let settings = &self.settings;
         let mut report = String::new();
@@ -1578,9 +1526,6 @@ impl SettingsView {
             ))
     }
 
-    /// One on/off row. Only the switch is a hit target; the label and the row
-    /// background stay inert like the native settings lists. `refresh_pin`
-    /// reapplies pin recognition when a recognition toggle changes.
     fn toggle_row(&self, theme: &Theme, cx: &mut Context<Self>, row: ToggleRow) -> AnyElement {
         let language = self.settings.language;
         a11y_row(
@@ -1754,9 +1699,6 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// A macOS-style popup button: the current value on the left, a chevron
-    /// on the right. Windows opens an in-window popover anchored to the
-    /// trigger; macOS raises the native menu at the pointer.
     fn select_trigger(
         &self,
         theme: &Theme,
@@ -1802,9 +1744,6 @@ impl SettingsView {
             .on_click(cx.listener(move |this, _, _, cx| {
                 #[cfg(target_os = "macos")]
                 {
-                    // The native menu runs its own tracking loop; showing it
-                    // inside the click dispatch would hold the App borrow and
-                    // abort on a re-entrant timer. Defer one main-queue turn.
                     let entries = this.select_entries(kind);
                     let selected = entries.iter().position(|(_, _, active)| *active);
                     let items: Vec<String> =
@@ -1840,9 +1779,6 @@ impl SettingsView {
             .child(probe)
     }
 
-    /// The popup layer for the long option lists (window background, padding,
-    /// repeat-pin behavior). Rendering it at the window root keeps it above the
-    /// card and outside the scrolling page.
     fn select_popup(
         &self,
         theme: &Theme,
@@ -2246,9 +2182,6 @@ impl SettingsView {
             .child(card(theme, rows))
     }
 
-    /// Pastel swatches plus a custom hex picker for the recording cursor
-    /// disc. The color is stored as RGB; the recorder applies a fixed
-    /// translucent alpha.
     fn record_highlight_color_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let language = self.settings.language;
         let current = self.settings.record_cursor_highlight_color;
@@ -2442,7 +2375,6 @@ impl SettingsView {
             cx.notify();
             return true;
         }
-        // Let the window shortcuts (Cmd/Ctrl+W, Cmd/Ctrl+Q) through.
         !command
     }
 
@@ -3033,8 +2965,6 @@ impl Render for SettingsView {
                     cx.notify();
                     return;
                 }
-                // Cmd/Ctrl+W and Cmd/Ctrl+Q close only the settings window;
-                // quitting the menu-bar app stays on the tray menu.
                 if command && matches!(event.keystroke.key.as_str(), "w" | "q") {
                     platform_window::set_macos_accessory_activation_policy();
                     let input = this.filename_input.clone();
@@ -3090,8 +3020,6 @@ pub fn open_settings(cx: &mut App) {
     let bounds = settings_bounds(cx);
     let display_id = cx.primary_display().map(|display| display.id());
     let language = settings_state::get().language;
-    // The settings page is a real app window: show the Dock tile while it is
-    // open so the user can find Capin in Mission Control and the app switcher.
     platform_window::set_macos_regular_activation_policy();
     let titlebar = custom_titlebar().then(|| TitlebarOptions {
         title: Some(t(language, "settings.title").into()),
@@ -3129,8 +3057,6 @@ pub fn open_settings(cx: &mut App) {
                     .borrow_mut()
                     .retain(|open| open.window_id() != handle.window_id());
             });
-            // Closing the last real window returns Capin to its menu-bar
-            // utility role (no Dock icon, no app-switcher entry).
             if !has_open_settings(cx) {
                 platform_window::set_macos_accessory_activation_policy();
             }
@@ -3149,9 +3075,6 @@ pub fn open_settings(cx: &mut App) {
     }
 }
 
-/// A tray or hotkey capture attempt that dies on macOS TCC would otherwise
-/// be a silent no-op. Surface the reason in the settings window instead of
-/// leaving the user with no visible response.
 #[cfg(target_os = "macos")]
 pub fn report_capture_permission_denied(cx: &mut App) {
     let language = settings_state::get().language;
@@ -3239,9 +3162,6 @@ fn card(theme: &Theme, rows: Vec<AnyElement>) -> Div {
         .children(children)
 }
 
-/// Grouped-list separator between rows. The hairline is one physical pixel;
-/// it starts at the row text inset like native settings lists, and the last
-/// row in a card has no trailing divider.
 fn card_divider(theme: &Theme) -> Div {
     div()
         .w_full()
@@ -3277,11 +3197,6 @@ fn group_header(theme: &Theme, title: &str, description: &str) -> Div {
         })
 }
 
-/// A group header and its card at the tight native label gap.
-///
-/// The wrapper is also the accessibility node: the settings page paints its
-/// own widgets, so without a role and label the window exposes nothing to UI
-/// Automation and the capture overlay cannot pick a section.
 fn group(id: &'static str, theme: &Theme, title: &str, description: &str, body: Div) -> AnyElement {
     div()
         .id(id)
@@ -3295,8 +3210,6 @@ fn group(id: &'static str, theme: &Theme, title: &str, description: &str, body: 
         .into_any_element()
 }
 
-/// Wraps one settings row in its accessibility node so element picking lands
-/// on the labeled row instead of the whole card.
 fn a11y_row(id: impl Into<ElementId>, label: impl Into<SharedString>, row: Div) -> AnyElement {
     div()
         .id(id)
@@ -3326,14 +3239,10 @@ fn row_shell() -> Div {
         .py(px(layout::ROW_PAD_Y))
 }
 
-/// Label block for a horizontal settings row. It takes the remaining width so
-/// long descriptions wrap instead of squeezing the control.
 fn row_label(theme: &Theme, title: &str, subtitle: &str) -> impl IntoElement {
     label_block(theme, title, subtitle).flex_1().min_w(px(0.0))
 }
 
-/// Same label block with a leading monochrome glyph, matching the icon column
-/// used by the system settings lists.
 fn row_label_with_icon(
     theme: &Theme,
     icon_data: &'static [u8],
@@ -3363,7 +3272,6 @@ fn row_label_with_icon(
         .child(label_block(theme, title, subtitle).flex_1().min_w(px(0.0)))
 }
 
-/// Label block for stacked layouts that manage their own width.
 fn label_block(theme: &Theme, title: &str, subtitle: &str) -> Stateful<Div> {
     let label = if subtitle.is_empty() {
         title.to_owned()
@@ -3425,9 +3333,6 @@ fn info_row(
 }
 
 fn toggle(theme: &Theme, value: bool, id: &'static str) -> impl IntoElement {
-    // Native-style 36x20 switch: a 16px white thumb travels 16px with a 2px
-    // inset. The thumb and the accent wash are driven by one spring, so an
-    // interrupted click reverses from where the thumb actually is.
     let accent = theme.accent;
     let off = theme.toggle_off;
     let knob = theme.knob;
@@ -3520,9 +3425,6 @@ fn action_button(theme: &Theme, label: String) -> Div {
         .child(label)
 }
 
-/// Flattened option buttons following the system Settings style: each choice is its own
-/// control, and the selected tile carries the system accent instead of a
-/// nested segmented track.
 fn segmented() -> Div {
     div().flex().flex_row().flex_shrink_0().gap(px(4.0))
 }

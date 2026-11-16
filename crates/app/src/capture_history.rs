@@ -18,26 +18,18 @@ struct HistoryEntry {
     file: String,
     created_at: u64,
     hash: u64,
-    /// Present when the export deliberately left the composed shadow out so
-    /// pinning it must render the floating edge again.
     #[serde(default)]
     pin_shadow: Option<HistoryPinShadow>,
-    /// Capture pixels per logical point. Pins use its inverse so a history
-    /// image reopens at the size it had when it was captured.
     #[serde(default)]
     scale: Option<f32>,
 }
 
-/// Recipe for the pin-only shadow of a region export.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HistoryPinShadow {
-    /// Logical corner radius the export was rendered with.
     pub corner_radius: u32,
-    /// Capture scale the export was rendered at.
     pub scale: f32,
 }
 
-/// A decoded history screenshot plus its pin-display shadow recipe.
 pub struct HistoryImage {
     pub frame: RgbaFrame,
     pub pin_shadow: Option<HistoryPinShadow>,
@@ -46,23 +38,13 @@ pub struct HistoryImage {
 
 thread_local! {
     static ENTRIES: RefCell<Option<Vec<HistoryEntry>>> = const { RefCell::new(None) };
-    /// Bumped whenever an image is recorded. Pin walks reset when this
-    /// changes so the shortcut starts over at the newest screenshot instead
-    /// of continuing an old sequence.
     static GENERATION: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Monotonic marker for "a new capture was recorded".
 pub fn generation() -> u64 {
     GENERATION.with(Cell::get)
 }
 
-/// Records an already encoded PNG. Copying a screenshot to the clipboard
-/// produces PNG bytes; history writes those bytes instead of encoding the
-/// same image a second time.
-///
-/// Every successful record advances the generation. Pins anchor the walk to
-/// their image after opening, so their own record does not interrupt it.
 pub fn record_png_bytes(
     bytes: &[u8],
     hash: u64,
@@ -78,8 +60,6 @@ pub fn record_png_bytes(
     recorded
 }
 
-/// Records an existing exported PNG by copying the file. Saving a screenshot
-/// already paid for PNG encoding, so history only duplicates the bytes.
 pub fn record_png_file(
     source: &Path,
     hash: u64,
@@ -107,8 +87,6 @@ fn record_png(
     let now = now_millis();
     let mut entries = entries();
     if let Some(first) = entries.first_mut().filter(|entry| entry.hash == hash) {
-        // Re-exporting the newest image refreshes its age instead of creating
-        // a duplicate entry.
         first.created_at = now;
         first.pin_shadow = pin_shadow;
         first.scale = scale;
@@ -128,9 +106,6 @@ fn record_png(
         return false;
     };
 
-    // The same screenshot can be copied, saved, and pinned again after other
-    // captures in between. Move the older copy to the front instead of
-    // leaving a second entry that the pin shortcut would show twice.
     if let Some(index) = entries.iter().position(|entry| entry.hash == hash) {
         let duplicate = entries.remove(index);
         if let Some(name) = Path::new(&duplicate.file).file_name() {
@@ -153,12 +128,6 @@ fn record_png(
     true
 }
 
-/// Returns the next older screenshot after the one matching `hash`.
-///
-/// The walk follows manifest order and stops at the oldest entry; it never
-/// wraps back to the newest, so one sequence cannot show an image twice. If
-/// `hash` does not belong to the history (for example a clipboard-only pin),
-/// the walk starts at the newest screenshot.
 pub fn cycle(hash: u64) -> Option<HistoryImage> {
     let entries = entries();
     if entries.is_empty() {
@@ -181,8 +150,6 @@ pub fn cycle(hash: u64) -> Option<HistoryImage> {
     None
 }
 
-/// First manifest position a walk may show: one past `hash`, or the newest
-/// entry when the source is not in the history.
 fn older_index(entries: &[HistoryEntry], hash: u64) -> usize {
     match entries.iter().position(|entry| entry.hash == hash) {
         Some(index) => index + 1,
@@ -190,18 +157,14 @@ fn older_index(entries: &[HistoryEntry], hash: u64) -> usize {
     }
 }
 
-/// Whether `hash` belongs to a screenshot in the current history.
 pub fn contains(hash: u64) -> bool {
     entries().iter().any(|entry| entry.hash == hash)
 }
 
-/// Whether the history has any entry, without decoding an image.
 pub fn has_entries() -> bool {
     !entries().is_empty()
 }
 
-/// Loads the history entry matching `hash`. Used to reopen a pin that was just
-/// closed without advancing the history walk.
 pub fn find(hash: u64) -> Option<HistoryImage> {
     let entries = entries();
     let directory = history_dir()?;
@@ -217,8 +180,6 @@ pub fn find(hash: u64) -> Option<HistoryImage> {
         })
 }
 
-/// Loads the newest exported screenshot. The pin shortcut falls back to this
-/// instead of keeping a full decoded frame in memory for the whole session.
 pub fn latest() -> Option<HistoryImage> {
     let entries = entries();
     let directory = history_dir()?;
@@ -231,7 +192,6 @@ pub fn latest() -> Option<HistoryImage> {
     })
 }
 
-/// Stable in-process hash for matching an image against history.
 pub fn hash_frame(frame: &RgbaFrame) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     let packed = frame.packed_pixels();
@@ -322,9 +282,6 @@ fn write_entries(directory: &Path, entries: &[HistoryEntry]) {
     }
 }
 
-/// Removes history images that no manifest entry references once they are
-/// older than the normal retention window. Recent orphans are kept so a
-/// concurrent record or a crash-recovery window cannot lose a fresh capture.
 fn cleanup_orphans(directory: &Path, now: u64, referenced: &HashSet<String>) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;

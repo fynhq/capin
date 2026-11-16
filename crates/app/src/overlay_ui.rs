@@ -1,8 +1,3 @@
-//! Pure overlay geometry and chrome helpers.
-//!
-//! The interaction state and window plumbing stay in `overlay`; these helpers
-//! only map physical rectangles to the elements drawn above the frozen frame.
-
 use core_types::PhysicalRect;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -42,9 +37,6 @@ pub(crate) fn fit_ratio_rect(
     clamp_to_monitor(clamped, size)
 }
 
-/// Keeps a ratio-locked selection inside the monitor while preserving the
-/// requested edge. Used by the info-bar width/height editor, where clamping
-/// only one dimension used to leave a 16:9 box at an arbitrary ratio.
 pub(crate) fn fit_ratio_to_bounds(
     desired_width: i32,
     ratio: f32,

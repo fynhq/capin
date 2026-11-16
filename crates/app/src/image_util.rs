@@ -6,9 +6,6 @@ use core_types::{PhysicalRect, PhysicalSize, RgbaFrame};
 use gpui_kit::*;
 use image::ImageEncoder;
 
-/// Builds a GPUI image from an owned frame, swapping RGBA to BGRA in place.
-/// Callers that need to keep the RGBA frame pass a clone instead of paying for
-/// a second full-size buffer inside the conversion.
 pub fn render_image(frame: RgbaFrame) -> Arc<RenderImage> {
     let width = frame.width();
     let height = frame.height();
@@ -17,19 +14,15 @@ pub fn render_image(frame: RgbaFrame) -> Arc<RenderImage> {
         pixel.swap(0, 2);
     }
 
-    // GPUI interprets RenderImage bytes as BGRA; only the byte order matters.
     let buffer = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(width, height, pixels)
         .expect("capture frames are validated before conversion");
     Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))
 }
 
-/// Copies a borrowed frame before converting it to a GPUI image.
 pub fn render_image_ref(frame: &RgbaFrame) -> Arc<RenderImage> {
     render_image(frame.clone())
 }
 
-/// One transparent pixel, used by overlays whose editor already paints the
-/// frozen monitor image and no longer needs a second full-screen background.
 pub fn transparent_image() -> Arc<RenderImage> {
     render_image(
         RgbaFrame::from_pixels(1, 1, vec![0, 0, 0, 0])
@@ -37,13 +30,11 @@ pub fn transparent_image() -> Arc<RenderImage> {
     )
 }
 
-/// Dimensions of the BGRA render image.
 pub fn image_size(image: &RenderImage) -> PhysicalSize {
     let size = image.size(0);
     PhysicalSize::new(size.width.0.max(0) as u32, size.height.0.max(0) as u32)
 }
 
-/// Samples one pixel of a BGRA render image as `[red, green, blue, alpha]`.
 pub fn image_pixel(image: &RenderImage, x: u32, y: u32) -> Option<[u8; 4]> {
     let size = image_size(image);
     if x >= size.width || y >= size.height {
@@ -55,10 +46,6 @@ pub fn image_pixel(image: &RenderImage, x: u32, y: u32) -> Option<[u8; 4]> {
     Some([pixel[2], pixel[1], pixel[0], pixel[3]])
 }
 
-/// Crops a BGRA render image and returns a tightly packed RGBA frame.
-///
-/// The render image stays the only full-size CPU copy while an overlay is
-/// open; only the selected region pays for an RGBA buffer.
 pub fn cropped_rgba(image: &RenderImage, rect: PhysicalRect) -> Option<RgbaFrame> {
     let size = image_size(image);
     let bounds = PhysicalRect::new(0, 0, size.width, size.height);
@@ -83,8 +70,6 @@ pub fn cropped_rgba(image: &RenderImage, rect: PhysicalRect) -> Option<RgbaFrame
     RgbaFrame::from_pixels(width as u32, height as u32, pixels).ok()
 }
 
-/// Builds a nearest-neighbour magnified crop around `center` for the overlay
-/// magnifier. `center` is in image-local physical pixels.
 pub fn magnifier_image(
     image: &RenderImage,
     center_x: i32,
@@ -190,16 +175,10 @@ impl image::GenericImageView for RenderFrameView<'_> {
     }
 }
 
-/// Builds the preview for a box-blur radius. The frame is downscaled by two
-/// before the Gaussian pass so the preview keeps the exported radius; the
-/// previous eighth-resolution preview compressed every strength into the same
-/// frosted look. The downscale reads the source frame directly instead of
-/// cloning a full RGBA image first.
 pub fn blurred_image(frame: &RgbaFrame, radius: u32) -> Arc<RenderImage> {
     blur_from_view(&FrameView(frame), frame.width(), frame.height(), radius)
 }
 
-/// Blur preview for editors that display a BGRA render image directly.
 pub fn blurred_image_from_render(image: &RenderImage, radius: u32) -> Arc<RenderImage> {
     let view = RenderFrameView::new(image);
     blur_from_view(&view, view.size.width, view.size.height, radius)
@@ -249,11 +228,6 @@ pub fn encode_png(frame: &RgbaFrame) -> Result<Vec<u8>, image::ImageError> {
     Ok(cursor.into_inner())
 }
 
-/// Copies a screenshot together with the formats native apps expect.
-///
-/// Windows legacy apps reject a PNG-only clipboard, so the platform layer
-/// writes a CF_DIB next to the PNG entry. Other platforms and failures fall
-/// back to the GPUI image clipboard.
 pub fn copy_png_bytes(bytes: Vec<u8>, frame: &RgbaFrame, cx: &mut App) {
     #[cfg(target_os = "windows")]
     {

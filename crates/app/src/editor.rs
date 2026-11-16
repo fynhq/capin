@@ -64,14 +64,11 @@ fn blur_image_index(radius: u32) -> usize {
         .unwrap_or(0)
 }
 
-/// What the pointer is currently over inside the image, used to swap the
-/// painted selection handles from the drawing crosshair to resize arrows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SelectionHover {
     None,
     Body,
     Handle(ResizeHandle),
-    /// Edge of the adjustable export frame in a full-canvas region editor.
     Region(RegionHandle),
 }
 
@@ -81,9 +78,6 @@ struct PanDraft {
 }
 
 thread_local! {
-    /// Inline editors own full-frame textures but are not OverlayView
-    /// instances. Track their window handles so app-driven close paths can
-    /// release textures before the renderer is torn down.
     static EDITOR_VIEWS: std::cell::RefCell<Vec<(WeakEntity<EditorView>, AnyWindowHandle)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -97,9 +91,6 @@ pub(crate) fn register_view(view: &Entity<EditorView>, window: &Window) {
     });
 }
 
-/// Releases editor textures for windows that are about to be removed. This
-/// mirrors the overlay release path and closes the gap for standalone pin and
-/// long-capture editors.
 pub(crate) fn release_images_for_windows(
     cx: &mut App,
     handles: &[AnyWindowHandle],
@@ -130,9 +121,6 @@ pub(crate) fn release_images_for_windows(
     });
 }
 
-/// Pins the standalone inline editor (long capture) that owns the pin
-/// shortcut. Overlay editors are handled by `overlay::pin_current` first;
-/// pin editors have nothing new to pin.
 pub(crate) fn has_open_editors() -> bool {
     EDITOR_VIEWS.with(|views| {
         views
@@ -166,24 +154,12 @@ pub(crate) fn pin_current(cx: &mut App) -> bool {
     false
 }
 
-/// Where an inline editor sits inside the full-screen capture overlay.
-/// `image_rect` is already in the overlay window's logical coordinates, so the
-/// editor can draw the annotated image exactly where the selection was instead
-/// of opening a separate window.
 #[derive(Clone, Copy)]
 struct InlineHost {
     image_rect: Bounds<Pixels>,
-    /// Logical origin of the surface that contains `image_rect`. Capture
-    /// overlays use the monitor origin; pin/long-capture editors use their
-    /// display origin, so the pin button can place output on the same screen.
     screen_origin: Point<Pixels>,
     capture: Option<InlineCapture>,
-    /// Long captures fit the full image first and allow wheel zoom/pan;
-    /// screenshot and pin editors must keep the captured pixel rect exact.
     zoomable: bool,
-    /// Client area used to fit the image. Set for zoomable editors so a crop
-    /// or undo can re-fit the new canvas instead of stretching it into the
-    /// original tall rect.
     fit_area: Option<Size<Pixels>>,
 }
 
@@ -203,13 +179,8 @@ pub(crate) struct FullCanvasInit {
     pub(crate) adjustable: bool,
 }
 
-/// One visual line produced by GPUI's text shaper. The editor and exporter use
-/// different text engines, so hit-testing and the caret must follow the same
-/// layout that the preview actually paints.
 #[derive(Clone, Copy)]
 struct TextLineBox {
-    /// UTF-8 byte offsets in the edited content. The newline that ends a hard
-    /// line is not part of any box, so the next hard line starts one byte later.
     start: usize,
     end: usize,
     x: f32,
@@ -218,9 +189,6 @@ struct TextLineBox {
     hard_line: usize,
 }
 
-/// Shapes every hard line. `shape_text` splits on `\n` and returns one
-/// `WrappedLine` per hard line; keeping only the first one made multi-line
-/// text hit-test and paint its caret against the first line.
 fn layout_annotation_text(
     window: &Window,
     text: &str,
@@ -410,18 +378,9 @@ pub(crate) struct EditorView {
     blur_images: [Option<Arc<RenderImage>>; BLUR_RADII.len()],
     images_released: bool,
     frame: Arc<RgbaFrame>,
-    /// Frozen monitor image behind an inline screenshot editor. Present only
-    /// for plain region captures, where the crop can be widened or shrunk
-    /// again while no annotation object is selected. The BGRA render image is
-    /// shared with the overlay, so widening a selection does not keep a second
-    /// full RGBA monitor frame alive.
     region_source: Option<Arc<RenderImage>>,
     pin_target: Option<u64>,
-    /// The pin being edited came from a region capture, which always displays
-    /// the composed shadow even when the export setting leaves it off.
     pin_shadow_always: bool,
-    /// Capture scale of a pin's stored effects; pin editors have no inline
-    /// capture descriptor to read it from.
     pin_effects_scale: f32,
     selection_hover: SelectionHover,
     pan_draft: Option<PanDraft>,
@@ -434,8 +393,6 @@ pub(crate) struct EditorView {
     appearance_subscription: Option<Subscription>,
     pub(crate) focus_handle: FocusHandle,
     inline: Option<InlineHost>,
-    /// Pure editing state. Field access goes through `Deref` so the split can
-    /// land incrementally without rewriting every call site.
     pub(crate) state: EditorState,
 }
 
@@ -460,10 +417,6 @@ impl EditorView {
         Self::new_with_image(frame, image, image_size, pin_target, cx)
     }
 
-    /// Builds an editor whose display image and coordinate space can differ
-    /// from the CPU frame used for export. Region screenshots pass the frozen
-    /// monitor BGRA image plus a cropped selection copy; pin and long-capture
-    /// editors pass the image built from their frame.
     fn new_with_image(
         frame: Arc<RgbaFrame>,
         image: Arc<RenderImage>,
@@ -471,8 +424,6 @@ impl EditorView {
         pin_target: Option<u64>,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Blur previews are built lazily: most captures never use the blur
-        // tool, and eagerly resizing four full frames cost startup CPU.
         let blur_images: [Option<Arc<RenderImage>>; BLUR_RADII.len()] =
             std::array::from_fn(|_| None);
         let accent_hex = system_accent_hex().unwrap_or(0x4C9AFF);
@@ -602,10 +553,6 @@ impl EditorView {
             }));
     }
 
-    /// Builds an editor that paints directly inside an existing overlay or a
-    /// dedicated inline editor surface. The image stays in place; screenshot
-    /// capture passes `capture: Some`, while pin and long-capture editing pass
-    /// `None` and only need the image rect plus its screen origin.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_inline(
         frame: Arc<RgbaFrame>,
@@ -703,8 +650,6 @@ impl EditorView {
             .max(0.01)
     }
 
-    /// Recomputes the painted-handle hover state. Returns true when the cursor
-    /// style has to be repainted.
     fn update_selection_hover(&mut self, point: PhysicalPoint, window: &Window) -> bool {
         let scale = self.image_scale(window);
         let handle = self
@@ -733,16 +678,11 @@ impl EditorView {
         (self.image_scale(window) / self.view_zoom.max(0.01)).max(0.01)
     }
 
-    /// The selection area inside the displayed image. A composed window frame
-    /// has transparent padding around the captured content, so the info bar and
-    /// toolbar anchor to the content rect, not the padded frame.
     pub(crate) fn inline_selection_rect(&self, window: &Window) -> Option<Bounds<Pixels>> {
         let inline = self.inline?;
         let capture = inline.capture?;
         let image = self.image_view_rect(window);
         if self.full_canvas.is_some() {
-            // Full-canvas editors show the whole monitor; the selection is an
-            // arbitrary rect inside it, not the image boundary.
             let selection = self.live_selection_rect().unwrap_or(capture.region.rect);
             return full_selection_bounds(image, self.image_size, selection);
         }
@@ -757,10 +697,6 @@ impl EditorView {
         })
     }
 
-    /// The selection frame the user currently sees. While the export frame is
-    /// being dragged this is the live preview rectangle, so the dim mask,
-    /// border, handles and size readout follow the pointer in real time the
-    /// way the initial capture selection does.
     fn live_selection_rect(&self) -> Option<PhysicalRect> {
         self.region_drag
             .filter(|_| self.full_canvas.is_some())
@@ -768,15 +704,11 @@ impl EditorView {
             .or_else(|| self.full_selection())
     }
 
-    /// Selection frame in full-monitor physical pixels.
     fn full_selection(&self) -> Option<PhysicalRect> {
         self.full_canvas.as_ref()?;
         Some(self.inline?.capture?.region.rect)
     }
 
-    /// Builds the annotation document for the current export frame. Full-canvas
-    /// editors keep objects in monitor coordinates, so export translates them
-    /// into the cropped output instead of cropping the live document.
     fn action_document(&self) -> AnnotationDocument {
         let Some(selection) = self.full_selection() else {
             return self.document.clone();
@@ -784,7 +716,6 @@ impl EditorView {
         cropped_document(&self.document, selection)
     }
 
-    /// Selection frame in window logical coordinates for pin placement.
     fn full_selection_screen_bounds(&self) -> Option<Bounds<Pixels>> {
         let selection = self.full_selection()?;
         let inline = self.inline?;
@@ -831,9 +762,6 @@ impl EditorView {
         let toolbar_bottom = toolbar_top + f32::from(toolbar.size.height);
         let anchor = self.toolbar_anchor(window);
         let anchor_bottom = f32::from(anchor.origin.y) + f32::from(anchor.size.height);
-        // Keep the options on the same side as the toolbar, i.e. further away
-        // from the capture. Placing them between the toolbar and the image
-        // covered the bottom of small selections.
         let toolbar_below = toolbar_top >= anchor_bottom;
         let below = toolbar_bottom + 6.0;
         let above = toolbar_top - OPTIONS_PANEL_HEIGHT - 6.0;
@@ -1178,9 +1106,6 @@ impl EditorView {
         cx.notify();
     }
 
-    /// Re-fits the canvas after its pixel size changed. Without this a crop or
-    /// an undo kept the original tall display rect, which stretched the new
-    /// image to the old aspect ratio.
     fn refit_zoomable_view(&mut self) {
         let Some(mut inline) = self.inline else {
             return;
@@ -1213,20 +1138,12 @@ impl EditorView {
         self.state.record_canvas_snapshot(snapshot);
     }
 
-    /// Rebuilds the GPUI images for the current frame and returns the old
-    /// uploads to the window atlas. Direct `img(RenderImage)` entries stay in
-    /// the atlas until dropped, so every canvas replacement has to release
-    /// the previous set explicitly.
     fn refresh_frame_images(&mut self, cx: &mut Context<Self>) {
         let image = image_util::render_image_ref(&self.frame);
         let old_image = std::mem::replace(&mut self.image, image);
         let old_blur_images =
             std::mem::replace(&mut self.blur_images, std::array::from_fn(|_| None));
         self.images_released = false;
-        // The update runs with the window removed from `App.windows`, so an
-        // immediate `App::drop_image` cannot reach the editor's atlas. Defer
-        // the drop until the update finished; otherwise every F5 refresh or
-        // canvas replacement leaks the previous full image.
         let mut dropped = Vec::with_capacity(1 + old_blur_images.len());
         dropped.push(old_image);
         dropped.extend(old_blur_images.into_iter().flatten());
@@ -1237,9 +1154,6 @@ impl EditorView {
         });
     }
 
-    /// Returns the cached blurred preview for `radius`, creating it on first
-    /// use. The blur tool is rare, so the four previews no longer cost a
-    /// resize and blur over the full frame on every editor open.
     fn blur_image(&mut self, radius: u32, _cx: &mut Context<Self>) -> Arc<RenderImage> {
         let index = blur_image_index(radius);
         if let Some(image) = &self.blur_images[index] {
@@ -1254,9 +1168,6 @@ impl EditorView {
         image
     }
 
-    /// Releases the editor's atlas entries before the window is removed.
-    /// `on_release` runs after the window has left `App::windows`, so dropping
-    /// only there cannot reach the retained Windows renderer.
     pub(crate) fn release_images(&mut self, cx: &mut Context<Self>) {
         if self.images_released {
             return;
@@ -1268,8 +1179,6 @@ impl EditorView {
         }
     }
 
-    /// Releases textures when the platform asks to close the window (Alt+F4,
-    /// native close button, app quit) before the window leaves `App::windows`.
     pub(crate) fn watch_close(&self, window: &Window, cx: &mut Context<Self>) {
         let view = cx.entity().downgrade();
         window.on_window_should_close(cx, move |_, cx| {
@@ -1416,9 +1325,6 @@ impl EditorView {
         if let Some(draft) = self.region_drag.as_mut() {
             draft.current = rect;
         }
-        // Keep the captured image and annotations at their current size while
-        // the crop frame moves; resizing the image element here stretched the
-        // already-captured pixels until the pointer was released.
         cx.notify();
     }
 
@@ -1443,8 +1349,6 @@ impl EditorView {
                 capture.region = CaptureRegion::new(capture.region.monitor, draft.current);
                 capture.target = CaptureTarget::Region(capture.region);
             }
-            // Keep the object data, but do not leave a hidden object selected
-            // outside the new export frame.
             if let Some(id) = self.document.selected()
                 && self
                     .document
@@ -1478,9 +1382,6 @@ impl EditorView {
             let translated = annotation.clone().translated(-dx, -dy);
             document.add(translated.shape, translated.style);
         }
-        // `add` selects the newest object; a crop should leave the document
-        // deselected instead of popping annotation handles the user did not
-        // ask for.
         document.select(None);
         document.clear_history();
         self.frame = Arc::new(cropped);
@@ -1541,11 +1442,6 @@ impl EditorView {
         cx.notify();
     }
 
-    /// Leaves the current annotation state exactly like the first Escape
-    /// press: cancel the text or polyline in progress, close the tool
-    /// panels, or drop the selection and return to Select. Returns false
-    /// when the editor is already idle, so the caller can decide whether
-    /// Escape should close the editor.
     fn cancel_annotation_state(&mut self, cx: &mut Context<Self>) -> bool {
         if self.text_edit.is_some() {
             self.cancel_text(cx);
@@ -1577,11 +1473,6 @@ impl EditorView {
         false
     }
 
-    /// Right click never leaves the capture. While annotating it behaves like
-    /// Escape and leaves the tool; an annotation already in progress is
-    /// confirmed first (text commit, polyline finish, crop apply). The image
-    /// layer carries this handler as well, because its opaque hitbox blocks
-    /// events from reaching handlers on the editor root.
     fn right_click(&mut self, cx: &mut Context<Self>) {
         cx.stop_propagation();
         if self.text_edit.is_some() {
@@ -1655,9 +1546,6 @@ impl EditorView {
         handles
     }
 
-    /// Transparent grab bands on the export frame edges and corners. They sit
-    /// above the image layer so a frame edge stays draggable even when an
-    /// annotation runs along it, and they make the 9px handles easier to grab.
     fn region_edge_bands(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         if !self.can_adjust_region() {
             return Vec::new();
@@ -1744,10 +1632,6 @@ impl EditorView {
         bands
     }
 
-    /// Selection outline and resize handles as regular elements. They sit
-    /// above the image layer (so handles on the image edge are not clipped)
-    /// and are rebuilt with every render, unlike the scene-painted canvas
-    /// selection that could lag behind a click.
     fn selection_layer(&self, window: &Window) -> Option<AnyElement> {
         if self.text_edit.is_some() {
             return None;
@@ -1937,9 +1821,6 @@ impl EditorView {
         Some(PhysicalPoint::new(x, y))
     }
 
-    /// Whether a left press should start panning a zoomable long-capture
-    /// preview instead of drawing or selecting. Empty image area pans; an
-    /// annotation body or its resize handle keeps its editing behavior.
     fn zoomable_pan_start(&self, position: Point<Pixels>, window: &Window) -> bool {
         let Some(inline) = self.inline else {
             return false;
@@ -1976,9 +1857,6 @@ impl EditorView {
         Some(point)
     }
 
-    /// Export-frame edge under `point`. Full-canvas region editors keep the
-    /// whole monitor on screen, so these handles must follow the selection
-    /// rect instead of the monitor boundary.
     fn region_handle_at(&self, point: PhysicalPoint) -> Option<RegionHandle> {
         if !self.can_adjust_region() {
             return None;
@@ -1996,8 +1874,6 @@ impl EditorView {
         edge_resize_handle(rect, point, (8.0 / scale).max(1.0))
     }
 
-    /// Applies a typed `RRGGBB` value. Returns false while the buffer is not a
-    /// complete color, so the panel can stay open.
     fn apply_custom_color(&mut self, cx: &mut Context<Self>) -> bool {
         let hex = self.custom_color_buffer.trim().trim_start_matches('#');
         if hex.len() != 6 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
@@ -2289,8 +2165,6 @@ impl EditorView {
         );
     }
 
-    /// Inserts clipboard text at the caret. Multi-line text keeps its line
-    /// breaks so pasted notes match what the source application showed.
     fn paste_text(&mut self, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| {
             item.entries().iter().find_map(|entry| match entry {
@@ -2534,8 +2408,6 @@ impl EditorView {
                     }));
                 swatches.push(swatch.into_any_element());
             }
-            // The palette is not limited to the six presets: this swatch opens
-            // an exact color panel with a hue strip and a hex field.
             let custom_label = t(language, "editor.custom_color").to_owned();
             let custom_active = self.custom_color_open
                 || !settings_state::ANNOTATION_COLORS
@@ -3427,8 +3299,6 @@ impl EditorView {
                     |this, cx| this.toggle_crop(cx),
                 ));
 
-            // Long captures only support cropping; rotation and flipping are
-            // reserved for pins, which keep the full image transform set.
             if self.pin_target.is_some() {
                 panel = panel
                     .child(self.more_row(
@@ -3582,14 +3452,10 @@ impl EditorView {
         }
         match self.inline.and_then(|inline| inline.capture) {
             Some(capture) => !matches!(capture.target, CaptureTarget::Window(_)),
-            // Pin editors keep the capture effects without an inline capture
-            // descriptor; long-capture editors never have region effects.
             None => self.pin_target.is_some(),
         }
     }
 
-    /// Effects worth carrying into a pin document. Window captures already
-    /// have their system frame and must not inherit a stale region radius.
     fn stored_region_effects(&self) -> RegionEffects {
         if self.region_effects_active() {
             self.effects
@@ -3598,8 +3464,6 @@ impl EditorView {
         }
     }
 
-    /// Effects applied to a pin created from this editor. Region pins always
-    /// compose the shadow; copy/save still follow the configured effects.
     fn pin_effects(&self) -> RegionEffects {
         let mut effects = self.stored_region_effects();
         if self.region_pin() {
@@ -3608,8 +3472,6 @@ impl EditorView {
         effects
     }
 
-    /// Whether the pin being created or edited keeps the shadow regardless of
-    /// the export setting.
     fn region_pin(&self) -> bool {
         self.pin_shadow_always
             || self
@@ -3618,9 +3480,6 @@ impl EditorView {
                 .is_some_and(|capture| matches!(capture.target, CaptureTarget::Region(_)))
     }
 
-    /// Long-capture results have no composed shadow and rely on the native
-    /// window shadow. Region pins now compose their own, and window/pin
-    /// editors already carry the captured edge shadow.
     fn pin_native_shadow(&self) -> bool {
         self.inline.is_some()
             && self.inline.and_then(|inline| inline.capture).is_none()
@@ -4042,10 +3901,6 @@ impl EditorView {
                     });
                 let export_padding = if self.effects.shadow { 0 } else { pin_padding };
                 let placement = inline_host.map(|inline| {
-                    // The editor image may already be zoomed; use its displayed
-                    // scale so the pin opens at the same size and center. This
-                    // also keeps pins on the same monitor as the capture, long
-                    // capture, or source pin.
                     let display_scale = if self.image_size.width == 0 {
                         1.0
                     } else {
@@ -4096,14 +3951,10 @@ impl EditorView {
                     pin_padding,
                     effects_scale,
                 );
-                // Pin windows must not be created inside the toolbar's input
-                // callback; close the editor first and open the pin next turn.
                 cx.defer(move |cx| {
                     if inline_host.is_some() {
                         crate::windows::close_capture_auxiliary(cx, handles);
                     }
-                    // Encoding blocks for a few milliseconds; run it after the
-                    // editor closes instead of inside the toolbar callback.
                     if record_history && let Ok(bytes) = image_util::encode_png(&export) {
                         crate::capture_history::record_png_bytes(
                             &bytes,
@@ -4158,9 +4009,6 @@ impl EditorView {
                 let scale = self.region_effects_scale();
                 let pin_effects = self.pin_effects();
                 let pin_padding = pin_effects.padding(scale);
-                // Pin editors display region captures with a composed shadow
-                // even when the export setting is off; copy/save keep following
-                // the configured effects.
                 let (output, pin_output) = if pin_update.is_some() {
                     let copy = if self.region_effects_active() {
                         self.effects.apply(raw.clone(), scale)
@@ -4336,8 +4184,6 @@ impl EntityInputHandler for EditorView {
             let range = range_utf16
                 .as_ref()
                 .map(|range| edit.range_from_utf16(range));
-            // A committed IME result arrives with no range; `replace` then
-            // consumes the marked composition range before inserting it.
             edit.replace(range, new_text, false);
             window.notify_text_input_changed(&self.focus_handle);
             cx.notify();
@@ -4423,9 +4269,6 @@ impl Render for EditorView {
         let status_serial = self.status_serial;
         let accent_hex = self.accent_hex;
 
-        // Build one layer per annotation in document order. Rendering every
-        // vector shape in a single canvas put all of them above text and
-        // numbers, so the preview no longer matched the exported z-order.
         let mut object_layers: Vec<AnyElement> = Vec::with_capacity(objects.len());
         for annotation in &objects {
             match &annotation.shape {
@@ -4773,8 +4616,6 @@ impl Render for EditorView {
             match self.selection_hover {
                 SelectionHover::Handle(handle) => handle_cursor(handle),
                 SelectionHover::Region(handle) => region_handle_cursor(handle),
-                // Any annotation under the pointer can be selected and moved,
-                // even while a drawing tool is active.
                 SelectionHover::Body => crate::ui::open_hand_cursor(),
                 SelectionHover::None
                     if self.tool == Tool::Select
@@ -4790,9 +4631,6 @@ impl Render for EditorView {
             div().absolute().inset_0().on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    // The image layer blocks this layer for clicks on the
-                    // image; keep the bounds check as a safeguard for the
-                    // first frame after the image rect changes.
                     if this.image_view_rect(window).contains(&event.position) {
                         cx.stop_propagation();
                         return;
@@ -4840,8 +4678,6 @@ impl Render for EditorView {
             0.0
         };
         let frame_overlay = selection_clip.map(|clip| {
-            // Paint in window coordinates: the canvas is anchored to the image
-            // layer, while the mask and its accent ring share one outline.
             let origin = image_rect.origin;
             let hole = Bounds {
                 origin: point(
@@ -4902,9 +4738,6 @@ impl Render for EditorView {
             .h(image_rect.size.height)
             .cursor(image_cursor)
             .overflow_hidden()
-            // Block the inline backdrop behind the image: without this the
-            // same click selected an object and then reached the backdrop,
-            // which immediately cleared the selection again.
             .occlude()
             .child(
                 img(self.image.clone())
@@ -4926,8 +4759,6 @@ impl Render for EditorView {
                     ScrollDelta::Pixels(delta) => (f32::from(delta.x), f32::from(delta.y)),
                     ScrollDelta::Lines(delta) => (delta.x * 50.0, delta.y * 50.0),
                 };
-                // Long-capture preview: the wheel zooms directly, anchored at
-                // the pointer. Panning is left-drag only, so Ctrl is optional.
                 if zoomable {
                     let delta = if y.abs() >= x.abs() { y } else { x };
                     let steps = (delta / 50.0).clamp(-4.0, 4.0);
@@ -4953,9 +4784,6 @@ impl Render for EditorView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    // Clicking the image must keep keyboard focus in the
-                    // editor, otherwise Delete/arrow shortcuts stop working
-                    // after a toolbar interaction.
                     let focus = this.focus_handle.clone();
                     window.focus(&focus, cx);
                     if this.text_edit.is_none()
@@ -4972,9 +4800,6 @@ impl Render for EditorView {
                     let Some(display_point) = this.to_display_point(event.position, window) else {
                         return;
                     };
-                    // A previous gesture can outlive its mouse-up when the
-                    // pointer leaves the window or the platform consumes the
-                    // release. Every new press starts from a clean transform.
                     if this.region_drag.is_some() {
                         this.finish_region_drag(cx);
                     }
@@ -4984,9 +4809,6 @@ impl Render for EditorView {
                         .full_selection()
                         .is_some_and(|selection| !selection.contains(display_point))
                     {
-                        // Pressing just outside the export frame still grabs the
-                        // nearest frame edge; the pointer may sit on the border
-                        // itself while the selection is the real target.
                         if let Some(handle) = this.region_handle_at(display_point) {
                             this.begin_region_drag(handle, cx);
                             cx.stop_propagation();
@@ -4994,10 +4816,6 @@ impl Render for EditorView {
                         return;
                     }
                     let point = display_point;
-                    // Selection handles stay live regardless of the active
-                    // drawing tool: after drawing a shape the tool does not
-                    // switch to Select, and dragging a painted handle should
-                    // still resize instead of starting another draft.
                     let scale = this.image_scale(window);
                     if let Some(annotation) = this
                         .document
@@ -5031,9 +4849,6 @@ impl Render for EditorView {
                         this.commit_text(cx);
                     }
                     let hit = this.document.hit_test(point);
-                    // With nothing selected, the image edge is a live crop
-                    // handle. Clicking an object still wins so edge-adjacent
-                    // annotations remain selectable.
                     if hit.is_none()
                         && this.can_adjust_region()
                         && let Some(handle) = this.region_handle_at(point)
@@ -5042,19 +4857,12 @@ impl Render for EditorView {
                         cx.stop_propagation();
                         return;
                     }
-                    // Text edits are a double-click affordance on the object
-                    // itself, not on the Select tool, so a just-created text
-                    // annotation can be reopened without switching tools.
                     if event.click_count >= 2 && hit.is_some() && this.edit_text_at(point, cx) {
                         let focus = this.focus_handle.clone();
                         window.focus(&focus, cx);
                         cx.stop_propagation();
                         return;
                     }
-                    // Clicking any existing object selects it and starts a
-                    // move, even while a drawing tool is still active. Without
-                    // this, only the shape that had just been drawn could be
-                    // moved; older annotations could never be selected again.
                     if this.polyline_draft.is_none()
                         && let Some(id) = hit
                     {
@@ -5085,8 +4893,6 @@ impl Render for EditorView {
                         cx.notify();
                         return;
                     }
-                    // Starting another annotation with a drawing tool drops
-                    // the previous selection before the new draft begins.
                     if this.tool != Tool::Select && this.document.selected().is_some() {
                         this.document.select(None);
                         this.selection_hover = SelectionHover::None;
@@ -5190,9 +4996,6 @@ impl Render for EditorView {
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                // The export-frame grab bands sit above this layer; their drag
-                // must keep following the pointer even though it moves over
-                // the opaque image, which never reaches the editor root.
                 if this.region_drag.is_some() {
                     this.update_region_drag(event.position, event.modifiers, cx);
                     return;
@@ -5208,10 +5011,6 @@ impl Render for EditorView {
                 let Some(point) = this.to_image_point(event.position, window) else {
                     return;
                 };
-                // Transforms commit on every move and end on mouse-up or
-                // mouse-exit. Do not cancel on `pressed_button == None`: some
-                // Windows move events omit the button state, which made a
-                // selected object impossible to drag.
                 if this.move_draft.is_some() || this.resize_draft.is_some() {
                     let changed = if this.resize_draft.is_some() {
                         this.update_resize(point)
@@ -5281,10 +5080,6 @@ impl Render for EditorView {
                         return;
                     }
                     if this.move_draft.take().is_some() {
-                        // The move is already committed by the last pointer
-                        // move. Never reapply the mouse-up position: some
-                        // platforms report it late or not at all, and using a
-                        // stale value would send the object back or jump it.
                         this.status = None;
                         cx.notify();
                         return;
@@ -5309,9 +5104,6 @@ impl Render for EditorView {
             .on_mouse_exit(cx.listener(|this, _, _, cx| {
                 let hover_reset = this.selection_hover != SelectionHover::None;
                 this.selection_hover = SelectionHover::None;
-                // A drag that ends outside the image keeps the geometry it
-                // already committed on the last move; only the gesture state
-                // has to be cleared.
                 let mut changed = hover_reset;
                 if this.move_draft.take().is_some() {
                     changed = true;
@@ -5331,9 +5123,6 @@ impl Render for EditorView {
                     cx.notify();
                 }
             }))
-            // A release over a toolbar or panel never reaches this image
-            // layer's mouse-up handler; finish the export-frame drag from the
-            // outside path so the frame cannot stay stuck mid-resize.
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseUpEvent, _window, cx| {
@@ -5415,10 +5204,6 @@ impl Render for EditorView {
                     if this.region_drag.is_some() {
                         this.finish_region_drag(cx);
                     }
-                    // Toolbars and panels overlap the image on small captures
-                    // and consume the mouse-up before the image layer sees it.
-                    // Finish any in-flight drag here; the geometry itself was
-                    // already committed by the last move.
                     let mut changed = false;
                     if this.move_draft.take().is_some() {
                         changed = true;
@@ -5506,10 +5291,6 @@ impl Render for EditorView {
                     return;
                 }
                 if this.text_edit.is_some() {
-                    // While an IME composition is in flight, Enter, Esc,
-                    // arrows and Backspace belong to the input method. Handling
-                    // them here committed the pinyin composition together with
-                    // the final Chinese text.
                     if this
                         .text_edit
                         .as_ref()
@@ -5598,9 +5379,6 @@ impl Render for EditorView {
                         this.export(false, cx);
                         return;
                     }
-                    // While editing, swallow document-level shortcuts so
-                    // Cmd/Ctrl+Z cannot undo an object out from under the
-                    // in-flight text edit.
                     return;
                 }
                 if this.polyline_draft.is_some() {
@@ -5692,8 +5470,6 @@ impl Render for EditorView {
                         this.restore_region_image_rect(scale, cx);
                         return;
                     }
-                    // First Escape clears the current annotation selection or
-                    // active drawing tool; only the next one leaves the editor.
                     if this.cancel_annotation_state(cx) {
                         return;
                     }
@@ -5834,9 +5610,6 @@ struct EditorOverlayHost {
 
 impl Render for EditorOverlayHost {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        // The editor itself is transparent outside the image. A full-window
-        // scrim keeps pin/long-capture editing modal without opening a second
-        // editor page; the image and toolbar paint above it.
         div()
             .relative()
             .size_full()
@@ -5856,8 +5629,6 @@ fn inline_editor_window_kind() -> WindowKind {
     }
 }
 
-/// Edits a pin at its current screen position. The pin window remains alive
-/// underneath; this surface only replaces the old standalone editor window.
 pub fn open_pin_editor_overlay(
     pin_id: u64,
     frame: Arc<RgbaFrame>,
@@ -5865,9 +5636,6 @@ pub fn open_pin_editor_overlay(
     edit_state: Option<crate::pin::PinEditState>,
     cx: &mut App,
 ) -> bool {
-    // The caller already resolved the unannotated base (or the flattened pin
-    // when a compact base could not be decoded); only the vector document and
-    // effects come from the edit state here.
     let (document, effects, shadow_always, display_padding, effects_scale) = match edit_state {
         Some(state) => (
             Some(state.document),
@@ -5896,9 +5664,6 @@ pub fn open_pin_editor_overlay(
         return false;
     };
     let display_bounds = display.bounds();
-    // Pins with composed effects display the base inset by the shadow padding;
-    // open the editor on that inner rect so the base is neither stretched nor
-    // re-shadowed.
     let output_width = frame.width() as f32 + display_padding as f32 * 2.0;
     let display_scale = f32::from(pin_bounds.size.width) / output_width.max(1.0);
     let inset = display_padding as f32 * display_scale;
@@ -5930,9 +5695,6 @@ pub fn open_pin_editor_overlay(
     )
 }
 
-/// Opens a stitched long capture in the same in-place editor surface. The
-/// tall image is initially fit to the capture monitor; wheel zoom/pan keeps
-/// full-resolution detail reachable without a separate editor page.
 pub fn open_long_capture_inline(
     frame: RgbaFrame,
     monitor_id: MonitorId,
@@ -5963,9 +5725,6 @@ pub fn open_long_capture_inline(
                     px(monitor.bounds.size.height as f32 / scale),
                 ),
             };
-            // `WindowOptions` uses display-local coordinates on macOS; passing
-            // the virtual-desktop origin pushed the result off-screen on a
-            // secondary display.
             (
                 crate::display::window_bounds_on_monitor(monitor, global),
                 Some(DisplayId::new(monitor.id.raw())),
@@ -6007,9 +5766,6 @@ pub fn open_long_capture_inline(
 }
 
 fn fit_frame_rect(image_size: PhysicalSize, area: Size<Pixels>) -> Bounds<Pixels> {
-    // Keep the result clear of the macOS menu bar (which can be up to 37 pt on
-    // notched displays) and the window edges elsewhere, so a tall capture
-    // never opens partially off-screen.
     const MARGIN: f32 = 44.0;
     const GAP: f32 = 8.0;
     let area_width = f32::from(area.width);
@@ -6055,17 +5811,12 @@ fn open_inline_editor_window(
         WindowBackgroundAppearance::Transparent,
     );
 
-    // Accessories are not brought forward by ordering a window front; make
-    // sure the pin/long-capture editor can become key before opening it.
     cx.activate(true);
     match gpui_kit::open_window(options, cx, move |window, cx| {
         if let Err(error) = apply_window_style(&*window, WindowStyle::INLINE_EDITOR) {
             log_error!("editor", "failed to style inline editor: {error}");
         }
         hide_native_border(&*window);
-        // The popup frame is only on the left, right and bottom, but GPUI
-        // splits its height evenly when placing the window. Align the client
-        // area so annotations land on the pixels they were drawn over.
         crate::ui::align_client_to_bounds(&*window, window_bounds);
         let editor = cx.new(|cx| {
             let mut editor = EditorView::new_inline(

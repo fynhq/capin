@@ -1,10 +1,3 @@
-//! System-native surfaces for the capture overlay and annotation chrome.
-//!
-//! The screenshot page floats over arbitrary content, so it uses an opaque-
-//! enough neutral material with a hairline border and a soft shadow. Colors
-//! follow the platform's light/dark appearance and use native flyout values on
-//! Windows and popover values on macOS.
-
 #[cfg(not(target_os = "macos"))]
 use core_types::prefers_dark_foreground;
 use gpui_kit::*;

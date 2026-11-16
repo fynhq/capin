@@ -11,22 +11,12 @@ const SHADOW_OFFSET: f32 = 6.0;
 const SHADOW_BLUR: f32 = 16.0;
 const SHADOW_OPACITY: f32 = 0.35;
 
-/// Composes a window capture with the fixed window styling: the system corner
-/// radius, a system-style drop shadow, the configured background and padding.
-/// macOS 13 captures include the native shadow, so the composed shadow is
-/// skipped there; macOS 14+ captures drop it and receive the composed fallback.
 pub fn compose_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> RgbaFrame {
     let settings = settings_state::get();
     let scale = scale.max(0.1);
-    // WGC returns the window surface with a 1px fringe of non-client pixels.
-    // Painting the old light border over it left a white-looking frame on
-    // dark windows; trim the fringe instead and keep the visible edge clean.
     #[cfg(target_os = "windows")]
     let frame = trim_capture_fringe(frame);
     let fallback_radius = core_capture::window_corner_radius(id, scale);
-    // macOS 14+ captures keep the native window shape in their alpha channel.
-    // Measuring it matches Tahoe's larger window corners and any app-specific
-    // radius instead of assuming one value per release.
     #[cfg(target_os = "macos")]
     let corner_radius = if platform_window::window_capture_includes_native_shadow() {
         fallback_radius
@@ -59,11 +49,6 @@ pub fn compose_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> Rgb
     }
 }
 
-/// macOS window screenshots carry a one-point hairline around the window.
-/// ScreenCaptureKit's desktop-independent window image exposes only the
-/// window's content, so the system outline has to be painted back on the
-/// composed frame. Keep the dark outline close to the system's subtle edge;
-/// a brighter white line was reading as an extra frame inside the window.
 #[cfg(target_os = "macos")]
 fn system_border(scale: f32) -> Option<Border> {
     let width = (scale.max(0.1)).round().max(1.0) as u32;
@@ -79,9 +64,6 @@ fn system_border(scale: f32) -> Option<Border> {
     })
 }
 
-/// Windows window screenshots keep a 1px system border. Paint it inside the
-/// captured content so the composed image does not grow an extra pixel beyond
-/// the window edge; the shadow still starts at that edge.
 #[cfg(target_os = "windows")]
 fn system_border(_scale: f32) -> Option<Border> {
     let light = platform_window::system_uses_light_theme().unwrap_or(true);
@@ -96,10 +78,6 @@ fn system_border(_scale: f32) -> Option<Border> {
     })
 }
 
-/// Removes the non-client fringe Windows Graphics Capture includes around a
-/// window surface. The fringe reads as a light or dark hairline once the
-/// capture is placed on a background, so every window screenshot would
-/// otherwise get a visible 1px frame.
 #[cfg(target_os = "windows")]
 fn trim_capture_fringe(frame: RgbaFrame) -> RgbaFrame {
     let width = frame.width();

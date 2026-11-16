@@ -24,9 +24,6 @@ mod imp {
 
     thread_local! {
         static TRAY: RefCell<Option<TrayIcon>> = const { RefCell::new(None) };
-        /// Tracks the Windows taskbar variant currently painted so a light/dark
-        /// switch swaps the glyph without rebuilding the tray. macOS uses a
-        /// template image and lets AppKit recolour it, so it has no such state.
         #[cfg(target_os = "windows")]
         static TRAY_LIGHT: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     }
@@ -53,10 +50,6 @@ mod imp {
             .with_menu_on_left_click(false)
             .with_menu_on_right_click(true)
             .with_tooltip("Capin");
-        // The macOS menu bar can be tinted independently of the app
-        // appearance, so a glyph picked from `NSApp.effectiveAppearance` can
-        // turn black on a dark menu bar. A template image lets AppKit draw
-        // the glyph in the colour the menu bar actually uses.
         #[cfg(target_os = "macos")]
         let builder = builder.with_icon_templated(icon);
         #[cfg(not(target_os = "macos"))]
@@ -86,8 +79,6 @@ mod imp {
         let quit = MenuItem::with_id(MENU_QUIT, t(language, "menu.quit"), true, None);
         let mut items: Vec<&dyn IsMenuItem> = vec![&start, &settings];
 
-        // Click-through pins add a release entry, while the normal menu stays
-        // at Start / Settings / Restart / Quit.
         let release_pins = (crate::pin::click_through_count() > 0).then(|| {
             MenuItem::with_id(
                 MENU_RELEASE_PINS,
@@ -106,7 +97,6 @@ mod imp {
         Some(menu)
     }
 
-    /// Rebuilds the tray menu after a language change.
     pub fn refresh_menu() {
         TRAY.with(|slot| {
             if let Some(tray) = slot.borrow().as_ref()
@@ -118,12 +108,6 @@ mod imp {
     }
 
     fn load_icon() -> Option<Icon> {
-        // Windows uses the raw 32 px glyph on the taskbar. macOS menu bar
-        // items follow the HIG at 16 pt with breathing room, so that platform
-        // ships a 44 px asset whose 32 px glyph is centred in a transparent
-        // margin; AppKit scales it to 22 pt (the menu bar cap). The macOS
-        // asset is installed as a template image, so only its alpha shape is
-        // used and the two-ring glyph stays identical to the Windows icon.
         #[cfg(target_os = "macos")]
         let bytes: &[u8] = include_bytes!("../../../assets/icon/tray/capin_tray_light_macos.png");
         #[cfg(not(target_os = "macos"))]
@@ -143,14 +127,9 @@ mod imp {
         platform_window::system_taskbar_uses_light_theme().unwrap_or(false)
     }
 
-    /// macOS recolours the template image itself, so there is nothing to swap.
     #[cfg(target_os = "macos")]
     fn refresh_icon_for_theme() {}
 
-    /// Re-picks the Windows taskbar glyph when the taskbar flips between light
-    /// and dark. The tray surface is owned by the platform, so no GPUI
-    /// appearance callback reaches us; a low-frequency poll is the portable
-    /// signal.
     #[cfg(target_os = "windows")]
     fn refresh_icon_for_theme() {
         let light = surface_is_light();
@@ -182,8 +161,6 @@ mod imp {
                 ticks = ticks.wrapping_add(1);
                 if ticks.is_multiple_of(10) {
                     refresh_icon_for_theme();
-                    // Keeps the focus-return target current even when Capin
-                    // is active (a tray click can consume the previous app).
                     crate::overlay::remember_frontmost_application();
                 }
 
@@ -223,8 +200,6 @@ mod imp {
 
     fn handle_action(action: &str, cx: &mut App) {
         match action {
-            // Starting a capture keeps an open settings window in place; it is
-            // part of the frozen screen the user sees in the overlay.
             MENU_START => {
                 if crate::overlay::has_open_overlays() {
                     crate::overlay::close_open_overlays(cx);
@@ -251,9 +226,6 @@ mod imp {
 
         cx.defer(move |cx| {
             crate::windows::close_auxiliary(cx, handles);
-            // Let the closed window leave the compositor without blocking the
-            // UI thread. Capture itself excludes Capin windows, so this delay
-            // is only a visual cleanup.
             cx.spawn(async move |cx| {
                 cx.background_executor()
                     .timer(Duration::from_millis(50))
@@ -265,8 +237,6 @@ mod imp {
     }
 
     pub fn restart(cx: &mut App) {
-        // Release the single-instance lock before spawning: the replacement
-        // process starts while this one is still exiting.
         crate::storage::release_single_instance();
         match relaunch() {
             Ok(()) => {

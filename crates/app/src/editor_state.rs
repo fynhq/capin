@@ -1,10 +1,3 @@
-//! Pure interaction state for the annotation editor.
-//!
-//! This module owns the editing state machine and must stay free of GPUI
-//! window, render-image, and focus types. `EditorView` keeps the renderer,
-//! window subscriptions, and input routing; it reaches the fields here through
-//! `Deref` so the split can stay incremental.
-
 use std::ops::Range;
 
 use core_annotate::{AnnotationDocument, AnnotationStyle, Shape, TextAlignment};
@@ -17,8 +10,6 @@ use crate::settings_state::{self, AnnotationColorTool};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Tool {
-    /// Internal selection mode; clicking an existing object enters it without
-    /// a dedicated toolbar button.
     Select,
     Rect,
     Arrow,
@@ -107,9 +98,7 @@ pub(crate) struct Draft {
     pub(crate) tool: Tool,
     pub(crate) start: PhysicalPoint,
     pub(crate) current: PhysicalPoint,
-    /// Constrain rectangle-like tools to a square/circle while Shift is held.
     pub(crate) shift: bool,
-    /// Rectangle tool drafts an ellipse.
     pub(crate) ellipse: bool,
 }
 
@@ -118,8 +107,6 @@ pub(crate) struct MoveDraft {
     pub(crate) start: PhysicalPoint,
     pub(crate) current: PhysicalPoint,
     pub(crate) original: Shape,
-    /// The document records one undo snapshot for the whole drag. Until the
-    /// first actual movement, no history entry is created.
     pub(crate) recorded: bool,
 }
 
@@ -163,12 +150,8 @@ pub(crate) struct RegionAdjustDraft {
     pub(crate) current: PhysicalRect,
 }
 
-/// Region screenshots annotate the frozen monitor image directly. The
-/// selection is only an export frame: annotations keep monitor coordinates and
-/// the edge handles move the frame without cropping the document.
 #[derive(Clone, Copy)]
 pub(crate) struct FullCanvas {
-    /// Region captures expose edge handles; monitor captures stay full-frame.
     pub(crate) adjustable: bool,
 }
 
@@ -183,13 +166,10 @@ pub(crate) struct TextEdit {
     pub(crate) origin: PhysicalPoint,
     pub(crate) bounds: PhysicalRect,
     pub(crate) content: String,
-    /// UTF-8 byte offsets. `anchor` is the selection origin; `cursor` is the
-    /// caret and the end of a selection.
     pub(crate) cursor: usize,
     pub(crate) anchor: usize,
     pub(crate) marked: Option<Range<usize>>,
     pub(crate) style: AnnotationStyle,
-    /// Whether the current pointer gesture is extending a text selection.
     pub(crate) selecting: bool,
 }
 
@@ -301,10 +281,6 @@ impl TextEdit {
         start..end
     }
 
-    /// Replaces text as either an IME composition (`mark`) or committed text.
-    ///
-    /// A committed IME result must replace the in-flight composition instead
-    /// of being appended after it, and only a composition may stay marked.
     pub(crate) fn replace(&mut self, range: Option<Range<usize>>, text: &str, mark: bool) {
         let selection = self.selection();
         let range = range
@@ -354,7 +330,6 @@ pub(crate) fn next_char_boundary(content: &str, cursor: usize) -> usize {
         .unwrap_or(cursor)
 }
 
-/// Editing state that survives a re-render and has no renderer dependency.
 pub(crate) struct EditorState {
     pub(crate) document: AnnotationDocument,
     pub(crate) image_size: PhysicalSize,
@@ -367,16 +342,11 @@ pub(crate) struct EditorState {
     pub(crate) text_background: bool,
     pub(crate) text_outline: bool,
     pub(crate) text_alignment: TextAlignment,
-    /// Image pixels per logical point for the surface hosting this editor.
-    /// Preset sizes (corner radius, badge size, spotlight radius) are stored
-    /// in logical points and multiplied by this value when applied.
     pub(crate) ui_scale: f32,
     pub(crate) corner_radius: f32,
     pub(crate) highlighter_radius: f32,
     pub(crate) number_size: u32,
     pub(crate) spotlight_radius: f32,
-    /// Independent defaults for the two width-bearing tool families. The
-    /// selected object's own width is shown and edited through `style`.
     pub(crate) rect_stroke_width: f32,
     pub(crate) arrow_stroke_width: f32,
     pub(crate) blur_radius: u32,
@@ -485,7 +455,6 @@ impl EditorState {
                 self.rect_filled
             };
         if self.tool == Tool::Rect && style.filled {
-            // Filled shapes are opaque by design; there is no opacity control.
             style.color |= 0x000000FF;
         }
         if self.tool == Tool::Text {
@@ -513,14 +482,10 @@ impl EditorState {
         style
     }
 
-    /// Current color for a tool. Reading the mode from the shared settings
-    /// keeps an already-open editor in step when the setting is toggled.
     pub(crate) fn tool_color(&self, tool: AnnotationColorTool) -> u32 {
         settings_state::get().annotation_color_for(tool)
     }
 
-    /// The tool whose color the toolbar palette edits: the selected object's
-    /// tool when there is a selection, otherwise the active drawing tool.
     pub(crate) fn palette_color_tool(&self) -> AnnotationColorTool {
         if let Some(tool) = self
             .document
@@ -534,8 +499,6 @@ impl EditorState {
         self.tool.color_tool().unwrap_or(self.active_color_tool)
     }
 
-    /// The tool whose properties the toolbar should expose. The selected
-    /// object wins over the drawing tool; `Select` alone has no properties.
     pub(crate) fn config_tool(&self) -> Option<Tool> {
         if let Some(tool) = self
             .document
@@ -750,10 +713,6 @@ impl EditorState {
 
     pub(crate) fn apply_color(&mut self, color: u32) {
         let tool = self.palette_color_tool();
-        // Keep the alpha the selected object already renders with. Reading
-        // `self.style` here was wrong right after drawing: the draft uses
-        // `effective_style` but `self.style` still holds the opaque palette
-        // color, so the first color switch turned a highlighter box opaque.
         let alpha = self
             .document
             .selected()
@@ -848,8 +807,6 @@ impl EditorState {
                 }
             }
         } else {
-            // Deselecting returns the toolbar to the drawing tool's own
-            // independent defaults instead of keeping the object's width.
             self.style.stroke_width = match self.tool {
                 Tool::Rect => self.rect_stroke_width,
                 Tool::Arrow => self.arrow_stroke_width,
@@ -858,10 +815,6 @@ impl EditorState {
         }
     }
 
-    /// Applies a move gesture up to `point`. The shape is always rebuilt from
-    /// the geometry captured on mouse-down, so a dropped mouse-up cannot make
-    /// the object snap back to its pre-drag position: every move already
-    /// updates the document. The first actual movement records one undo step.
     pub(crate) fn update_move(&mut self, point: PhysicalPoint) -> bool {
         let Some(draft) = self.move_draft.as_mut() else {
             return false;
@@ -954,8 +907,6 @@ pub(crate) fn normalized_rect(start: PhysicalPoint, end: PhysicalPoint) -> Physi
     PhysicalRect::new(left, top, (right - left) as u32, (bottom - top) as u32)
 }
 
-/// Shift keeps the drag direction but forces equal width and height, which
-/// turns rectangles into squares and ellipses into circles.
 pub(crate) fn constrained_rect(
     start: PhysicalPoint,
     end: PhysicalPoint,
@@ -1026,23 +977,12 @@ pub(crate) fn hit_resize_handle(
         .map(|(handle, _)| handle)
 }
 
-/// Half-size of the painted selection handle in logical points. The hit area
-/// must match it, otherwise the visible outer half of a handle starts a move
-/// instead of a resize.
 pub(crate) const SELECTION_HANDLE_HALF: f32 = 5.5;
 
-/// Painted size of the export-frame handles, matching the capture overlay.
 pub(crate) const REGION_HANDLE_SIZE: f32 = 9.0;
-/// Invisible grab area around each export-frame handle.
 pub(crate) const HANDLE_HIT: f32 = 18.0;
-/// Half thickness of the transparent grab bands along the export frame.
 pub(crate) const BAND_HALF: f32 = 6.0;
 
-/// Resolves a resize handle without stealing drags from the object body.
-///
-/// Handles win inside their painted square even when that square overlaps the
-/// shape border; only a deeper interior point starts a body drag. Very thin
-/// shapes keep the body-first rule so moving them stays possible.
 pub(crate) fn annotation_handle_at(
     shape: &Shape,
     point: PhysicalPoint,
@@ -1158,8 +1098,6 @@ pub(crate) fn resize_shape(
         }
     }
     if matches!(original, Shape::Number { .. }) {
-        // Sequence badges stay circular: resizing any handle scales the
-        // square uniformly instead of turning the chip into an ellipse.
         let width = right - left;
         let height = bottom - top;
         let (size, anchor_x, anchor_y) = match handle {
@@ -1275,8 +1213,6 @@ impl EditorState {
         let Some(mut edit) = self.text_edit.take() else {
             return false;
         };
-        // Clicking elsewhere can commit while a composition is still in
-        // flight; never persist the IME's pinyin buffer as user text.
         if let Some(range) = edit.marked.take()
             && range.end <= edit.content.len()
         {
@@ -1369,7 +1305,6 @@ impl EditorState {
     }
 }
 
-/// Canvas history depth. Each step stores a full frame, so keep it small.
 pub(crate) const CANVAS_HISTORY_LIMIT: usize = 3;
 
 impl EditorState {

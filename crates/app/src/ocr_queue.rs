@@ -1,10 +1,3 @@
-//! Serializes pin OCR and QR work.
-//!
-//! Restoring many pins used to queue one full-image OCR job per pin at once.
-//! Frames are shared now, and a pin whose CPU frame was released sends its
-//! saved PNG path instead, so only one recognition and one decode run at a
-//! time.
-
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 

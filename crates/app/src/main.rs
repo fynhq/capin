@@ -57,10 +57,6 @@ fn main() {
             gpui_kit::init(cx);
             cx.set_reduce_motion(platform_window::reduce_motion());
             platform_window::set_macos_accessory_activation_policy();
-            // Element targeting needs Accessibility. Ask at launch so the
-            // grant is in place before the first capture; a re-signed dev
-            // build starts from an untrusted state and would otherwise
-            // silently fall back to window/whole-screen picking.
             #[cfg(target_os = "macos")]
             if !platform_window::accessibility_trusted() {
                 let granted = platform_window::request_accessibility_permission();

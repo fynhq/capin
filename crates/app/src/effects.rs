@@ -3,16 +3,9 @@ use core_types::RgbaFrame;
 
 use crate::logging::log_error;
 
-/// Capture-level decoration applied to region and monitor captures.
-///
-/// Window captures already run through the window composition pipeline, so
-/// these effects are skipped for them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RegionEffects {
-    /// Corner radius in logical pixels.
     pub corner_radius: u32,
-    /// Draws the system-style neutral drop shadow. It intentionally has no
-    /// color option; the shadow follows the platform look.
     pub shadow: bool,
 }
 
@@ -21,15 +14,11 @@ impl RegionEffects {
         self.corner_radius > 0 || self.shadow
     }
 
-    /// Same effects with the composed shadow forced on. Region pins always
-    /// float above the desktop; the saved/copied export still follows the
-    /// configured shadow.
     pub fn with_shadow(mut self) -> Self {
         self.shadow = true;
         self
     }
 
-    /// Physical pixels added around the frame when the shadow is composed.
     pub fn padding(self, scale: f32) -> u32 {
         if self.shadow {
             ((20.0 + 8.0 + 4.0) * scale.max(0.1)).round().max(1.0) as u32
@@ -38,9 +27,6 @@ impl RegionEffects {
         }
     }
 
-    /// Applies the effects, returning the original frame unchanged when they
-    /// are disabled. Taking the frame by value avoids a full-image clone on
-    /// the common path where no region effect is configured.
     pub fn apply(self, frame: RgbaFrame, scale: f32) -> RgbaFrame {
         if !self.active() || frame.width() == 0 || frame.height() == 0 {
             return frame;

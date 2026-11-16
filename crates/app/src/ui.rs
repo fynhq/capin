@@ -1,5 +1,3 @@
-//! Small shared UI helpers used by the auxiliary windows.
-
 use std::time::Duration;
 
 #[cfg(any(target_os = "windows", test))]
@@ -35,8 +33,6 @@ pub(crate) fn tooltip_view(text: String, cx: &mut App) -> AnyView {
     cx.new(|_| TooltipLabel { text: text.into() }).into()
 }
 
-/// Centers a window on the primary display, or falls back to a stable origin
-/// when no display information is available.
 pub fn centered_bounds(cx: &App, width: f32, height: f32) -> Bounds<Pixels> {
     match cx.primary_display() {
         Some(display) => {
@@ -53,9 +49,6 @@ pub fn centered_bounds(cx: &App, width: f32, height: f32) -> Bounds<Pixels> {
     }
 }
 
-/// Converts logical window bounds into the physical rectangle used to
-/// re-place a popup client area. Origins round to the nearest physical pixel;
-/// sizes round up so fractional scaling never clips the content.
 #[cfg(any(target_os = "windows", test))]
 pub fn physical_window_rect(bounds: Bounds<Pixels>, scale: f32) -> PhysicalRect {
     let scale = scale.max(0.1);
@@ -67,9 +60,6 @@ pub fn physical_window_rect(bounds: Bounds<Pixels>, scale: f32) -> PhysicalRect 
     )
 }
 
-/// Re-places a popup's client area on Windows after GPUI has applied its own
-/// frame offset. Other platforms place the window in display-local points and
-/// do not need the correction.
 pub fn align_client_to_bounds(window: &Window, bounds: Bounds<Pixels>) {
     #[cfg(target_os = "windows")]
     {
@@ -84,12 +74,8 @@ pub fn align_client_to_bounds(window: &Window, bounds: Bounds<Pixels>) {
     }
 }
 
-/// Bézier handle length for a quarter-circle approximation.
 const ARC_HANDLE: f32 = 0.552_284_8;
 
-/// Appends a rounded-rectangle path to `builder`, clamping the radius to half
-/// the shorter side. The corners are cubic approximations of circular arcs so
-/// they line up with GPUI's rounded quads and the composed export corners.
 pub fn push_rounded_rect(builder: &mut PathBuilder, rect: Bounds<Pixels>, radius: f32) {
     let left = f32::from(rect.origin.x);
     let top = f32::from(rect.origin.y);
@@ -130,13 +116,6 @@ pub fn push_rounded_rect(builder: &mut PathBuilder, rect: Bounds<Pixels>, radius
     builder.close();
 }
 
-/// Paints the dimmed area outside a rounded hole plus, optionally, an accent
-/// ring along the hole edge.
-///
-/// The ring is tessellated from the same rounded outline as the hole instead
-/// of a separate `border()` quad. At large radii the two primitives used to
-/// disagree by about a pixel around the arc, leaving an undimmed sliver the
-/// border could not cover.
 pub fn paint_rounded_mask(
     window: &mut Window,
     bounds: Bounds<Pixels>,
@@ -199,15 +178,12 @@ pub fn paint_rounded_mask(
     }
 }
 
-/// Horizontal placement for a popover anchored to a control.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PopoverAlign {
     Center,
     End,
 }
 
-/// Places a popover horizontally at the anchor edge or center, keeping an
-/// 8px margin inside the window.
 pub fn popover_left(
     anchor: Bounds<Pixels>,
     width: f32,
@@ -223,9 +199,6 @@ pub fn popover_left(
     left.clamp(8.0, (window_width - width - 8.0).max(8.0))
 }
 
-/// Places a popover beside its anchor without covering the anchor or another
-/// chrome bar. Preferring the space below keeps a card from clamping back over
-/// the info bar when the selection sits near the bottom of the screen.
 pub fn popover_top(
     anchor: Bounds<Pixels>,
     height: f32,
@@ -235,7 +208,6 @@ pub fn popover_top(
     popover_top_with_gap(anchor, height, window_height, avoid, 6.0)
 }
 
-/// [`popover_top`] with an explicit gap between the anchor and the popover.
 pub fn popover_top_with_gap(
     anchor: Bounds<Pixels>,
     height: f32,
@@ -275,9 +247,6 @@ pub enum BarButtonTone {
     Danger,
 }
 
-/// Compact action button used by the long-capture and recording bars. The
-/// native flyout surface and one leading glyph keep both bars consistent with
-/// the screenshot chrome instead of the old dark text-only pills.
 pub fn bar_button<View: 'static>(
     id: &'static str,
     label: String,
@@ -324,9 +293,6 @@ fn opacity_color(color: Rgba, opacity: f32) -> Rgba {
     rgba((u32::from(color) & 0x00FF_FFFF) << 8 | ((opacity * 255.0) as u32))
 }
 
-/// Native text caret blink. `repeat_synced` keeps multiple carets in phase and
-/// the low frame cap avoids waking the renderer at monitor refresh just to
-/// toggle a one-pixel bar.
 pub fn caret_blink() -> Animation {
     Animation::new(Duration::from_millis(530))
         .repeat_synced()
@@ -338,9 +304,6 @@ fn ease_out_cubic(delta: f32) -> f32 {
     1.0 - (1.0 - delta).powi(3)
 }
 
-/// Grab cursor for a movable object. gpui's Windows backend maps
-/// `OpenHand`/`ClosedHand` to the plain arrow, so Windows uses the pointing
-/// hand that the backend does implement.
 pub fn open_hand_cursor() -> CursorStyle {
     #[cfg(target_os = "windows")]
     {
@@ -352,7 +315,6 @@ pub fn open_hand_cursor() -> CursorStyle {
     }
 }
 
-/// Dragging variant of [`open_hand_cursor`], with the same Windows fallback.
 pub fn closed_hand_cursor() -> CursorStyle {
     #[cfg(target_os = "windows")]
     {
@@ -364,9 +326,6 @@ pub fn closed_hand_cursor() -> CursorStyle {
     }
 }
 
-/// Fades and slightly slides a transient surface in. Only the entrance is
-/// animated; conditional panels disappear immediately so dismissing a menu
-/// never feels delayed.
 pub fn enter_slide_fade<E>(
     element: E,
     id: impl Into<ElementId>,
@@ -388,7 +347,6 @@ where
     )
 }
 
-/// Fades a surface in without changing its layout position.
 pub fn enter_fade<E>(
     element: E,
     id: impl Into<ElementId>,
@@ -404,8 +362,6 @@ where
     )
 }
 
-/// Converts a hue in degrees to a saturated RGB swatch used by the custom
-/// color panels.
 pub fn hue_rgb(hue: f32) -> u32 {
     let hue = hue.rem_euclid(360.0) / 60.0;
     let saturation = 0.82;

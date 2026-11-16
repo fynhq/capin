@@ -1,7 +1,3 @@
-//! Shared geometry for the capture selection frame and the inline editor's
-//! export-frame handles. Keeping it outside `overlay.rs` also breaks the
-//! editor <-> overlay module cycle.
-
 use core_types::{PhysicalPoint, PhysicalRect, PhysicalSize};
 use gpui_kit::*;
 
@@ -56,9 +52,6 @@ fn handle_has_south(handle: ResizeHandle) -> bool {
     )
 }
 
-/// Maps a press near a selection edge or corner to the matching resize handle.
-/// The painted dots stay small, while the whole border becomes a grab target
-/// so the selection can be adjusted again after the initial drag.
 pub(crate) fn edge_resize_handle(
     rect: PhysicalRect,
     point: PhysicalPoint,
@@ -229,9 +222,6 @@ pub(crate) fn handle_positions(rect: Bounds<Pixels>) -> Vec<(ResizeHandle, Point
     ]
 }
 
-/// Corner handles normally sit on the square corner. On a rounded selection
-/// that point falls outside the visible shape and the white handle floats in
-/// the dimmed corner, so pull it onto the 45-degree point of the arc.
 pub(crate) fn corner_handle_offset(handle: ResizeHandle, radius: f32) -> (f32, f32) {
     let inset = radius.max(0.0) * (1.0 - std::f32::consts::FRAC_1_SQRT_2);
     match handle {

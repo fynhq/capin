@@ -103,17 +103,10 @@ impl ScrollView {
         };
         cx.on_release(|_, cx| crate::region_outline::close(cx))
             .detach();
-        // Stitching is automatic: injected wheel events are unreliable, so the
-        // session samples the selected region while the user scrolls. A slow
-        // capture (macOS ScreenCaptureKit is the expensive case) backs off so
-        // sampling never saturates the capture backend.
         let capture_region = region;
         cx.spawn(async move |this, cx| {
             loop {
                 let started = Instant::now();
-                // Capture off the UI thread: WGC waits up to two seconds for a
-                // first frame and SCK queries can take longer, both of which
-                // used to freeze the control bar and the app.
                 let captured = cx
                     .background_executor()
                     .spawn(async move {
@@ -177,8 +170,6 @@ impl ScrollView {
                 }
                 Err(error) => {
                     self.missed_frames += 1;
-                    // A full buffer cannot accept more rows; stop sampling but
-                    // leave the bar up so the user can finish with what exists.
                     if matches!(
                         error,
                         StitchError::HeightLimit(_) | StitchError::MemoryLimit(_)
@@ -200,8 +191,6 @@ impl ScrollView {
 
     fn finish(&mut self, cx: &mut Context<Self>) {
         self.running = false;
-        // Pick up the final viewport before closing the session; otherwise a
-        // quick finish can stop one sample short of what the user sees.
         self.capture_frame(cx);
         match self.stitcher.finish() {
             Ok(frame) => {

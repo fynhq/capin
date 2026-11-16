@@ -1,10 +1,7 @@
-//! Shared construction for auxiliary popup windows and capture targets.
-
 use core_capture::{CaptureTarget, MonitorInfo, platform_backend};
 use core_types::{PhysicalPoint, PhysicalRect};
 use gpui_kit::*;
 
-/// Common options for borderless, fixed-size helper windows.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn popup_options(
     app_id: &'static str,
@@ -30,10 +27,6 @@ pub(crate) fn popup_options(
     }
 }
 
-/// Resolves a capture target to its monitor-local physical area and monitor.
-///
-/// Region and window targets use the same mapping as the capture overlay; a
-/// monitor target maps to the monitor's full bounds.
 pub(crate) fn target_area(target: CaptureTarget) -> Option<(PhysicalRect, MonitorInfo)> {
     let monitors = platform_backend().monitors().ok()?;
     let (area, monitor_id) = match target {

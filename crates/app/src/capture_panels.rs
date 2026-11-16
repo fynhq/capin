@@ -1,6 +1,3 @@
-//! Shared capture chrome: effect options, keyboard hints, and compact action
-//! buttons used by both the frozen overlay and the inline editor.
-
 use std::time::Duration;
 
 use gpui_kit::prelude::*;
@@ -12,10 +9,6 @@ use crate::i18n::{Language, t};
 use crate::icons;
 use crate::ui::{enter_slide_fade, tooltip_view};
 
-/// Effect options popover shared by the overlay and inline editor.
-///
-/// The caller owns placement and animation direction; the popover itself only
-/// renders the corner/shadow controls and reports changes through callbacks.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn effects_panel<View: 'static>(
     id_prefix: &'static str,
@@ -140,7 +133,6 @@ pub(crate) fn effects_panel<View: 'static>(
         .into_any_element()
 }
 
-/// Keyboard hint card shared by the overlay and inline editor.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn hints_panel<View: 'static>(
     id_prefix: &'static str,
@@ -217,7 +209,6 @@ pub(crate) fn hints_panel<View: 'static>(
         .into_any_element()
 }
 
-/// The "effects" chip in the selection info bar.
 pub(crate) fn effects_chip<View: 'static>(
     id: &'static str,
     theme: ChromeTheme,
@@ -257,7 +248,6 @@ pub(crate) fn effects_chip<View: 'static>(
         .into_any_element()
 }
 
-/// The refresh button in the selection info bar.
 pub(crate) fn refresh_button<View: 'static>(
     id: &'static str,
     theme: ChromeTheme,

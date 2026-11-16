@@ -1,7 +1,3 @@
-//! Thin border-only window that keeps the recorded or scroll-captured region
-//! visible while the control bar is on screen. It is click-through and always
-//! excluded from capture, so the red frame never ends up in the output.
-
 use core_capture::{CaptureTarget, platform_backend};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -20,8 +16,6 @@ pub fn close(cx: &mut App) {
     let Some((handle, view)) = entry else {
         return;
     };
-    // Native window teardown is asynchronous on Windows; hide the border now
-    // so stopping or leaving the completion prompt removes the frame at once.
     view.update(cx, |this, cx| {
         this.visible = false;
         cx.notify();
@@ -47,9 +41,6 @@ pub fn open(target: CaptureTarget, cx: &mut App) {
         origin: point(px(left), px(top)),
         size: size(px(width), px(height)),
     };
-    // macOS accepts display-local points in `WindowOptions`; Windows accepts
-    // virtual-desktop logical coordinates. The shared helper applies the
-    // platform-specific translation, matching the recording/scroll bars.
     let bounds = crate::display::window_bounds_on_monitor(monitor, logical);
     let options = crate::aux_window::popup_options(
         "capin-region-outline",

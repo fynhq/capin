@@ -8,8 +8,6 @@ use crate::settings_state;
 
 const APP_FOLDER: &str = "Capin";
 
-/// Keeps the lock file open for the lifetime of the process. Two instances
-/// would otherwise share `pins.json` and delete each other's pin images.
 static INSTANCE_LOCK: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 
 fn instance_lock() -> &'static Mutex<Option<File>> {
@@ -45,9 +43,6 @@ pub fn acquire_single_instance() -> bool {
     true
 }
 
-/// Drops the lock before a relaunch. The replacement process starts while
-/// this one is still shutting down and would otherwise see the lock held and
-/// exit immediately, which made the tray restart a plain quit.
 pub fn release_single_instance() {
     if let Some(lock) = INSTANCE_LOCK.get() {
         let mut slot = lock.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -129,8 +124,6 @@ pub fn save_png(frame: &RgbaFrame) -> Result<PathBuf, std::io::Error> {
     Ok(path)
 }
 
-/// Expands the user filename template. `{date}` is local `YYYYMMDD`,
-/// `{time}` is local `HHMMSS`, and `{width}`/`{height}` are image pixels.
 pub fn render_filename(template: &str, width: u32, height: u32) -> String {
     let template = if template.trim().is_empty() {
         crate::settings_state::DEFAULT_FILENAME_TEMPLATE
@@ -203,8 +196,6 @@ fn create_unique_file(
     ))
 }
 
-/// Builds the output path for a recording using the shared filename template.
-/// `{width}`/`{height}` expand to the recording target's physical pixels.
 pub fn recording_path(width: u32, height: u32) -> Result<PathBuf, std::io::Error> {
     let directory = recording_dir();
     ensure_directory(&directory)?;

@@ -30,8 +30,6 @@ pub(crate) enum RecordShortcut {
     Stop,
 }
 
-/// Handles F9/F10 while the recording bar is alive. The global hotkey manager
-/// routes these to the single active session.
 pub(crate) fn handle_shortcut(shortcut: RecordShortcut, cx: &mut App) {
     let view = RECORD_BAR.with(|slot| slot.borrow().as_ref().and_then(|weak| weak.upgrade()));
     if let Some(view) = view {
@@ -57,8 +55,6 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
     };
     let config = RecordConfig {
         target,
-        // The highlight is only meaningful with the cursor in frame, so it
-        // implies cursor capture even when "include cursor" is off.
         include_cursor: settings.record_cursor || settings.record_cursor_highlight,
         cursor_highlight: settings.record_cursor_highlight.then_some(CursorHighlight {
             color: settings.record_cursor_highlight_color & 0x00FF_FFFF,
@@ -99,9 +95,6 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
                 false
             }
         };
-        // The bar must exist before the macOS content filter is built so it
-        // can be excluded from the stream. Windows already applies
-        // WDA_EXCLUDEFROMCAPTURE above.
         let excluded: Vec<u64> = platform_window::native_window_id(&*window)
             .into_iter()
             .collect();
@@ -293,8 +286,6 @@ impl RecordBar {
             .is_some_and(|recorder| recorder.error().is_none())
     }
 
-    /// The completion prompt is transient: keep it on screen long enough to
-    /// click "Open folder", then remove the bar and the region outline.
     fn schedule_auto_close(&mut self, cx: &mut Context<Self>) {
         if self.auto_close_scheduled {
             return;
@@ -656,9 +647,6 @@ fn target_monitor(target: CaptureTarget) -> Option<core_types::MonitorId> {
     }
 }
 
-/// Whether the capture bar sits inside the recorded rectangle. If capture
-/// exclusion fails and this returns true, recording must not start: otherwise
-/// the bar itself would be encoded into the video.
 fn bar_overlaps_target(target: CaptureTarget, bar: Bounds<Pixels>) -> bool {
     let Ok(monitors) = platform_backend().monitors() else {
         return true;

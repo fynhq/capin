@@ -1,22 +1,8 @@
-//! Converts virtual-desktop bounds into the coordinate space GPUI expects for
-//! a window assigned to a specific monitor.
-//!
-//! Windows places windows in virtual-desktop logical coordinates, where each
-//! monitor's origin is its physical origin divided by that monitor's scale.
-//! macOS places them relative to the target display's top-left corner. The
-//! same `WindowOptions` value therefore means different things on the two
-//! platforms once a window is not on the primary display.
-
 use core_capture::MonitorInfo;
 use gpui_kit::{Bounds, Pixels};
 #[cfg(target_os = "macos")]
 use gpui_kit::{point, px};
 
-/// Returns `bounds` in the space used by `WindowOptions.window_bounds` for a
-/// window that belongs to `monitor`.
-///
-/// `bounds` must be in the virtual-desktop logical space built from physical
-/// pixels divided by the source monitor's scale.
 pub fn window_bounds_on_monitor(monitor: &MonitorInfo, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
     #[cfg(target_os = "macos")]
     {

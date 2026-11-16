@@ -9,10 +9,6 @@ use platform_window::{AutostartState, set_autostart};
 use crate::i18n::Language;
 use crate::logging::{log_error, log_info, log_warn};
 
-// Windows reserves Win+Shift+S for Snipping Tool, so the default has to move
-// to a combination RegisterHotKey can actually claim. macOS keeps the
-// Command-based family but pairs it with Control so it does not collide with
-// browser "Save As" style shortcuts.
 #[cfg(target_os = "windows")]
 pub const DEFAULT_CAPTURE_HOTKEY: &str = "ctrl+alt+KeyS";
 #[cfg(not(target_os = "windows"))]
@@ -34,8 +30,6 @@ pub const DEFAULT_ANNOTATION_COLOR: u32 = 0xFF3B30FF;
 pub const DEFAULT_ANNOTATION_FONT_SIZE: f32 = 20.0;
 pub const DEFAULT_FILENAME_TEMPLATE: &str = "Capin_{date}_{time}";
 
-/// Palette used by the annotation toolbar. The first item is the default
-/// color; each entry carries its stable id and i18n key.
 pub const ANNOTATION_COLORS: [(u32, &str, &str); 6] = [
     (0xFF3B30FF, "red", "color.red"),
     (0xFFCC00FF, "yellow", "color.yellow"),
@@ -47,12 +41,8 @@ pub const ANNOTATION_COLORS: [(u32, &str, &str); 6] = [
 
 pub const ANNOTATION_COLOR_TOOL_COUNT: usize = 6;
 
-/// Pastel presets for the recording cursor disc. Custom colors are entered
-/// through the settings hex picker.
 pub const RECORD_HIGHLIGHT_COLORS: [u32; 4] = [0xFFE082, 0x90CAF9, 0xCE93D8, 0xA5D6A7];
 
-/// Color-bearing annotation tools. Shapes that do not use a color
-/// (selection, blur, spotlight) are intentionally absent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AnnotationColorTool {
     Rect,
@@ -120,27 +110,19 @@ impl WindowBackground {
     pub fn from_code(code: &str) -> Option<Self> {
         match code {
             "transparent" => Some(Self::Transparent),
-            // Files written before the option set was reduced to two still
-            // hold an explicit non-transparent choice; keep its intent.
             "white" | "system" | "light" | "dark" => Some(Self::White),
             _ => None,
         }
     }
 }
 
-/// Frame padding offered for window captures. Zero is deliberately absent:
-/// window screenshots always keep room for the system-style shadow.
 pub const WINDOW_PADDINGS: [u32; 3] = [24, 48, 96];
 pub const DEFAULT_WINDOW_PADDING: u32 = 24;
 
-/// What the pin shortcut does when it is triggered again for an image that is
-/// already on screen.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RepeatPinBehavior {
-    /// Cycle to an older screenshot in the recent-capture history.
     #[default]
     RestoreHistory,
-    /// Flash the existing pin instead of creating another copy.
     FlashCurrent,
 }
 
@@ -170,13 +152,10 @@ pub struct AppSettings {
     pub auto_start_explicit: bool,
     pub copy_to_clipboard: bool,
     pub record_cursor: bool,
-    /// Draws a translucent colored disc under the cursor while recording.
     pub record_cursor_highlight: bool,
-    /// Disc color as packed `0xRRGGBB`; opacity is fixed by the recorder.
     pub record_cursor_highlight_color: u32,
     pub capture_hotkey: String,
     pub pin_hotkey: String,
-    /// Behavior when the pin shortcut repeats for an image already on screen.
     pub repeat_pin: RepeatPinBehavior,
     pub screenshot_dir: Option<PathBuf>,
     pub recording_dir: Option<PathBuf>,
@@ -184,47 +163,34 @@ pub struct AppSettings {
     pub window_background: WindowBackground,
     pub window_padding: u32,
     pub capture_cursor: bool,
-    /// Region capture corner radius in logical pixels; persists across captures.
     pub region_corner_radius: u32,
-    /// Draws the composed drop shadow around region captures.
     pub region_shadow: bool,
-    /// Shared color used when `annotation_uniform_color` is enabled.
     pub annotation_color: u32,
-    /// Per-tool colors used when `annotation_uniform_color` is disabled.
     pub annotation_colors: [u32; ANNOTATION_COLOR_TOOL_COUNT],
     pub annotation_uniform_color: bool,
-    /// Line width for the rectangle/ellipse tool family.
     pub annotation_rect_stroke_width: f32,
-    /// Line width for the arrow/polyline tool family. Kept separate from the
-    /// rectangle width so changing one never changes the other.
     pub annotation_arrow_stroke_width: f32,
     pub annotation_font_size: f32,
     pub annotation_arrow_start: bool,
     pub annotation_arrow_end: bool,
-    /// New arrow annotations use the polyline form.
     pub annotation_arrow_polyline: bool,
     pub annotation_text_background: bool,
     pub annotation_text_outline: bool,
     pub annotation_text_alignment: TextAlignment,
     pub annotation_corner_radius: f32,
-    /// Highlighter corner radius in logical pixels.
     pub annotation_highlighter_radius: f32,
-    /// Sequence badge diameter in logical pixels.
     pub annotation_number_size: u32,
     pub annotation_blur_radius: u32,
     pub annotation_rect_filled: bool,
     pub annotation_ellipse_filled: bool,
-    /// New rectangle-tool annotations use the ellipse form.
     pub annotation_rect_ellipse: bool,
     pub annotation_spotlight_intensity: u8,
-    /// Rounded corner radius of the spotlight hole in logical pixels.
     pub annotation_spotlight_radius: f32,
     pub pin_text_ocr: bool,
     pub pin_qr: bool,
 }
 
 impl AppSettings {
-    /// Resolves the color for a tool under the current mode.
     pub fn annotation_color_for(&self, tool: AnnotationColorTool) -> u32 {
         if self.annotation_uniform_color {
             self.annotation_color
@@ -233,8 +199,6 @@ impl AppSettings {
         }
     }
 
-    /// Applies a toolbar color choice. Unified mode updates every tool;
-    /// independent mode updates only `tool`.
     pub fn apply_annotation_color(&mut self, tool: AnnotationColorTool, color: u32) {
         self.annotation_color = color;
         if self.annotation_uniform_color {
@@ -302,9 +266,6 @@ enum SaveRequest {
     Flush(Sender<()>),
 }
 
-/// Returns a cheap snapshot of the current settings. Callers that only read
-/// fields get an `Arc` clone instead of copying strings and paths on every
-/// render.
 pub fn get() -> Arc<AppSettings> {
     SETTINGS
         .get_or_init(|| Mutex::new(Arc::new(load().unwrap_or_default())))
@@ -323,8 +284,6 @@ pub fn update(update: impl FnOnce(&mut AppSettings)) {
     persist(settings);
 }
 
-/// Applies an explicit or previously enabled login-startup preference at
-/// startup. A default `false` never removes an existing OS login item.
 pub fn apply_startup_autostart() {
     let settings = get();
     if !settings.auto_start_explicit && !settings.auto_start {
@@ -346,8 +305,6 @@ fn load() -> Option<AppSettings> {
 
 fn parse(text: &str) -> AppSettings {
     let mut settings = AppSettings::default();
-    // The pre-0.1.0-14 file stored one width for every tool. Read it as the
-    // fallback for both families; per-tool keys below take precedence.
     let mut legacy_stroke_width = None;
     let mut rect_stroke_width = None;
     let mut arrow_stroke_width = None;
@@ -397,8 +354,6 @@ fn parse(text: &str) -> AppSettings {
             }
             "window_padding" => {
                 if let Ok(padding) = value.parse::<u32>() {
-                    // Older files may hold 0 or an arbitrary value; window
-                    // captures now always keep a shadow margin of at least 24.
                     settings.window_padding = if WINDOW_PADDINGS.contains(&padding) {
                         padding
                     } else {
@@ -418,7 +373,6 @@ fn parse(text: &str) -> AppSettings {
             "annotation_color" => {
                 if let Some(color) = parse_rgba(value) {
                     settings.annotation_color = color;
-                    // Legacy files stored a single color for every tool.
                     settings.annotation_colors = [color; ANNOTATION_COLOR_TOOL_COUNT];
                 }
             }
@@ -521,8 +475,6 @@ fn parse(text: &str) -> AppSettings {
         arrow_stroke_width.or(legacy_stroke_width).unwrap_or(4.0);
     #[cfg(target_os = "windows")]
     {
-        // Older Windows builds persisted the Win+Shift combinations, which
-        // RegisterHotKey can never claim while Snipping Tool owns them.
         if settings.capture_hotkey == LEGACY_CAPTURE_HOTKEY {
             settings.capture_hotkey = DEFAULT_CAPTURE_HOTKEY.to_owned();
         }
@@ -532,8 +484,6 @@ fn parse(text: &str) -> AppSettings {
     }
     #[cfg(target_os = "macos")]
     {
-        // The first macOS default was Cmd+Shift; the default moved to
-        // Control+Command so it no longer overlaps common app shortcuts.
         if settings.capture_hotkey == LEGACY_CAPTURE_HOTKEY {
             settings.capture_hotkey = DEFAULT_CAPTURE_HOTKEY.to_owned();
         }
@@ -566,7 +516,6 @@ fn parse_directory(value: &str) -> Option<PathBuf> {
     path.is_absolute().then_some(path)
 }
 
-/// Parses `RRGGBB` or `RRGGBBAA`; six-digit values are opaque.
 fn parse_rgba(value: &str) -> Option<u32> {
     let hex = value.trim().strip_prefix('#').unwrap_or(value.trim());
     let value = u32::from_str_radix(hex, 16).ok()?;
@@ -648,7 +597,6 @@ fn write_settings(text: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Flushes a debounced settings write before the event loop exits.
 pub fn flush() {
     let Some(worker) = SAVE_TX.get().and_then(Option::as_ref) else {
         return;
@@ -829,8 +777,6 @@ mod tests {
         assert!(!defaults.annotation_ellipse_filled);
         assert_eq!(defaults.annotation_spotlight_intensity, 40);
 
-        // The retired edge-fade key stays in the sample so older config files
-        // keep loading without it.
         let settings = parse(
             "annotation_stroke_width=8\nannotation_font_size=32\nannotation_arrow_start=true\nannotation_arrow_end=false\nannotation_arrow_polyline=true\nannotation_text_background=true\nannotation_text_outline=true\nannotation_text_alignment=center\nannotation_corner_radius=16\nannotation_highlighter_radius=12\nannotation_blur_radius=32\nannotation_blur_feather=24\nannotation_rect_filled=true\nannotation_ellipse_filled=true\nannotation_rect_ellipse=true\nannotation_spotlight_intensity=80\n",
         );

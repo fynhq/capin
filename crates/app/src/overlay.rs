@@ -35,20 +35,11 @@ use crate::{
     ui::tooltip_view,
 };
 
-/// Backdrop shade outside the live selection. Forty percent black keeps the
-/// frozen frame readable while making the selected region stand out.
 const DIM: u32 = 0x00000066;
 const FALLBACK_HOVER_ACCENT: u32 = 0x4c9aff;
-/// Element hover uses a warm second accent so it reads differently from the
-/// window hover that shares the system accent.
 const ELEMENT_HOVER: u32 = 0xffb020;
-/// The whole-screen hover preview uses green so it is distinct from window
-/// and element targets. Actual selections keep their existing accent color.
 const SCREEN_SELECTION: u32 = 0x34c759;
 const MAGNIFIER_SIZE: u32 = 144;
-/// Source pixels shown in the magnifier. An odd count keeps the sampled pixel
-/// exactly in the centre; nine pixels over 144 points gives 16-point blocks,
-/// so the pixel matrix stays legible on both 1x and 2x displays.
 const MAGNIFIER_SOURCE: u32 = 9;
 const MAGNIFIER_PANEL: f32 = 160.0;
 const MAGNIFIER_PANEL_HEIGHT: f32 = 228.0;
@@ -59,18 +50,10 @@ const SELECTION_TOOLBAR_WIDTH: f32 = 560.0;
 const HANDLE_SIZE: f32 = 9.0;
 const REGION_GAP: f32 = 8.0;
 
-/// Number of live overlay views. The global capture shortcut uses this to
-/// close an overlay even when keyboard focus was lost, which is the safety
-/// valve against a full-screen window with no visible way out.
 static OPEN_OVERLAYS: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
-    /// Live overlay views for global actions such as the pin shortcut, which
-    /// reaches the app through the hotkey manager rather than the key event.
     static OVERLAY_VIEWS: RefCell<Vec<WeakEntity<OverlayView>>> = const { RefCell::new(Vec::new()) };
-    /// Last non-Capin application seen in front before a capture. Closing the
-    /// overlay hands focus back to it, so the captured window does not stay
-    /// in its inactive state with gray traffic lights.
     static RETURN_APP_PID: Cell<Option<i32>> = const { Cell::new(None) };
 }
 
@@ -87,20 +70,16 @@ pub fn close_open_overlays(cx: &mut App) {
     OVERLAY_VIEWS.with(|views| views.borrow_mut().clear());
 }
 
-/// Keeps the last non-Capin foreground application for focus restoration.
 pub(crate) fn remember_frontmost_application() {
     if let Some(pid) = platform_window::frontmost_other_application_pid() {
         RETURN_APP_PID.with(|slot| slot.set(Some(pid)));
     }
 }
 
-/// Ctrl state, including native AppKit flags when no modifier event arrived.
 fn control_down(modifiers: &Modifiers) -> bool {
     modifiers.control || platform_window::control_modifier_down()
 }
 
-/// Returns focus to the app the user came from. A remaining Capin surface
-/// that needs keyboard input keeps the app frontmost instead.
 pub(crate) fn restore_previous_application(cx: &mut App) {
     let Some(pid) = RETURN_APP_PID.with(Cell::get) else {
         return;
@@ -126,16 +105,10 @@ pub(crate) fn restore_previous_application(cx: &mut App) {
     .detach();
 }
 
-/// Windows owned by the capture overlays. Pins and the settings page are
-/// valid capture targets, so only these helper surfaces are filtered from
-/// hover hit-testing.
 fn live_overlay_window_ids(cx: &App) -> Vec<WindowId> {
     live_overlay_window_ids_excluding(cx, None)
 }
 
-/// Collects the helper window ids without reading an overlay that is already
-/// inside its own update. F5 refresh runs from an `OverlayView` listener and
-/// used to read itself here, which GPUI rejects as a re-entrant entity read.
 fn live_overlay_window_ids_excluding(cx: &App, exclude: Option<EntityId>) -> Vec<WindowId> {
     OVERLAY_VIEWS.with(|views| {
         views
@@ -149,16 +122,10 @@ fn live_overlay_window_ids_excluding(cx: &App, exclude: Option<EntityId>) -> Vec
     })
 }
 
-/// Drops the full-monitor display textures held by live overlays. Closing a
-/// Windows window does not immediately free its sprite atlas, so doing this
-/// before the window list is torn down keeps one capture from leaving a
-/// screen-sized GPU allocation behind.
 pub(crate) fn release_textures(cx: &mut App) {
     release_texture_views(cx, None);
 }
 
-/// Same as [`release_textures`], but keeps the overlay that is turning into
-/// the inline editor: it still paints the frozen desktop behind the editor.
 pub(crate) fn release_textures_except(cx: &mut App, keep: u64) {
     release_texture_views(cx, Some(keep));
 }
@@ -187,9 +154,6 @@ fn release_texture_views(cx: &mut App, keep: Option<u64>) {
     }
 }
 
-/// Pins whatever the open overlay or its inline editor currently shows. The
-/// global pin shortcut is handled outside the window event loop, so it has to
-/// route back to the same action as the toolbar pin button.
 pub fn pin_current(cx: &mut App) -> bool {
     let views: Vec<WeakEntity<OverlayView>> = OVERLAY_VIEWS.with(|views| views.borrow().clone());
     let mut live = Vec::new();
@@ -361,9 +325,6 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
         return;
     }
     remember_frontmost_application();
-    // Capture is a menu-bar utility mode: return to the accessory policy even
-    // if the settings window was force-closed by the tray, which bypasses its
-    // close callback. The overlay itself still gets key status below.
     if !crate::settings::has_open_settings(cx) {
         platform_window::set_macos_accessory_activation_policy();
     }
@@ -392,11 +353,6 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
     let accent_hex = system_accent_hex().unwrap_or(FALLBACK_HOVER_ACCENT);
     let accent = rgb(accent_hex);
 
-    // Freeze every monitor before opening any overlay. An overlay window that
-    // is already on screen can end up inside the next monitor's frozen frame
-    // when mixed-DPI placement lets it spill across the display boundary; that
-    // made the second display look like a copy of the first one. Capturing all
-    // frames up front keeps each overlay bound to its own monitor.
     let mut captures: Vec<(MonitorInfo, Arc<RenderImage>, PhysicalSize)> =
         Vec::with_capacity(monitors.len());
     let capture_cursor = settings_state::get().capture_cursor;
@@ -405,9 +361,6 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
             .iter()
             .find(|(kept, _, _)| kept.bounds == monitor.bounds)
         {
-            // Clone mode exposes both physical displays at identical desktop
-            // coordinates. One overlay already covers the whole desktop area,
-            // and the OS mirrors it to the other panel.
             log_warn!(
                 "overlay",
                 "monitor {} shares bounds {:?} with {}; treating it as a clone",
@@ -434,10 +387,6 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
                     "failed to capture monitor {:?}: {error}",
                     monitor.id
                 );
-                // On macOS a denied screen recording grant makes the menu and
-                // shortcut look dead: the overlays never open and stderr is
-                // invisible for a bundled app. Route that case to settings,
-                // where the permission rows and guidance are visible.
                 #[cfg(target_os = "macos")]
                 if matches!(error, core_capture::CaptureError::PermissionDenied) {
                     crate::settings::report_capture_permission_denied(cx);
@@ -502,18 +451,11 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
         let session_windows = windows.clone();
         let monitor_id = monitor.id.raw();
 
-        // Accessories are not brought forward by ordering a window front:
-        // AppKit only gives key status to an active app. Without this the
-        // overlay looks right but ignores Esc and every letter shortcut.
         cx.activate(true);
         match gpui_kit::open_window(options, cx, move |window, cx| {
             if let Err(error) = apply_window_style(&*window, WindowStyle::OVERLAY) {
                 log_error!("overlay", "failed to style overlay: {error}");
             }
-            // GPUI creates windows on the primary display and then moves them
-            // with the target display's scale factor. Windows can still apply
-            // a WM_DPICHANGED suggested rectangle during that move, so pin the
-            // native frame to the monitor's physical rectangle afterwards.
             if let Err(error) =
                 platform_window::place_on_monitor(&*window, placement, placement_scale)
             {
@@ -522,10 +464,6 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
                     "failed to place monitor {monitor_id} overlay: {error}"
                 );
             }
-            // Use the scale and size GPUI actually ended up with after the
-            // native placement. If a platform still applied a DPI suggestion,
-            // hit-testing and UI layout stay consistent with the frozen frame
-            // instead of assuming the monitor's nominal scale.
             let scale = window.scale_factor();
             let actual_size = window.bounds().size;
             let window_size =
@@ -587,9 +525,6 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
             OVERLAY_VIEWS.with(|views| views.borrow_mut().push(view.downgrade()));
             let geometry = view.clone();
             window.defer(cx, move |window, cx| {
-                // Re-apply after any WM_DPICHANGED suggestion the first
-                // placement triggered. The second pass runs with the window
-                // already on the target monitor, so its DPI is stable.
                 if let Err(error) =
                     platform_window::place_on_monitor(&*window, placement, placement_scale)
                 {
@@ -640,9 +575,6 @@ fn overlay_options(monitor: MonitorId, bounds: Bounds<Pixels>) -> WindowOptions 
     )
 }
 
-/// macOS needs a normal window so AppKit can give it key status (a
-/// nonactivating panel silently drops Esc and letter shortcuts). Windows keeps
-/// the popup tool window that already worked and stays out of Alt+Tab.
 fn overlay_window_kind() -> WindowKind {
     #[cfg(target_os = "macos")]
     {
@@ -682,13 +614,7 @@ fn capture_monitor(
     }
 }
 
-/// A monitor capture must have exactly the monitor's physical size. A stale or
-/// wrong-monitor frame is worse than a missing overlay because it silently
-/// captures content the user never saw under the selection.
 fn frame_matches_monitor(frame: &RgbaFrame, monitor: &MonitorInfo) -> bool {
-    // A one-pixel difference can come from mode/rounding changes; larger
-    // differences mean the backend returned another monitor's frame or the
-    // process lost DPI awareness, and showing it would silently mis-crop.
     frame.width().abs_diff(monitor.bounds.size.width) <= 1
         && frame.height().abs_diff(monitor.bounds.size.height) <= 1
 }
@@ -702,9 +628,6 @@ struct OverlayView {
     session: SelectionSession,
     native_id: Option<u64>,
     image: Arc<RenderImage>,
-    /// Pixel size of the frozen frame. The RGBA source is dropped after the
-    /// BGRA render image is built, so the overlay keeps one full-size CPU
-    /// copy instead of two.
     image_size: PhysicalSize,
     scale: f32,
     window_size: Size<Pixels>,
@@ -717,18 +640,9 @@ struct OverlayView {
     aspect: AspectPreset,
     color_format: ColorFormat,
     shift_held: bool,
-    /// Ctrl window mode: hover only windows or the whole screen, hide element
-    /// targeting, and open the editor straight on click.
     window_only: bool,
-    /// Whether the current press started in Ctrl window mode, so releasing
-    /// Ctrl before the mouse-up still opens the editor.
     click_opens_editor: bool,
-    /// macOS turns Ctrl+click into a secondary click before it reaches the
-    /// window. Track the synthesized right press so it still drives the normal
-    /// capture path instead of the context-menu path.
     ctrl_click_primary: bool,
-    /// Cursor shown by the overlay root. Selection states swap it to a hand
-    /// or resize arrows so movable and resizable targets read correctly.
     cursor_style: CursorStyle,
     element_targeting: bool,
     magnifier: Option<Magnifier>,
@@ -736,19 +650,13 @@ struct OverlayView {
     notice_serial: u64,
     notice_leaving: bool,
     element_cache: HashMap<WindowId, Vec<PhysicalRect>>,
-    /// macOS samples the element chain at the cursor, so the cache is only
-    /// valid for the point it was queried at. Windows keeps a per-window list.
     element_cache_point: Option<PhysicalPoint>,
-    /// Windows whose empty element list was retried once. Self-drawn windows
-    /// only expose their accessibility nodes one frame after the first query.
     element_retry: HashSet<WindowId>,
     element_window: Option<WindowId>,
     element_pending: Option<WindowId>,
     element_pending_point: Option<PhysicalPoint>,
     element_candidates: Vec<PhysicalRect>,
     element_level: usize,
-    /// Wheel targeting climbed past the hovered window; the whole screen is
-    /// highlighted and a click captures the monitor.
     screen_targeting: bool,
     focus_handle: FocusHandle,
     editor: Option<Entity<EditorView>>,
@@ -771,13 +679,8 @@ impl OverlayView {
         mode: OverlayMode,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Windows and elements are recognized by hovering; dragging is still
-        // reserved for a free region.
         session.set_window_targeting(true);
         cx.on_release(|this, cx| {
-            // The Windows backend can keep a closed window's renderer alive
-            // briefly; drop the display-list textures explicitly so each
-            // capture does not leave a full-screen image in GPU memory.
             cx.drop_image(this.image.clone(), None);
             if let Some(magnifier) = this.magnifier.take() {
                 cx.drop_image(magnifier.image, None);
@@ -838,11 +741,6 @@ impl OverlayView {
             }));
     }
 
-    /// Physical frame pixels per logical window pixel on each axis.
-    ///
-    /// Normally this equals `scale`, but the ratio keeps pointer mapping and
-    /// selection overlays aligned with the image if a platform clamps the
-    /// window or applies a different DPI than the monitor reports.
     fn frame_ratio(&self) -> (f32, f32) {
         let frame_width = self.image_size.width;
         let frame_height = self.image_size.height;
@@ -854,11 +752,6 @@ impl OverlayView {
         )
     }
 
-    /// Capture pixels per logical window point. On scaled HiDPI modes the
-    /// panel resolution and the window-server backing scale differ, so every
-    /// physical-to-logical conversion must follow the frozen frame rather than
-    /// the window's nominal scale; otherwise selections, the inline editor and
-    /// pins drift or shrink relative to the image.
     fn effective_scale(&self) -> f32 {
         self.frame_ratio().0.max(0.1)
     }
@@ -872,9 +765,6 @@ impl OverlayView {
         )
     }
 
-    /// Converts a monitor-local physical rectangle (as produced by
-    /// `SelectionSession::selection_rect`) into window coordinates. Unlike
-    /// `local_bounds`, there is no virtual-desktop origin to remove.
     fn local_rect(&self, rect: PhysicalRect) -> Option<Bounds<Pixels>> {
         let monitor = self.session.monitor_bounds();
         let local = PhysicalRect::new(0, 0, monitor.size.width, monitor.size.height);
@@ -955,10 +845,6 @@ impl OverlayView {
         self.effects.corner_radius as f32
     }
 
-    /// Dims everything outside the rounded selection and draws the accent
-    /// frame on the same outline. Painting the border from the hole path keeps
-    /// it flush with the dim mask at every radius; the old separate rounded
-    /// border quad drifted off the arc and left bright slivers at 16/24.
     fn dim_layers_rounded(&self, hole: Option<Bounds<Pixels>>, radius: f32) -> Vec<AnyElement> {
         if radius <= 0.5 {
             return self
@@ -1009,9 +895,6 @@ impl OverlayView {
         if self.session.is_dragging() || self.selected.is_some() {
             return;
         }
-        // `hovered_window` is suppressed while whole-screen targeting is
-        // active; the raw window still tells us which element tree to resolve
-        // so scrolling back down restores the window level.
         let Some(window) = self.session.window_under_pointer().cloned() else {
             self.element_window = None;
             self.element_pending = None;
@@ -1056,8 +939,6 @@ impl OverlayView {
             if self.element_pending.is_none() {
                 self.query_elements(window.id, point, cx);
             }
-            // Do not highlight from a chain sampled at another point; the
-            // background query refreshes it on the next frame.
             self.session.set_hovered_element(None);
             return;
         }
@@ -1078,22 +959,12 @@ impl OverlayView {
         self.session.set_hovered_element(selected);
     }
 
-    /// Resolves the element chain under the cursor off the UI thread.
-    ///
-    /// macOS hit-tests the accessibility tree at the pointer, so the cached
-    /// chain is tied to its query point and refreshed as the pointer moves.
-    /// Windows enumerates the window's UIA descendants once and caches them
-    /// per window. An empty answer is retried once because self-drawn windows
-    /// report no nodes until a frame after the first accessibility client
-    /// connects.
     fn query_elements(
         &mut self,
         window_id: WindowId,
         point: PhysicalPoint,
         cx: &mut Context<Self>,
     ) {
-        // UIA's FindAll walks the whole descendant tree; AX hit-testing still
-        // crosses into the target process. Both are resolved off-thread.
         self.element_pending = Some(window_id);
         self.element_pending_point = Some(point);
         cx.spawn(async move |this, cx| {
@@ -1111,9 +982,6 @@ impl OverlayView {
                     }
                     this.element_pending = None;
                     this.element_pending_point = None;
-                    // Do not pin an empty accessibility answer while the
-                    // process is untrusted: the grant may arrive while the
-                    // overlay is open, and the next pointer move should retry.
                     if empty && !platform_window::accessibility_trusted() {
                         return false;
                     }
@@ -1177,7 +1045,6 @@ impl OverlayView {
         let max = self.element_candidates.len();
         if self.screen_targeting {
             if delta < 0.0 {
-                // Back down from the whole screen to the window it lives in.
                 self.screen_targeting = false;
                 self.element_level = max;
             }
@@ -1185,8 +1052,6 @@ impl OverlayView {
             if self.element_level < max {
                 self.element_level += 1;
             } else {
-                // Past the window level the whole monitor becomes the target,
-                // so the wheel walk can reach a full-screen capture.
                 self.screen_targeting = true;
             }
         } else {
@@ -1243,10 +1108,6 @@ impl OverlayView {
             self.clear_magnifier(window);
             return;
         }
-        // An active drag hides the panel and reports the region through the
-        // size tag, so there is no point uploading a magnifier texture for
-        // every captured pointer event. Dropping the stale image also keeps
-        // the color-copy shortcut reading the live cursor pixel.
         if self.session.is_dragging() {
             self.clear_magnifier(window);
             return;
@@ -1271,9 +1132,6 @@ impl OverlayView {
             MAGNIFIER_SOURCE,
             output_size.max(1),
         );
-        // GPUI keeps direct `img(RenderImage)` uploads in the window atlas
-        // until they are dropped explicitly; a fresh image per pointer move
-        // would otherwise grow without bound.
         if let Some(previous) = self.magnifier.replace(Magnifier { point, image }) {
             let _ = window.drop_image(previous.image);
         }
@@ -1285,10 +1143,6 @@ impl OverlayView {
         }
     }
 
-    /// Picks up the window geometry after the deferred native placement. A
-    /// platform may deliver a DPI suggestion between window creation and the
-    /// first event-loop pass; the frozen frame and the pointer mapping must
-    /// follow whatever the window actually became.
     fn refresh_geometry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let scale = window.scale_factor();
         let size = window.bounds().size;
@@ -1306,8 +1160,6 @@ impl OverlayView {
     }
 
     fn copy_color(&mut self, cx: &mut Context<Self>) {
-        // Clicking the magnifier panel moves the pointer off the sampled pixel;
-        // the magnifier keeps the point whose color is actually on screen.
         let Some(point) = self
             .magnifier
             .as_ref()
@@ -1321,8 +1173,6 @@ impl OverlayView {
         };
         let text = self.color_text(red, green, blue);
         cx.write_to_clipboard(ClipboardItem::new_string(text));
-        // The color is the only thing this mode was opened for; leaving the
-        // frozen desktop up would make the user dismiss it by hand.
         self.close_overlays(cx);
     }
 
@@ -1394,8 +1244,6 @@ impl OverlayView {
             )
     }
 
-    /// Label for the whole screen, used when the pointer is over the desktop
-    /// (or Ctrl window mode finds no window).
     fn screen_label(&self, language: Language) -> Div {
         let width = self.session.monitor_bounds().size.width;
         let height = self.session.monitor_bounds().size.height;
@@ -1457,8 +1305,6 @@ impl OverlayView {
         top = top.clamp(0.0, (window_height - MAGNIFIER_PANEL_HEIGHT).max(0.0));
 
         let color = self.sample_color(point);
-        // Pixel matrix: one cell per source pixel. The centre cell gets a
-        // stronger outline so the sampled pixel is unambiguous.
         let step = MAGNIFIER_SIZE as f32 / MAGNIFIER_SOURCE as f32;
         let mut lines: Vec<Div> = Vec::new();
         for index in 1..MAGNIFIER_SOURCE {
@@ -1522,9 +1368,6 @@ impl OverlayView {
                         .text_color(self.chrome.text)
                         .child(text),
                 )
-                // The magnifier follows the pointer; any clickable chip would
-                // move the sampled pixel before it could be clicked. Format
-                // switching and copying stay keyboard-only.
                 .child(
                     div()
                         .px(px(4.0))
@@ -1746,12 +1589,6 @@ impl OverlayView {
             .ok_or_else(|| "no selection".to_owned())?;
         let frame = match selected.target {
             CaptureTarget::Window(id) => {
-                // macOS re-captures a window through ScreenCaptureKit after
-                // the overlay has taken key status. The target window is now
-                // inactive (gray traffic lights) and translucent sidebars
-                // composite against a different backing, so the result no
-                // longer matches what the user saw. When the window is fully
-                // visible and unoccluded, crop the frozen frame instead.
                 let frozen = {
                     #[cfg(target_os = "macos")]
                     {
@@ -1781,10 +1618,6 @@ impl OverlayView {
                             crate::window_frame::compose_window_capture(id, frame, selected.scale)
                         }
                         Err(error) => {
-                            // Shell surfaces such as the taskbar reject some
-                            // window-capture paths. The frozen desktop already
-                            // contains exactly what the user selected, so fall
-                            // back to that instead of failing the capture.
                             log_warn!(
                                 "overlay",
                                 "window capture failed ({error}); cropping the frozen frame"
@@ -1810,9 +1643,6 @@ impl OverlayView {
             .ok_or_else(|| "empty selection".to_owned())
     }
 
-    /// Whether the selected window is completely inside this monitor and no
-    /// higher window covers it. Only then does the frozen frame contain the
-    /// exact window pixels the user saw, without occluders or clipped edges.
     #[cfg(target_os = "macos")]
     fn window_is_fully_visible(&self, id: WindowId) -> bool {
         let Some(window) = self.session.window(id) else {
@@ -1896,8 +1726,6 @@ impl OverlayView {
             frame.height()
         );
         let editor_rect = if full_monitor {
-            // The full monitor image fills the overlay window; the selection
-            // frame lives inside the editor instead of sizing its image.
             Bounds {
                 origin: point(px(0.0), px(0.0)),
                 size: self.window_size,
@@ -1934,8 +1762,6 @@ impl OverlayView {
         self.selected = None;
         self.screen_targeting = false;
         self.session.cancel();
-        // Cropped region editors share the frozen monitor image for edge
-        // resizing; full-canvas editors already keep it as their display image.
         let region_source = (!full_monitor && matches!(selected.target, CaptureTarget::Region(_)))
             .then(|| self.image.clone());
 
@@ -1965,9 +1791,6 @@ impl OverlayView {
                         )
                     });
                     if full_monitor {
-                        // The editor paints the frozen monitor itself; drop the
-                        // overlay's extra reference so one full-size CPU copy
-                        // remains and F5 can safely release the old texture.
                         this.image = image_util::transparent_image();
                     }
                     this.editor = Some(editor.clone());
@@ -2025,7 +1848,6 @@ impl OverlayView {
         cx.notify();
     }
 
-    /// Shadow recipe a history entry needs to pin a shadow-free region export.
     fn history_pin_shadow(&self) -> Option<HistoryPinShadow> {
         let selected = self.selected.as_ref()?;
         if !matches!(selected.target, CaptureTarget::Region(_)) || self.effects.shadow {
@@ -2107,9 +1929,6 @@ impl OverlayView {
         let region = matches!(selected.target, CaptureTarget::Region(_));
         let window = matches!(selected.target, CaptureTarget::Window(_));
         let raw = output;
-        // Region pins always show the composed shadow so rounded corners keep
-        // their floating edge; the export (copy/save/history) follows the
-        // configured effects.
         let display_effects = if region {
             self.effects.with_shadow()
         } else {
@@ -2141,8 +1960,6 @@ impl OverlayView {
             corner_radius: self.effects.corner_radius,
             scale,
         });
-        // A region pin shows a shadow margin the export may not carry; copy and
-        // save strip that margin instead of handing out the display image.
         let export_padding = if pin_shadow.is_some() {
             display_effects.padding(scale)
         } else {
@@ -2150,13 +1967,8 @@ impl OverlayView {
         };
         let monitor = self.session.monitor();
         let handles = cx.windows();
-        // Opening the pin window inside this input callback would re-enter
-        // the App borrow. Close the overlay first, then create the pin on the
-        // next turn.
         cx.defer(move |cx| {
             crate::windows::close_capture_auxiliary(cx, handles);
-            // Encoding the export blocks for a few milliseconds; keep it out of
-            // the toolbar's input callback.
             if let Ok(bytes) = image_util::encode_png(&export) {
                 crate::capture_history::record_png_bytes(&bytes, hash, pin_shadow, Some(scale));
             }
@@ -2213,9 +2025,6 @@ impl OverlayView {
         self.image_size = PhysicalSize::new(frame.width(), frame.height());
         let image = image_util::render_image(frame);
         let old_image = std::mem::replace(&mut self.image, image);
-        // Drop the previous full-screen atlas entry through the window that
-        // owns it. Deferring App::drop_image let several refreshes pile up
-        // before the entries were reclaimed.
         if let Err(error) = window.drop_image(old_image) {
             log_warn!("overlay", "failed to release refreshed frame: {error}");
         }
@@ -2514,9 +2323,6 @@ impl OverlayView {
         cx.notify();
     }
 
-    /// Arrow keys move the selection one pixel at a time. Shift resizes it
-    /// toward the arrow: left/up shrink, right/down grow, with the top-left
-    /// corner anchored.
     fn nudge_selection(&mut self, dx: i32, dy: i32, resize: bool, cx: &mut Context<Self>) {
         let Some(selected) = self.selected.as_mut() else {
             return;
@@ -2524,8 +2330,6 @@ impl OverlayView {
         let monitor = self.session.monitor_bounds();
         let mut rect = selected.rect;
         if resize {
-            // Keep the top-left corner anchored and stop growing at the
-            // monitor edge instead of letting the clamp slide the origin.
             let max_width = monitor
                 .size
                 .width
@@ -3149,11 +2953,7 @@ impl OverlayView {
 
 impl Drop for OverlayView {
     fn drop(&mut self) {
-        // Ctrl window mode hides the system cursor; never leave it hidden if
-        // the window goes away through Alt+F4 or another native close path.
         platform_window::set_cursor_hidden(false);
-        // Saturating: `close_open_overlays` also resets the counter, and the
-        // view can then be dropped afterwards.
         let _ = OPEN_OVERLAYS.try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
             Some(count.saturating_sub(1))
         });
@@ -3408,8 +3208,6 @@ impl OverlayView {
 
         let screen_color = rgba((SCREEN_SELECTION << 8) | 0xFF);
         let selection_radius = self.selection_effects_radius();
-        // A free-region drag previews the same rounded frame the confirmed
-        // selection and the export use; window and element hovers stay square.
         let drag_radius = if self.selected.is_none() && drag_selection.is_some() {
             self.effects.corner_radius as f32
         } else {
@@ -3418,8 +3216,6 @@ impl OverlayView {
         let radius = selection_radius.max(drag_radius);
         let mut layers = self.dim_layers_rounded(hole, radius);
         if let Some(rect) = selected_bounds {
-            // Above 0.5 the rounded mask already painted the accent ring from
-            // the same path as the hole.
             if radius <= 0.5 {
                 layers.push(border(rect, self.accent, radius).into_any_element());
             }
@@ -3504,11 +3300,6 @@ impl OverlayView {
                 let command =
                     event.keystroke.modifiers.platform || event.keystroke.modifiers.control;
 
-                // Modifier-only changes normally arrive through
-                // `on_modifiers_changed`, but some platforms also report the
-                // Shift key itself. Treat either edge as one toggle so holding
-                // or rapidly tapping Shift always flips the magnifier format
-                // once.
                 if key == "shift"
                     && !this.shift_held
                     && this.mode == OverlayMode::Capture
@@ -3678,12 +3469,8 @@ impl OverlayView {
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 let point = this.to_physical(event.position);
                 this.cursor = Some(point);
-                // Covers the case where Ctrl was already held before the
-                // overlay became key and no modifier-change event arrives.
                 this.set_window_only(control_down(&event.modifiers), cx);
                 if this.window_only && this.selected.is_none() {
-                    // WM_SETCURSOR can restore the arrow while moving; keep it
-                    // hidden so only the painted camera cursor is visible.
                     platform_window::set_cursor_hidden(true);
                 }
                 if this
@@ -3722,9 +3509,6 @@ impl OverlayView {
                 }
                 this.cursor_style = CursorStyle::Crosshair;
                 if this.session.has_drag() && event.pressed_button.is_none() {
-                    // The mouse-up happened outside this overlay. Drop the
-                    // stale press instead of turning the next click into a
-                    // region that starts at the old origin.
                     this.screen_targeting = false;
                     this.session.cancel();
                 } else {
@@ -3733,11 +3517,6 @@ impl OverlayView {
                         this.refresh_auto_target(point, cx);
                     }
                 }
-                // The magnifier is built here instead of during render so
-                // frames triggered by other state (theme, notices) do not
-                // upload a fresh texture; an active drag skips it entirely
-                // because the size tag already reports the region while the
-                // pointer is captured.
                 this.update_magnifier(window);
                 cx.notify();
             }))
@@ -3758,11 +3537,6 @@ impl OverlayView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                    // macOS delivers Ctrl+click as a secondary click, and GPUI
-                    // clears the control modifier while converting it. Window
-                    // mode is a primary-click action, so rely on the tracked
-                    // Ctrl state (or a real control-modified right click) to
-                    // keep it on the normal capture path.
                     if cfg!(target_os = "macos")
                         && this.mode == OverlayMode::Capture
                         && this.selected.is_none()
@@ -3774,8 +3548,6 @@ impl OverlayView {
                         cx.stop_propagation();
                         return;
                     }
-                    // Right click never leaves the capture. While annotating,
-                    // the editor consumes it to confirm the current object.
                     if this
                         .selected
                         .as_ref()
@@ -3814,8 +3586,6 @@ impl OverlayView {
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseUpEvent, window, cx| {
                     if this.ctrl_click_primary {
-                        // Some macOS versions pair the synthesized secondary
-                        // down with the original primary up.
                         this.ctrl_click_primary = false;
                         this.primary_pointer_up(event, window, cx);
                         return;

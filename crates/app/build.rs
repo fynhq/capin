@@ -1,12 +1,3 @@
-//! Embeds the Windows application icon and version metadata into `capin.exe`,
-//! and rejects locale resources whose keys have drifted.
-//!
-//! The locale check parses `locales/*.conf` with the same line format as
-//! `src/i18n.rs`, compares every language against `en.conf`, and scans
-//! `src/**/*.rs` for the literal keys passed to `t()`. Unreferenced keys are
-//! reported as warnings instead of build failures so a translation can land
-//! before the UI that uses it.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -204,8 +195,6 @@ fn line_at(source: &str, offset: usize) -> usize {
         + 1
 }
 
-/// Masks comments and string contents (keeping quote and newline bytes) so
-/// call sites can be located without matching text inside strings or comments.
 fn analyze(source: &str) -> Analysis {
     let bytes = source.as_bytes();
     let mut masked = Vec::with_capacity(bytes.len());
@@ -346,7 +335,6 @@ fn char_literal_length(bytes: &[u8], start: usize) -> Option<usize> {
     }
 }
 
-/// Finds string-literal keys passed as the second argument of `t(language, key)`.
 fn call_keys(masked: &str, source: &str) -> Vec<(usize, String)> {
     let bytes = masked.as_bytes();
     let source_bytes = source.as_bytes();

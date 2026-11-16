@@ -1,9 +1,3 @@
-//! Live demo-cursor disc shown while recording.
-//!
-//! The encoded frames get the same disc painted by the platform recorder, so
-//! this window is excluded from capture and click-through: it exists only to
-//! let the user see the highlight in real time.
-
 use std::cell::RefCell;
 use std::time::Duration;
 

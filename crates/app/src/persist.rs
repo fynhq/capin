@@ -6,11 +6,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Replaces `path` with `bytes` without ever exposing a half-written file.
-///
-/// The temporary file lives in the same directory so the final rename stays on
-/// one filesystem. `std::fs::rename` replaces an existing destination on both
-/// Windows (`MoveFileEx` with `MOVEFILE_REPLACE_EXISTING`) and Unix.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let Some(parent) = path.parent() else {
         return Err(std::io::Error::other("path has no parent directory"));
@@ -51,9 +46,6 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Err(last_error.unwrap_or_else(|| std::io::Error::other("could not create a temporary file")))
 }
 
-/// Copies `source` to `path` through a temporary file. Callers use this for
-/// history images so a crash cannot leave a truncated PNG referenced by the
-/// manifest.
 pub fn copy_atomic(source: &Path, path: &Path) -> std::io::Result<()> {
     let bytes = fs::read(source)?;
     write_atomic(path, &bytes)
@@ -115,7 +107,6 @@ mod tests {
         let directory = temp_dir("failure");
         let path = directory.join("state.json");
         std::fs::write(&path, b"old").unwrap();
-        // A directory cannot be replaced by a regular file.
         let blocker = directory.join("blocker");
         std::fs::create_dir_all(&blocker).unwrap();
         assert!(write_atomic(&blocker, b"new").is_err());

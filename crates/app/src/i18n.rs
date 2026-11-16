@@ -43,8 +43,6 @@ impl Language {
     }
 }
 
-/// Looks up `key` for `language`. Missing keys fall back to the key itself so
-/// omissions are visible during development.
 pub fn t(language: Language, key: &str) -> &str {
     language.strings().get(key).copied().unwrap_or(key)
 }

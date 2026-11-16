@@ -1,9 +1,3 @@
-//! Local file logging for field diagnosis.
-//!
-//! Logs never contain screen contents, window titles, clipboard text, or file
-//! paths. One file is written per local calendar day, and files older than
-//! seven days are pruned.
-
 use chrono::{Duration, Local, NaiveDate};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -121,8 +115,6 @@ pub fn write(level: Level, target: &str, message: &str) {
     }
 }
 
-/// Directory containing the daily log files. Settings exposes it so field
-/// testers can attach the files without hunting through AppData.
 pub fn log_directory() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
@@ -153,10 +145,6 @@ pub fn log_directory() -> PathBuf {
     }
 }
 
-/// Returns up to `limit` most recent lines from today's log file.
-///
-/// Diagnostics copy this tail into the clipboard. The logger already removes
-/// screen contents, window titles, clipboard text, and file paths.
 pub fn recent_lines(limit: usize) -> Vec<String> {
     let path = log_directory().join(log_file_name(Local::now().date_naive()));
     let Ok(text) = std::fs::read_to_string(path) else {
@@ -211,7 +199,6 @@ fn prune_old_files(directory: &Path, today: NaiveDate) {
     }
 }
 
-/// Drops the size-based `capin.log` rotation used before daily files.
 fn migrate_legacy_files(directory: &Path, today: NaiveDate) {
     let legacy = directory.join("capin.log");
     if legacy.exists() {

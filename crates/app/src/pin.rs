@@ -23,13 +23,8 @@ use crate::ui::centered_bounds;
 
 const MAX_RESTORED_PINS: usize = 20;
 
-/// Lowest wheel-zoom factor. Tall stitched captures need well below 15% to
-/// fit a display, so the floor must not clamp them back to an oversized pin.
 const MIN_PIN_ZOOM: f32 = 0.02;
 
-/// macOS `WindowKind::PopUp` is an `NSPanel` with `NonactivatingPanel`, which
-/// can never take keyboard focus; pins need key status for the system copy
-/// shortcut on selected OCR text. Windows keeps the popup tool window.
 fn pin_window_kind() -> WindowKind {
     #[cfg(target_os = "macos")]
     {
@@ -52,25 +47,11 @@ thread_local! {
     static PIN_MENU: RefCell<Option<AnyWindowHandle>> = const { RefCell::new(None) };
     static MANIFEST_REVISION: Cell<u64> = const { Cell::new(0) };
     static LAST_PIN_TRIGGER: Cell<Option<u64>> = const { Cell::new(None) };
-    /// Native-shadow choice of the pin that set `LAST_PIN_TRIGGER`, so the
-    /// first shortcut press after Esc reopens the same image with the same
-    /// floating edge.
     static LAST_PIN_SHADOW: Cell<bool> = const { Cell::new(false) };
-    /// Signature of the clipboard image seen when the current pin sequence
-    /// started. A changed clipboard starts a fresh sequence; an unchanged one
-    /// keeps walking the screenshot history even after the previous pin was
-    /// closed.
     static PIN_CLIPBOARD: Cell<Option<u64>> = const { Cell::new(None) };
     static PIN_CLIPBOARD_TEXT: Cell<Option<u64>> = const { Cell::new(None) };
-    /// History generation the current walk belongs to. A new capture starts
-    /// the walk over at the newest entry; closing pins does not.
     static PIN_WALK_GENERATION: Cell<Option<u64>> = const { Cell::new(None) };
-    /// The walk already passed the oldest history entry, so the next press
-    /// starts a new walk from the newest capture.
     static PIN_WALK_EXHAUSTED: Cell<bool> = const { Cell::new(false) };
-    /// Persisted pins beyond `MAX_RESTORED_PINS` that were not opened at
-    /// startup. They stay in the manifest so closing a restored pin cannot
-    /// silently delete them.
     static DEFERRED_PINS: RefCell<Vec<PersistedPin>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -83,10 +64,6 @@ fn clipboard_signature_of(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// Cheap content signature for the first clipboard image. Bytes are hashed
-/// without decoding, so checking whether the clipboard changed costs one read.
-/// Copied image files use their path, size and modification time instead so
-/// the file itself is not read twice.
 fn clipboard_image_signature(cx: &mut App) -> Option<u64> {
     let item = cx.read_from_clipboard()?;
     for entry in item.entries() {
@@ -237,8 +214,6 @@ impl PinContent {
         }
     }
 
-    /// Drops the CPU copy after OCR has finished; the render image and the
-    /// persisted PNG remain available. Pin actions reload it on demand.
     fn drop_frame(&mut self) {
         if let Self::Image { frame, .. } = self {
             *frame = None;
@@ -327,9 +302,6 @@ fn wrapped_line_count(line: &str, width: f32, font_size: f32) -> usize {
     lines
 }
 
-/// Text pins hug their content instead of taking a card-width block: the width
-/// follows the longest line up to a readable cap, and the height only counts
-/// the lines that actually wrap at that width.
 fn text_pin_size(text: &str) -> (f32, f32) {
     const FONT: f32 = 14.0;
     const LINE_HEIGHT: f32 = 20.0;
@@ -354,29 +326,13 @@ enum PinKind {
     Text(String),
 }
 
-/// Vector annotations kept alongside a pinned image so reopening the pin
-/// editor does not force the user to edit an already-rasterized image.
-///
-/// Large bases are stored as their already-encoded PNG bytes. A handful of
-/// pinned 4K screenshots otherwise keep a full RGBA copy per pin alive for the
-/// whole session; the editor decodes the base again only when the user opens
-/// it. Small bases stay as frames because decoding them every time would cost
-/// more than they save.
 #[derive(Clone)]
 pub(crate) struct PinEditState {
     base: PinBase,
     pub document: AnnotationDocument,
     pub effects: crate::effects::RegionEffects,
-    /// Region pins keep the composed shadow on screen even when the export
-    /// shadow setting is off, so re-pinning from the editor must force it too.
     pub shadow_always: bool,
-    /// Physical margin composed around the base in the displayed pin image.
-    /// The editor opens the base inset by this much so it is not stretched to
-    /// the padded pin window.
     pub display_padding: u32,
-    /// Capture scale used for the stored effects. Pin editors have no inline
-    /// capture descriptor, so they must carry it to re-apply radii and shadow
-    /// padding at the original DPI.
     pub effects_scale: f32,
 }
 
@@ -389,8 +345,6 @@ enum PinBase {
     },
 }
 
-/// Bases above this size are kept compressed. 8 MiB covers 1080p screenshots
-/// (about 7.9 MiB of RGBA); small crops stay raw and larger 4K bases become PNG.
 const PIN_BASE_KEEP_RAW_BYTES: usize = 8 * 1024 * 1024;
 
 impl PinEditState {
@@ -412,9 +366,6 @@ impl PinEditState {
         }
     }
 
-    /// Materializes the unannotated base for the editor. `None` means the
-    /// encoded base could not be decoded; callers fall back to the flattened
-    /// pin image.
     pub(crate) fn base_frame(&self) -> Option<Arc<RgbaFrame>> {
         self.base.frame()
     }
@@ -456,21 +407,13 @@ struct PinState {
     entity: Entity<PinView>,
     window: AnyWindowHandle,
     image_path: Option<PathBuf>,
-    /// Hash of the pinned image, used to find the pin when the same image is
-    /// triggered again.
     content_hash: Option<u64>,
     bounds: Bounds<Pixels>,
     opacity: f32,
     zoom: f32,
     click_through: bool,
-    /// Long-capture pins have no composed edge shadow, so the window itself
-    /// supplies one. Region and window captures already bake it in.
     native_shadow: bool,
-    /// Present after the pin has been edited in this session. Rotating or
-    /// replacing the image from another source clears it.
     edit_state: Option<PinEditState>,
-    /// Shadow margin baked into the pinned image while the export shadow was
-    /// off. Copy/save strip it so the clipboard matches the export settings.
     export_padding: u32,
 }
 
@@ -490,25 +433,16 @@ struct PersistedPin {
     click_through: bool,
     #[serde(default)]
     shadow: bool,
-    /// Composed shadow margin that copy/save must strip while the export
-    /// shadow setting is off.
     #[serde(default)]
     export_padding: u32,
 }
 
 pub fn pin_last(cx: &mut App) {
-    // Closing every pin keeps the walk position so repeated presses keep
-    // moving through older screenshots. Only a new capture restarts it: that
-    // way the shortcut never sinks back to an image the user just walked past.
     let generation = crate::capture_history::generation();
     if PIN_WALK_GENERATION.with(|slot| slot.get()) != Some(generation) {
         LAST_PIN_TRIGGER.with(|slot| slot.set(None));
         PIN_WALK_EXHAUSTED.with(|slot| slot.set(false));
     }
-    // The walk already showed the oldest entry; the next press starts over at
-    // the newest screenshot instead of staying stuck on the oldest one. This
-    // must not depend on every pin being closed: older pins can stay on screen
-    // while the shortcut continues from the newest image.
     if PIN_WALK_EXHAUSTED.with(|slot| slot.get()) {
         LAST_PIN_TRIGGER.with(|slot| slot.set(None));
         PIN_WALK_EXHAUSTED.with(|slot| slot.set(false));
@@ -533,8 +467,6 @@ pub fn pin_last(cx: &mut App) {
                 break;
             }
         }
-        // Explorer and browsers often copy image files as CF_HDROP instead of
-        // pixel data; those should pin just like a copied bitmap.
         if clipboard_frame.is_none() {
             for entry in item.entries() {
                 let ClipboardEntry::ExternalPaths(paths) = entry else {
@@ -573,27 +505,16 @@ pub fn pin_last(cx: &mut App) {
 
     if let Some(frame) = clipboard_frame {
         let previous_clipboard = PIN_CLIPBOARD.get();
-        // A clipboard image that has not changed since the sequence started
-        // must not hijack the walk: pressing the shortcut after closing a pin
-        // continues upward through the screenshots.
         let clipboard_changed = match (previous_clipboard, clipboard_signature) {
             (Some(previous), Some(current)) => previous != current,
-            // No image existed when the sequence started, so a new one is
-            // user-provided content rather than part of the walk.
             (None, Some(_)) => true,
             _ => false,
         };
         let walk_active = LAST_PIN_TRIGGER.with(|slot| slot.get()).is_some();
         if walk_active && !clipboard_changed {
-            // The sequence is already walking the history. Even when it is
-            // exhausted, reopening the clipboard image would show the image
-            // the user just dismissed.
             pin_history_step(cx);
             return;
         }
-        // A new sequence starts with a changed clipboard. When the walk was
-        // reset by a finished capture instead, prefer that capture over a
-        // clipboard image that has not changed since the last pin.
         let clipboard_image = crate::capture_history::HistoryImage {
             frame,
             pin_shadow: None,
@@ -625,7 +546,6 @@ pub fn pin_last(cx: &mut App) {
         });
         if walk_active && !text_changed {
             if !text_live {
-                // A dismissed text pin reopens first, matching image pins.
                 open_text_pin(text, cx);
                 return;
             }
@@ -635,9 +555,6 @@ pub fn pin_last(cx: &mut App) {
             open_text_pin(text, cx);
             return;
         }
-        // A changed clipboard or a fresh app start pins the text. A reset
-        // walk belongs to a finished capture, which is more recent than an
-        // unchanged clipboard text.
         let start_with_text = text_changed
             || PIN_CLIPBOARD_TEXT.get().is_none()
             || !crate::capture_history::has_entries();
@@ -662,14 +579,10 @@ pub fn pin_last(cx: &mut App) {
     }
 }
 
-/// Stable content signature for a text pin. The overlay and clipboard paths
-/// hash the same trimmed text so a text pin is recognised as already on
-/// screen and takes part in the history walk.
 fn text_signature(text: &str) -> u64 {
     clipboard_signature_of(text.as_bytes())
 }
 
-/// Opens a clipboard text pin and records it as the current walk position.
 fn open_text_pin(text: String, cx: &mut App) {
     let hash = text_signature(&text);
     if open_pin_content(PinContent::Text(text), cx).is_some() {
@@ -678,23 +591,15 @@ fn open_text_pin(text: String, cx: &mut App) {
     }
 }
 
-/// Remembers that the current walk belongs to the current history generation
-/// and that it has not run out of older entries yet.
 fn mark_walk() {
     PIN_WALK_GENERATION.with(|slot| slot.set(Some(crate::capture_history::generation())));
     PIN_WALK_EXHAUSTED.with(|slot| slot.set(false));
 }
 
-/// Pins the next older screenshot in history. Respects the flash-current
-/// repeat preference while that pin is still on screen. Reaching the oldest
-/// entry consumes the shortcut; the next press starts a new walk at the
-/// newest screenshot instead of reopening the oldest one.
 fn pin_history_step(cx: &mut App) -> bool {
     let Some(current) = LAST_PIN_TRIGGER.with(|slot| slot.get()) else {
         return false;
     };
-    // The pin may have just been dismissed with Esc. Reopen that same image
-    // first; only the next press walks to an older history entry.
     let live = PINS.with(|pins| {
         pins.borrow()
             .values()
@@ -724,8 +629,6 @@ fn pin_history_step(cx: &mut App) -> bool {
     true
 }
 
-/// Pins an image, or applies the configured repeat behavior when the same
-/// screenshot is triggered again without a new clipboard source.
 fn pin_image(image: crate::capture_history::HistoryImage, cx: &mut App) {
     let hash = crate::capture_history::hash_frame(&image.frame);
     let repeated = LAST_PIN_TRIGGER.with(|slot| slot.get() == Some(hash))
@@ -747,8 +650,6 @@ fn pin_image(image: crate::capture_history::HistoryImage, cx: &mut App) {
             }
             return;
         }
-        // Flash an on-screen pin with the same image. When every matching pin
-        // was closed, fall through so the shortcut still reopens the image.
         if flash_existing_pin(hash, cx) {
             return;
         }
@@ -756,7 +657,6 @@ fn pin_image(image: crate::capture_history::HistoryImage, cx: &mut App) {
     open_history_pin(image, false, cx);
 }
 
-/// Brings the pin holding `hash` to the front and flashes its outline.
 fn flash_existing_pin(hash: u64, cx: &mut App) -> bool {
     let target = PINS.with(|pins| {
         pins.borrow()
@@ -783,18 +683,11 @@ pub fn open_frame_with_hash(
     let zoom = content.preferred_zoom();
     let (width, height) = content.size(zoom);
     let bounds = default_bounds(cx, width, height);
-    // Capture pins record their shadow-free export into history themselves;
-    // the pinned image may carry a pin-only shadow.
     let id = open_pin_content_at(content, bounds, zoom, None, native_shadow, cx);
     mark_walk();
     id
 }
 
-/// Pins a capture at a screen rectangle using a hash already computed by the
-/// caller. Capture images are physical pixels, so `zoom` is the inverse
-/// monitor scale; that keeps the pin at the same apparent size instead of
-/// growing on high-DPI screens. Reusing the hash avoids a second full-image
-/// pass.
 pub fn open_frame_at_with_hash(
     frame: RgbaFrame,
     bounds: Bounds<Pixels>,
@@ -830,9 +723,6 @@ pub fn open_frame_at_with_hash(
     id
 }
 
-/// Opens a screenshot from history. Region exports leave the composed shadow
-/// out so copy/save match the settings; pinning one renders the floating edge
-/// again and keeps the shadow-free export as the edit base.
 fn open_history_pin(
     image: crate::capture_history::HistoryImage,
     native_shadow: bool,
@@ -867,8 +757,6 @@ fn open_history_pin(
     let display = display_effects.apply(frame, shadow.scale);
     let display_padding = display_effects.padding(shadow.scale);
     let content = PinContent::from_frame_with_hash(display, hash);
-    // The image already carries its composed shadow; the window must not add
-    // a second one. Copy/save strip the pin-only margin.
     let id = match zoom {
         Some(zoom) => {
             let (width, height) = content.size(zoom);
@@ -982,8 +870,6 @@ fn open_pin_inner(
     } else {
         None
     };
-    // OCR reads the already persisted PNG instead of pinning a full-frame Arc
-    // for every new pin; the frame is released as soon as the window exists.
     let initial_ocr_path = image_path.clone();
     let display_id = display_id.or_else(|| display_for_bounds(cx, bounds));
     let options = crate::aux_window::popup_options(
@@ -1000,22 +886,12 @@ fn open_pin_inner(
         if let Err(error) = apply_window_style(&*window, WindowStyle::PIN) {
             log_error!("pin", "failed to style pin window: {error}");
         }
-        // Window and region captures bake their edge shadow into the image
-        // and must not get a second system shadow. Long-capture results have
-        // no composed shadow, so the window supplies the floating edge.
         if native_shadow {
             enable_native_shadow(&*window);
         } else {
             disable_native_shadow(&*window);
         }
-        // Hide the non-client border after the shadow policy: enabling
-        // NC rendering can restore DWM's 1px outline, which reads as a white
-        // frame around dark captures.
         hide_native_border(&*window);
-        // GPUI centre-splits the popup's resize frame when it first places
-        // the window. The frame sits on the left, right and bottom only, so
-        // that split lifts the client area a few pixels above the requested
-        // rect. Re-place the client area once the native frame is final.
         crate::ui::align_client_to_bounds(&*window, bounds);
         if click_through && let Err(error) = set_click_through(&*window, true) {
             crate::logging::log_warn!("pin", "failed to enable click-through: {error}");
@@ -1034,8 +910,6 @@ fn open_pin_inner(
         view.update(cx, |view, cx| {
             view.watch_close(window, cx);
         });
-        // The DWM frame settles one turn after the shadow policy changes;
-        // repeat the client alignment once the window has laid out.
         window.defer(cx, move |window, _| {
             crate::ui::align_client_to_bounds(window, bounds)
         });
@@ -1062,8 +936,6 @@ fn open_pin_inner(
             });
             PIN_CLIPBOARD.with(|slot| slot.set(clipboard_image_signature(cx)));
             PIN_CLIPBOARD_TEXT.with(|slot| slot.set(clipboard_text_signature(cx)));
-            // OCR already holds its own Arc source; drop the pin's CPU frame
-            // now that the PNG path is recorded. Actions reload it lazily.
             view_for_release.update(cx, |view, _| view.release_frame_if_persisted());
             if persist {
                 save_manifest();
@@ -1142,8 +1014,6 @@ pub fn restore(cx: &mut App) {
             cx,
             Bounds {
                 origin: point(px(entry.x), px(entry.y)),
-                // Content size is authoritative: a previous zoom might not
-                // have been written together with the window bounds.
                 size: size(px(width), px(height)),
             },
         );
@@ -1177,8 +1047,6 @@ pub fn restore(cx: &mut App) {
     save_manifest();
 }
 
-/// Cheap validation for entries kept in the manifest but not opened because
-/// the startup window budget is full.
 fn persisted_pin_is_usable(entry: &PersistedPin, directory: &Path) -> bool {
     if !entry.x.is_finite()
         || !entry.y.is_finite()
@@ -1200,8 +1068,6 @@ fn persisted_pin_is_usable(entry: &PersistedPin, directory: &Path) -> bool {
     }
 }
 
-/// Attaches the vector document to a pin that was just created from the
-/// editor, without rewriting or restarting OCR for its flattened image.
 pub(crate) fn set_edit_state(id: u64, edit_state: PinEditState) {
     PINS.with(|pins| {
         if let Some(state) = pins.borrow_mut().get_mut(&id) {
@@ -1210,8 +1076,6 @@ pub(crate) fn set_edit_state(id: u64, edit_state: PinEditState) {
     });
 }
 
-/// Marks how much composed shadow margin a pin image carries so copy/save can
-/// drop it while the export shadow setting is off.
 pub(crate) fn set_export_padding(id: u64, padding: u32) {
     PINS.with(|pins| {
         if let Some(state) = pins.borrow_mut().get_mut(&id) {
@@ -1220,9 +1084,6 @@ pub(crate) fn set_export_padding(id: u64, padding: u32) {
     });
 }
 
-/// Updates the pin image and remembers the vector annotation document so the
-/// next edit can select and change existing objects instead of starting from
-/// a flattened bitmap.
 pub(crate) fn replace_image_with_edit_state(
     id: u64,
     frame: RgbaFrame,
@@ -1302,8 +1163,6 @@ pub fn close_pin(id: u64, cx: &mut App) {
     let _ = state
         .window
         .update(cx, |_, window, _| window.remove_window());
-    // Drop the manifest entry first; if the atomic write fails, the image is
-    // left as an orphan instead of a manifest pointing at deleted content.
     save_manifest();
     if let Some(path) = state.image_path {
         let _ = std::fs::remove_file(path);
@@ -1438,7 +1297,6 @@ fn update_bounds_state(id: u64, bounds: Bounds<Pixels>) {
     });
 }
 
-/// Debounces manifest writes while the user scrolls to zoom or change opacity.
 fn schedule_manifest_save(cx: &mut Context<PinView>) {
     let revision = MANIFEST_REVISION.with(|revision| {
         let next = revision.get().wrapping_add(1);
@@ -1536,8 +1394,6 @@ fn save_manifest() {
         entries.sort_by_key(|entry| entry.id);
         entries
     });
-    // Pins beyond the startup window budget are not open, but they must stay
-    // in the manifest; otherwise closing a restored pin deletes them.
     entries.extend(DEFERRED_PINS.with(|pins| pins.borrow().clone()));
     entries.sort_by_key(|entry| entry.id);
     entries.dedup_by_key(|entry| entry.id);
@@ -1599,8 +1455,6 @@ impl PinTheme {
     }
 }
 
-/// Native window drag started from a pin. Screen coordinates are physical so
-/// mixed-DPI desktops move the window at the same speed as the cursor.
 struct PinDrag {
     cursor_start: (i32, i32),
     window_start: (i32, i32),
@@ -1610,13 +1464,8 @@ struct PinView {
     id: u64,
     content: PinContent,
     zoom: f32,
-    /// Wheel zoom animates toward this value so a sequence of notches keeps
-    /// moving in the same direction instead of restarting from the current
-    /// window size.
     zoom_target: f32,
     zoom_serial: u64,
-    /// Screen point that stays fixed across a zoom gesture. Captured once per
-    /// gesture so frame-placement latency cannot make the pin creep.
     zoom_center: Option<(f32, f32)>,
     opacity: f32,
     click_through: bool,
@@ -1627,8 +1476,6 @@ struct PinView {
     hud_serial: u64,
     hud_leaving: bool,
     ocr: Option<platform_ocr::OcrOutput>,
-    /// Restored pins start OCR from their saved PNG instead of keeping a
-    /// full-frame Arc queued for every restored window.
     ocr_path: Option<PathBuf>,
     selection: Option<(usize, usize)>,
     selecting: bool,
@@ -1688,8 +1535,6 @@ impl PinView {
         view
     }
 
-    /// Pulses a bright outline so a repeated pin shortcut makes the existing
-    /// pin easy to find instead of stacking another copy on top.
     fn flash(&mut self, cx: &mut Context<Self>) {
         self.flash_generation = self.flash_generation.wrapping_add(1);
         self.flash_active = true;
@@ -1720,9 +1565,6 @@ impl PinView {
         })
     }
 
-    /// Returns the CPU frame for an explicit user action (copy/save/edit/
-    /// rotate). After OCR the frame is dropped and reloaded from the pinned
-    /// PNG only when needed.
     fn frame_for_action(&self) -> Option<Arc<RgbaFrame>> {
         self.content.frame_arc().or_else(|| {
             self.persisted_path()
@@ -1771,9 +1613,6 @@ impl PinView {
             if !current {
                 return;
             }
-            // Sources are either a shared frame or a saved PNG path; queued
-            // jobs therefore hold no duplicate pixel buffers, and the queue
-            // serializes the expensive decode/recognition work.
             let output = cx
                 .background_executor()
                 .spawn(async move { crate::ocr_queue::recognize(source, options) })
@@ -1788,7 +1627,6 @@ impl PinView {
             .ok();
         })
         .detach();
-        // The OCR task holds its own Arc source; actions reload from disk.
         self.release_frame_if_persisted();
     }
 
@@ -1834,10 +1672,6 @@ impl PinView {
                 .last()
                 .map(|ch| (ch.rect.origin.x + ch.rect.size.width as i32) as f32)
                 .unwrap_or(line_left);
-            // Only a click inside the line's own glyph run selects text.
-            // Falling back to the nearest character anywhere in the image made
-            // every drag over a text screenshot start a selection, so the pin
-            // could not be moved by its body.
             if x < line_left - 3.0 || x > line_right + 3.0 {
                 base += line.chars.len();
                 continue;
@@ -1868,9 +1702,6 @@ impl PinView {
             let length = line.chars.len();
             if index < base + length {
                 let local = index - base;
-                // CJK runs no longer carry the OCR word separator, so treat
-                // one glyph as the double-click unit instead of selecting the
-                // entire line.
                 if !line.chars[local].ch.is_ascii() {
                     return Some((base + local, base + local));
                 }
@@ -1915,8 +1746,6 @@ impl PinView {
             let to = (end.saturating_sub(base) + 1).min(length);
             let full_line = to == length;
             let separator = match previous {
-                // Only a fully selected line can be reflowed into the next
-                // one; partial selections keep an explicit line break.
                 Some((previous_line, true)) if from == 0 => {
                     platform_ocr::line_join_separator(previous_line, line, block_right)
                 }
@@ -2043,8 +1872,6 @@ impl PinView {
         true
     }
 
-    /// Largest zoom whose window still fits the display the pin lives on.
-    /// Returns the configured maximum when the image or display is unknown.
     fn fitted_zoom_limit(&self, window: &Window, cx: &App) -> f32 {
         let Some(size) = self.content.image_size() else {
             return 4.0;
@@ -2060,21 +1887,10 @@ impl PinView {
         )
     }
 
-    /// Applies one animation step around the window centre. Resizing from the
-    /// top-left made wheel zoom drift towards the bottom-right; moving the
-    /// native frame keeps the image's centre anchored.
-    ///
-    /// A pin cannot usefully show more than one display, so the frame is kept
-    /// inside the display bounds whenever it fits. Growing past the screen
-    /// used to leave the image cut at the display edges even though the user
-    /// asked for a larger pin.
     fn apply_zoom(&mut self, zoom: f32, window: &mut Window, cx: &mut Context<Self>) {
         if self.content.image_size().is_none() {
             return;
         }
-        // Keep the whole pin on screen: capping the applied zoom also covers
-        // pins that were opened larger than their display, which used to stay
-        // cut at the screen edge through every wheel step.
         let fit = self.fitted_zoom_limit(window, cx).max(MIN_PIN_ZOOM);
         let zoom = zoom.clamp(MIN_PIN_ZOOM, fit);
         let (width, height) = self.content.size(zoom);
@@ -2117,8 +1933,6 @@ impl PinView {
             (width * scale).ceil().max(1.0) as u32,
             (height * scale).ceil().max(1.0) as u32,
         );
-        // Update the content scale before moving the native frame so a
-        // repaint driven by the resize already draws the new image.
         self.zoom = zoom;
         let settle_bounds = Bounds {
             origin,
@@ -2127,22 +1941,11 @@ impl PinView {
         if place_on_monitor_deferred(&*window, physical, dpi).is_err() {
             window.resize(size(px(width), px(height)));
         }
-        // The native frame and DWM can settle one turn after a resize; repeat
-        // the client alignment and repaint so the image never stays clipped to
-        // the previous window size.
         window.defer(cx, move |window, cx| {
             crate::ui::align_client_to_bounds(window, settle_bounds);
-            // The platform resize callback cannot update GPUI's cached
-            // viewport while this view is being updated, so the layout kept
-            // fitting the pre-resize client area. Read the new client size
-            // here, before the next frame, instead of waiting for a click.
             window.bounds_changed(cx);
             window.refresh();
         });
-        // A pin created moments ago can miss the swap-chain resize for its
-        // first wheel step, which left the enlarged image cut off at the old
-        // surface until the next input repainted the window. Request one more
-        // frame after the resize settles instead of waiting for a click.
         #[cfg(target_os = "windows")]
         {
             let handle = window.window_handle();
@@ -2182,23 +1985,14 @@ impl PinView {
         if self.content.image_size().is_none() {
             return;
         }
-        // Stop growing once the whole pin fits the display. Zooming out may
-        // go below that limit so tall captures can still be shrunk further.
         let fit = self.fitted_zoom_limit(window, cx).clamp(MIN_PIN_ZOOM, 4.0);
         self.zoom_target = target.clamp(MIN_PIN_ZOOM, fit);
         let language = settings_state::get().language;
         let percent = (self.zoom_target * 100.0).round() as i32;
-        // Animating a native window resize on Windows presents the stretched
-        // old frame before the new image, which reads as the border moving
-        // first. One resize per wheel notch keeps both together; the body is
-        // also sized from the zoom target so it never waits for the native
-        // frame to catch up.
         if cx.reduce_motion() || cfg!(target_os = "windows") {
             self.zoom_center = None;
             let target = self.zoom_target;
             self.apply_zoom(target, window, cx);
-            // Keep the next wheel step relative to the zoom that was applied,
-            // not the unclamped target, so scrolling back starts immediately.
             self.zoom_target = self.zoom;
             schedule_manifest_save(cx);
             self.show_hud(format!("{} {percent}%", t(language, "pin.zoom_hud")), cx);
@@ -2247,10 +2041,6 @@ impl PinView {
     fn begin_window_drag(&mut self, window: &mut Window) {
         #[cfg(target_os = "windows")]
         {
-            // GPUI's Windows backend dispatches non-client presses back into
-            // the view, so the native move loop never runs. Move the window
-            // ourselves from the physical cursor delta instead; GPUI already
-            // captured the mouse until button release.
             let cursor = platform_window::cursor_screen_position();
             let origin = platform_window::window_screen_origin(&*window);
             if let (Some(cursor), Some(origin)) = (cursor, origin) {
@@ -2275,8 +2065,6 @@ impl PinView {
         };
         let x = drag.window_start.0 + cursor_x - drag.cursor_start.0;
         let y = drag.window_start.1 + cursor_y - drag.cursor_start.1;
-        // Moving is best-effort and runs every pointer frame; a transient
-        // platform failure would only spam the log.
         let _ = platform_window::move_window_to(&*window, x, y);
     }
 
@@ -2286,8 +2074,6 @@ impl PinView {
         }
     }
 
-    /// Releases the pin texture before a native window-close request removes
-    /// the renderer. App-driven close already calls `release_image` explicitly.
     fn watch_close(&self, window: &Window, cx: &mut Context<Self>) {
         let view = cx.entity().downgrade();
         window.on_window_should_close(cx, move |_, cx| {
@@ -2297,9 +2083,6 @@ impl PinView {
     }
 
     fn replace_image(&mut self, frame: Arc<RgbaFrame>, hash: u64, cx: &mut Context<Self>) {
-        // Any replacement from outside the editor invalidates the vector
-        // document; `replace_image_with_edit_state` attaches a fresh one after
-        // this call.
         PINS.with(|pins| {
             if let Some(state) = pins.borrow_mut().get_mut(&self.id) {
                 state.edit_state = None;
@@ -2313,8 +2096,6 @@ impl PinView {
         self.zoom_center = None;
         self.zoom_serial = self.zoom_serial.wrapping_add(1);
         if let PinContent::Image { image, .. } = previous {
-            // Replacement runs inside an entity update, where `App::drop_image`
-            // cannot see the pin window; defer until the update completes.
             cx.defer(move |cx| cx.drop_image(image, None));
         }
         self.content_generation = self.content_generation.wrapping_add(1);
@@ -2363,8 +2144,6 @@ impl PinView {
         cx.notify();
     }
 
-    /// Short-lived numeric feedback for wheel gestures. Kept separate from
-    /// `notice` so a zoom tick does not hide a copy/save message.
     fn show_hud(&mut self, message: String, cx: &mut Context<Self>) {
         self.hud = Some(message);
         self.hud_leaving = false;
@@ -2421,9 +2200,6 @@ impl PinView {
         self.show_notice(t(language, "pin.copied").to_owned(), cx);
     }
 
-    /// The frame copy/save exports. Region pins display a composed shadow even
-    /// when the export setting leaves it off, so those re-export the capture
-    /// with the configured effects instead of handing out the display image.
     fn export_frame(&self) -> Option<Arc<RgbaFrame>> {
         let edit_state = PINS.with(|pins| {
             pins.borrow()
@@ -2441,8 +2217,6 @@ impl PinView {
             };
             return Some(Arc::new(frame));
         }
-        // A restored pin has no vector document; strip the pin-only shadow
-        // margin so the copy matches the export that was recorded in history.
         let frame = self.frame_for_action()?;
         let padding = self.export_padding();
         if padding > 0 {
@@ -2502,7 +2276,6 @@ impl PinView {
         let (frame, edit_state) = match edit_state {
             Some(state) => match state.base_frame() {
                 Some(base) => (Some(base), Some(state)),
-                // A corrupted compact base falls back to the flattened pin.
                 None => (self.frame_for_action(), None),
             },
             None => (self.frame_for_action(), None),
@@ -2547,14 +2320,7 @@ impl PinView {
     fn body(&self, theme: &PinTheme, viewport: Size<Pixels>) -> Div {
         match &self.content {
             PinContent::Image { image, .. } => {
-                // Size the image from the zoom instead of the window: the
-                // native frame can reach its new size one frame before GPUI
-                // relayouts, which made the image visibly trail the border
-                // during wheel zoom.
                 let (width, height) = self.content.size(self.zoom.max(MIN_PIN_ZOOM));
-                // Never paint past the client area. While a wheel step is
-                // still resizing the frame, an oversized body would lose its
-                // right and bottom edge until the next repaint.
                 let viewport_width = f32::from(viewport.width);
                 let viewport_height = f32::from(viewport.height);
                 let fit = if viewport_width <= 0.0 || viewport_height <= 0.0 {
@@ -2564,10 +2330,6 @@ impl PinView {
                         .min(viewport_height / height.max(1.0))
                         .min(1.0)
                 };
-                // Centre the image while the client area still lags a wheel
-                // step. Anchoring it to the top-left corner made a growing pin
-                // look like the image was sliding up-left until the next
-                // click resized the surface.
                 div()
                     .size_full()
                     .flex()
@@ -2739,9 +2501,6 @@ impl Render for PinView {
                         x < margin || y < margin || x > width - margin || y > height - margin;
                     let over_text = this.begin_text_selection(event.position);
                     if near_edge || event.modifiers.alt || !over_text {
-                        // Dragging text selects it; Alt or an edge drag moves
-                        // the pin. Both gestures stay available on text-heavy
-                        // images.
                         this.selection = None;
                         this.selecting = false;
                         this.begin_window_drag(window);
@@ -2759,9 +2518,6 @@ impl Render for PinView {
                     );
                     let items = this.menu_items(settings_state::get().language);
                     let pin_id = this.id;
-                    // Opening a GPUI window inside an input callback re-enters
-                    // the App borrow and panics; create the menu after the
-                    // event dispatch finishes.
                     cx.defer(move |cx| crate::pin::open_pin_menu(pin_id, position, items, cx));
                     cx.stop_propagation();
                 }),
@@ -2798,9 +2554,6 @@ impl Render for PinView {
                 }),
             )
             .on_mouse_exit(cx.listener(|this, _, window, cx| {
-                // A very fast drag can outrun the window; without this the
-                // drag state would survive a mouse-up delivered outside and
-                // the pin would keep following the cursor afterwards.
                 if this.drag.take().is_some() {
                     update_bounds(this.id, window.bounds());
                     cx.notify();
@@ -2821,8 +2574,6 @@ impl Render for PinView {
                         (f32::from(delta.x) / 20.0, f32::from(delta.y) / 20.0)
                     }
                 };
-                // Windows translates Shift+wheel into a horizontal scroll with
-                // a zero vertical delta, so opacity adjustments must read X.
                 let primary = if delta_y.abs() > f32::EPSILON {
                     delta_y
                 } else {
@@ -2838,9 +2589,6 @@ impl Render for PinView {
                         this.set_opacity(this.opacity - step, cx);
                     }
                 } else {
-                    // One wheel event is one notch. Windows reports the
-                    // system's scroll-lines setting (three by default), which
-                    // made a single notch jump the zoom by 30%.
                     let step = if lines {
                         delta_y.signum() * 0.10
                     } else {
@@ -2935,8 +2683,6 @@ impl Render for PinView {
 struct PinMenuView {
     pin_id: u64,
     items: Vec<(PinMenuAction, String)>,
-    /// Keyboard highlight. `None` until an arrow key is pressed so opening
-    /// the menu never paints a selected row.
     selected: Option<usize>,
     focus_handle: FocusHandle,
     _blur_subscription: Option<gpui_kit::Subscription>,
@@ -3027,8 +2773,6 @@ impl Render for PinMenuView {
                     .on_click(cx.listener(move |_, _, window, cx| {
                         forget_pin_menu();
                         window.remove_window();
-                        // Edit opens a full-screen editor window; doing that
-                        // inside this input callback would re-enter the App.
                         cx.defer(move |cx| perform_pin_action(pin_id, action, cx));
                     }))
                     .child(label),
@@ -3247,8 +2991,6 @@ fn display_for_bounds(cx: &App, bounds: Bounds<Pixels>) -> Option<DisplayId> {
         .or_else(|| cx.primary_display().map(|display| display.id()))
 }
 
-/// Display that will host a pin being opened. Prefers the caller's monitor,
-/// then the display under the requested bounds, then the primary display.
 fn pin_open_display_bounds(
     cx: &App,
     bounds: Bounds<Pixels>,
@@ -3275,10 +3017,6 @@ fn pin_open_display_bounds(
         .or_else(|| cx.primary_display().map(|display| display.bounds()))
 }
 
-/// Fits a pin being opened inside its display: caps the zoom so the whole
-/// image stays visible and clamps the origin inside the screen. A pin opened
-/// from history used to inherit both its capture scale and a cascade offset,
-/// so a full-screen capture started cut at the display edge.
 fn fit_pin_to_display(
     content: &PinContent,
     bounds: Bounds<Pixels>,
@@ -3325,8 +3063,6 @@ fn fit_pin_to_display(
     )
 }
 
-/// Largest zoom where a pin image still fits the given display. Pins stop
-/// growing at the display edge instead of hanging off-screen.
 fn fit_zoom_limit(
     image_width: u32,
     image_height: u32,
@@ -3341,9 +3077,6 @@ fn fit_zoom_limit(
         .clamp(MIN_PIN_ZOOM, 4.0)
 }
 
-/// Display under the pin window. `Window::display` reflects the monitor stored
-/// at creation and can lag a move across monitors, which made the zoom limit
-/// fit the wrong screen size.
 fn pin_display_bounds(window: &Window, cx: &App) -> Option<Bounds<Pixels>> {
     let bounds = window.bounds();
     let center_x = f32::from(bounds.origin.x) + f32::from(bounds.size.width) / 2.0;
@@ -3403,8 +3136,6 @@ mod tests {
         assert!((super::fit_zoom_limit(1000, 500, 1200.0, 800.0) - 1.2).abs() < 0.001);
         assert!((super::fit_zoom_limit(200, 100, 1920.0, 1080.0) - 4.0).abs() < 0.001);
         assert!((super::fit_zoom_limit(4000, 3000, 1920.0, 1080.0) - 0.36).abs() < 0.001);
-        // Tall stitched captures must be allowed below 15% so the whole pin
-        // still fits instead of being clamped back to a cropped window.
         assert!((super::fit_zoom_limit(3000, 12000, 1920.0, 1080.0) - 0.09).abs() < 0.001);
     }
 

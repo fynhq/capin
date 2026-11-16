@@ -30,9 +30,6 @@ mod imp {
         static THROUGH_ESCAPE_FAILED: Cell<bool> = const { Cell::new(false) };
     }
 
-    /// A click-through pin cannot receive key events once the click lands on
-    /// another app. While such pins exist, claim Esc globally so the first
-    /// press restores pin interaction instead of closing the pin.
     fn sync_through_escape(cx: &mut App) {
         let wanted = crate::pin::click_through_count() > 0
             && !crate::overlay::has_open_overlays()
@@ -101,8 +98,6 @@ mod imp {
         value.parse().unwrap_or(default)
     }
 
-    /// Registers each shortcut independently: a system-owned combination such
-    /// as Win+Shift+S must not take the other shortcut down with it.
     fn register_pair(
         manager: &GlobalHotKeyManager,
         capture: HotKey,
@@ -190,21 +185,13 @@ mod imp {
                             if crate::overlay::has_open_overlays() {
                                 crate::overlay::close_open_overlays(cx);
                             } else {
-                                // Keep an open settings window: capture only
-                                // freezes the screen, it is not a mode switch.
                                 crate::overlay::open_overlays(cx);
                             }
                         } else if pin_enabled && id == pin_id {
                             log_info!("hotkey", "pin shortcut pressed");
                             if crate::overlay::has_open_overlays() {
-                                // Capture owns the shortcut while it is open:
-                                // pin the current selection/editor, not an old
-                                // clipboard image behind the overlay.
                                 let _ = crate::overlay::pin_current(cx);
                             } else if !crate::editor::pin_current(cx) {
-                                // A standalone long-capture editor is not an
-                                // overlay; route the shortcut there before
-                                // falling back to screenshot history.
                                 crate::pin::pin_last(cx);
                             }
                         } else if through_escape_id != 0 && id == through_escape_id {
@@ -227,13 +214,10 @@ mod imp {
         .detach();
     }
 
-    /// The latest registration failure, surfaced in the shortcuts page and
-    /// logs. `None` means every configured shortcut is active.
     pub fn registration_error() -> Option<String> {
         REGISTRATION_ERROR.with(|slot| slot.borrow().clone())
     }
 
-    /// Re-registers the global hotkeys after a settings change.
     pub fn refresh() -> Result<(), String> {
         let settings = settings_state::get();
         let capture = parse_or_default(&settings.capture_hotkey, default_capture());
@@ -259,8 +243,6 @@ mod imp {
             }
             let (registered, error) = register_pair(manager, capture, pin);
             if let Some(error) = error {
-                // Roll back to the last working pair so a rejected combination
-                // leaves the app usable and the settings page unchanged.
                 for hotkey in &registered {
                     let _ = manager.unregister(*hotkey);
                 }
@@ -279,8 +261,6 @@ mod imp {
                 PIN_ENABLED.with(|enabled| enabled.set(restored_pin));
                 CAPTURE_ID.with(|id| id.set(previous_capture.id()));
                 PIN_ID.with(|id| id.set(previous_pin.id()));
-                // The failed combination is reverted, so the page warning must
-                // describe the shortcuts that are actually active now.
                 REGISTRATION_ERROR.with(|slot| *slot.borrow_mut() = restore_error);
                 log_error!("hotkey", "failed to apply new shortcuts: {error}");
                 return Err(error);
@@ -303,8 +283,6 @@ mod imp {
         })
     }
 
-    /// Registers or releases the recording-only shortcuts (F9 pause, F10 stop).
-    /// Returns whether the requested state is active.
     pub fn set_recording_shortcuts(enabled: bool) -> bool {
         MANAGER.with(|slot| {
             let manager_borrow = slot.borrow();
@@ -343,8 +321,6 @@ mod imp {
         })
     }
 
-    /// Converts a captured key plus modifier flags into the persisted form.
-    /// Returns `None` when the key is unknown or only Shift is held.
     pub fn shortcut_from_key(
         key: &str,
         control: bool,
