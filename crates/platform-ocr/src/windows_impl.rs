@@ -19,15 +19,9 @@ use paddleocr_rs_onnx::{OcrEngine as PaddleEngine, TextRegion};
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 static PADDLE: OnceLock<Result<Mutex<PaddleEngine>, String>> = OnceLock::new();
 
-/// PaddleOCR confidence below this value is treated as icon noise. UI text
-/// normally scores above 0.8; low-confidence boxes are usually toolbar glyphs
-/// rather than copyable text.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const PADDLE_MIN_CONFIDENCE: f32 = 0.5;
 
-/// PP-OCRv6 accepts a dynamic recognition width, but extremely wide lines
-/// still produce a huge input tensor. Lines above this aspect ratio are
-/// recognized in overlapping chunks, each close to the model's training width.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const PADDLE_REC_MAX_ASPECT: f32 = 64.0;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -70,10 +64,6 @@ pub(super) fn recognize_text(frame: Arc<RgbaFrame>) -> Result<Vec<OcrLine>, OcrE
 }
 
 fn recognize_on_thread(frame: &RgbaFrame) -> Result<Vec<OcrLine>, OcrError> {
-    // Windows OCR splits Chinese characters into radicals at the scales this
-    // app used to feed it. PaddleOCR's PP-OCR models keep whole glyphs and
-    // preserve mixed Latin runs such as `eSIM`; fall back to the system engine
-    // on unsupported architectures or when the bundled models cannot load.
     if let Some(Ok(lines)) = recognize_with_paddle(frame)
         && !lines.is_empty()
     {
@@ -103,9 +93,6 @@ fn recognize_with_paddle(frame: &RgbaFrame) -> Option<Result<Vec<OcrLine>, OcrEr
         frame.packed_pixels().into_owned(),
     )?;
     let image = image::DynamicImage::ImageRgba8(image);
-    // Small crops (window titles, file names) gain stroke detail when
-    // upscaled. Large screenshots are tiled instead so the detector never
-    // shrinks 4K UI text to a few pixels.
     let (width, height) = (image.width(), image.height());
     let tiled = width.max(height) > TILE;
     let (source, scale_x, scale_y) = if tiled {
@@ -120,9 +107,6 @@ fn recognize_with_paddle(frame: &RgbaFrame) -> Option<Result<Vec<OcrLine>, OcrEr
         Ok(regions) => regions,
         Err(error) => return Some(Err(error)),
     };
-    // A tight crop of a single line can have no room for the detector's
-    // unclip margin. Keep the old whole-image recognition fallback for small
-    // images; large images stay tiled and fall back to the system engine.
     if regions.is_empty() && !tiled {
         let (width, height) = (source.width() as f32, source.height() as f32);
         regions.push(TextRegion {
@@ -165,9 +149,6 @@ fn detect_regions(
         .collect())
 }
 
-/// Runs detection on overlapping tiles and maps the boxes back to the source
-/// image. A failed tile is skipped unless every tile fails, so one bad tile
-/// does not discard the rest of the screenshot.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn detect_tiled(
     engine: &PaddleEngine,
@@ -233,8 +214,6 @@ fn recognize_regions(
     lines
 }
 
-/// Recognizes one region, splitting extremely wide lines into overlapping
-/// chunks so the recognizer keeps a native character width.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn recognize_region(
     engine: &PaddleEngine,
@@ -253,7 +232,6 @@ fn recognize_region(
         return Some((decoded.text, decoded.score));
     }
     let chunks = ((aspect / PADDLE_REC_CHUNK_ASPECT).ceil() as usize).clamp(2, 16);
-    // One character of overlap keeps a glyph cut by the chunk boundary whole.
     let overlap = (height * 1.2 / width).clamp(0.005, 0.2);
     let mut text = String::new();
     let mut weighted_score = 0.0_f32;
@@ -353,9 +331,6 @@ fn physical_rect(
     ))
 }
 
-/// Upscales small frames before detection and recognition. The detector caps
-/// its input at a 960 px long side, so small crops still benefit from extra
-/// pixels; large frames go through tiled detection instead.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn paddle_upscale(width: u32, height: u32) -> f32 {
     let pixels = u64::from(width).saturating_mul(u64::from(height));
@@ -371,8 +346,6 @@ fn paddle_upscale(width: u32, height: u32) -> f32 {
     }
 }
 
-/// Returns the (possibly upscaled) image plus the factors that map its
-/// coordinates back to the original frame.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn paddle_source(image: &image::DynamicImage) -> (image::DynamicImage, f32, f32) {
     let upscale = paddle_upscale(image.width(), image.height());
@@ -404,18 +377,12 @@ fn recognize_with_windows(frame: &RgbaFrame) -> Result<Vec<OcrLine>, OcrError> {
 
     let engine = OcrEngine::TryCreateFromUserProfileLanguages()
         .map_err(platform_error("TryCreateFromUserProfileLanguages"))?;
-    // Windows OCR misreads small UI text (0/l/1, e/0, 5/6) at native scale.
-    // Text crops are often only a few hundred pixels wide, so scale them up
-    // before recognition and map the returned boxes back to the original
-    // pixels. Keep the result inside the engine's maximum bitmap dimension.
     let upscale = ocr_upscale(
         frame.width(),
         frame.height(),
         OcrEngine::MaxImageDimension().unwrap_or(0),
     );
     let (bgra, width, height) = ocr_bitmap(frame, upscale);
-    // Map boxes back with the actual bitmap ratio, not the nominal factor:
-    // rounding the upscaled dimensions would otherwise shift every box.
     let scale_x = frame.width() as f32 / width.max(1) as f32;
     let scale_y = frame.height() as f32 / height.max(1) as f32;
 
@@ -489,11 +456,6 @@ fn recognize_with_windows(frame: &RgbaFrame) -> Result<Vec<OcrLine>, OcrError> {
     Ok(result)
 }
 
-/// Picks an integer upscale factor for OCR. Full-screen captures are left
-/// alone; smaller crops gain enough stroke detail for Windows OCR to separate
-/// characters such as `0` from `e`, `l` from `1`, and `5` from `6`. When the
-/// engine reports a maximum bitmap dimension, the factor is lowered so the
-/// upscaled bitmap still fits.
 fn ocr_upscale(width: u32, height: u32, max_dimension: u32) -> f32 {
     let pixels = u64::from(width).saturating_mul(u64::from(height));
     if pixels == 0 {
@@ -516,7 +478,6 @@ fn ocr_upscale(width: u32, height: u32, max_dimension: u32) -> f32 {
     preferred.min(fit).max(1.0)
 }
 
-/// Returns BGRA bytes plus the bitmap dimensions after the upscale pass.
 fn ocr_bitmap(frame: &RgbaFrame, upscale: f32) -> (Vec<u8>, i32, i32) {
     if upscale <= 1.0 {
         let mut bgra = frame.packed_pixels().into_owned();

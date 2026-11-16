@@ -1,10 +1,7 @@
-/// Result of applying the login-startup preference.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AutostartState {
     Enabled,
     Disabled,
-    /// macOS accepted the registration but the user must approve it in
-    /// System Settings > Login Items.
     RequiresApproval,
     Unsupported,
 }
@@ -81,8 +78,6 @@ pub fn set_autostart(enabled: bool) -> Result<AutostartState, crate::PlatformWin
             .unwrap_or_else(|| utf16(""));
         let description = utf16("Capin");
 
-        // The app already initialized COM; a different apartment model is not
-        // fatal for creating a shell link.
         let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
         unsafe {
             let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
@@ -107,8 +102,6 @@ pub fn set_autostart(enabled: bool) -> Result<AutostartState, crate::PlatformWin
         Ok(())
     }
 
-    // A fixed value name is what prevents duplicate startup entries when the
-    // executable moves or the app is upgraded.
     unsafe fn read_run_value() -> Option<String> {
         let key = utf16(RUN_KEY);
         let value = utf16(RUN_VALUE);
@@ -182,8 +175,6 @@ pub fn set_autostart(enabled: bool) -> Result<AutostartState, crate::PlatformWin
             return Ok(AutostartState::Enabled);
         }
 
-        // A previous fallback entry is already sufficient; do not rewrite it
-        // on every launch when the Run key stays blocked.
         if startup_shortcut_path().is_some_and(|path| path.exists()) {
             return Ok(AutostartState::Enabled);
         }
@@ -206,9 +197,6 @@ pub fn set_autostart(enabled: bool) -> Result<AutostartState, crate::PlatformWin
             return Ok(AutostartState::Enabled);
         }
 
-        // Some managed machines deny writes to the Run key. Drop a stale value
-        // if allowed, then use a Startup folder shortcut, which needs no
-        // elevation.
         let _ = unsafe {
             RegDeleteKeyValueW(
                 HKEY_CURRENT_USER,
@@ -238,7 +226,6 @@ pub fn set_autostart(enabled: bool) -> Result<AutostartState, crate::PlatformWin
                     PCWSTR(value.as_ptr()),
                 )
             };
-            // ERROR_FILE_NOT_FOUND means another process removed it first.
             if !result.is_ok() && result.0 != 2 {
                 error = Some(crate::PlatformWindowError::Platform {
                     operation: "RegDeleteKeyValueW",
@@ -264,9 +251,6 @@ pub fn set_autostart(enabled: bool) -> Result<AutostartState, crate::PlatformWin
     use objc2::runtime::{AnyClass, AnyObject, Bool};
     use objc2::{msg_send, sel};
 
-    // SMAppService lives in ServiceManagement.framework. Login items are keyed
-    // by code-signing identity, so packaging must ad-hoc sign the bundle with
-    // a fixed identifier or every build creates another login item.
     #[link(name = "ServiceManagement", kind = "framework")]
     unsafe extern "C" {}
 

@@ -1,11 +1,4 @@
-//! Platform-neutral helpers for tiled OCR detection.
-
-/// Long side of one detection tile. The bundled detector resizes its input to
-/// a 960 px long side, so a 1280 px tile keeps small UI text close to native
-/// resolution instead of shrinking a whole 4K screenshot four times.
 pub(crate) const TILE: u32 = 1280;
-/// Overlap between adjacent tiles. Lines crossing a seam appear whole in at
-/// least one tile, and `merge_rects` joins the duplicate fragments.
 pub(crate) const OVERLAP: u32 = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -38,8 +31,6 @@ impl Rect {
     }
 }
 
-/// Splits an image into overlapping tiles. The last tile in each direction is
-/// clamped to the image edge and may be narrower than [`TILE`].
 pub(crate) fn tile_rects(width: u32, height: u32) -> Vec<(u32, u32, u32, u32)> {
     if width == 0 || height == 0 {
         return Vec::new();
@@ -70,9 +61,6 @@ fn tile_starts(length: u32) -> Vec<u32> {
     starts
 }
 
-/// Joins duplicate boxes produced by overlapping tiles and fragments of the
-/// same line. Boxes on adjacent rows stay separate because their vertical
-/// overlap is below the threshold.
 pub(crate) fn merge_rects(rects: &mut Vec<Rect>) {
     loop {
         let mut merged = Vec::with_capacity(rects.len());
@@ -124,8 +112,6 @@ fn union(a: Rect, b: Rect) -> Rect {
     )
 }
 
-/// Reorders boxes top-to-bottom and left-to-right, grouping boxes whose
-/// vertical ranges overlap into the same row.
 pub(crate) fn sort_rects(rects: &mut Vec<Rect>) {
     let mut sorted = std::mem::take(rects);
     sorted.sort_by(|a, b| {

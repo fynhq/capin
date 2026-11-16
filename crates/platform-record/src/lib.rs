@@ -1,9 +1,3 @@
-//! Platform screen recorders for MP4 output.
-//!
-//! The recorder captures a monitor, a region, or a single window without audio
-//! and reports progress through [`Recorder`]. MP4 uses the platform encoder
-//! (Media Foundation on Windows, AVFoundation on macOS).
-
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,7 +14,6 @@ mod mp4;
 #[cfg(target_os = "windows")]
 mod windows;
 
-/// Errors returned before a recording thread starts.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum RecorderError {
     #[error(transparent)]
@@ -33,7 +26,6 @@ pub enum RecorderError {
     UnsupportedPlatform,
 }
 
-/// Shared control block between the UI and the platform recorder.
 pub(crate) struct Flags {
     stop: AtomicBool,
     paused: AtomicBool,
@@ -44,7 +36,7 @@ pub(crate) struct Flags {
     paused_total: Mutex<Duration>,
 }
 
-#[allow(dead_code)] // platform backends only
+#[allow(dead_code)]
 impl Flags {
     fn new() -> Self {
         Self {
@@ -77,9 +69,6 @@ impl Flags {
         }
     }
 
-    /// Resets the active clock when the platform stream actually starts.
-    /// Without this, setup time before the first frame appeared as a leading
-    /// gap in the output file.
     pub(crate) fn restart_started(&self) {
         if let Ok(mut started) = self.started.lock() {
             *started = Some(Instant::now());
@@ -92,9 +81,6 @@ impl Flags {
         }
     }
 
-    /// Active (non-paused) recording time, independent of whether frames
-    /// arrived. This keeps the timer, pause math, and final file duration in
-    /// sync on static screens.
     pub(crate) fn elapsed_active(&self) -> Duration {
         let started = self.started.lock().ok().and_then(|started| *started);
         let Some(started) = started else {
@@ -158,26 +144,15 @@ fn part_path(output: &Path) -> PathBuf {
     output.with_file_name(format!(".{stem}.part.{extension}"))
 }
 
-/// A running recording session.
-///
-/// Dropping the recorder requests a stop; the platform thread still finishes
-/// the file in the background.
 pub struct Recorder {
     flags: Arc<Flags>,
 }
 
 impl Recorder {
-    /// Validates the target and starts a platform recorder.
-    ///
-    /// The returned recorder reports setup and encoding failures through
-    /// [`Recorder::error`] once the background thread stops.
     pub fn start(config: RecordConfig, output: PathBuf) -> Result<Self, RecorderError> {
         Self::start_excluding(config, output, &[])
     }
 
-    /// Starts a recorder while excluding extra native window identifiers from
-    /// display capture. macOS uses this for the recording bar; Windows already
-    /// excludes it through `WDA_EXCLUDEFROMCAPTURE`.
     pub fn start_excluding(
         config: RecordConfig,
         output: PathBuf,
@@ -230,9 +205,6 @@ impl Drop for Recorder {
     }
 }
 
-/// Physical pixel dimensions a target will be recorded at. Callers that need
-/// the size before starting (for filename templates) use this instead of
-/// duplicating the target lookup.
 pub fn target_dimensions(target: CaptureTarget) -> Result<PhysicalSize, RecorderError> {
     resolve_target_dimensions(target)
 }

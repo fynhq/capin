@@ -1,5 +1,3 @@
-/// Returns the platform accent as packed `0xRRGGBB`, or `None` when the
-/// platform has no usable accent source.
 #[cfg(windows)]
 pub fn system_accent_hex() -> Option<u32> {
     use windows::Win32::Graphics::Dwm::DwmGetColorizationColor;
@@ -11,8 +9,6 @@ pub fn system_accent_hex() -> Option<u32> {
     }
 
     let mut argb = 0u32;
-    // DWM colorization is a fallback: it can lag and is tinted by the
-    // transparency mix. Explorer's AccentColorMenu is what Settings uses.
     if unsafe { DwmGetColorizationColor(&mut argb, &mut Default::default()) }.is_err() {
         return None;
     }
@@ -89,8 +85,6 @@ pub fn system_accent_hex() -> Option<u32> {
     None
 }
 
-/// Whether the Windows app theme is light, used to pick a tray glyph and the
-/// "follow system" window background.
 #[cfg(windows)]
 pub fn system_uses_light_theme() -> Option<bool> {
     const PERSONALIZE_KEY: &str =
@@ -98,9 +92,6 @@ pub fn system_uses_light_theme() -> Option<bool> {
     hkcu_dword(PERSONALIZE_KEY, "AppsUseLightTheme").map(|value| value != 0)
 }
 
-/// Whether the app is running under the light system appearance. AppKit reads
-/// the effective appearance of the shared application, so an explicit app
-/// override would be reflected too.
 #[cfg(target_os = "macos")]
 pub fn system_uses_light_theme() -> Option<bool> {
     use objc2::MainThreadMarker;
@@ -117,9 +108,6 @@ pub fn system_uses_light_theme() -> Option<bool> {
     None
 }
 
-/// Whether the taskbar (not the app chrome) is light. The tray glyph sits on
-/// the taskbar, so this follows `SystemUsesLightTheme` and falls back to the
-/// app theme when the value is missing.
 #[cfg(windows)]
 pub fn system_taskbar_uses_light_theme() -> Option<bool> {
     const PERSONALIZE_KEY: &str =

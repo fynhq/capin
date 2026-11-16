@@ -1,6 +1,3 @@
-//! Native window behavior that GPUI does not expose: topmost, taskbar
-//! visibility, activation policy, and capture exclusion.
-
 mod accent;
 mod autostart;
 mod error;
@@ -18,9 +15,6 @@ pub use style::WindowStyle;
 
 use raw_window_handle::HasWindowHandle;
 
-/// Raises a native dropdown menu at the pointer and returns the chosen index.
-/// macOS uses this for settings popups so the menu owns its vibrant surface
-/// and keyboard/dismiss behavior; other platforms keep their in-window popover.
 pub fn show_native_menu(items: &[String], selected: usize) -> Option<usize> {
     #[cfg(target_os = "macos")]
     {
@@ -33,7 +27,6 @@ pub fn show_native_menu(items: &[String], selected: usize) -> Option<usize> {
     }
 }
 
-/// Whether the process currently has macOS Accessibility permission.
 pub fn accessibility_trusted() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -45,9 +38,6 @@ pub fn accessibility_trusted() -> bool {
     }
 }
 
-/// Asks macOS to list the app under Accessibility. The system shows the
-/// prompt only while the app is not yet listed; later calls just return the
-/// current decision. No-op on other platforms.
 pub fn request_accessibility_permission() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -59,7 +49,6 @@ pub fn request_accessibility_permission() -> bool {
     }
 }
 
-/// Whether the process currently has macOS screen-recording permission.
 pub fn screen_capture_trusted() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -71,9 +60,6 @@ pub fn screen_capture_trusted() -> bool {
     }
 }
 
-/// Asks macOS to list the app under Screen Recording. The system shows the
-/// prompt only while the app is not yet listed; later calls just return the
-/// current decision. No-op on other platforms.
 pub fn request_screen_capture_permission() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -85,35 +71,21 @@ pub fn request_screen_capture_permission() -> bool {
     }
 }
 
-/// Hides the macOS Dock icon so the app behaves as a menu-bar utility.
-/// No-op on other platforms.
 pub fn set_macos_accessory_activation_policy() {
     #[cfg(target_os = "macos")]
     macos::set_accessory_activation_policy();
 }
 
-/// Shows a Dock icon while a full app window (the settings page) is open.
-/// No-op on other platforms.
 pub fn set_macos_regular_activation_policy() {
     #[cfg(target_os = "macos")]
     macos::set_regular_activation_policy();
 }
 
-/// Brings the process to the foreground. The capture overlay needs this on
-/// macOS because accessories are not activated merely by ordering a window
-/// front; without it the overlay never becomes the key window, so Esc and
-/// letter shortcuts do nothing.
 pub fn activate_application() {
     #[cfg(target_os = "macos")]
     macos::activate_application();
 }
 
-/// Whether Control is currently held, read from AppKit at call time.
-///
-/// macOS turns Ctrl+left-click into a secondary click before GPUI sees it and
-/// clears the control modifier from the event. It also sends no
-/// modifier-changed event when Control was already down before a window
-/// became key, so callers that need the real state query it here.
 pub fn control_modifier_down() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -125,8 +97,6 @@ pub fn control_modifier_down() -> bool {
     }
 }
 
-/// PID of the frontmost application when it is not this process. Used to
-/// restore focus after a capture overlay closes.
 pub fn frontmost_other_application_pid() -> Option<i32> {
     #[cfg(target_os = "macos")]
     {
@@ -138,8 +108,6 @@ pub fn frontmost_other_application_pid() -> Option<i32> {
     }
 }
 
-/// Activates a previously recorded application by PID. No-op elsewhere or
-/// when the process has quit.
 pub fn activate_application_by_pid(pid: i32) {
     #[cfg(target_os = "macos")]
     macos::activate_application_by_pid(pid);
@@ -149,16 +117,12 @@ pub fn activate_application_by_pid(pid: i32) {
     }
 }
 
-/// A macOS Privacy & Security pane that the settings page can open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrivacyPane {
     ScreenCapture,
     Accessibility,
 }
 
-/// Opens the matching pane of System Settings. On macOS each pane first
-/// triggers its own permission prompt so Capin is added to the list instead
-/// of leaving the user with an empty toggle.
 pub fn open_privacy_settings(pane: PrivacyPane) {
     #[cfg(target_os = "macos")]
     {
@@ -178,10 +142,6 @@ pub fn open_privacy_settings(pane: PrivacyPane) {
     }
 }
 
-/// Returns the current user's Pictures folder.
-///
-/// On Windows this is the known folder, so redirected libraries (for example
-/// OneDrive) resolve to their real location. On macOS it is `~/Pictures`.
 pub fn pictures_dir() -> Option<std::path::PathBuf> {
     #[cfg(target_os = "windows")]
     {
@@ -197,9 +157,6 @@ pub fn pictures_dir() -> Option<std::path::PathBuf> {
     }
 }
 
-/// Returns the current user's video folder.
-///
-/// On Windows this is the known Videos folder; on macOS it is `~/Movies`.
 pub fn videos_dir() -> Option<std::path::PathBuf> {
     #[cfg(target_os = "windows")]
     {
@@ -220,7 +177,6 @@ fn home_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(std::path::PathBuf::from)
 }
 
-/// Enables or disables mouse pass-through for an existing window.
 pub fn set_click_through(
     window: &impl HasWindowHandle,
     enabled: bool,
@@ -240,7 +196,6 @@ pub fn set_click_through(
     }
 }
 
-/// Physical screen position of the mouse cursor.
 pub fn cursor_screen_position() -> Option<(i32, i32)> {
     #[cfg(target_os = "windows")]
     {
@@ -256,7 +211,6 @@ pub fn cursor_screen_position() -> Option<(i32, i32)> {
     }
 }
 
-/// Physical screen origin of a native window.
 pub fn window_screen_origin(window: &impl HasWindowHandle) -> Option<(i32, i32)> {
     #[cfg(target_os = "windows")]
     {
@@ -269,7 +223,6 @@ pub fn window_screen_origin(window: &impl HasWindowHandle) -> Option<(i32, i32)>
     }
 }
 
-/// Moves a native window without resizing or changing its z-order.
 pub fn move_window_to(
     window: &impl HasWindowHandle,
     x: i32,
@@ -286,10 +239,6 @@ pub fn move_window_to(
     }
 }
 
-/// Hides or restores the system cursor for the current thread's window.
-///
-/// The capture overlay hides it while Ctrl window mode paints a camera glyph
-/// at the pointer. No-op on platforms where GPUI already owns the cursor.
 pub fn set_cursor_hidden(hidden: bool) {
     #[cfg(target_os = "windows")]
     {
@@ -301,10 +250,6 @@ pub fn set_cursor_hidden(hidden: bool) {
     }
 }
 
-/// Removes the platform-drawn outline around a borderless surface. Windows 11
-/// still paints a 1px frame and rounded corners around top-level windows; a
-/// pin is sized to its image and must not show anything outside it. No-op on
-/// other platforms.
 pub fn hide_native_border(window: &impl HasWindowHandle) {
     #[cfg(target_os = "windows")]
     {
@@ -316,10 +261,6 @@ pub fn hide_native_border(window: &impl HasWindowHandle) {
     }
 }
 
-/// Stops the platform from drawing an outer non-client shadow around a
-/// borderless surface. Pins contain their own captured edge shadow and must
-/// not receive a second system shadow. No-op on platforms without a native
-/// window shadow.
 pub fn disable_native_shadow(window: &impl HasWindowHandle) {
     #[cfg(target_os = "windows")]
     {
@@ -331,10 +272,6 @@ pub fn disable_native_shadow(window: &impl HasWindowHandle) {
     }
 }
 
-/// Restores the platform-drawn outer shadow for a borderless surface. Pins
-/// whose image has no composed edge shadow (currently long-capture results)
-/// use this so the pinned screenshot still reads as a floating object. No-op
-/// on platforms without a native window shadow.
 pub fn enable_native_shadow(window: &impl HasWindowHandle) {
     #[cfg(target_os = "windows")]
     {
@@ -350,9 +287,6 @@ pub fn enable_native_shadow(window: &impl HasWindowHandle) {
     }
 }
 
-/// Whether the platform's window capture already includes the native window
-/// shadow. macOS 13's ScreenCaptureKit path does; macOS 14+ drops it, so
-/// callers compose one instead.
 pub fn window_capture_includes_native_shadow() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -364,10 +298,6 @@ pub fn window_capture_includes_native_shadow() -> bool {
     }
 }
 
-/// Returns the native window identifier used by the platform capture APIs.
-///
-/// On Windows this is the `HWND`; on macOS it is the `CGWindowID`/window
-/// number. Returns `None` before the platform window has been created.
 pub fn native_window_id(window: &impl HasWindowHandle) -> Option<u64> {
     #[cfg(target_os = "windows")]
     {
@@ -384,16 +314,6 @@ pub fn native_window_id(window: &impl HasWindowHandle) -> Option<u64> {
     }
 }
 
-/// Places an existing window on a monitor using that monitor's physical
-/// rectangle.
-///
-/// Full-screen capture overlays must cover exactly one monitor even on
-/// mixed-DPI desktops. GPUI converts logical window bounds with the target
-/// display's scale factor, but Windows may still resize the window through
-/// `WM_DPICHANGED` while it moves from the monitor it was created on. Applying
-/// the physical rectangle after creation removes that ambiguity. On macOS the
-/// rectangle is converted back to AppKit points, so callers always pass
-/// physical pixels.
 pub fn place_on_monitor(
     window: &impl HasWindowHandle,
     bounds: core_types::PhysicalRect,
@@ -415,15 +335,6 @@ pub fn place_on_monitor(
     }
 }
 
-/// Moves and resizes a window without forcing the platform to paint its old
-/// content into the new frame.
-///
-/// Interactive resize animations call this on every tick. macOS
-/// `setFrame:display:YES` flushes the previous backing store before GPUI has
-/// laid out the new size, which made a pin's frame jump ahead of the image.
-/// Leaving the redraw to the next render pass keeps both in one presentation.
-/// Windows skips `SWP_FRAMECHANGED` for the same reason: forcing a non-client
-/// recalculation presented the new frame before the next paint.
 pub fn place_on_monitor_deferred(
     window: &impl HasWindowHandle,
     bounds: core_types::PhysicalRect,
@@ -445,14 +356,6 @@ pub fn place_on_monitor_deferred(
     }
 }
 
-/// Writes a screenshot to the system clipboard in the formats native apps
-/// expect.
-///
-/// Windows gets a bottom-up CF_DIB plus the registered PNG format: several
-/// Win32 and legacy apps reject a PNG-only clipboard. The DIB has no alpha
-/// channel, so transparent corners are flattened onto white. Other platforms
-/// return [`PlatformWindowError::UnsupportedPlatform`] and keep the GPUI
-/// clipboard path.
 pub fn set_image_clipboard(
     width: u32,
     height: u32,
@@ -470,9 +373,6 @@ pub fn set_image_clipboard(
     }
 }
 
-/// Whether the operating system asks applications to reduce decorative
-/// motion. The caller forwards this to GPUI once at startup so `with_animation`
-/// and `with_spring` render their static end state.
 pub fn reduce_motion() -> bool {
     #[cfg(target_os = "windows")]
     {
@@ -488,8 +388,6 @@ pub fn reduce_motion() -> bool {
     }
 }
 
-/// Returns the platform monitor that currently contains the window, as the
-/// same raw identifier used by `MonitorInfo`.
 pub fn monitor_for_window(window: &impl HasWindowHandle) -> Option<u64> {
     #[cfg(target_os = "windows")]
     {
@@ -502,11 +400,6 @@ pub fn monitor_for_window(window: &impl HasWindowHandle) -> Option<u64> {
     }
 }
 
-/// Applies the requested native window behavior to an existing window.
-///
-/// Call this after GPUI creates the window. Settings that the platform cannot
-/// satisfy are ignored when they are not applicable (for example, macOS has no
-/// per-window taskbar flag), while operations that report an OS error fail.
 pub fn apply(window: &impl HasWindowHandle, style: WindowStyle) -> Result<(), PlatformWindowError> {
     #[cfg(target_os = "windows")]
     {
@@ -523,15 +416,6 @@ pub fn apply(window: &impl HasWindowHandle, style: WindowStyle) -> Result<(), Pl
     }
 }
 
-/// Posts a scroll wheel event toward the window under a monitor-local point.
-///
-/// `monitor` is the platform monitor identifier and `(x, y)` is in that
-/// monitor's physical pixel space. Using monitor-local coordinates avoids the
-/// ambiguous global mapping on mixed-DPI macOS desktops.
-///
-/// `notches` is the number of wheel steps; positive scrolls up and negative
-/// scrolls down. Returns `false` when the platform cannot synthesize input,
-/// for example when macOS permission for posting events is missing.
 pub fn scroll_wheel_at(monitor: u64, x: i32, y: i32, notches: i32) -> bool {
     #[cfg(target_os = "windows")]
     {

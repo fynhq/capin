@@ -28,7 +28,6 @@ use windows_capture::window::Window;
 
 use crate::Flags;
 
-/// What the WGC session should do with each captured frame.
 #[derive(Clone, Copy, Debug)]
 enum Source {
     Monitor,
@@ -47,10 +46,8 @@ struct CaptureInfo {
     shared: Arc<Flags>,
 }
 
-/// Maps screen-space cursor positions into the captured frame.
 #[derive(Clone, Copy, Debug)]
 enum CursorSpace {
-    /// The frame starts at a physical desktop origin and covers `width`x`height`.
     Screen {
         origin_x: i32,
         origin_y: i32,
@@ -58,8 +55,10 @@ enum CursorSpace {
         height: u32,
         dpi: f32,
     },
-    /// The frame follows a window, so its origin is queried per frame.
-    Window { hwnd: isize, dpi: f32 },
+    Window {
+        hwnd: isize,
+        dpi: f32,
+    },
 }
 
 impl CursorSpace {
@@ -69,7 +68,6 @@ impl CursorSpace {
         }
     }
 
-    /// Returns the cursor position in frame pixels for a frame of `width`x`height`.
     fn cursor_in_frame(self, width: u32, height: u32) -> Option<(f32, f32)> {
         let (cursor_x, cursor_y) = cursor_position()?;
         self.point_in_frame(width, height, cursor_x, cursor_y)
@@ -112,18 +110,11 @@ impl CursorSpace {
 
 #[derive(Clone, Copy)]
 struct CursorSample {
-    /// System-relative time in 100 ns units, matching the capture timestamp.
     ticks: i64,
     x: i32,
     y: i32,
 }
 
-/// Timestamped cursor positions sampled off the capture thread.
-///
-/// WGC composites the cursor into a frame at the frame's capture timestamp,
-/// but the callback runs later. Reading `GetCursorPos` there made the demo
-/// disc lag behind fast pointer movement; matching the frame timestamp to this
-/// trace keeps the disc on the recorded cursor.
 struct CursorTrace {
     samples: Mutex<VecDeque<CursorSample>>,
 }
@@ -176,8 +167,6 @@ pub(crate) fn start(
         return Err("empty recording region".to_owned());
     }
 
-    // Cursor geometry is only needed for the demo highlight; skip the extra
-    // monitor/window enumeration otherwise.
     let monitors = config
         .cursor_highlight
         .map(|_| platform_backend().monitors().unwrap_or_default())
@@ -303,9 +292,6 @@ fn spawn_window(window: Window, info: CaptureInfo) -> Result<(), String> {
     Ok(())
 }
 
-/// Watches for the stop request independently of frame arrival. The previous
-/// implementation only created this watcher inside the first frame callback,
-/// so a recording that never received a frame could not be stopped.
 fn supervise(
     control: CaptureControl<Recorder, Box<dyn std::error::Error + Send + Sync>>,
     shared: Arc<Flags>,
@@ -348,7 +334,6 @@ fn cursor_position() -> Option<(i32, i32)> {
     Some((point.x, point.y))
 }
 
-/// Returns the window's physical outer rectangle as `(left, top, width, height)`.
 fn window_rect(hwnd: isize) -> Option<(i32, i32, u32, u32)> {
     use windows::Win32::Foundation::{HWND, RECT};
     use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
@@ -368,12 +353,8 @@ fn window_rect(hwnd: isize) -> Option<(i32, i32, u32, u32)> {
 struct Recorder {
     encoder: Option<VideoEncoder>,
     output_size: Option<(u32, u32)>,
-    /// The last encoded frame, retained for the final stop timestamp.
     frame_front: Vec<u8>,
-    /// Scratch frame buffer; swapped with `frame_front` after each encode so
-    /// steady-state recording does not allocate or zero a full frame.
     frame_back: Vec<u8>,
-    /// Reused scratch for `Frame::as_nopadding_buffer`.
     packed: Vec<u8>,
     last_pts: i64,
     frame_ticks: i64,
@@ -439,8 +420,6 @@ impl GraphicsCaptureApiHandler for Recorder {
         if x0 >= x1 || y0 >= y1 || x1 > frame.width() || y1 > frame.height() {
             return Ok(());
         }
-        // H.264 encoders reject odd frame dimensions, so drop at most one
-        // pixel from the right and bottom edge.
         let x1 = x0 + ((x1 - x0) & !1);
         let y1 = y0 + ((y1 - y0) & !1);
         if x0 >= x1 || y0 >= y1 {
@@ -488,8 +467,6 @@ impl GraphicsCaptureApiHandler for Recorder {
         });
         if let (Some(highlight), Some((cursor_x, cursor_y))) = (highlight, cursor) {
             let radius = CURSOR_HIGHLIGHT_RADIUS * self.flags.cursor_space.dpi();
-            // The buffer is bottom-up for `send_frame_buffer`; the cursor
-            // position is top-down like the displayed frame.
             let buffer_y = height as f32 - cursor_y;
             paint_cursor_highlight_bgra(
                 &mut self.frame_back,
@@ -556,8 +533,6 @@ impl Drop for Recorder {
             return;
         };
 
-        // Hold the last frame until the stop timestamp so static content does
-        // not produce a file much shorter than the on-screen timer.
         if !self.frame_front.is_empty() {
             let buffer = std::mem::take(&mut self.frame_front);
             let elapsed_ticks = (self.flags.shared.elapsed_active().as_nanos() / 100) as i64;

@@ -87,9 +87,6 @@ pub(crate) fn start(
     if outcome.is_err() {
         let _ = std::fs::remove_file(&temp);
     } else {
-        // The UI polls `finished` to leave the "saving" state. Windows marks
-        // it in its encoder; the macOS path must do the same once the file is
-        // published, otherwise F10 leaves the bar on "saving" forever.
         flags.finish();
     }
     outcome
@@ -104,8 +101,6 @@ struct SessionPlan {
     cursor_space: CursorSpace,
 }
 
-/// Maps the global cursor position (screen points, top-left origin) into the
-/// recorded frame. All geometry is captured when the session starts.
 #[derive(Clone, Copy, Debug)]
 enum CursorSpace {
     Screen {
@@ -183,9 +178,6 @@ fn build_plan(
                     &windows,
                 )
             };
-            // SCDisplay reports points; the stream needs backing-store pixels.
-            // Recording the point size produced non-Retina files, and a wrong
-            // source scale left black bars outside the captured rect.
             let scale = sck::display_scale(&display);
             let output_width = (frame.size.width * scale).round().max(2.0) as usize;
             let output_height = (frame.size.height * scale).round().max(2.0) as usize;
@@ -276,11 +268,6 @@ fn build_plan(
     }
 }
 
-/// Excludes Capin's helper windows (overlay, capture bar, region outline,
-/// demo cursor, pin menu) from a display stream. Pins and the settings page
-/// stay visible, matching screenshots and the Windows recorder.
-/// `NSWindow.sharingType` no longer hides windows from ScreenCaptureKit on
-/// macOS 15, so the filter is the only reliable mechanism.
 fn own_windows(content: &SCShareableContent, extra: &[u64]) -> Vec<Retained<SCWindow>> {
     let excluded = core_capture::capture_excluded_window_ids();
     unsafe { content.windows() }
@@ -307,9 +294,6 @@ fn region_size(rect: PhysicalRect) -> Result<(usize, usize), String> {
     ))
 }
 
-/// H.264 encoders reject frames above 4K. Scale larger displays and windows
-/// down proportionally; ScreenCaptureKit and the writer both use this size so
-/// the sample buffers and the encoder never disagree.
 fn fitted_output(width: usize, height: usize) -> (usize, usize) {
     const MAX_WIDTH: usize = 4096;
     const MAX_HEIGHT: usize = 2304;
@@ -436,7 +420,6 @@ fn build_stream_config(
     if let Some(rect) = plan.source_rect {
         unsafe { stream_config.setSourceRect(rect) };
     }
-    // Available on macOS 14+; macOS 13 keeps the window shadow.
     if plan.single_window
         && stream_config.respondsToSelector(objc2::sel!(setIgnoreShadowsSingleWindow:))
     {
@@ -498,9 +481,6 @@ define_class!(
                 Ok(timeline) => timeline,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            // Start the recording clock when the first frame actually
-            // arrives, matching Windows and keeping PTS at zero. Starting it
-            // before `startCapture` completed left a black leading gap.
             if timeline.next_index() == 0 {
                 ivars.flags.restart_started();
             }
@@ -758,8 +738,6 @@ impl Writer {
     }
 
     fn finish(self, final_pts_millis: i64) -> Result<(), String> {
-        // Extend the session to the stop time so static content does not
-        // produce a clip that ends at the last changed frame.
         if final_pts_millis > self.last_pts_millis {
             unsafe {
                 self.writer

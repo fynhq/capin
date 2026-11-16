@@ -70,9 +70,6 @@ pub(super) fn place_on_monitor(
     place_on_monitor_impl(window, bounds, true)
 }
 
-/// Resizes without `SWP_FRAMECHANGED`: pins animate their size, and forcing a
-/// non-client recalculation made DWM present the new frame before GPUI's next
-/// paint, so the border moved ahead of the image.
 pub(super) fn place_on_monitor_deferred(
     window: &impl HasWindowHandle,
     bounds: core_types::PhysicalRect,
@@ -90,11 +87,6 @@ fn place_on_monitor_impl(
         return Err(PlatformWindowError::NotWin32);
     };
     let hwnd = HWND(win32.hwnd.get() as *mut c_void);
-    // `bounds` describes the client area that must cover the monitor. A
-    // window that still carries non-client frame styles would place its
-    // client area a few pixels inside this rectangle, scaling the frozen
-    // frame and clipping the right/bottom edges. Expand the native window by
-    // the measured frame insets so the client matches the monitor.
     let (inset_left, inset_top, extra_width, extra_height) = client_frame_insets(hwnd);
     let width = i32::try_from(bounds.size.width)
         .ok()
@@ -130,8 +122,6 @@ fn place_on_monitor_impl(
     .map_err(|error| platform_error("SetWindowPos", error))
 }
 
-/// Native frame thickness around the client area, as
-/// `(left, top, total_width, total_height)` in physical pixels.
 fn client_frame_insets(hwnd: HWND) -> (i32, i32, i32, i32) {
     let mut window_rect = RECT::default();
     let mut client_rect = RECT::default();
@@ -169,12 +159,6 @@ pub(super) fn apply(
     let hwnd = HWND(win32.hwnd.get() as *mut c_void);
 
     if style.borderless && style.opaque {
-        // GPUI's popup windows keep the resize frame on the left, right and
-        // bottom even after the title bar is hidden. A capture overlay must
-        // cover the monitor exactly, so drop the whole non-client frame
-        // instead of living with a client area that is a few pixels smaller
-        // than the display. Transparent inline editors keep GPUI's frame
-        // compensation: they are placed before their style is applied.
         let mut window_style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
         window_style &=
             !(WS_CAPTION.0 | WS_THICKFRAME.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0);
@@ -272,8 +256,6 @@ pub(super) fn set_click_through(
         // window already uses a composition surface.
         let _ = unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA) };
     } else {
-        // Remove LAYERED again: leaving it behind can make later opacity or
-        // composition changes behave differently from the original window.
         ex_style &= !(WS_EX_TRANSPARENT.0 | WS_EX_LAYERED.0);
     }
     // SAFETY: the extended style value came from the same window.
@@ -285,9 +267,6 @@ pub(super) fn set_click_through(
 
 const CF_DIB_FORMAT: u32 = 8;
 
-/// Writes the image as a bottom-up CF_DIB plus the registered PNG format.
-/// Legacy apps only read CF_DIB/CF_BITMAP, so a PNG-only clipboard cannot be
-/// pasted there; the PNG entry keeps alpha and fidelity for modern apps.
 pub(super) fn set_image_clipboard(
     width: u32,
     height: u32,
@@ -352,8 +331,6 @@ fn dib_from_rgba(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
     header[24..28].copy_from_slice(&2835i32.to_le_bytes());
     header[28..32].copy_from_slice(&2835i32.to_le_bytes());
     dib.extend_from_slice(&header);
-    // CF_DIB has no alpha channel. Flatten transparent corners onto white so
-    // window captures keep their rounded look instead of turning black.
     for row in (0..height as usize).rev() {
         for column in 0..width as usize {
             let index = (row * width as usize + column) * 4;
@@ -468,8 +445,6 @@ pub(super) fn hide_native_border(window: &impl HasWindowHandle) {
         return;
     };
     let hwnd = HWND(win32.hwnd.get() as *mut c_void);
-    // Windows 10 rejects these attributes; Windows 11 paints the frame unless
-    // it is told not to.
     let border = DWMWA_COLOR_NONE;
     let corners = DWMWCP_DONOTROUND;
     // SAFETY: hwnd is live and the attribute pointers outlive each call.
@@ -489,9 +464,6 @@ pub(super) fn hide_native_border(window: &impl HasWindowHandle) {
     }
 }
 
-/// Stops DWM from drawing the non-client frame and its outer shadow. Pins and
-/// other surfaces that show only their own pixels use this so the system does
-/// not add a second shadow around the captured window's own edge shadow.
 pub(super) fn disable_native_shadow(window: &impl HasWindowHandle) {
     let Ok(handle) = window.window_handle() else {
         return;
@@ -522,9 +494,6 @@ pub(super) fn disable_native_shadow(window: &impl HasWindowHandle) {
     }
 }
 
-/// Restores DWM's non-client rendering so a transparent borderless pin gets
-/// the same outer shadow as a normal top-level window. `hide_native_border`
-/// keeps the frame itself invisible.
 pub(super) fn enable_native_shadow(window: &impl HasWindowHandle) {
     let Ok(handle) = window.window_handle() else {
         return;

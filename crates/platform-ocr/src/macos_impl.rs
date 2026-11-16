@@ -10,9 +10,6 @@ use objc2_vision::{
 
 use crate::{OcrChar, OcrError, OcrLine, build_line};
 
-/// Per-character Vision boxes are only fetched for reasonably sized lines.
-/// Longer paragraphs keep the distributed layout so OCR does not spend more
-/// time on UI boxes than on recognition.
 const MAX_VISION_CHARS: usize = 1024;
 
 pub(super) fn recognize_text(frame: Arc<RgbaFrame>) -> Result<Vec<OcrLine>, OcrError> {
@@ -141,9 +138,6 @@ fn build_vision_line(
     }
 }
 
-/// Vision has returned line-sized boxes for every character on some systems.
-/// Detect that shape and fall back to the distributed layout instead of
-/// breaking text selection.
 fn vision_chars_are_usable(chars: &[OcrChar], line: PhysicalRect) -> bool {
     let visible: Vec<&OcrChar> = chars
         .iter()

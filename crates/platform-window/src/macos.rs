@@ -39,12 +39,6 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// Moves and resizes a window to a monitor's physical rectangle.
-///
-/// `NSWindow` frames use AppKit global points with a bottom-left origin, while
-/// the caller's rectangle is in the monitor's physical pixel space with a
-/// top-left origin. Dividing by the monitor scale and flipping around the main
-/// display height keeps mixed-DPI desktops unambiguous.
 pub(super) fn place_on_monitor(
     window: &impl HasWindowHandle,
     bounds: core_types::PhysicalRect,
@@ -53,8 +47,6 @@ pub(super) fn place_on_monitor(
     place_on_monitor_impl(window, bounds, scale, true)
 }
 
-/// Same placement without `setFrame:display:YES`. The window server and the
-/// GPUI content layer then present the new frame and the new image together.
 pub(super) fn place_on_monitor_deferred(
     window: &impl HasWindowHandle,
     bounds: core_types::PhysicalRect,
@@ -149,24 +141,16 @@ pub(super) fn activate_application() {
     app.activate();
 }
 
-/// Current Control key state from AppKit. GPUI's modifier-changed event is
-/// not delivered when Control was already held before a window became key,
-/// and its synthesized secondary click clears the modifier. The capture
-/// overlay therefore checks the native flag at button-down time so window
-/// mode still sees the real Ctrl state.
 pub(super) fn control_modifier_down() -> bool {
     NSEvent::modifierFlags_class().contains(NSEventModifierFlags::Control)
 }
 
-/// PID of the frontmost application when it is not Capin. Recording it before
-/// the capture overlay activates lets the overlay hand focus back afterwards.
 pub(super) fn frontmost_other_application_pid() -> Option<i32> {
     let frontmost = NSWorkspace::sharedWorkspace().frontmostApplication()?;
     let pid = frontmost.processIdentifier();
     (pid != std::process::id() as i32).then_some(pid)
 }
 
-/// Activates a previously recorded application. No-op when it has quit.
 pub(super) fn activate_application_by_pid(pid: i32) {
     if let Some(application) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
         application.activateWithOptions(NSApplicationActivationOptions(0));
@@ -181,10 +165,6 @@ pub(super) fn request_accessibility_permission() -> bool {
 }
 
 pub(super) fn open_privacy_settings(pane: PrivacyPane) {
-    // macOS Ventura moved Privacy & Security into the new Settings
-    // extension; older releases still answer the legacy anchor. Try the
-    // modern deep link first, then the fallback, and finally plain System
-    // Settings so the click always does something visible.
     let modern = match pane {
         PrivacyPane::ScreenCapture => {
             "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture"
@@ -204,8 +184,6 @@ pub(super) fn open_privacy_settings(pane: PrivacyPane) {
     if open_url(modern) || open_url(legacy) || open_url("x-apple.systempreferences:") {
         return;
     }
-    // AppKit can refuse the URL when the app is not frontmost; the `open`
-    // helper asks LaunchServices directly and is the last-resort path.
     let _ = std::process::Command::new("open").arg(legacy).spawn();
 }
 
@@ -231,18 +209,11 @@ pub(super) fn apply(
         return Err(PlatformWindowError::NotAppKit);
     };
 
-    // A nonactivating panel never becomes the key window, which leaves a
-    // full-screen capture overlay unable to receive Esc or letter shortcuts.
-    // The overlay asks for a borderless normal window instead: GPUI's window
-    // subclass already overrides `canBecomeKeyWindow`.
     if style.borderless {
         let content = window.contentRectForFrameRect(window.frame());
         window.setStyleMask(NSWindowStyleMask::Borderless);
         window.setFrame_display(content, true);
         window.setHasShadow(false);
-        // Changing the style mask resigns the first responder, and without it
-        // the view never receives keyDown/insertText. Restore the GPUI view so
-        // shortcuts and annotation text input keep working.
         let _ = window.makeFirstResponder(Some(view.as_super()));
     }
     if style.opaque {
@@ -256,10 +227,6 @@ pub(super) fn apply(
         window.setLevel(NSScreenSaverWindowLevel);
     }
 
-    // NSPanel hides itself when the application deactivates (the default is
-    // `true` for panels). Pins, the recording bar and capture outlines must
-    // survive an app switch; without this a pin vanishes as soon as the user
-    // clicks another app and only comes back when Capin is activated again.
     if style.keeps_visible_when_inactive {
         window.setHidesOnDeactivate(false);
     }
@@ -278,8 +245,6 @@ pub(super) fn apply(
     Ok(())
 }
 
-/// Re-enables AppKit's window shadow. Borderless windows turn it off in
-/// `apply` so pins do not clip their own pixels; long-capture pins restore it.
 pub(super) fn enable_native_shadow(window: &impl HasWindowHandle) {
     let Ok(handle) = window.window_handle() else {
         return;
@@ -304,9 +269,6 @@ pub(super) fn window_capture_includes_native_shadow() -> bool {
     })
 }
 
-/// Physical cursor position in the same top-left global space as
-/// `core-capture`'s monitor bounds: global points multiplied by the scale of
-/// the display under the pointer.
 pub(super) fn cursor_screen_position() -> Option<(i32, i32)> {
     let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).ok()?;
     let event = CGEvent::new(source).ok()?;
@@ -400,11 +362,6 @@ fn cursor_point() -> Option<CGPoint> {
     Some(event.location())
 }
 
-/// Converts a monitor-local physical pixel into an AppKit point.
-///
-/// Resolving the display by identifier keeps mixed-DPI desktops unambiguous:
-/// the previous global inverse mapping could pick the wrong display when two
-/// monitors used different scales.
 fn display_point(monitor: u64, x: i32, y: i32) -> Option<CGPoint> {
     let display_id = u32::try_from(monitor).ok()?;
     if display_id == 0 {
@@ -419,10 +376,6 @@ fn display_point(monitor: u64, x: i32, y: i32) -> Option<CGPoint> {
     if bounds.size.width <= 0.0 || bounds.size.height <= 0.0 {
         return None;
     }
-    // Points come from the window-server backing store (for example 2x the
-    // reported menu-bar points). AppKit is the source of truth for the scale;
-    // the display mode is only a fallback because its width can be reported in
-    // either points or pixels depending on the OS and display.
     let scale = screen_backing_scale(display_id)
         .or_else(|| {
             display.display_mode().and_then(|mode| {
@@ -440,7 +393,6 @@ fn display_point(monitor: u64, x: i32, y: i32) -> Option<CGPoint> {
     ))
 }
 
-/// Backing scale of the NSScreen that hosts a CGDirectDisplayID.
 fn screen_backing_scale(id: u32) -> Option<f64> {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSScreen;
@@ -450,8 +402,6 @@ fn screen_backing_scale(id: u32) -> Option<f64> {
     let point_bounds = CGDisplay::new(id).bounds();
     for screen in NSScreen::screens(marker).iter() {
         let frame = screen.frame();
-        // NSScreen frames use a bottom-left origin; CGDisplay bounds are
-        // top-left relative to the primary display.
         let top = main_height - (frame.origin.y + frame.size.height);
         if (frame.origin.x - point_bounds.origin.x).abs() <= 1.0
             && (top - point_bounds.origin.y).abs() <= 1.0
@@ -472,16 +422,11 @@ unsafe extern "C" {
     fn CGEventSetLocation(event: core_graphics::sys::CGEventRef, location: CGPoint);
 }
 
-// ---------------------------------------------------------------------------
-// Native dropdown menus
-// ---------------------------------------------------------------------------
-
 thread_local! {
     static MENU_SELECTION: std::cell::Cell<Option<isize>> = const { std::cell::Cell::new(None) };
     static MENU_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Keeps a second popup from nesting inside an already tracking menu.
 struct MenuGuard;
 
 impl MenuGuard {
@@ -524,9 +469,6 @@ impl MenuTarget {
     }
 }
 
-/// Shows a native menu at the pointer and returns the chosen index. The
-/// current item carries the system checkmark. `None` means the menu was
-/// dismissed, another menu is already open, or no window was available.
 pub(super) fn show_native_menu(items: &[String], selected: usize) -> Option<usize> {
     use objc2_app_kit::{
         NSAppearanceCustomization, NSControlStateValueOn, NSEvent, NSMenu, NSMenuItem,
@@ -542,12 +484,7 @@ pub(super) fn show_native_menu(items: &[String], selected: usize) -> Option<usiz
     let view = window.contentView()?;
 
     let menu = NSMenu::new(mtm);
-    // Every item has an explicit target/action below; automatic enabling
-    // would otherwise walk the responder chain and gray them out.
     menu.setAutoenablesItems(false);
-    // A menu raised from a vibrant window can inherit the button's
-    // appearance and render dark in light mode. Follow the app's effective
-    // appearance, like the app's other native menus.
     let appearance = app.effectiveAppearance();
     menu.setAppearance(Some(&appearance));
 
@@ -567,8 +504,6 @@ pub(super) fn show_native_menu(items: &[String], selected: usize) -> Option<usiz
         menu.addItem(&item);
     }
 
-    // `mouseLocation` is in screen coordinates; convert through the window
-    // into its content view, the space `popUpMenuPositioningItem` expects.
     let screen_point = NSEvent::mouseLocation();
     let window_point = window.convertPointFromScreen(screen_point);
     let view_point = view.convertPoint_fromView(window_point, None);

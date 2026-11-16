@@ -1,12 +1,3 @@
-//! Post-processing for MP4 recordings: drops the empty audio track the Windows
-//! transcoder leaves behind and writes the encoder and author URL into the
-//! iTunes-style `moov.udta.meta.ilst` box that Windows Explorer and most
-//! players expose as file properties.
-//!
-//! Both platform encoders finalize `moov` after `mdat`, so the new metadata is
-//! appended inside the last top-level box. A file whose `moov` is not last is
-//! rejected instead of rewriting chunk offsets.
-
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -19,9 +10,6 @@ const TAG_ENCODER: [u8; 4] = [A9, b'e', b'n', b'c'];
 const TAG_URL: [u8; 4] = [A9, b'u', b'r', b'l'];
 const TAGS: [([u8; 4], &str); 2] = [(TAG_ENCODER, ENCODER), (TAG_URL, PROJECT_URL)];
 
-/// Windows Explorer and Windows Media Player read descriptive MP4 metadata
-/// from the proprietary `udta/Xtra` box rather than the iTunes `ilst` tags.
-/// The names must match the WM/ property names exactly.
 const XTRA_ENCODER: &str = "WM/EncodedBy";
 const XTRA_URL: &str = "WM/AuthorURL";
 const XTRA_TAGS: [(&str, &str); 2] = [(XTRA_ENCODER, ENCODER), (XTRA_URL, PROJECT_URL)];
@@ -40,7 +28,7 @@ impl BoxSpan {
     }
 }
 
-#[allow(dead_code)] // only the Windows and macOS recorders call this
+#[allow(dead_code)]
 pub(crate) fn inject_metadata(path: &Path) -> Result<(), String> {
     let mut file = OpenOptions::new()
         .read(true)
@@ -134,9 +122,6 @@ fn parse_boxes(bytes: &[u8]) -> Result<Vec<BoxSpan>, String> {
 
 fn update_moov(payload: &[u8]) -> Result<Vec<u8>, String> {
     let children = parse_boxes(payload)?;
-    // The Windows transcoder always declares an audio stream even when audio
-    // is disabled. Its track has zero samples but makes strict players reject
-    // the file, so drop empty tracks while keeping at least one real track.
     let empty_traks: Vec<bool> = children
         .iter()
         .map(|child| {
@@ -214,18 +199,11 @@ fn update_udta(payload: &[u8]) -> Result<Vec<u8>, String> {
     Ok(rebuilt)
 }
 
-/// Rewrites the Windows `Xtra` records so Explorer's Details tab shows the
-/// encoder and author URL. Each record is
-/// `size(u32) name_len(u32) name type(u32) value_len(u32) value`, where both
-/// size fields include their own four bytes and the value starts with the
-/// fixed `0x0008` marker followed by UTF-16LE text and a null terminator.
 fn update_xtra(payload: &[u8]) -> Vec<u8> {
     let mut rebuilt = Vec::with_capacity(payload.len() + 160);
     let mut offset = 0;
     while offset + 16 <= payload.len() {
         let Some(record) = xtra_record_at(payload, offset) else {
-            // An unknown layout is replaced as a whole: keeping arbitrary
-            // bytes risks a box Explorer cannot parse.
             rebuilt.clear();
             break;
         };
@@ -341,7 +319,6 @@ fn make_hdlr() -> Vec<u8> {
 }
 
 fn make_item(kind: [u8; 4], value: &str) -> Vec<u8> {
-    // `data` full box: version/flags 1 (UTF-8), locale 0, then the string.
     let mut data = vec![0u8; 8];
     data[3] = 1;
     data.extend_from_slice(value.as_bytes());

@@ -1,18 +1,14 @@
-//! Platform text recognition and QR decoding for captured frames.
-
 use std::sync::Arc;
 
 use core_types::{PhysicalRect, RgbaFrame};
 use thiserror::Error;
 
-/// One recognized character with its approximate image-space box.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OcrChar {
     pub ch: char,
     pub rect: PhysicalRect,
 }
 
-/// One recognized text line and its character boxes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OcrLine {
     pub text: String,
@@ -87,10 +83,6 @@ pub fn recognize_with(frame: RgbaFrame, options: OcrOptions) -> OcrOutput {
     recognize_shared(Arc::new(frame), options)
 }
 
-/// Recognizes text and/or QR codes from a shared frame.
-///
-/// Callers that already hold a pinned image can pass its `Arc` so queued OCR
-/// work does not duplicate the full RGBA buffer.
 pub fn recognize_shared(frame: Arc<RgbaFrame>, options: OcrOptions) -> OcrOutput {
     let qr_codes = if options.qr {
         decode_qr(&frame)
@@ -125,12 +117,6 @@ pub fn recognize_shared(frame: Arc<RgbaFrame>, options: OcrOptions) -> OcrOutput
     }
 }
 
-/// Windows OCR often returns full-width punctuation for Latin text (a
-/// U+FF0C comma instead of `,`, for example) because the active recognizer is
-/// the CJK model. Lines without CJK content are mapped back to ASCII forms so
-/// copied commands, code and URLs stay usable. Mostly-Latin lines keep their
-/// CJK glyphs but still clean up the lookalikes the Chinese model produces
-/// for `.` and `_` inside file names and version numbers.
 fn normalize_latin_punctuation(line: &mut OcrLine) {
     let chars: Vec<char> = line.text.chars().collect();
     let meaningful: Vec<char> = chars
@@ -153,7 +139,6 @@ fn normalize_latin_punctuation(line: &mut OcrLine) {
         .filter(|ch| ch.is_ascii_alphanumeric() || ch.is_ascii_punctuation())
         .count();
     if ascii * 3 < meaningful.len() * 2 {
-        // A genuinely Chinese line: full-width punctuation is intentional.
         return;
     }
     let normalized: Vec<char> = chars
@@ -183,7 +168,6 @@ fn normalize_latin_punctuation(line: &mut OcrLine) {
 fn normalize_latin_char(ch: char) -> char {
     let code = ch as u32;
     if (0xFF01..=0xFF5E).contains(&code) {
-        // Full-width ASCII block maps one-to-one onto U+0021..U+007E.
         return char::from_u32(code - 0xFEE0).unwrap_or(ch);
     }
     match ch {
@@ -194,9 +178,6 @@ fn normalize_latin_char(ch: char) -> char {
     }
 }
 
-/// Cleans up one character inside a mostly-Latin line. Only characters with
-/// an ASCII neighbour are touched, so Chinese punctuation that happens to sit
-/// inside such a line stays intact.
 fn normalize_mixed_char(ch: char, previous: Option<char>, next: Option<char>) -> char {
     let previous_ascii = previous.is_some_and(|ch| ch.is_ascii_alphanumeric());
     let next_ascii = next.is_some_and(|ch| ch.is_ascii_alphanumeric());
@@ -204,8 +185,6 @@ fn normalize_mixed_char(ch: char, previous: Option<char>, next: Option<char>) ->
         return ch;
     }
     match ch {
-        // The dot in `v0.1.0` or `setup.exe` frequently decodes as a
-        // full-width comma; between two digits only a decimal point fits.
         '\u{FF0C}' | '\u{3001}' => {
             return if previous.is_some_and(|ch| ch.is_ascii_digit())
                 && next.is_some_and(|ch| ch.is_ascii_digit())
@@ -216,7 +195,6 @@ fn normalize_mixed_char(ch: char, previous: Option<char>, next: Option<char>) ->
             };
         }
         '\u{3002}' => return '.',
-        // `_` inside a file name decodes as the CJK one or a dash.
         '\u{4E00}' => return '_',
         '\u{2014}' | '\u{2013}' | '\u{2015}' => return '-',
         _ => {}
@@ -228,8 +206,7 @@ fn normalize_mixed_char(ch: char, previous: Option<char>, next: Option<char>) ->
     ch
 }
 
-/// Joins two overlapping chunk decodes without repeating the shared seam.
-#[allow(dead_code)] // Windows recognition only
+#[allow(dead_code)]
 pub(crate) fn merge_recognition_overlap(previous: &str, next: &str) -> String {
     let mut merged = String::with_capacity(previous.len() + next.len());
     merged.push_str(previous);
@@ -253,19 +230,14 @@ fn prefix_chars(text: &str, count: usize) -> &str {
 fn is_cjk(ch: char) -> bool {
     matches!(
         ch as u32,
-        0x3040..=0x30FF   // kana
-            | 0x3400..=0x4DBF // CJK extension A
-            | 0x4E00..=0x9FFF // CJK unified ideographs
-            | 0xAC00..=0xD7AF // hangul syllables
-            | 0xF900..=0xFAFF // CJK compatibility ideographs
+        0x3040..=0x30FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xAC00..=0xD7AF
+            | 0xF900..=0xFAFF
     )
 }
 
-/// Joins recognized lines back into one text, treating lines that a paragraph
-/// wrapped as a soft join instead of a newline. The decision uses sentence
-/// punctuation, list markers, vertical gaps, paragraph indentation and short
-/// paragraph-ending lines, which covers UI text and prose without merging
-/// unrelated rows.
 pub fn join_ocr_lines(lines: &[OcrLine]) -> String {
     let Some((first, rest)) = lines.split_first() else {
         return String::new();
@@ -287,7 +259,6 @@ pub fn join_ocr_lines(lines: &[OcrLine]) -> String {
                 .next()
                 .is_some_and(|ch| ch.is_ascii_lowercase())
         {
-            // A word split across a wrap keeps no space or hyphen.
             text.pop();
         } else {
             text.push_str(separator);
@@ -298,10 +269,6 @@ pub fn join_ocr_lines(lines: &[OcrLine]) -> String {
     text
 }
 
-/// Separator for two adjacent recognized lines. `block_right` is the right
-/// edge of the widest line in the block, used to spot paragraph-ending short
-/// lines. Returns `"\n"` for hard breaks, `" "` for wrapped Latin text and
-/// `""` for wrapped CJK text.
 pub fn line_join_separator(previous: &OcrLine, next: &OcrLine, block_right: i32) -> &'static str {
     let previous_text = previous.text.trim_end();
     let next_text = next.text.trim_start();
@@ -389,19 +356,14 @@ fn needs_join_space(previous: char, next: char) -> bool {
     )
 }
 
-#[allow(dead_code)] // platform backends only
+#[allow(dead_code)]
 pub(crate) fn build_line(text: String, rect: PhysicalRect) -> OcrLine {
     let text = text.trim_end().to_owned();
     let chars = layout_chars(&text, rect);
     OcrLine { text, rect, chars }
 }
 
-/// Builds a line from word-level OCR hits. Windows returns every CJK glyph as
-/// its own "word", so joining word text with spaces inserted a gap between
-/// each Chinese character both on screen and when copied. Character boxes now
-/// follow the real word rectangles instead of being spread evenly across the
-/// whole line, which also makes text selection land on the right glyph.
-#[allow(dead_code)] // Windows backend only
+#[allow(dead_code)]
 pub(crate) fn build_line_from_words(words: &[(String, PhysicalRect)]) -> Option<OcrLine> {
     let words: Vec<(&str, PhysicalRect)> = words
         .iter()
@@ -450,10 +412,8 @@ pub(crate) fn build_line_from_words(words: &[(String, PhysicalRect)]) -> Option<
     })
 }
 
-#[allow(dead_code)] // Windows backend only
+#[allow(dead_code)]
 fn needs_space(previous: char, next: char) -> bool {
-    // Windows OCR can split a long number into word boxes. Inserting a space
-    // between two digit runs turns one value into two, so keep digits joined.
     if previous.is_ascii_digit() && next.is_ascii_digit() {
         return false;
     }
@@ -470,7 +430,7 @@ fn needs_space(previous: char, next: char) -> bool {
     )
 }
 
-#[allow(dead_code)] // Windows backend only
+#[allow(dead_code)]
 fn union_rect(a: PhysicalRect, b: PhysicalRect) -> PhysicalRect {
     let left = a.origin.x.min(b.origin.x);
     let top = a.origin.y.min(b.origin.y);
@@ -532,9 +492,6 @@ fn decode_qr(frame: &RgbaFrame) -> Vec<String> {
         *target = image::Luma([luminance as u8]);
     }
 
-    // rqrr scans the whole bitmap. A 4K screenshot is mostly wasted work for
-    // QR detection; cap the long edge while keeping typical codes well above
-    // the minimum module size.
     const QR_MAX_EDGE: u32 = 2048;
     let long_edge = gray.width().max(gray.height());
     let gray = if long_edge > QR_MAX_EDGE {
