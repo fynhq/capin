@@ -356,10 +356,24 @@ impl AccelerationDevice {
 /// If the requested EP is not available (not compiled into ORT, missing runtime
 /// libraries, or unsupported on this platform), a warning is logged and the
 /// session falls back to CPU.
+fn ocr_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|threads| threads.get())
+        .unwrap_or(1)
+        .min(2)
+}
+
 fn configure_session_builder(
-    builder: ort::session::builder::SessionBuilder,
+    mut builder: ort::session::builder::SessionBuilder,
     device: AccelerationDevice,
 ) -> Result<ort::session::builder::SessionBuilder, PaddleOcrError> {
+    let threads = ocr_threads();
+    builder = builder
+        .with_intra_threads(threads)
+        .and_then(|builder| builder.with_memory_pattern(false))
+        .map_err(|error| PaddleOcrError::General(error.to_string()))?;
+    info!("[ocr] session threads={threads}, memory pattern off");
+
     macro_rules! configure_ep {
         ($feature:literal, $ep:ty) => {{
             #[cfg(feature = $feature)]
@@ -383,7 +397,19 @@ fn configure_session_builder(
     }
 
     match device {
-        AccelerationDevice::Cpu => Ok(builder),
+        AccelerationDevice::Cpu => {
+            let cpu = ort::ep::CPU::default().with_arena_allocator(false).build();
+            match builder.clone().with_execution_providers([cpu]) {
+                Ok(builder) => {
+                    info!("[ocr] cpu arena disabled");
+                    Ok(builder)
+                }
+                Err(error) => {
+                    warn!("[ocr] cpu arena disable failed: {error}");
+                    Ok(builder)
+                }
+            }
+        }
         AccelerationDevice::DirectML => configure_ep!("directml", ort::ep::DirectML),
         AccelerationDevice::Cuda => configure_ep!("cuda", ort::ep::CUDA),
         AccelerationDevice::OpenVINO => configure_ep!("openvino", ort::ep::OpenVINO),
