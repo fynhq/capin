@@ -158,6 +158,19 @@ pub fn preprocess_region(
     rec_height: u32,
     rec_width: Option<u32>,
 ) -> Result<(Vec<f32>, i64), PaddleOcrError> {
+    preprocess_region_rgb(&image.to_rgb8(), region, rec_height, rec_width)
+}
+
+/// Preprocess a text region from an already packed RGB image.
+///
+/// Callers processing many regions from the same page should convert once and
+/// reuse the buffer instead of converting per region.
+pub fn preprocess_region_rgb(
+    image: &RgbImage,
+    region: &TextRegion,
+    rec_height: u32,
+    rec_width: Option<u32>,
+) -> Result<(Vec<f32>, i64), PaddleOcrError> {
     let bbox = order_bbox_points(region.bbox);
 
     // Reject degenerate quads that would produce an ill-conditioned homography
@@ -188,7 +201,6 @@ pub fn preprocess_region(
     let proj = Projection::from_control_points(src, dst)
         .ok_or(PaddleOcrError::Projection { reason: "Failed to create projection".to_string() })?;
 
-    let rgb = image.to_rgb8();
     let mut rectified = RgbImage::new(rw, rh);
 
     // Use Bilinear instead of Bicubic: bilinear samples a 2×2 neighbourhood
@@ -197,7 +209,7 @@ pub fn preprocess_region(
     // For OCR text rectification the quality difference is negligible.
     let warp_result = catch_unwind(AssertUnwindSafe(|| {
         warp_into(
-            &rgb,
+            image,
             proj,
             Interpolation::Bilinear,
             Border::Replicate,

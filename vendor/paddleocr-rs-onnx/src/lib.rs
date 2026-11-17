@@ -58,7 +58,7 @@ pub use error::PaddleOcrError;
 pub use cls::{DocOrientation, OrientationResult, classify_orientation};
 pub use decode::DecodedText;
 
-use image::DynamicImage;
+use image::{DynamicImage, RgbImage};
 use serde::{Deserialize, Serialize};
 
 /// A detected text region in an image.
@@ -558,20 +558,10 @@ impl OcrEngine {
             );
         }
 
-        // build session pool for concurrent recognition
-        let cores = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(2);
-                // Mobile optimization: use smaller pool size on Android/iOS
-        let pool_size = {
-            #[cfg(target_os = "android")]
-            { 1 }
-            #[cfg(target_os = "ios")]
-            { 1 }
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            { (cores / 2).max(1) }
-        };
-        info!("[ocr] creating rec session pool of size {} (cores={})", pool_size, cores);
+        // Capin recognizes regions serially on one worker thread; a single
+        // session avoids duplicating weights and arena memory per core.
+        let pool_size = 1usize;
+        info!("[ocr] creating rec session pool of size {pool_size}");
 
         let mut sessions = VecDeque::with_capacity(pool_size);
         sessions.push_back(rec_session);
@@ -685,7 +675,19 @@ impl OcrEngine {
     /// [`recognize_all`]: OcrEngine::recognize_all
     pub fn recognize_text(&self, image: &DynamicImage, region: &TextRegion) -> Result<decode::DecodedText, PaddleOcrError> {
         let (data, width) = rec::preprocess_region(image, region, self.rec_height, self.rec_width)?;
+        self.run_region(data, width)
+    }
 
+    /// Recognize a single text region from an already packed RGB image.
+    ///
+    /// Callers that recognize many regions from the same page should convert
+    /// once and reuse the RGB buffer across calls.
+    pub fn recognize_text_rgb(&self, image: &RgbImage, region: &TextRegion) -> Result<decode::DecodedText, PaddleOcrError> {
+        let (data, width) = rec::preprocess_region_rgb(image, region, self.rec_height, self.rec_width)?;
+        self.run_region(data, width)
+    }
+
+    fn run_region(&self, data: Vec<f32>, width: i64) -> Result<decode::DecodedText, PaddleOcrError> {
         // Pop a session from the pool, blocking until one is available
         let mut session = {
             let mut pool = self.rec_sessions.lock();

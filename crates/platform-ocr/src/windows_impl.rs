@@ -42,7 +42,7 @@ pub(super) fn recognize_text(frame: Arc<RgbaFrame>) -> Result<Vec<OcrLine>, OcrE
             .name("capin-ocr".to_owned())
             .spawn(move || {
                 while let Ok(job) = receiver.recv() {
-                    let _ = job.reply.send(recognize_on_thread(&job.frame));
+                    let _ = job.reply.send(recognize_on_thread(job.frame));
                 }
             })
             .map(|_| sender)
@@ -63,17 +63,30 @@ pub(super) fn recognize_text(frame: Arc<RgbaFrame>) -> Result<Vec<OcrLine>, OcrE
         .map_err(|_| OcrError::Platform("the OCR worker stopped unexpectedly".to_owned()))?
 }
 
-fn recognize_on_thread(frame: &RgbaFrame) -> Result<Vec<OcrLine>, OcrError> {
-    if let Some(Ok(lines)) = recognize_with_paddle(frame)
+fn recognize_on_thread(frame: Arc<RgbaFrame>) -> Result<Vec<OcrLine>, OcrError> {
+    let Some(image) = rgba_image(frame) else {
+        return Err(OcrError::Platform("invalid OCR frame".to_owned()));
+    };
+    let image = image::DynamicImage::ImageRgba8(image);
+    if let Some(Ok(lines)) = recognize_with_paddle(&image)
         && !lines.is_empty()
     {
         return Ok(lines);
     }
-    recognize_with_windows(frame)
+    recognize_with_windows(&image)
+}
+
+fn rgba_image(frame: Arc<RgbaFrame>) -> Option<image::RgbaImage> {
+    let (width, height) = (frame.width(), frame.height());
+    let pixels = match Arc::try_unwrap(frame) {
+        Ok(frame) => frame.into_packed_pixels(),
+        Err(frame) => frame.packed_pixels().into_owned(),
+    };
+    image::RgbaImage::from_raw(width, height, pixels)
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-fn recognize_with_paddle(frame: &RgbaFrame) -> Option<Result<Vec<OcrLine>, OcrError>> {
+fn recognize_with_paddle(image: &image::DynamicImage) -> Option<Result<Vec<OcrLine>, OcrError>> {
     static DET: &[u8] = include_bytes!("../assets/ocr/PP-OCRv6_tiny_det.onnx");
     static REC: &[u8] = include_bytes!("../assets/ocr/PP-OCRv6_tiny_rec.onnx");
     static KEYS: &[u8] = include_bytes!("../assets/ocr/ppocrv6_dict.txt");
@@ -87,19 +100,20 @@ fn recognize_with_paddle(frame: &RgbaFrame) -> Option<Result<Vec<OcrLine>, OcrEr
         Ok(engine) => engine,
         Err(_) => return None,
     };
-    let image = image::RgbaImage::from_raw(
-        frame.width(),
-        frame.height(),
-        frame.packed_pixels().into_owned(),
-    )?;
-    let image = image::DynamicImage::ImageRgba8(image);
-    let image = maybe_invert_dark(image);
+    let inverted;
+    let image = if mean_luma(image) < 100.0 {
+        inverted = inverted_rgba(image);
+        &inverted
+    } else {
+        image
+    };
     let (width, height) = (image.width(), image.height());
     let tiled = width.max(height) > TILE;
     let (source, scale_x, scale_y) = if tiled {
-        (image, 1.0, 1.0)
+        (std::borrow::Cow::Borrowed(image), 1.0, 1.0)
     } else {
-        paddle_source(&image)
+        let (scaled, scale_x, scale_y) = paddle_source(image);
+        (std::borrow::Cow::Owned(scaled), scale_x, scale_y)
     };
     let Ok(engine) = engine.lock() else {
         return None;
@@ -115,15 +129,7 @@ fn recognize_with_paddle(frame: &RgbaFrame) -> Option<Result<Vec<OcrLine>, OcrEr
             confidence: 1.0,
         });
     }
-    let lines = recognize_regions(
-        &engine,
-        &source,
-        regions,
-        scale_x,
-        scale_y,
-        frame.width(),
-        frame.height(),
-    );
+    let lines = recognize_regions(&engine, &source, regions, scale_x, scale_y, width, height);
     Some(Ok(lines))
 }
 
@@ -198,9 +204,10 @@ fn recognize_regions(
     frame_width: u32,
     frame_height: u32,
 ) -> Vec<OcrLine> {
+    let rgb = image.to_rgb8();
     let mut lines = Vec::with_capacity(regions.len());
     for region in regions {
-        let Some((text, confidence)) = recognize_region(engine, image, &region) else {
+        let Some((text, confidence)) = recognize_region(engine, &rgb, &region) else {
             continue;
         };
         let text = text.trim();
@@ -218,7 +225,7 @@ fn recognize_regions(
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn recognize_region(
     engine: &PaddleEngine,
-    image: &image::DynamicImage,
+    image: &image::RgbImage,
     region: &TextRegion,
 ) -> Option<(String, f32)> {
     let rect = region_to_rect(region);
@@ -229,7 +236,7 @@ fn recognize_region(
     }
     let aspect = width / height;
     if aspect <= PADDLE_REC_MAX_ASPECT {
-        let decoded = engine.recognize_text(image, region).ok()?;
+        let decoded = engine.recognize_text_rgb(image, region).ok()?;
         return Some((decoded.text, decoded.score));
     }
     let chunks = ((aspect / PADDLE_REC_CHUNK_ASPECT).ceil() as usize).clamp(2, 16);
@@ -250,7 +257,7 @@ fn recognize_region(
             ],
             confidence: region.confidence,
         };
-        let Ok(decoded) = engine.recognize_text(image, &chunk) else {
+        let Ok(decoded) = engine.recognize_text_rgb(image, &chunk) else {
             continue;
         };
         let chunk_text = decoded.text;
@@ -268,7 +275,7 @@ fn recognize_region(
         decoded_chunks += 1;
     }
     if text.is_empty() || decoded_chunks == 0 {
-        let decoded = engine.recognize_text(image, region).ok()?;
+        let decoded = engine.recognize_text_rgb(image, region).ok()?;
         return Some((decoded.text, decoded.score));
     }
     Some((text, weighted_score / char_count.max(1) as f32))
@@ -365,34 +372,46 @@ fn paddle_source(image: &image::DynamicImage) -> (image::DynamicImage, f32, f32)
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-fn maybe_invert_dark(image: image::DynamicImage) -> image::DynamicImage {
-    let rgb = image.to_rgb8();
-    let (width, height) = rgb.dimensions();
-    let pixels = u64::from(width) * u64::from(height);
+fn mean_luma(image: &image::DynamicImage) -> f32 {
+    if let Some(rgba) = image.as_rgba8() {
+        return mean_rgba_luma(rgba);
+    }
+    mean_rgba_luma(&image.to_rgba8())
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn mean_rgba_luma(rgba: &image::RgbaImage) -> f32 {
+    let pixels = u64::from(rgba.width()) * u64::from(rgba.height());
     if pixels == 0 {
-        return image;
+        return 255.0;
     }
-    let mean_luma = rgb
-        .pixels()
+    let total = rgba
+        .as_raw()
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| u64::from(p[0]) * 299 + u64::from(p[1]) * 587 + u64::from(p[2]) * 114)
-        .sum::<u64>()
-        / (pixels * 1000);
-    if mean_luma >= 100 {
-        return image;
+        .sum::<u64>();
+    total as f32 / (pixels as f32 * 1000.0)
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn inverted_rgba(image: &image::DynamicImage) -> image::DynamicImage {
+    let mut rgba = image.to_rgba8();
+    for pixel in rgba.pixels_mut() {
+        pixel[0] = 255 - pixel[0];
+        pixel[1] = 255 - pixel[1];
+        pixel[2] = 255 - pixel[2];
     }
-    let inverted = image::RgbImage::from_fn(width, height, |x, y| {
-        let p = rgb.get_pixel(x, y);
-        image::Rgb([255 - p[0], 255 - p[1], 255 - p[2]])
-    });
-    image::DynamicImage::ImageRgb8(inverted)
+    image::DynamicImage::ImageRgba8(rgba)
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-fn recognize_with_paddle(_frame: &RgbaFrame) -> Option<Result<Vec<OcrLine>, OcrError>> {
+fn recognize_with_paddle(_image: &image::DynamicImage) -> Option<Result<Vec<OcrLine>, OcrError>> {
     None
 }
 
-fn recognize_with_windows(frame: &RgbaFrame) -> Result<Vec<OcrLine>, OcrError> {
+fn recognize_with_windows(image: &image::DynamicImage) -> Result<Vec<OcrLine>, OcrError> {
     // SAFETY: initializing a fresh apartment on this worker thread is safe;
     // a pre-initialized apartment only changes the returned HRESULT.
     unsafe {
@@ -401,14 +420,17 @@ fn recognize_with_windows(frame: &RgbaFrame) -> Result<Vec<OcrLine>, OcrError> {
 
     let engine = OcrEngine::TryCreateFromUserProfileLanguages()
         .map_err(platform_error("TryCreateFromUserProfileLanguages"))?;
+    let Some(rgba) = image.as_rgba8() else {
+        return Err(OcrError::Platform("unexpected OCR image format".to_owned()));
+    };
     let upscale = ocr_upscale(
-        frame.width(),
-        frame.height(),
+        rgba.width(),
+        rgba.height(),
         OcrEngine::MaxImageDimension().unwrap_or(0),
     );
-    let (bgra, width, height) = ocr_bitmap(frame, upscale);
-    let scale_x = frame.width() as f32 / width.max(1) as f32;
-    let scale_y = frame.height() as f32 / height.max(1) as f32;
+    let (bgra, width, height) = ocr_bitmap(rgba, upscale);
+    let scale_x = rgba.width() as f32 / width.max(1) as f32;
+    let scale_y = rgba.height() as f32 / height.max(1) as f32;
 
     let buffer = CryptographicBuffer::CreateFromByteArray(&bgra)
         .map_err(platform_error("CreateFromByteArray"))?;
@@ -502,29 +524,18 @@ fn ocr_upscale(width: u32, height: u32, max_dimension: u32) -> f32 {
     preferred.min(fit).max(1.0)
 }
 
-fn ocr_bitmap(frame: &RgbaFrame, upscale: f32) -> (Vec<u8>, i32, i32) {
+fn ocr_bitmap(image: &image::RgbaImage, upscale: f32) -> (Vec<u8>, i32, i32) {
     if upscale <= 1.0 {
-        let mut bgra = frame.packed_pixels().into_owned();
+        let mut bgra = image.as_raw().clone();
         for pixel in bgra.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
         }
-        return (bgra, frame.width() as i32, frame.height() as i32);
+        return (bgra, image.width() as i32, image.height() as i32);
     }
-    let width = (frame.width() as f32 * upscale).round().max(1.0) as u32;
-    let height = (frame.height() as f32 * upscale).round().max(1.0) as u32;
-    let Some(rgba) = image::RgbaImage::from_raw(
-        frame.width(),
-        frame.height(),
-        frame.packed_pixels().into_owned(),
-    ) else {
-        let mut bgra = frame.packed_pixels().into_owned();
-        for pixel in bgra.as_chunks_mut::<4>().0 {
-            pixel.swap(0, 2);
-        }
-        return (bgra, frame.width() as i32, frame.height() as i32);
-    };
+    let width = (image.width() as f32 * upscale).round().max(1.0) as u32;
+    let height = (image.height() as f32 * upscale).round().max(1.0) as u32;
     let resized =
-        image::imageops::resize(&rgba, width, height, image::imageops::FilterType::Lanczos3);
+        image::imageops::resize(image, width, height, image::imageops::FilterType::Lanczos3);
     let mut bgra = resized.into_raw();
     for pixel in bgra.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
@@ -569,13 +580,14 @@ mod tests {
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     #[test]
     fn dark_image_is_inverted() {
-        use super::maybe_invert_dark;
+        use super::{inverted_rgba, mean_luma};
         let dark = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
             4,
             4,
             image::Rgb([30, 30, 40]),
         ));
-        let result = maybe_invert_dark(dark);
+        assert!(mean_luma(&dark) < 100.0);
+        let result = inverted_rgba(&dark);
         let rgb = result.to_rgb8();
         let p = rgb.get_pixel(0, 0);
         assert!(p[0] > 200);
@@ -585,15 +597,13 @@ mod tests {
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     #[test]
-    fn light_image_is_unchanged() {
-        use super::maybe_invert_dark;
+    fn light_image_is_not_inverted() {
+        use super::mean_luma;
         let light = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
             4,
             4,
             image::Rgb([240, 240, 240]),
         ));
-        let result = maybe_invert_dark(light);
-        let rgb = result.to_rgb8();
-        assert_eq!(rgb.get_pixel(0, 0)[0], 240);
+        assert!(mean_luma(&light) >= 100.0);
     }
 }
