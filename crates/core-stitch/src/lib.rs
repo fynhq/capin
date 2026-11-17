@@ -275,7 +275,7 @@ impl Stitcher {
             return Ok(());
         }
         let limit = self.height_limit() as usize * row_bytes;
-        let grown = needed.saturating_add(needed / 4);
+        let grown = self.pixels.len().saturating_mul(2).max(needed);
         let target = grown.min(limit).max(needed);
         self.pixels
             .try_reserve_exact(target - self.pixels.len())
@@ -295,15 +295,15 @@ impl Stitcher {
             }
         }
         self.footer_rows = 0;
-        self.footer_pixels.clear();
-        self.previous_top.clear();
+        self.footer_pixels = Vec::new();
+        self.previous_top = Vec::new();
         self.previous_top_rows = 0;
-        self.previous_bottom.clear();
+        self.previous_bottom = Vec::new();
         self.previous_bottom_rows = 0;
         let width = self.width;
         let height = self.height;
         let pixels = std::mem::take(&mut self.pixels);
-        self.signatures.clear();
+        self.signatures = Vec::new();
         self.height = 0;
         self.frames = 0;
         Ok(RgbaFrame::from_pixels(width, height, pixels)?)
@@ -314,10 +314,13 @@ impl Stitcher {
             return self.config.max_height;
         }
         let row_bytes = (self.width as usize).saturating_mul(4).max(1);
-        let rows_by_bytes = (self.config.max_bytes / row_bytes).max(1);
+        let samples = self.samples as usize;
+        let overhead = 512 * samples;
+        let rows_by_bytes =
+            self.config.max_bytes.saturating_sub(overhead) / (row_bytes + samples).max(1);
         self.config
             .max_height
-            .min(rows_by_bytes.min(u32::MAX as usize) as u32)
+            .min(rows_by_bytes.max(1).min(u32::MAX as usize) as u32)
     }
 
     fn limit_error(&self) -> StitchError {
@@ -988,7 +991,7 @@ mod tests {
             64,
             StitchConfig {
                 max_height: 10_000,
-                max_bytes: 64 * 4 * 60,
+                max_bytes: (64 * 4 + 48) * 70 + 512 * 48,
                 ..Default::default()
             },
         )
@@ -1014,7 +1017,7 @@ mod tests {
     fn capacity_never_exceeds_the_byte_budget() {
         let width = 32u32;
         let row_bytes = width as usize * 4;
-        let max_bytes = row_bytes * 500;
+        let max_bytes = (row_bytes + 32) * 500 + 512 * 32;
         let mut stitches = Stitcher::new(
             width,
             StitchConfig {

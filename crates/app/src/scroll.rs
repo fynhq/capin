@@ -106,6 +106,10 @@ impl ScrollView {
         let capture_region = region;
         cx.spawn(async move |this, cx| {
             loop {
+                let running = this.update(cx, |this, _| this.running).unwrap_or(false);
+                if !running {
+                    break;
+                }
                 let started = Instant::now();
                 let captured = cx
                     .background_executor()
@@ -190,8 +194,11 @@ impl ScrollView {
     }
 
     fn finish(&mut self, cx: &mut Context<Self>) {
+        let was_running = self.running;
         self.running = false;
-        self.capture_frame(cx);
+        if was_running {
+            self.capture_frame(cx);
+        }
         match self.stitcher.finish() {
             Ok(frame) => {
                 let handles = cx.windows();
