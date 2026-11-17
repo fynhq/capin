@@ -37,7 +37,7 @@ pub struct HistoryImage {
 }
 
 thread_local! {
-    static ENTRIES: RefCell<Option<Vec<HistoryEntry>>> = const { RefCell::new(None) };
+    static ENTRIES: RefCell<Option<std::rc::Rc<Vec<HistoryEntry>>>> = const { RefCell::new(None) };
     static GENERATION: Cell<u64> = const { Cell::new(0) };
 }
 
@@ -86,11 +86,12 @@ fn record_png(
     };
     let now = now_millis();
     let mut entries = entries();
-    if let Some(first) = entries.first_mut().filter(|entry| entry.hash == hash) {
+    let list = std::rc::Rc::make_mut(&mut entries);
+    if let Some(first) = list.first_mut().filter(|entry| entry.hash == hash) {
         first.created_at = now;
         first.pin_shadow = pin_shadow;
         first.scale = scale;
-        write_entries(&directory, &entries);
+        write_entries(&directory, list);
         ENTRIES.with(|slot| *slot.borrow_mut() = Some(entries));
         return true;
     }
@@ -106,13 +107,13 @@ fn record_png(
         return false;
     };
 
-    if let Some(index) = entries.iter().position(|entry| entry.hash == hash) {
-        let duplicate = entries.remove(index);
+    if let Some(index) = list.iter().position(|entry| entry.hash == hash) {
+        let duplicate = list.remove(index);
         if let Some(name) = Path::new(&duplicate.file).file_name() {
             let _ = std::fs::remove_file(directory.join(name));
         }
     }
-    entries.insert(
+    list.insert(
         0,
         HistoryEntry {
             file,
@@ -122,8 +123,8 @@ fn record_png(
             scale,
         },
     );
-    prune(&mut entries, &directory, now);
-    write_entries(&directory, &entries);
+    prune(list, &directory, now);
+    write_entries(&directory, list);
     ENTRIES.with(|slot| *slot.borrow_mut() = Some(entries));
     true
 }
@@ -204,13 +205,13 @@ pub fn hash_frame(frame: &RgbaFrame) -> u64 {
     hash
 }
 
-fn entries() -> Vec<HistoryEntry> {
+fn entries() -> std::rc::Rc<Vec<HistoryEntry>> {
     ENTRIES.with(|slot| {
         if slot.borrow().is_none() {
             let loaded = load_entries();
-            *slot.borrow_mut() = Some(loaded);
+            *slot.borrow_mut() = Some(std::rc::Rc::new(loaded));
         }
-        slot.borrow().clone().unwrap_or_default()
+        slot.borrow().as_ref().cloned().unwrap_or_default()
     })
 }
 

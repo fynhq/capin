@@ -1,6 +1,6 @@
 use chrono::{Duration, Local, NaiveDate};
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, Once, OnceLock};
 
@@ -147,13 +147,36 @@ pub fn log_directory() -> PathBuf {
 
 pub fn recent_lines(limit: usize) -> Vec<String> {
     let path = log_directory().join(log_file_name(Local::now().date_naive()));
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Ok(mut file) = File::open(path) else {
         return Vec::new();
     };
-    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    let mut remaining = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+    let mut chunks: Vec<Vec<u8>> = Vec::new();
+    let mut newlines = 0usize;
+    while remaining > 0 {
+        let read = remaining.min(8192) as usize;
+        remaining -= read as u64;
+        let mut chunk = vec![0u8; read];
+        if file.seek(SeekFrom::Start(remaining)).is_err() || file.read_exact(&mut chunk).is_err() {
+            return Vec::new();
+        }
+        newlines += chunk.iter().filter(|byte| **byte == b'\n').count();
+        chunks.push(chunk);
+        if newlines > limit {
+            break;
+        }
+    }
+    let mut buffer = Vec::new();
+    for chunk in chunks.iter().rev() {
+        buffer.extend_from_slice(chunk);
+    }
+    let text = String::from_utf8_lossy(&buffer);
+    let lines: Vec<&str> = text.lines().collect();
     let start = lines.len().saturating_sub(limit);
-    lines.drain(..start);
-    lines
+    lines[start..]
+        .iter()
+        .map(|line| (*line).to_owned())
+        .collect()
 }
 
 fn log_file_name(date: NaiveDate) -> String {
