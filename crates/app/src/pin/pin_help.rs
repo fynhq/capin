@@ -41,28 +41,26 @@ fn open(anchor: Bounds<Pixels>, image: bool, cx: &mut App) {
     let area_height = f32::from(area.size.height);
     let width = hints_panel_width().min((area_width - 32.0).max(160.0));
     let height = hints_panel_height(rows.len());
-    let window_width = width + 16.0;
-    let window_height = height + 16.0;
     let anchor_left = f32::from(anchor.origin.x);
     let anchor_top = f32::from(anchor.origin.y);
     let right = anchor_left + f32::from(anchor.size.width) + 8.0;
-    let left = if right + window_width <= area_left + area_width - 8.0 {
+    let left = if right + width <= area_left + area_width - 8.0 {
         right
     } else {
-        anchor_left - window_width - 8.0
+        anchor_left - width - 8.0
     };
     let left = left.clamp(
         area_left + 8.0,
-        (area_left + area_width - window_width - 8.0).max(area_left + 8.0),
+        (area_left + area_width - width - 8.0).max(area_left + 8.0),
     );
-    let top = anchor_top + (f32::from(anchor.size.height) - window_height) / 2.0;
+    let top = anchor_top + (f32::from(anchor.size.height) - height) / 2.0;
     let top = top.clamp(
         area_top + 8.0,
-        (area_top + area_height - window_height - 8.0).max(area_top + 8.0),
+        (area_top + area_height - height - 8.0).max(area_top + 8.0),
     );
     let bounds = Bounds {
         origin: point(px(left), px(top)),
-        size: size(px(window_width), px(window_height)),
+        size: size(px(width), px(height)),
     };
     let options = crate::aux_window::popup_options(
         "capin-pin-help",
@@ -167,7 +165,6 @@ impl Render for PinHelpView {
         let language = settings_state::get().language;
         div()
             .size_full()
-            .p(px(8.0))
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" || event.keystroke.key == "f1" {
@@ -177,7 +174,7 @@ impl Render for PinHelpView {
                 }
             }))
             .child(crate::ui::enter_fade(
-                hints_card(theme, language, self.width, &self.rows),
+                hints_card(theme, language, self.width, &self.rows, false),
                 "pin-help-enter",
                 Duration::from_millis(100),
             ))

@@ -11,8 +11,12 @@ use crate::ui::{enter_slide_fade, tooltip_view};
 
 const HINTS_PADDING: f32 = 14.0;
 const HINTS_GAP: f32 = 7.0;
-const HINTS_TITLE_HEIGHT: f32 = 18.0;
-const HINTS_ROW_HEIGHT: f32 = 17.0;
+const HINTS_TITLE_FONT: f32 = 13.0;
+const HINTS_KEY_FONT: f32 = 11.5;
+const HINTS_TEXT_FONT: f32 = 12.5;
+const HINTS_LINE_HEIGHT: f32 = 1.618;
+const HINTS_TITLE_HEIGHT: f32 = HINTS_TITLE_FONT * HINTS_LINE_HEIGHT;
+const HINTS_ROW_HEIGHT: f32 = HINTS_TEXT_FONT * HINTS_LINE_HEIGHT;
 
 fn text_advance(text: &str, font_size: f32) -> f32 {
     text.chars()
@@ -183,6 +187,7 @@ pub(crate) fn hints_card(
     language: Language,
     width: f32,
     rows: &[(String, String)],
+    shadow: bool,
 ) -> Div {
     let mut panel = div()
         .w(px(width))
@@ -194,10 +199,10 @@ pub(crate) fn hints_card(
         .bg(theme.surface_strong)
         .border_1()
         .border_color(theme.border)
-        .shadow(theme.shadow())
+        .when(shadow, |panel| panel.shadow(theme.shadow()))
         .child(
             div()
-                .text_size(px(13.0))
+                .text_size(px(HINTS_TITLE_FONT))
                 .text_color(theme.text)
                 .child(t(language, "editor.hints_title")),
         );
@@ -212,13 +217,13 @@ pub(crate) fn hints_card(
                 .child(
                     div()
                         .flex_shrink_0()
-                        .text_size(px(11.5))
+                        .text_size(px(HINTS_KEY_FONT))
                         .text_color(theme.muted)
                         .child(key.clone()),
                 )
                 .child(
                     div()
-                        .text_size(px(12.5))
+                        .text_size(px(HINTS_TEXT_FONT))
                         .text_color(theme.text)
                         .child(description.clone()),
                 ),
@@ -237,7 +242,7 @@ pub(crate) fn hints_panel<View: 'static>(
     cx: &mut Context<View>,
     on_dismiss: fn(&mut View, &mut Context<View>),
 ) -> AnyElement {
-    let panel = hints_card(theme, language, f32::from(rect.size.width), &rows)
+    let panel = hints_card(theme, language, f32::from(rect.size.width), &rows, true)
         .id(format!("{id_prefix}-hints-panel"))
         .absolute()
         .left(rect.origin.x)
