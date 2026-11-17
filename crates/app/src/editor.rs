@@ -1184,6 +1184,7 @@ impl EditorView {
         let view = cx.entity().downgrade();
         window.on_window_should_close(cx, move |_, cx| {
             let _ = view.update(cx, |this, cx| this.release_images(cx));
+            crate::windows::schedule_memory_trim();
             true
         });
     }

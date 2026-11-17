@@ -965,6 +965,7 @@ fn close_pin_inner(id: u64, cx: &mut App, remove_window: bool) {
     if let Some(path) = state.image_path {
         let _ = std::fs::remove_file(path);
     }
+    crate::windows::schedule_memory_trim();
 }
 
 fn persist_rotated_image(id: u64, frame: &RgbaFrame, hash: u64, bounds: Bounds<Pixels>) -> bool {

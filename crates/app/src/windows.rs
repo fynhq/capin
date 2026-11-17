@@ -59,6 +59,7 @@ fn close_matching(
         crate::overlay::release_textures(cx);
     }
     crate::editor::release_images_for_windows(cx, &handles, keep);
+    let trim_after_close = keep.is_none();
     let keep_id = keep.map(|handle| handle.window_id());
     for handle in handles {
         if keep_id == Some(handle.window_id())
@@ -68,6 +69,24 @@ fn close_matching(
             continue;
         }
         let _ = handle.update(cx, |_, window, _| window.remove_window());
+    }
+    if trim_after_close {
+        schedule_memory_trim();
+    }
+}
+
+pub(crate) fn schedule_memory_trim() {
+    #[cfg(target_os = "windows")]
+    {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static GENERATION: AtomicU64 = AtomicU64::new(0);
+        let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            if GENERATION.load(Ordering::SeqCst) == generation {
+                platform_window::trim_working_set();
+            }
+        });
     }
 }
 

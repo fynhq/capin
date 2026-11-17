@@ -15,6 +15,13 @@ pub use style::WindowStyle;
 
 use raw_window_handle::HasWindowHandle;
 
+pub fn trim_working_set() {
+    #[cfg(target_os = "windows")]
+    {
+        windows::trim_working_set();
+    }
+}
+
 pub fn show_native_menu(items: &[String], selected: usize) -> Option<usize> {
     #[cfg(target_os = "macos")]
     {

@@ -381,6 +381,7 @@ impl RecordBar {
         cx.defer(move |cx| {
             let _ = handle.update(cx, |_, window, _| window.remove_window());
         });
+        crate::windows::schedule_memory_trim();
     }
 }
 

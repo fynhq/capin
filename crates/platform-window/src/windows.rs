@@ -19,6 +19,7 @@ use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
 };
@@ -38,6 +39,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::GUID;
 
 use crate::{PlatformWindowError, WindowStyle};
+
+pub(super) fn trim_working_set() {
+    // SAFETY: the pseudo-handle refers to this process; -1 sizes request a trim.
+    unsafe {
+        let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+}
 
 pub(super) fn reduce_motion() -> bool {
     let mut animations: i32 = 1;
