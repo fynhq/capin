@@ -4036,24 +4036,22 @@ impl EditorView {
                         corner_radius: self.effects.corner_radius,
                         scale,
                     });
-                if copy_only || settings_state::get().copy_to_clipboard {
-                    match image_util::encode_png(&output) {
-                        Ok(bytes) => {
-                            copy_ok = true;
-                            if record_history {
-                                history_recorded = crate::capture_history::record_png_bytes(
-                                    &bytes,
-                                    hash,
-                                    pin_shadow,
-                                    Some(scale),
-                                );
-                            }
-                            image_util::copy_png_bytes(bytes, &output, cx);
-                            messages.push(t(language, "editor.copied").to_owned());
+                match image_util::encode_png(&output) {
+                    Ok(bytes) => {
+                        copy_ok = true;
+                        if record_history {
+                            history_recorded = crate::capture_history::record_png_bytes(
+                                &bytes,
+                                hash,
+                                pin_shadow,
+                                Some(scale),
+                            );
                         }
-                        Err(error) => {
-                            messages.push(format!("{}{}", t(language, "editor.copy_failed"), error))
-                        }
+                        image_util::copy_png_bytes(bytes, &output, cx);
+                        messages.push(t(language, "editor.copied").to_owned());
+                    }
+                    Err(error) => {
+                        messages.push(format!("{}{}", t(language, "editor.copy_failed"), error))
                     }
                 }
                 if !copy_only && self.pin_target.is_none() {

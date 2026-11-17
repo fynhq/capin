@@ -1433,19 +1433,6 @@ impl SettingsView {
                             theme,
                             cx,
                             ToggleRow {
-                                id: "settings-copy-to-clipboard",
-                                icon: icons::CLIPBOARD,
-                                title_key: "settings.copy_clipboard",
-                                description_key: None,
-                                value: self.settings.copy_to_clipboard,
-                                set: |settings, value| settings.copy_to_clipboard = value,
-                                refresh_pin: false,
-                            },
-                        ),
-                        self.toggle_row(
-                            theme,
-                            cx,
-                            ToggleRow {
                                 id: "settings-capture-cursor",
                                 icon: icons::CURSOR,
                                 title_key: "settings.capture_cursor",
@@ -2150,34 +2137,19 @@ impl SettingsView {
 
     fn recording(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings.language;
-        let mut rows = vec![
-            self.toggle_row(
-                theme,
-                cx,
-                ToggleRow {
-                    id: "settings-record-cursor",
-                    icon: icons::CURSOR,
-                    title_key: "settings.record_cursor",
-                    description_key: None,
-                    value: self.settings.record_cursor,
-                    set: |settings, value| settings.record_cursor = value,
-                    refresh_pin: false,
-                },
-            ),
-            self.toggle_row(
-                theme,
-                cx,
-                ToggleRow {
-                    id: "settings-record-cursor-highlight",
-                    icon: icons::CURSOR,
-                    title_key: "settings.record_cursor_highlight",
-                    description_key: Some("settings.record_cursor_highlight_desc"),
-                    value: self.settings.record_cursor_highlight,
-                    set: |settings, value| settings.record_cursor_highlight = value,
-                    refresh_pin: false,
-                },
-            ),
-        ];
+        let mut rows = vec![self.toggle_row(
+            theme,
+            cx,
+            ToggleRow {
+                id: "settings-record-cursor-highlight",
+                icon: icons::CURSOR,
+                title_key: "settings.record_cursor_highlight",
+                description_key: Some("settings.record_cursor_highlight_desc"),
+                value: self.settings.record_cursor_highlight,
+                set: |settings, value| settings.record_cursor_highlight = value,
+                refresh_pin: false,
+            },
+        )];
         if self.settings.record_cursor_highlight {
             rows.push(self.record_highlight_color_row(theme, cx));
         }

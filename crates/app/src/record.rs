@@ -55,7 +55,7 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
     };
     let config = RecordConfig {
         target,
-        include_cursor: settings.record_cursor || settings.record_cursor_highlight,
+        include_cursor: true,
         cursor_highlight: settings.record_cursor_highlight.then_some(CursorHighlight {
             color: settings.record_cursor_highlight_color & 0x00FF_FFFF,
         }),

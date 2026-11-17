@@ -58,8 +58,8 @@ tccutil reset ScreenCapture io.github.fynhq.capin
 - **选区与标注**：按 `R` 切换自由/1:1/4:3/16:9；放大镜显示像素颜色与尺寸，`Shift` 切换十六进制/RGB，`C` 复制色值。框选后在 overlay 内直接标注；区域截图在未选中对象且未使用标注工具时可拖选区边缘调整导出范围，框外标注保留但不显示；双击或 Enter 复制；空格隐藏工具栏，F1 快捷键，F5 只刷新底图。
 - **编辑器**：复制/保存用 `Ctrl/Cmd+C`、`Ctrl/Cmd+S`；选中对象后可移动、缩放、复制粘贴、删除、改属性；右键或 Esc 退出当前工具。贴图可裁剪、旋转、翻转；长截图可裁剪，并用 `Ctrl/Cmd+滚轮` 缩放、`Space+拖动` 平移、`Ctrl/Cmd+0/1` 适应/100%。
 - **贴图**：置顶、透明度、缩放、旋转、多贴、穿透；空白或边缘拖动，Alt 任意位置拖动；Esc 或中键关闭；未划选文字时 `Ctrl/Cmd+C` 复制整图、`Ctrl/Cmd+S` 保存图片；右键菜单含旋转、编辑、复制、保存、复制二维码、穿透与关闭；按贴图键回看最近 7 天历史。
-- **录屏**：框选或悬停窗口后点工具栏录屏；3 秒倒计时，F9 暂停/继续，F10 结束；默认录入光标，演示光标可在设置开启并选色；停止后保存单个 MP4，可打开文件夹。
-- **设置**：保存目录、文件名模板、热键、开机自启、语言、标注颜色/线宽、贴图 OCR、录屏光标与高亮均在设置页；所有内容仅在本机处理。
+- **录屏**：框选或悬停窗口后点工具栏录屏；3 秒倒计时，F9 暂停/继续，F10 结束；始终录入光标，演示光标可在设置开启并选色；停止后保存单个 MP4，可打开文件夹。
+- **设置**：保存目录、文件名模板、热键、开机自启、语言、标注颜色/线宽、贴图 OCR、录屏演示光标与高亮颜色均在设置页；所有内容仅在本机处理。
 
 ## 从源码构建
 
@@ -134,8 +134,8 @@ tccutil reset ScreenCapture io.github.fynhq.capin
 - **Selection and annotation** — press `R` to cycle ratios; `Shift` switches the color format and `C` copies the value; annotate in the overlay. Region captures expose edge/corner handles to resize the export frame after annotating; outside objects stay but are hidden. Double-click or Enter copies; Space hides the toolbar, F1 shows shortcuts, F5 refreshes only the base image.
 - **Editor** — `Ctrl/Cmd+C/S` copies/saves; objects can be moved, resized, copied/pasted, deleted and restyled; right-click or Esc leaves the current tool. Pins support crop/rotate/flip; scrolling captures support crop and `Ctrl/Cmd+wheel` zoom, `Space+drag` pan, `Ctrl/Cmd+0/1` fit/100%.
 - **Pins** — always on top, opacity, zoom, rotation, multiple pins, click-through; drag from blank areas/edges or Alt+drag anywhere; Esc/middle-click closes; `Ctrl/Cmd+C/S` copies/saves the whole pin when no text is selected; the right-click menu offers rotate, edit, copy, save, copy QR, click-through and close; the pin hotkey walks the last 7 days of history.
-- **Recording** — select a region or hover a window and click record; 3-second countdown, F9 pause/resume, F10 stop; cursor is captured by default and the demo highlight can be enabled in settings; stop saves one MP4 and can open its folder.
-- **Settings** — save folders, filename template, hotkeys, launch at login, language, annotation colors/widths, pin OCR and recording cursor/highlight live in Settings. Everything stays local.
+- **Recording** — select a region or hover a window and click record; 3-second countdown, F9 pause/resume, F10 stop; the cursor is always captured and the demo highlight can be enabled in settings; stop saves one MP4 and can open its folder.
+- **Settings** — save folders, filename template, hotkeys, launch at login, language, annotation colors/widths, pin OCR and the recording demo cursor/highlight color live in Settings. Everything stays local.
 
 ## Build from source
 
