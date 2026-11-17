@@ -647,7 +647,6 @@ struct OverlayView {
     click_opens_editor: bool,
     ctrl_click_primary: bool,
     cursor_style: CursorStyle,
-    element_targeting: bool,
     magnifier: Option<Magnifier>,
     #[cfg(target_os = "windows")]
     monitor_stream: Option<core_capture::MonitorStream>,
@@ -714,7 +713,6 @@ impl OverlayView {
             click_opens_editor: false,
             ctrl_click_primary: false,
             cursor_style: CursorStyle::Crosshair,
-            element_targeting: true,
             magnifier: None,
             #[cfg(target_os = "windows")]
             monitor_stream: None,
@@ -915,7 +913,7 @@ impl OverlayView {
             self.session.set_hovered_element(None);
             return;
         };
-        if !self.element_targeting || self.window_only {
+        if self.window_only {
             self.element_window = None;
             self.element_pending = None;
             self.element_pending_point = None;
@@ -3390,16 +3388,6 @@ impl OverlayView {
                         this.cycle_aspect(cx);
                     } else if key.eq_ignore_ascii_case("c") {
                         this.copy_color(cx);
-                    } else if key == "tab" {
-                        this.element_targeting = !this.element_targeting;
-                        this.element_pending = None;
-                        this.element_pending_point = None;
-                        this.element_candidates.clear();
-                        this.element_level = 0;
-                        this.screen_targeting = false;
-                        this.session.set_screen_targeting(false);
-                        this.session.set_hovered_element(None);
-                        cx.notify();
                     } else if key == "f5" && !event.is_held {
                         this.refresh_frame(window, cx);
                     }
