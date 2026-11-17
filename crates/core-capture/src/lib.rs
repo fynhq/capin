@@ -74,7 +74,7 @@ pub fn window_corner_radius(id: core_types::WindowId, scale: f32) -> u32 {
 #[cfg(target_os = "macos")]
 pub use macos::{MacosCapture, display_backing_scale};
 #[cfg(target_os = "windows")]
-pub use windows::{WindowsCapture, init_process_dpi_awareness};
+pub use windows::{MonitorStream, WindowsCapture, init_process_dpi_awareness};
 
 #[cfg(target_os = "macos")]
 pub fn capture_excluded_window_ids() -> Vec<u32> {

@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use core_capture::{
     CaptureBackend, CaptureError, CaptureTarget, MonitorInfo, SelectionAction, SelectionOutcome,
@@ -34,6 +34,8 @@ use crate::{
     settings_state,
     ui::tooltip_view,
 };
+
+mod refresh;
 
 const DIM: u32 = 0x00000066;
 const FALLBACK_HOVER_ACCENT: u32 = 0x4c9aff;
@@ -522,6 +524,7 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
             });
             let focus = view.read(cx).focus_handle.clone();
             view.update(cx, |this, cx| this.observe_appearance(window, cx));
+            view.update(cx, |view, cx| view.watch_close(window, cx));
             OVERLAY_VIEWS.with(|views| views.borrow_mut().push(view.downgrade()));
             let geometry = view.clone();
             window.defer(cx, move |window, cx| {
@@ -646,6 +649,9 @@ struct OverlayView {
     cursor_style: CursorStyle,
     element_targeting: bool,
     magnifier: Option<Magnifier>,
+    #[cfg(target_os = "windows")]
+    monitor_stream: Option<core_capture::MonitorStream>,
+    last_refresh: Option<Instant>,
     notice: Option<String>,
     notice_serial: u64,
     notice_leaving: bool,
@@ -710,6 +716,9 @@ impl OverlayView {
             cursor_style: CursorStyle::Crosshair,
             element_targeting: true,
             magnifier: None,
+            #[cfg(target_os = "windows")]
+            monitor_stream: None,
+            last_refresh: None,
             notice: None,
             notice_serial: 0,
             notice_leaving: false,
@@ -2013,54 +2022,6 @@ impl OverlayView {
         };
         self.close_overlays(cx);
         cx.defer(move |cx| crate::record::start(selected.target, cx));
-    }
-
-    fn refresh_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let mut backend = platform_backend();
-        let monitor = self.session.monitor();
-        let frame = match backend.capture(CaptureTarget::Monitor(monitor)) {
-            Ok(frame) => frame,
-            Err(error) => {
-                self.set_notice(error.to_string(), cx);
-                return;
-            }
-        };
-        self.image_size = PhysicalSize::new(frame.width(), frame.height());
-        let image = image_util::render_image(frame);
-        let old_image = std::mem::replace(&mut self.image, image);
-        if let Err(error) = window.drop_image(old_image) {
-            log_warn!("overlay", "failed to release refreshed frame: {error}");
-        }
-        if let Some(magnifier) = self.magnifier.take()
-            && let Err(error) = window.drop_image(magnifier.image)
-        {
-            log_warn!("overlay", "failed to release magnifier frame: {error}");
-        }
-        self.element_cache.clear();
-        self.element_cache_point = None;
-        self.element_retry.clear();
-        self.element_window = None;
-        self.element_pending = None;
-        self.element_pending_point = None;
-        self.element_candidates.clear();
-        self.element_level = 0;
-        self.screen_targeting = false;
-        let monitor_bounds = self.session.monitor_bounds();
-        let mut excluded = live_overlay_window_ids_excluding(cx, Some(cx.entity().entity_id()));
-        if let Some(id) = self.native_id {
-            excluded.push(WindowId::from_raw(id));
-        }
-        if let Ok(windows) = backend.windows_excluding(&excluded) {
-            self.session = SelectionSession::with_scale(
-                monitor,
-                monitor_bounds,
-                windows,
-                self.effective_scale(),
-            );
-            self.session.set_window_targeting(true);
-            self.session.set_aspect_ratio(self.aspect.ratio());
-        }
-        cx.notify();
     }
 
     fn set_notice(&mut self, message: String, cx: &mut Context<Self>) {

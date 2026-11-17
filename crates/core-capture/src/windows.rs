@@ -1,8 +1,9 @@
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::mem::size_of;
-use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use core_types::{DpiScale, MonitorId, PhysicalRect, RgbaFrame, WindowId};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, TRUE};
@@ -46,8 +47,7 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(2);
 type CropRect = (u32, u32, u32, u32);
 
 pub fn init_process_dpi_awareness() {
-    // SAFETY: callers invoke this before creating UI windows. Failure usually
-    // means awareness was already fixed by the manifest or an earlier call.
+    // SAFETY: callers invoke this before creating UI windows; failure means awareness was already fixed.
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
@@ -568,6 +568,144 @@ where
                 operation,
                 message: "timed out waiting for the first frame".to_owned(),
             })
+        }
+    }
+}
+
+pub struct MonitorStream {
+    control: Option<CaptureControl<StreamHandler, String>>,
+    shared: Arc<StreamShared>,
+}
+
+struct StreamShared {
+    request: AtomicBool,
+    frame: Mutex<Option<RawFrame>>,
+    last_copy: Mutex<Option<Instant>>,
+    error: Mutex<Option<String>>,
+}
+
+struct StreamHandler {
+    shared: Arc<StreamShared>,
+}
+
+impl GraphicsCaptureApiHandler for StreamHandler {
+    type Flags = Arc<StreamShared>;
+    type Error = String;
+
+    fn new(context: Context<Self::Flags>) -> std::result::Result<Self, Self::Error> {
+        Ok(Self {
+            shared: context.flags,
+        })
+    }
+
+    fn on_frame_arrived(
+        &mut self,
+        frame: &mut Frame,
+        _capture_control: InternalCaptureControl,
+    ) -> std::result::Result<(), Self::Error> {
+        let requested = self.shared.request.swap(false, Ordering::AcqRel);
+        let due = self
+            .shared
+            .last_copy
+            .lock()
+            .map(|last| last.is_none_or(|last| last.elapsed() >= Duration::from_millis(200)))
+            .unwrap_or(false);
+        if !requested && !due {
+            return Ok(());
+        }
+        match read_frame(frame, None) {
+            Ok(raw) => {
+                if let Ok(mut slot) = self.shared.frame.lock() {
+                    *slot = Some(raw);
+                }
+                if let Ok(mut last) = self.shared.last_copy.lock() {
+                    *last = Some(Instant::now());
+                }
+            }
+            Err(error) => {
+                if let Ok(mut slot) = self.shared.error.lock() {
+                    *slot = Some(error);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl MonitorStream {
+    pub fn start(monitor: MonitorId) -> Result<Self> {
+        ensure_monitor(monitor)?;
+        let shared = Arc::new(StreamShared {
+            request: AtomicBool::new(false),
+            frame: Mutex::new(None),
+            last_copy: Mutex::new(None),
+            error: Mutex::new(None),
+        });
+        let settings = Settings::new(
+            Monitor::from_raw_hmonitor(monitor.raw() as usize as *mut c_void),
+            CursorCaptureSettings::WithoutCursor,
+            DrawBorderSettings::WithoutBorder,
+            SecondaryWindowSettings::Exclude,
+            MinimumUpdateIntervalSettings::Default,
+            DirtyRegionSettings::Default,
+            ColorFormat::Rgba8,
+            Arc::clone(&shared),
+        );
+        let control = StreamHandler::start_free_threaded(settings)
+            .map_err(|error| platform_error("start monitor stream", error))?;
+        Ok(Self {
+            control: Some(control),
+            shared,
+        })
+    }
+
+    pub fn refresh(&mut self) -> Result<Option<RgbaFrame>> {
+        if self.control.is_none() {
+            return Err(CaptureError::Platform {
+                operation: "monitor stream",
+                message: "stream is closed".to_owned(),
+            });
+        }
+        if let Ok(mut slot) = self.shared.frame.lock()
+            && let Some(raw) = slot.take()
+        {
+            return RgbaFrame::from_pixels(raw.width, raw.height, raw.pixels)
+                .map(Some)
+                .map_err(CaptureError::from);
+        }
+        if let Ok(mut slot) = self.shared.error.lock() {
+            *slot = None;
+        }
+        self.shared.request.store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_millis(150);
+        loop {
+            if let Ok(mut slot) = self.shared.frame.lock()
+                && let Some(raw) = slot.take()
+            {
+                return RgbaFrame::from_pixels(raw.width, raw.height, raw.pixels)
+                    .map(Some)
+                    .map_err(CaptureError::from);
+            }
+            if let Ok(mut slot) = self.shared.error.lock()
+                && let Some(message) = slot.take()
+            {
+                return Err(CaptureError::Platform {
+                    operation: "monitor stream",
+                    message,
+                });
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(Duration::from_millis(4));
+        }
+    }
+}
+
+impl Drop for MonitorStream {
+    fn drop(&mut self) {
+        if let Some(control) = self.control.take() {
+            let _ = control.stop();
         }
     }
 }
