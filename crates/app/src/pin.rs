@@ -21,6 +21,11 @@ use crate::settings_state;
 use crate::storage;
 use crate::ui::centered_bounds;
 
+mod pin_content;
+mod pin_display;
+
+use pin_content::PinContent;
+
 const MAX_RESTORED_PINS: usize = 20;
 
 const MIN_PIN_ZOOM: f32 = 0.02;
@@ -168,103 +173,6 @@ impl PinMenuAction {
 
     fn separated(self) -> bool {
         matches!(self, Self::Settings | Self::Through | Self::Close)
-    }
-}
-
-#[derive(Clone)]
-enum PinContent {
-    Image {
-        frame: Option<Arc<RgbaFrame>>,
-        image: Arc<RenderImage>,
-        size: PhysicalSize,
-        hash: u64,
-    },
-    Text(String),
-}
-
-impl PinContent {
-    fn from_frame(frame: RgbaFrame) -> Self {
-        let hash = crate::capture_history::hash_frame(&frame);
-        Self::from_frame_with_hash(frame, hash)
-    }
-
-    fn from_frame_with_hash(frame: RgbaFrame, hash: u64) -> Self {
-        Self::from_frame_shared(Arc::new(frame), hash)
-    }
-
-    fn from_frame_shared(frame: Arc<RgbaFrame>, hash: u64) -> Self {
-        let size = PhysicalSize::new(frame.width(), frame.height());
-        let image = image_util::render_image_ref(&frame);
-        Self::Image {
-            frame: Some(frame),
-            image,
-            size,
-            hash,
-        }
-    }
-
-    fn frame(&self) -> Option<&RgbaFrame> {
-        match self {
-            Self::Image { frame, .. } => frame.as_deref(),
-            _ => None,
-        }
-    }
-
-    fn frame_arc(&self) -> Option<Arc<RgbaFrame>> {
-        match self {
-            Self::Image { frame, .. } => frame.as_ref().map(Arc::clone),
-            _ => None,
-        }
-    }
-
-    fn drop_frame(&mut self) {
-        if let Self::Image { frame, .. } = self {
-            *frame = None;
-        }
-    }
-
-    fn hash(&self) -> Option<u64> {
-        match self {
-            Self::Image { hash, .. } => Some(*hash),
-            Self::Text(text) => Some(text_signature(text)),
-        }
-    }
-
-    fn image_size(&self) -> Option<PhysicalSize> {
-        match self {
-            Self::Image { size, .. } => Some(*size),
-            _ => None,
-        }
-    }
-
-    fn clipboard_text(&self) -> Option<String> {
-        match self {
-            Self::Image { .. } => None,
-            Self::Text(text) => Some(text.clone()),
-        }
-    }
-
-    fn kind(&self) -> PinKind {
-        match self {
-            Self::Image { .. } => PinKind::Image,
-            Self::Text(text) => PinKind::Text(text.clone()),
-        }
-    }
-
-    fn preferred_zoom(&self) -> f32 {
-        match self {
-            Self::Image { size, .. } => (900.0 / size.width as f32)
-                .min(700.0 / size.height as f32)
-                .min(1.0),
-            Self::Text(_) => 1.0,
-        }
-    }
-
-    fn size(&self, zoom: f32) -> (f32, f32) {
-        match self {
-            Self::Image { size, .. } => (size.width as f32 * zoom, size.height as f32 * zoom),
-            Self::Text(text) => text_pin_size(text),
-        }
     }
 }
 
@@ -912,6 +820,12 @@ fn open_pin_inner(
         });
         view.update(cx, |view, cx| {
             view.watch_close(window, cx);
+            view.fit_display_to_size(
+                window.scale_factor(),
+                f32::from(bounds.size.width),
+                f32::from(bounds.size.height),
+                cx,
+            );
         });
         window.defer(cx, move |window, _| {
             crate::ui::align_client_to_bounds(window, bounds)
@@ -1158,14 +1072,20 @@ fn replace_image_inner(
 }
 
 pub fn close_pin(id: u64, cx: &mut App) {
+    close_pin_inner(id, cx, true);
+}
+
+fn close_pin_inner(id: u64, cx: &mut App, remove_window: bool) {
     let state = PINS.with(|pins| pins.borrow_mut().remove(&id));
     let Some(state) = state else {
         return;
     };
     state.entity.update(cx, |view, cx| view.release_image(cx));
-    let _ = state
-        .window
-        .update(cx, |_, window, _| window.remove_window());
+    if remove_window {
+        let _ = state
+            .window
+            .update(cx, |_, window, _| window.remove_window());
+    }
     save_manifest();
     if let Some(path) = state.image_path {
         let _ = std::fs::remove_file(path);
@@ -1875,21 +1795,6 @@ impl PinView {
         true
     }
 
-    fn fitted_zoom_limit(&self, window: &Window, cx: &App) -> f32 {
-        let Some(size) = self.content.image_size() else {
-            return 4.0;
-        };
-        let Some(screen) = pin_display_bounds(window, cx) else {
-            return 4.0;
-        };
-        fit_zoom_limit(
-            size.width,
-            size.height,
-            f32::from(screen.size.width),
-            f32::from(screen.size.height),
-        )
-    }
-
     fn apply_zoom(&mut self, zoom: f32, window: &mut Window, cx: &mut Context<Self>) {
         if self.content.image_size().is_none() {
             return;
@@ -1975,6 +1880,7 @@ impl PinView {
             if (self.zoom_target - self.zoom).abs() > f32::EPSILON {
                 self.apply_zoom(self.zoom_target, window, cx);
             }
+            self.ensure_display_resolution(window);
             self.zoom_center = None;
             schedule_manifest_save(cx);
             return true;
@@ -1997,6 +1903,7 @@ impl PinView {
             let target = self.zoom_target;
             self.apply_zoom(target, window, cx);
             self.zoom_target = self.zoom;
+            self.ensure_display_resolution(window);
             schedule_manifest_save(cx);
             self.show_hud(format!("{} {percent}%", t(language, "pin.zoom_hud")), cx);
             return;
@@ -2071,16 +1978,10 @@ impl PinView {
         let _ = platform_window::move_window_to(&*window, x, y);
     }
 
-    fn release_image(&mut self, cx: &mut Context<Self>) {
-        if let PinContent::Image { image, .. } = &self.content {
-            cx.drop_image(image.clone(), None);
-        }
-    }
-
     fn watch_close(&self, window: &Window, cx: &mut Context<Self>) {
-        let view = cx.entity().downgrade();
+        let id = self.id;
         window.on_window_should_close(cx, move |_, cx| {
-            let _ = view.update(cx, |this, cx| this.release_image(cx));
+            close_pin_inner(id, cx, false);
             true
         });
     }
@@ -2105,6 +2006,13 @@ impl PinView {
         self.ocr = None;
         self.selection = None;
         self.selecting = false;
+        let window_handle = PINS.with(|pins| pins.borrow().get(&self.id).map(|state| state.window));
+        if let Some(handle) = window_handle
+            && let Ok(scale) = handle.update(cx, |_, window, _| window.scale_factor())
+        {
+            let (width, height) = self.content.size(self.zoom);
+            self.fit_display_to_size(scale, width, height, cx);
+        }
         self.start_ocr(cx);
         cx.notify();
     }

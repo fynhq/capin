@@ -20,7 +20,45 @@ pub fn render_image(frame: RgbaFrame) -> Arc<RenderImage> {
 }
 
 pub fn render_image_ref(frame: &RgbaFrame) -> Arc<RenderImage> {
-    render_image(frame.clone())
+    let width = frame.width();
+    let height = frame.height();
+    let mut pixels = frame.packed_pixels().into_owned();
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+
+    let buffer = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(width, height, pixels)
+        .expect("capture frames are validated before conversion");
+    Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))
+}
+
+pub fn downscaled_render_image(
+    frame: &RgbaFrame,
+    width: u32,
+    height: u32,
+) -> Option<(Arc<RenderImage>, PhysicalSize)> {
+    let width = width.clamp(1, frame.width());
+    let height = height.clamp(1, frame.height());
+    let source = image::RgbaImage::from_raw(
+        frame.width(),
+        frame.height(),
+        frame.packed_pixels().into_owned(),
+    )?;
+    let resized = image::imageops::resize(
+        &source,
+        width,
+        height,
+        image::imageops::FilterType::Triangle,
+    );
+    let mut pixels = resized.into_raw();
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+    let buffer = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(width, height, pixels)?;
+    Some((
+        Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])),
+        PhysicalSize::new(width, height),
+    ))
 }
 
 pub fn transparent_image() -> Arc<RenderImage> {
