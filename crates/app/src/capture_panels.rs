@@ -9,6 +9,51 @@ use crate::i18n::{Language, t};
 use crate::icons;
 use crate::ui::{enter_slide_fade, tooltip_view};
 
+const HINTS_PADDING: f32 = 14.0;
+const HINTS_GAP: f32 = 7.0;
+const HINTS_TITLE_HEIGHT: f32 = 18.0;
+const HINTS_ROW_HEIGHT: f32 = 17.0;
+
+fn text_advance(text: &str, font_size: f32) -> f32 {
+    text.chars()
+        .map(|ch| {
+            if ch.is_whitespace() {
+                font_size * 0.35
+            } else if ch.is_ascii() {
+                font_size * 0.62
+            } else {
+                font_size
+            }
+        })
+        .sum()
+}
+
+pub(crate) fn effects_panel_width(language: Language) -> f32 {
+    const FONT: f32 = 11.0;
+    let chip = |text: &str| text_advance(text, FONT) + 12.0;
+    let corner = 14.0
+        + 2.0
+        + chip(t(language, "overlay.effects_off"))
+        + chip("8")
+        + chip("16")
+        + chip("24")
+        + 8.0;
+    let shadow = text_advance(t(language, "overlay.effects_shadow"), FONT) + 16.0;
+    (16.0 + corner + 6.0 + 1.0 + 6.0 + shadow + 6.0).max(140.0)
+}
+
+pub(crate) fn hints_panel_width() -> f32 {
+    360.0
+}
+
+pub(crate) fn hints_panel_height(rows: usize) -> f32 {
+    HINTS_PADDING * 2.0
+        + HINTS_TITLE_HEIGHT
+        + rows as f32 * HINTS_ROW_HEIGHT
+        + rows as f32 * HINTS_GAP
+        + 2.0
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn effects_panel<View: 'static>(
     id_prefix: &'static str,
@@ -133,39 +178,26 @@ pub(crate) fn effects_panel<View: 'static>(
         .into_any_element()
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn hints_panel<View: 'static>(
-    id_prefix: &'static str,
+pub(crate) fn hints_card(
     theme: ChromeTheme,
     language: Language,
-    rect: Bounds<Pixels>,
-    rows: Vec<(String, String)>,
-    cx: &mut Context<View>,
-    on_dismiss: fn(&mut View, &mut Context<View>),
-) -> AnyElement {
+    width: f32,
+    rows: &[(String, String)],
+) -> Div {
     let mut panel = div()
-        .id(format!("{id_prefix}-hints-panel"))
-        .absolute()
-        .left(rect.origin.x)
-        .top(rect.origin.y)
-        .w(rect.size.width)
+        .w(px(width))
         .flex()
         .flex_col()
-        .gap(px(5.0))
-        .p(px(12.0))
+        .gap(px(HINTS_GAP))
+        .p(px(HINTS_PADDING))
         .rounded(px(theme.radius))
         .bg(theme.surface_strong)
         .border_1()
         .border_color(theme.border)
         .shadow(theme.shadow())
-        .occlude()
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|_, _, _, cx| cx.stop_propagation()),
-        )
         .child(
             div()
-                .text_size(px(12.0))
+                .text_size(px(13.0))
                 .text_color(theme.text)
                 .child(t(language, "editor.hints_title")),
         );
@@ -176,16 +208,45 @@ pub(crate) fn hints_panel<View: 'static>(
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .gap(px(8.0))
-                .child(div().text_size(px(10.5)).text_color(theme.muted).child(key))
+                .gap(px(10.0))
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .flex_shrink_0()
+                        .text_size(px(11.5))
+                        .text_color(theme.muted)
+                        .child(key.clone()),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.5))
                         .text_color(theme.text)
-                        .child(description),
+                        .child(description.clone()),
                 ),
         );
     }
+    panel
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn hints_panel<View: 'static>(
+    id_prefix: &'static str,
+    theme: ChromeTheme,
+    language: Language,
+    rect: Bounds<Pixels>,
+    rows: Vec<(String, String)>,
+    cx: &mut Context<View>,
+    on_dismiss: fn(&mut View, &mut Context<View>),
+) -> AnyElement {
+    let panel = hints_card(theme, language, f32::from(rect.size.width), &rows)
+        .id(format!("{id_prefix}-hints-panel"))
+        .absolute()
+        .left(rect.origin.x)
+        .top(rect.origin.y)
+        .occlude()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|_, _, _, cx| cx.stop_propagation()),
+        );
     let panel = enter_slide_fade(
         panel,
         format!("{id_prefix}-hints-enter"),

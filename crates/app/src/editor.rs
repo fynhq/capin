@@ -874,7 +874,8 @@ impl EditorView {
         let info = self.info_rect(window)?;
         let window_width = f32::from(window.viewport_size().width);
         let window_height = f32::from(window.viewport_size().height);
-        let width = 216.0_f32.min((window_width - 16.0).max(120.0));
+        let width = crate::capture_panels::effects_panel_width(settings_state::get().language)
+            .min((window_width - 16.0).max(120.0));
         let height = 40.0;
         let left = f32::from(info.origin.x).clamp(8.0, (window_width - width - 8.0).max(8.0));
         let top =
@@ -3589,8 +3590,30 @@ impl EditorView {
         let language = settings_state::get().language;
         let window_width = f32::from(window.viewport_size().width);
         let window_height = f32::from(window.viewport_size().height);
-        let width = 340.0_f32.min((window_width - 16.0).max(120.0));
-        let height = 220.0;
+        let width =
+            crate::capture_panels::hints_panel_width().min((window_width - 16.0).max(120.0));
+        let pin_hotkey = crate::hotkey::display_hotkey(&settings_state::get().pin_hotkey);
+        let k = |key: &str| t(language, key).to_owned();
+        let mut rows: Vec<(String, String)> = vec![
+            (k("editor.hint_key_copy"), k("editor.hint_copy")),
+            ("Cmd/Ctrl+S".to_owned(), k("editor.hint_save")),
+        ];
+        if self.inline.and_then(|inline| inline.capture).is_some() {
+            rows.push((pin_hotkey, k("editor.hint_pin")));
+        }
+        rows.push((
+            "Space".to_owned(),
+            if self.inline.is_some_and(|inline| inline.zoomable) {
+                k("editor.hint_pan")
+            } else {
+                k("editor.hint_space")
+            },
+        ));
+        if self.inline.and_then(|inline| inline.capture).is_some() {
+            rows.push(("F5".to_owned(), k("editor.hint_refresh")));
+        }
+        rows.push(("Esc".to_owned(), k("editor.hint_cancel")));
+        let height = crate::capture_panels::hints_panel_height(rows.len());
         let rect = Bounds {
             origin: point(
                 px((window_width - width) / 2.0),
@@ -3598,41 +3621,6 @@ impl EditorView {
             ),
             size: size(px(width), px(height)),
         };
-        let pin_hotkey = crate::hotkey::display_hotkey(&settings_state::get().pin_hotkey);
-        let mut rows: Vec<(String, String)> = vec![
-            (
-                t(language, "editor.hint_key_copy").to_owned(),
-                t(language, "editor.hint_copy").to_owned(),
-            ),
-            (
-                "Cmd/Ctrl+S".to_owned(),
-                t(language, "editor.hint_save").to_owned(),
-            ),
-        ];
-        if self.inline.and_then(|inline| inline.capture).is_some() {
-            rows.push((pin_hotkey, t(language, "editor.hint_pin").to_owned()));
-        }
-        rows.push(if self.inline.is_some_and(|inline| inline.zoomable) {
-            (
-                "Space".to_owned(),
-                t(language, "editor.hint_pan").to_owned(),
-            )
-        } else {
-            (
-                "Space".to_owned(),
-                t(language, "editor.hint_space").to_owned(),
-            )
-        });
-        if self.inline.and_then(|inline| inline.capture).is_some() {
-            rows.push((
-                "F5".to_owned(),
-                t(language, "editor.hint_refresh").to_owned(),
-            ));
-        }
-        rows.push((
-            "Esc".to_owned(),
-            t(language, "editor.hint_cancel").to_owned(),
-        ));
         Some(crate::capture_panels::hints_panel(
             "editor",
             self.chrome,

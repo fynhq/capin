@@ -2627,7 +2627,8 @@ impl OverlayView {
         }
         let info = self.info_rect()?;
         let language = settings_state::get().language;
-        let width = 216.0_f32.min(f32::from(self.window_size.width) - 16.0);
+        let width = crate::capture_panels::effects_panel_width(language)
+            .min((f32::from(self.window_size.width) - 16.0).max(120.0));
         let height = 40.0;
         let left = f32::from(info.origin.x).clamp(
             8.0,
@@ -2817,38 +2818,25 @@ impl OverlayView {
             return None;
         }
         let language = settings_state::get().language;
-        let width = 330.0_f32.min(f32::from(self.window_size.width) - 16.0);
-        let height = 154.0;
+        let width = crate::capture_panels::hints_panel_width()
+            .min((f32::from(self.window_size.width) - 16.0).max(120.0));
+        let pin_hotkey = crate::hotkey::display_hotkey(&settings_state::get().pin_hotkey);
+        let k = |key: &str| t(language, key).to_owned();
+        let rows = vec![
+            (k("editor.hint_key_copy"), k("editor.hint_copy")),
+            ("Cmd/Ctrl+S".to_owned(), k("editor.hint_save")),
+            (pin_hotkey, k("editor.hint_pin")),
+            ("Space".to_owned(), k("editor.hint_space")),
+            ("R / F5".to_owned(), k("editor.hint_ratio_refresh")),
+            ("Esc".to_owned(), k("editor.hint_cancel")),
+        ];
+        let height = crate::capture_panels::hints_panel_height(rows.len());
         let left = (f32::from(self.window_size.width) - width) / 2.0;
         let top = (f32::from(self.window_size.height) - height) / 2.0;
         let rect = Bounds {
             origin: point(px(left), px(top)),
             size: size(px(width), px(height)),
         };
-        let pin_hotkey = crate::hotkey::display_hotkey(&settings_state::get().pin_hotkey);
-        let rows = vec![
-            (
-                t(language, "editor.hint_key_copy").to_owned(),
-                t(language, "editor.hint_copy").to_owned(),
-            ),
-            (
-                "Cmd/Ctrl+S".to_owned(),
-                t(language, "editor.hint_save").to_owned(),
-            ),
-            (pin_hotkey, t(language, "editor.hint_pin").to_owned()),
-            (
-                "Space".to_owned(),
-                t(language, "editor.hint_space").to_owned(),
-            ),
-            (
-                "R / F5".to_owned(),
-                t(language, "editor.hint_ratio_refresh").to_owned(),
-            ),
-            (
-                "Esc".to_owned(),
-                t(language, "editor.hint_cancel").to_owned(),
-            ),
-        ];
         Some(crate::capture_panels::hints_panel(
             "overlay",
             self.chrome,
