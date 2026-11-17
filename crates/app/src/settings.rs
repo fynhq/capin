@@ -19,6 +19,8 @@ use crate::storage;
 
 const PROJECT_URL: &str = "https://github.com/fynhq/capin";
 
+mod settings_scroll;
+
 thread_local! {
     static PENDING_STATUS: RefCell<Option<String>> = const { RefCell::new(None) };
 }
@@ -534,6 +536,7 @@ fn card_border(_dark: bool) -> Rgba {
 pub(crate) struct SettingsView {
     section: SettingsSection,
     settings: AppSettings,
+    scroll_handle: ScrollHandle,
     accent: Option<u32>,
     last_accent: Option<u32>,
     status: Option<String>,
@@ -566,6 +569,7 @@ impl SettingsView {
         let mut view = Self {
             section: SettingsSection::General,
             settings,
+            scroll_handle: ScrollHandle::new(),
             accent: system_accent_hex(),
             last_accent: None,
             status: PENDING_STATUS.with(|slot| slot.borrow_mut().take()),
@@ -744,6 +748,7 @@ impl SettingsView {
                 .active(move |style| style.bg(selected_bg))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.section = section;
+                    this.scroll_handle.set_offset(point(px(0.0), px(0.0)));
                     this.select_menu = None;
                     cx.notify();
                 }))
@@ -1011,34 +1016,46 @@ impl SettingsView {
             .child(top_block)
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .w_full()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .px(px(layout::CONTENT_PAD_X))
-                    .pb(px(layout::CONTENT_PAD_BOTTOM))
-                    .id(format!("settings-content-{}", self.section.id()))
-                    .overflow_y_scroll()
                     .child(
                         div()
-                            .w(px(content_width))
+                            .size_full()
                             .flex()
                             .flex_col()
-                            .gap(px(layout::CONTENT_GAP))
-                            .child(match self.section {
-                                SettingsSection::General => self.general(theme, window, cx),
-                                SettingsSection::Capture => self.capture_settings(theme, cx),
-                                SettingsSection::Recording => self.recording(theme, cx),
-                                SettingsSection::Shortcuts => self.shortcuts(theme, cx),
-                            })
-                            .with_animation(
-                                SharedString::from(format!("settings-page-{}", self.section.id())),
-                                Animation::new(Duration::from_millis(120))
-                                    .with_easing(|delta| 1.0 - (1.0 - delta).powi(3)),
-                                |page, delta| page.opacity(delta),
+                            .items_center()
+                            .px(px(layout::CONTENT_PAD_X))
+                            .pb(px(layout::CONTENT_PAD_BOTTOM))
+                            .id(format!("settings-content-{}", self.section.id()))
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll_handle)
+                            .child(
+                                div()
+                                    .w(px(content_width))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(layout::CONTENT_GAP))
+                                    .child(match self.section {
+                                        SettingsSection::General => self.general(theme, window, cx),
+                                        SettingsSection::Capture => {
+                                            self.capture_settings(theme, cx)
+                                        }
+                                        SettingsSection::Recording => self.recording(theme, cx),
+                                        SettingsSection::Shortcuts => self.shortcuts(theme, cx),
+                                    })
+                                    .with_animation(
+                                        SharedString::from(format!(
+                                            "settings-page-{}",
+                                            self.section.id()
+                                        )),
+                                        Animation::new(Duration::from_millis(120))
+                                            .with_easing(|delta| 1.0 - (1.0 - delta).powi(3)),
+                                        |page, delta| page.opacity(delta),
+                                    ),
                             ),
-                    ),
+                    )
+                    .child(settings_scroll::scrollbar(theme, &self.scroll_handle)),
             )
     }
 
@@ -2565,13 +2582,6 @@ impl SettingsView {
                             t(language, "shortcuts.adjust_target_desc"),
                             t(language, "shortcuts.value.wheel"),
                             Some(icons::SCROLL),
-                        ),
-                        info_row(
-                            theme,
-                            t(language, "shortcuts.toggle_target"),
-                            "",
-                            "Tab",
-                            Some(icons::WINDOW),
                         ),
                         info_row(
                             theme,
