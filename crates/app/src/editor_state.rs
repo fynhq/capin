@@ -1307,10 +1307,18 @@ impl EditorState {
 
 pub(crate) const CANVAS_HISTORY_LIMIT: usize = 3;
 
+const LARGE_CANVAS_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
+
 impl EditorState {
     pub(crate) fn record_canvas_snapshot(&mut self, snapshot: EditorSnapshot) {
+        let bytes = snapshot.image_size.width as usize * snapshot.image_size.height as usize * 4;
+        let limit = if bytes > LARGE_CANVAS_SNAPSHOT_BYTES {
+            1
+        } else {
+            CANVAS_HISTORY_LIMIT
+        };
         self.canvas_undo.push(snapshot);
-        if self.canvas_undo.len() > CANVAS_HISTORY_LIMIT {
+        while self.canvas_undo.len() > limit {
             self.canvas_undo.remove(0);
         }
         self.canvas_redo.clear();
