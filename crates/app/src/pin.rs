@@ -15,15 +15,23 @@ use platform_window::{
 use serde::{Deserialize, Serialize};
 
 use crate::i18n::{Language, t};
+use crate::icons;
 use crate::image_util;
 use crate::logging::{log_error, log_info, log_warn};
 use crate::settings_state;
 use crate::storage;
 use crate::ui::centered_bounds;
 
+mod pin_clipboard;
 mod pin_content;
 mod pin_display;
+mod pin_help;
+mod pin_qr;
 
+use pin_clipboard::{
+    ClipboardContent, clipboard_image_signature, clipboard_text_signature, read_clipboard,
+    text_signature,
+};
 use pin_content::PinContent;
 
 const MAX_RESTORED_PINS: usize = 20;
@@ -60,85 +68,10 @@ thread_local! {
     static DEFERRED_PINS: RefCell<Vec<PersistedPin>> = const { RefCell::new(Vec::new()) };
 }
 
-fn clipboard_signature_of(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x1000_0000_01b3);
-    }
-    hash
-}
-
-fn clipboard_image_signature(cx: &mut App) -> Option<u64> {
-    let item = cx.read_from_clipboard()?;
-    for entry in item.entries() {
-        if let ClipboardEntry::Image(image) = entry {
-            return Some(clipboard_signature_of(&image.bytes));
-        }
-    }
-    for entry in item.entries() {
-        let ClipboardEntry::ExternalPaths(paths) = entry else {
-            continue;
-        };
-        if let Some(signature) = paths
-            .0
-            .iter()
-            .find(|path| is_image_path(path))
-            .and_then(|path| clipboard_file_signature(path))
-        {
-            return Some(signature);
-        }
-    }
-    None
-}
-
-fn clipboard_file_signature(path: &Path) -> Option<u64> {
-    let metadata = std::fs::metadata(path).ok()?;
-    let modified = metadata
-        .modified()
-        .ok()?
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_millis();
-    let mut bytes = path.display().to_string().into_bytes();
-    bytes.extend_from_slice(&metadata.len().to_le_bytes());
-    bytes.extend_from_slice(&modified.to_le_bytes());
-    Some(clipboard_signature_of(&bytes))
-}
-
-fn is_image_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            matches!(
-                extension.to_ascii_lowercase().as_str(),
-                "png" | "jpg" | "jpeg" | "bmp"
-            )
-        })
-}
-
-fn clipboard_text_signature(cx: &mut App) -> Option<u64> {
-    let item = cx.read_from_clipboard()?;
-    for entry in item.entries() {
-        let ClipboardEntry::String(text) = entry else {
-            continue;
-        };
-        let text = text.text.trim_end();
-        if text.is_empty() {
-            continue;
-        }
-        return Some(text_signature(text));
-    }
-    None
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PinMenuAction {
     Rotate,
     Edit,
-    Copy,
-    Save,
-    CopyQr,
     Settings,
     Through,
     Close,
@@ -149,9 +82,6 @@ impl PinMenuAction {
         match self {
             Self::Rotate => "pin-menu-rotate",
             Self::Edit => "pin-menu-edit",
-            Self::Copy => "pin-menu-copy",
-            Self::Save => "pin-menu-save",
-            Self::CopyQr => "pin-menu-copy-qr",
             Self::Settings => "pin-menu-settings",
             Self::Through => "pin-menu-through",
             Self::Close => "pin-menu-close",
@@ -162,9 +92,6 @@ impl PinMenuAction {
         match self {
             Self::Rotate => "pin.rotate",
             Self::Edit => "pin.edit",
-            Self::Copy => "pin.copy",
-            Self::Save => "pin.save",
-            Self::CopyQr => "pin.copy_qr",
             Self::Settings => "pin.settings",
             Self::Through => "pin.through",
             Self::Close => "pin.close",
@@ -358,125 +285,74 @@ pub fn pin_last(cx: &mut App) {
         LAST_PIN_TRIGGER.with(|slot| slot.set(None));
         PIN_WALK_EXHAUSTED.with(|slot| slot.set(false));
     }
-    let mut clipboard_frame = None;
-    let mut clipboard_signature = None;
-    let mut clipboard_text = None;
-    let mut clipboard_text_signature = None;
-    if let Some(item) = cx.read_from_clipboard() {
-        for entry in item.entries() {
-            let ClipboardEntry::Image(image) = entry else {
-                continue;
+    let (content, signature) = read_clipboard(cx);
+    match content {
+        ClipboardContent::Image(frame) => {
+            let previous_clipboard = PIN_CLIPBOARD.get();
+            let clipboard_changed = match (previous_clipboard, signature) {
+                (Some(previous), Some(current)) => previous != current,
+                (None, Some(_)) => true,
+                _ => false,
             };
-            clipboard_signature = Some(clipboard_signature_of(&image.bytes));
-            let Ok(image) = image::load_from_memory(&image.bytes) else {
-                continue;
+            let walk_active = LAST_PIN_TRIGGER.with(|slot| slot.get()).is_some();
+            if walk_active && !clipboard_changed {
+                pin_history_step(cx);
+                return;
+            }
+            let clipboard_image = crate::capture_history::HistoryImage {
+                frame,
+                pin_shadow: None,
+                scale: None,
             };
-            let rgba = image.to_rgba8();
-            let (width, height) = rgba.dimensions();
-            if let Ok(frame) = RgbaFrame::from_pixels(width, height, rgba.into_raw()) {
-                clipboard_frame = Some(frame);
-                break;
+            let start_with_clipboard = clipboard_changed
+                || previous_clipboard.is_none()
+                || !crate::capture_history::has_entries();
+            if start_with_clipboard {
+                let hash = crate::capture_history::hash_frame(&clipboard_image.frame);
+                crate::capture_history::record_frame(&clipboard_image.frame, hash, None, None);
+                pin_image(clipboard_image, cx);
+            } else if let Some(image) = crate::capture_history::latest() {
+                pin_image(image, cx);
             }
-        }
-        if clipboard_frame.is_none() {
-            for entry in item.entries() {
-                let ClipboardEntry::ExternalPaths(paths) = entry else {
-                    continue;
-                };
-                let Some(path) = paths.0.iter().find(|path| is_image_path(path)) else {
-                    continue;
-                };
-                clipboard_signature = clipboard_file_signature(path);
-                let Ok(image) = image::open(path) else {
-                    continue;
-                };
-                let rgba = image.to_rgba8();
-                let (width, height) = rgba.dimensions();
-                if let Ok(frame) = RgbaFrame::from_pixels(width, height, rgba.into_raw()) {
-                    clipboard_frame = Some(frame);
-                    break;
-                }
-            }
-        }
-        if clipboard_frame.is_none() {
-            for entry in item.entries() {
-                let ClipboardEntry::String(text) = entry else {
-                    continue;
-                };
-                let text = text.text.trim_end();
-                if text.is_empty() {
-                    continue;
-                }
-                clipboard_text_signature = Some(text_signature(text));
-                clipboard_text = Some(text.to_owned());
-                break;
-            }
-        }
-    }
-
-    if let Some(frame) = clipboard_frame {
-        let previous_clipboard = PIN_CLIPBOARD.get();
-        let clipboard_changed = match (previous_clipboard, clipboard_signature) {
-            (Some(previous), Some(current)) => previous != current,
-            (None, Some(_)) => true,
-            _ => false,
-        };
-        let walk_active = LAST_PIN_TRIGGER.with(|slot| slot.get()).is_some();
-        if walk_active && !clipboard_changed {
-            pin_history_step(cx);
             return;
         }
-        let clipboard_image = crate::capture_history::HistoryImage {
-            frame,
-            pin_shadow: None,
-            scale: None,
-        };
-        let start_with_clipboard = clipboard_changed
-            || previous_clipboard.is_none()
-            || !crate::capture_history::has_entries();
-        if start_with_clipboard {
-            pin_image(clipboard_image, cx);
-        } else if let Some(image) = crate::capture_history::latest() {
-            pin_image(image, cx);
-        }
-        return;
-    }
-
-    if let Some(text) = clipboard_text {
-        let text_changed = match (PIN_CLIPBOARD_TEXT.get(), clipboard_text_signature) {
-            (Some(previous), Some(current)) => previous != current,
-            (None, Some(_)) => true,
-            _ => false,
-        };
-        let walk_active = LAST_PIN_TRIGGER.with(|slot| slot.get()).is_some();
-        let hash = text_signature(&text);
-        let text_live = PINS.with(|pins| {
-            pins.borrow()
-                .values()
-                .any(|state| state.content_hash == Some(hash))
-        });
-        if walk_active && !text_changed {
-            if !text_live {
+        ClipboardContent::Text(text) => {
+            let text_changed = match (PIN_CLIPBOARD_TEXT.get(), signature) {
+                (Some(previous), Some(current)) => previous != current,
+                (None, Some(_)) => true,
+                _ => false,
+            };
+            let walk_active = LAST_PIN_TRIGGER.with(|slot| slot.get()).is_some();
+            let hash = text_signature(&text);
+            let text_live = PINS.with(|pins| {
+                pins.borrow()
+                    .values()
+                    .any(|state| state.content_hash == Some(hash))
+            });
+            if walk_active && !text_changed {
+                if !text_live {
+                    open_text_pin(text, cx);
+                    return;
+                }
+                if pin_history_step(cx) {
+                    return;
+                }
                 open_text_pin(text, cx);
                 return;
             }
-            if pin_history_step(cx) {
-                return;
+            let start_with_text = text_changed
+                || PIN_CLIPBOARD_TEXT.get().is_none()
+                || !crate::capture_history::has_entries();
+            if start_with_text {
+                open_text_pin(text, cx);
+            } else if let Some(image) = crate::capture_history::latest() {
+                pin_image(image, cx);
+            } else {
+                open_text_pin(text, cx);
             }
-            open_text_pin(text, cx);
             return;
         }
-        let start_with_text = text_changed
-            || PIN_CLIPBOARD_TEXT.get().is_none()
-            || !crate::capture_history::has_entries();
-        if start_with_text {
-            open_text_pin(text, cx);
-        } else if let Some(image) = crate::capture_history::latest() {
-            pin_image(image, cx);
-        } else {
-            open_text_pin(text, cx);
-        }
-        return;
+        ClipboardContent::Empty => {}
     }
 
     if LAST_PIN_TRIGGER.with(|slot| slot.get()).is_some() {
@@ -488,10 +364,6 @@ pub fn pin_last(cx: &mut App) {
     } else {
         log_warn!("pin", "no clipboard content or recent capture to pin");
     }
-}
-
-fn text_signature(text: &str) -> u64 {
-    clipboard_signature_of(text.as_bytes())
 }
 
 fn open_text_pin(text: String, cx: &mut App) {
@@ -558,6 +430,8 @@ fn pin_image(image: crate::capture_history::HistoryImage, cx: &mut App) {
             LAST_PIN_TRIGGER.with(|slot| slot.set(Some(history_hash)));
             if !flash_existing_pin(history_hash, cx) {
                 open_history_pin(history_image, false, cx);
+            } else {
+                mark_walk();
             }
             return;
         }
@@ -1076,6 +950,7 @@ pub fn close_pin(id: u64, cx: &mut App) {
 }
 
 fn close_pin_inner(id: u64, cx: &mut App, remove_window: bool) {
+    pin_help::close(cx);
     let state = PINS.with(|pins| pins.borrow_mut().remove(&id));
     let Some(state) = state else {
         return;
@@ -1404,6 +1279,7 @@ struct PinView {
     selecting: bool,
     drag: Option<PinDrag>,
     hover_text: bool,
+    hover: bool,
     content_generation: u64,
     flash_alpha: f32,
     flash_active: bool,
@@ -1442,6 +1318,7 @@ impl PinView {
             selecting: false,
             drag: None,
             hover_text: false,
+            hover: false,
             content_generation: 1,
             flash_alpha: 0.0,
             flash_active: false,
@@ -2206,19 +2083,9 @@ impl PinView {
 
     fn menu_items(&self, language: Language) -> Vec<(PinMenuAction, String)> {
         let mut items = Vec::new();
-        match &self.content {
-            PinContent::Image { .. } => {
-                items.push(PinMenuAction::Rotate);
-                items.push(PinMenuAction::Edit);
-                items.push(PinMenuAction::Copy);
-                items.push(PinMenuAction::Save);
-                if self.qr_code().is_some() {
-                    items.push(PinMenuAction::CopyQr);
-                }
-            }
-            PinContent::Text(_) => {
-                items.push(PinMenuAction::Copy);
-            }
+        if matches!(&self.content, PinContent::Image { .. }) {
+            items.push(PinMenuAction::Rotate);
+            items.push(PinMenuAction::Edit);
         }
         items.push(PinMenuAction::Settings);
         items.push(PinMenuAction::Through);
@@ -2323,6 +2190,117 @@ impl Render for PinView {
             .child(body)
             .children(text_layers)
             .children(flash);
+        let qr_bar = self
+            .qr_code()
+            .map(str::to_owned)
+            .filter(|_| self.hover && !self.click_through && self.drag.is_none())
+            .map(|code| {
+                let language = settings_state::get().language;
+                let url = pin_qr::qr_url(&code);
+                let menu = theme.menu;
+                let menu_border = theme.menu_border;
+                let menu_hover = theme.menu_hover;
+                let accent = theme.accent;
+                let text_color = theme.text;
+                let selection = theme.selection;
+                let mut bar = div()
+                    .id("pin-qr-bar")
+                    .absolute()
+                    .left(px(8.0))
+                    .right(px(8.0))
+                    .bottom(px(8.0))
+                    .h(px(30.0))
+                    .px(px(8.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .rounded(px(7.0))
+                    .bg(menu)
+                    .border_1()
+                    .border_color(menu_border)
+                    .shadow(vec![
+                        BoxShadow::new(px(0.0), px(4.0), hsla(0.0, 0.0, 0.0, 0.25))
+                            .blur_radius(px(12.0)),
+                    ])
+                    .cursor(CursorStyle::Arrow)
+                    .occlude()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            window.focus(&this.focus_handle, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(icons::icon(icons::QR, 14.0, accent));
+                let mut label = div()
+                    .id("pin-qr-open")
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(px(11.0))
+                    .text_color(text_color);
+                if url.is_some() {
+                    label = label
+                        .cursor_pointer()
+                        .hover(move |style| style.text_color(accent))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let Some(code) = this.qr_code().map(str::to_owned) else {
+                                return;
+                            };
+                            if let Some(url) = pin_qr::qr_url(&code) {
+                                cx.open_url(&url);
+                            }
+                        }));
+                }
+                bar = bar.child(label.child(code.clone()));
+                if url.is_some() {
+                    bar = bar.child(
+                        div()
+                            .id("pin-qr-open-button")
+                            .h(px(20.0))
+                            .px(px(7.0))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .rounded(px(5.0))
+                            .bg(menu_hover)
+                            .text_size(px(11.0))
+                            .text_color(accent)
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(selection))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let Some(code) = this.qr_code().map(str::to_owned) else {
+                                    return;
+                                };
+                                if let Some(url) = pin_qr::qr_url(&code) {
+                                    cx.open_url(&url);
+                                }
+                            }))
+                            .child(t(language, "pin.qr_open")),
+                    );
+                }
+                bar.child(
+                    div()
+                        .id("pin-qr-copy")
+                        .h(px(20.0))
+                        .px(px(7.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .rounded(px(5.0))
+                        .bg(menu_hover)
+                        .text_size(px(11.0))
+                        .text_color(text_color)
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(selection))
+                        .on_click(cx.listener(|this, _, _, cx| this.copy_qr(cx)))
+                        .child(t(language, "pin.qr_copy")),
+                )
+                .into_any_element()
+            });
         let cursor = match &self.content {
             PinContent::Image { .. } if self.drag.is_some() => crate::ui::closed_hand_cursor(),
             PinContent::Image { .. } if self.hover_text => CursorStyle::IBeam,
@@ -2334,7 +2312,7 @@ impl Render for PinView {
             .id("pin-window")
             .cursor(cursor)
             .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
                 let command =
                     event.keystroke.modifiers.platform || event.keystroke.modifiers.control;
@@ -2352,6 +2330,11 @@ impl Render for PinView {
                     cx.stop_propagation();
                     return;
                 }
+                if command && key == "v" {
+                    cx.defer(pin_clipboard::paste_clipboard);
+                    cx.stop_propagation();
+                    return;
+                }
                 if command && key == "s" {
                     if matches!(&this.content, PinContent::Image { .. }) {
                         this.save_image(cx);
@@ -2360,6 +2343,13 @@ impl Render for PinView {
                     return;
                 }
                 if command && key == "a" && this.select_all_text(cx) {
+                    cx.stop_propagation();
+                    return;
+                }
+                if key == "f1" {
+                    let bounds = window.bounds();
+                    let image = matches!(&this.content, PinContent::Image { .. });
+                    cx.defer(move |cx| pin_help::toggle(bounds, image, cx));
                     cx.stop_propagation();
                     return;
                 }
@@ -2445,8 +2435,16 @@ impl Render for PinView {
                     return;
                 }
                 let over_text = this.text_index_at(event.position).is_some();
+                let mut changed = false;
+                if !this.hover {
+                    this.hover = true;
+                    changed = true;
+                }
                 if over_text != this.hover_text {
                     this.hover_text = over_text;
+                    changed = true;
+                }
+                if changed {
                     cx.notify();
                 }
             }))
@@ -2466,15 +2464,23 @@ impl Render for PinView {
                 }),
             )
             .on_mouse_exit(cx.listener(|this, _, window, cx| {
+                let mut changed = false;
                 if this.drag.take().is_some() {
                     update_bounds(this.id, window.bounds());
-                    cx.notify();
+                    changed = true;
                 }
                 if this.selecting {
                     this.finish_text_selection(cx);
                 }
                 if this.hover_text {
                     this.hover_text = false;
+                    changed = true;
+                }
+                if this.hover {
+                    this.hover = false;
+                    changed = true;
+                }
+                if changed {
                     cx.notify();
                 }
             }))
@@ -2511,7 +2517,8 @@ impl Render for PinView {
                     }
                 }
             }))
-            .child(content);
+            .child(content)
+            .children(qr_bar);
 
         root.children(hud.map(|message| {
             let duration = if hud_leaving {
@@ -2808,21 +2815,6 @@ fn perform_pin_action(id: u64, action: PinMenuAction, cx: &mut App) {
         PinMenuAction::Rotate => rotate_pin(id, &entity, window_handle, cx),
         PinMenuAction::Edit => {
             entity.update(cx, |view, cx| view.open_editor(cx));
-        }
-        PinMenuAction::Copy => {
-            entity.update(cx, |view, cx| {
-                if matches!(view.content, PinContent::Image { .. }) {
-                    view.copy_image(cx);
-                } else {
-                    view.copy_content(cx);
-                }
-            });
-        }
-        PinMenuAction::Save => {
-            entity.update(cx, |view, cx| view.save_image(cx));
-        }
-        PinMenuAction::CopyQr => {
-            entity.update(cx, |view, cx| view.copy_qr(cx));
         }
         PinMenuAction::Settings => {
             crate::settings::open_settings(cx);

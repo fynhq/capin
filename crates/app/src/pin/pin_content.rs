@@ -5,7 +5,8 @@ use gpui_kit::*;
 
 use crate::image_util;
 
-use super::{PinKind, text_pin_size, text_signature};
+use super::pin_clipboard::text_signature;
+use super::{PinKind, text_pin_size};
 
 #[derive(Clone)]
 pub(super) enum PinContent {

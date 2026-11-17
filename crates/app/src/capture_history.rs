@@ -60,6 +60,18 @@ pub fn record_png_bytes(
     recorded
 }
 
+pub fn record_frame(
+    frame: &RgbaFrame,
+    hash: u64,
+    pin_shadow: Option<HistoryPinShadow>,
+    scale: Option<f32>,
+) -> bool {
+    let Ok(bytes) = crate::image_util::encode_png(frame) else {
+        return false;
+    };
+    record_png_bytes(&bytes, hash, pin_shadow, scale)
+}
+
 pub fn record_png_file(
     source: &Path,
     hash: u64,
