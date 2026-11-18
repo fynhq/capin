@@ -68,7 +68,9 @@ impl PinView {
             return;
         }
         let scale = window.scale_factor().max(0.1);
-        let (width, height) = self.content.size(self.zoom.max(MIN_PIN_ZOOM));
+        let (width, height) = self
+            .content
+            .size(self.values.borrow().zoom.max(MIN_PIN_ZOOM));
         let need_width = (width * scale).ceil().max(1.0) as u32;
         let need_height = (height * scale).ceil().max(1.0) as u32;
         if need_width as f32 <= current.width as f32 * 1.05

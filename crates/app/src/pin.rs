@@ -1,6 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -37,6 +38,7 @@ use pin_content::PinContent;
 const MAX_RESTORED_PINS: usize = 20;
 
 const MIN_PIN_ZOOM: f32 = 0.02;
+const MAX_PIN_ZOOM: f32 = 4.0;
 
 fn pin_window_kind() -> WindowKind {
     #[cfg(target_os = "macos")]
@@ -240,6 +242,15 @@ impl PinBase {
     }
 }
 
+#[derive(Clone, Copy)]
+struct PinWindowState {
+    zoom: f32,
+    opacity: f32,
+    click_through: bool,
+}
+
+type SharedPinWindowState = Rc<RefCell<PinWindowState>>;
+
 struct PinState {
     kind: PinKind,
     entity: Entity<PinView>,
@@ -247,9 +258,7 @@ struct PinState {
     image_path: Option<PathBuf>,
     content_hash: Option<u64>,
     bounds: Bounds<Pixels>,
-    opacity: f32,
-    zoom: f32,
-    click_through: bool,
+    values: SharedPinWindowState,
     native_shadow: bool,
     edit_state: Option<PinEditState>,
     export_padding: u32,
@@ -520,7 +529,7 @@ fn open_history_pin(
     } = image;
     let hash = crate::capture_history::hash_frame(&frame);
     LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
-    let zoom = scale.map(|scale| (1.0 / scale.max(0.1)).clamp(MIN_PIN_ZOOM, 4.0));
+    let zoom = scale.map(|scale| (1.0 / scale.max(0.1)).clamp(MIN_PIN_ZOOM, MAX_PIN_ZOOM));
     let Some(shadow) = pin_shadow else {
         let content = PinContent::from_frame_with_hash(frame, hash);
         if let Some(zoom) = zoom {
@@ -593,7 +602,7 @@ fn open_pin_content_at(
     native_shadow: bool,
     cx: &mut App,
 ) -> Option<u64> {
-    let zoom = zoom.clamp(MIN_PIN_ZOOM, 4.0);
+    let zoom = zoom.clamp(MIN_PIN_ZOOM, MAX_PIN_ZOOM);
     let size = bounds.size;
     log_info!(
         "pin",
@@ -643,6 +652,12 @@ fn open_pin_inner(
 ) -> Option<u64> {
     let display = pin_open_display_bounds(cx, bounds, display_id);
     let (bounds, zoom) = fit_pin_to_display(&content, bounds, zoom, display);
+    let values = Rc::new(RefCell::new(PinWindowState {
+        zoom,
+        opacity,
+        click_through,
+    }));
+    let view_values = values.clone();
     let id = id.unwrap_or_else(next_pin_id);
     LAST_PIN_SHADOW.with(|slot| slot.set(native_shadow));
     let kind = content.kind();
@@ -681,17 +696,8 @@ fn open_pin_inner(
         if click_through && let Err(error) = set_click_through(&*window, true) {
             crate::logging::log_warn!("pin", "failed to enable click-through: {error}");
         }
-        let view = cx.new(|cx| {
-            PinView::new(
-                id,
-                content_for_view,
-                zoom,
-                opacity,
-                click_through,
-                initial_ocr_path,
-                cx,
-            )
-        });
+        let view =
+            cx.new(|cx| PinView::new(id, content_for_view, view_values, initial_ocr_path, cx));
         view.update(cx, |view, cx| {
             view.watch_close(window, cx);
             view.fit_display_to_size(
@@ -715,9 +721,7 @@ fn open_pin_inner(
                 image_path,
                 content_hash,
                 bounds,
-                opacity,
-                zoom,
-                click_through,
+                values,
                 native_shadow,
                 edit_state: None,
                 export_padding: 0,
@@ -799,7 +803,7 @@ pub fn restore(cx: &mut App) {
             }
             _ => continue,
         };
-        let zoom = entry.zoom.clamp(MIN_PIN_ZOOM, 4.0);
+        let zoom = entry.zoom.clamp(MIN_PIN_ZOOM, MAX_PIN_ZOOM);
         let (width, height) = content.size(zoom);
         let bounds = ensure_visible(
             cx,
@@ -894,11 +898,12 @@ fn replace_image_inner(
     let state = PINS.with(|pins| {
         let pins = pins.borrow();
         let state = pins.get(&id)?;
+        let zoom = state.values.borrow().zoom;
         Some((
             state.entity.clone(),
             state.window,
             state.image_path.clone(),
-            state.zoom,
+            zoom,
             state.bounds.origin,
         ))
     });
@@ -906,15 +911,7 @@ fn replace_image_inner(
         return false;
     };
     let path = if let Some(path) = image_path {
-        if image::save_buffer(
-            &path,
-            frame.packed_pixels().as_ref(),
-            frame.width(),
-            frame.height(),
-            image::ColorType::Rgba8,
-        )
-        .is_err()
-        {
+        if !write_pin_image(&path, &frame) {
             return false;
         }
         Some(path)
@@ -951,6 +948,7 @@ pub fn close_pin(id: u64, cx: &mut App) {
 
 fn close_pin_inner(id: u64, cx: &mut App, remove_window: bool) {
     pin_help::close(cx);
+    close_pin_menu(cx);
     let state = PINS.with(|pins| pins.borrow_mut().remove(&id));
     let Some(state) = state else {
         return;
@@ -976,15 +974,7 @@ fn persist_rotated_image(id: u64, frame: &RgbaFrame, hash: u64, bounds: Bounds<P
     });
     let saved = match path {
         Some(path) => {
-            if image::save_buffer(
-                &path,
-                frame.packed_pixels().as_ref(),
-                frame.width(),
-                frame.height(),
-                image::ColorType::Rgba8,
-            )
-            .is_err()
-            {
+            if !write_pin_image(&path, frame) {
                 return false;
             }
             Some(path)
@@ -1037,7 +1027,7 @@ pub fn click_through_count() -> usize {
     PINS.with(|pins| {
         pins.borrow()
             .values()
-            .filter(|state| state.click_through)
+            .filter(|state| state.values.borrow().click_through)
             .count()
     })
 }
@@ -1046,7 +1036,7 @@ pub fn release_click_through(cx: &mut App) -> usize {
     let states: Vec<(u64, Entity<PinView>, AnyWindowHandle)> = PINS.with(|pins| {
         pins.borrow()
             .iter()
-            .filter(|(_, state)| state.click_through)
+            .filter(|(_, state)| state.values.borrow().click_through)
             .map(|(id, state)| (*id, state.entity.clone(), state.window))
             .collect()
     });
@@ -1055,13 +1045,10 @@ pub fn release_click_through(cx: &mut App) -> usize {
         let _ = window.update(cx, |_, window, _| {
             let _ = set_click_through(&*window, false);
         });
-        entity.update(cx, |view, cx| {
-            view.click_through = false;
-            cx.notify();
-        });
+        entity.update(cx, |_, cx| cx.notify());
         PINS.with(|pins| {
             if let Some(state) = pins.borrow_mut().get_mut(&id) {
-                state.click_through = false;
+                state.values.borrow_mut().click_through = false;
             }
         });
     }
@@ -1079,16 +1066,7 @@ fn update_bounds(id: u64, bounds: Bounds<Pixels>) {
     save_manifest();
 }
 
-fn update_meta(id: u64, zoom: f32, opacity: f32) {
-    PINS.with(|pins| {
-        if let Some(state) = pins.borrow_mut().get_mut(&id) {
-            state.zoom = zoom;
-            state.opacity = opacity;
-        }
-    });
-}
-
-fn update_bounds_state(id: u64, bounds: Bounds<Pixels>) {
+fn update_bounds_without_save(id: u64, bounds: Bounds<Pixels>) {
     PINS.with(|pins| {
         if let Some(state) = pins.borrow_mut().get_mut(&id) {
             state.bounds = bounds;
@@ -1118,7 +1096,7 @@ fn schedule_manifest_save(cx: &mut Context<PinView>) {
 fn set_state_click_through(id: u64, enabled: bool) {
     PINS.with(|pins| {
         if let Some(state) = pins.borrow_mut().get_mut(&id) {
-            state.click_through = enabled;
+            state.values.borrow_mut().click_through = enabled;
         }
     });
     save_manifest();
@@ -1141,15 +1119,14 @@ fn next_pin_id() -> u64 {
 fn save_pin_image(id: u64, frame: &RgbaFrame) -> Option<PathBuf> {
     let directory = storage::pins_dir()?;
     let path = directory.join(format!("pin-{id}.png"));
-    image::save_buffer(
-        &path,
-        frame.packed_pixels().as_ref(),
-        frame.width(),
-        frame.height(),
-        image::ColorType::Rgba8,
-    )
-    .ok()?;
-    Some(path)
+    write_pin_image(&path, frame).then_some(path)
+}
+
+fn write_pin_image(path: &Path, frame: &RgbaFrame) -> bool {
+    let Ok(bytes) = crate::image_util::encode_png(frame) else {
+        return false;
+    };
+    crate::persist::write_atomic(path, &bytes).is_ok()
 }
 
 fn save_manifest() {
@@ -1173,6 +1150,7 @@ fn save_manifest() {
                     }
                     PinKind::Text(text) => ("text", None, Some(text.clone())),
                 };
+                let values = state.values.borrow();
                 Some(PersistedPin {
                     id: *id,
                     kind: kind.to_owned(),
@@ -1182,9 +1160,9 @@ fn save_manifest() {
                     y: f32::from(state.bounds.origin.y),
                     width: f32::from(state.bounds.size.width),
                     height: f32::from(state.bounds.size.height),
-                    opacity: state.opacity,
-                    zoom: state.zoom,
-                    click_through: state.click_through,
+                    opacity: values.opacity,
+                    zoom: values.zoom,
+                    click_through: values.click_through,
                     shadow: state.native_shadow,
                     export_padding: state.export_padding,
                 })
@@ -1262,12 +1240,10 @@ struct PinDrag {
 struct PinView {
     id: u64,
     content: PinContent,
-    zoom: f32,
+    values: SharedPinWindowState,
     zoom_target: f32,
     zoom_serial: u64,
     zoom_center: Option<(f32, f32)>,
-    opacity: f32,
-    click_through: bool,
     notice: Option<String>,
     notice_serial: u64,
     notice_leaving: bool,
@@ -1292,21 +1268,18 @@ impl PinView {
     fn new(
         id: u64,
         content: PinContent,
-        zoom: f32,
-        opacity: f32,
-        click_through: bool,
+        values: SharedPinWindowState,
         ocr_path: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let zoom = values.borrow().zoom;
         let mut view = Self {
             id,
             content,
-            zoom,
+            values,
             zoom_target: zoom,
             zoom_serial: 0,
             zoom_center: None,
-            opacity,
-            click_through,
             ocr_path,
             notice: None,
             notice_serial: 0,
@@ -1451,7 +1424,7 @@ impl PinView {
 
     fn text_index_at(&self, position: Point<Pixels>) -> Option<usize> {
         let lines = self.text_lines()?;
-        let zoom = self.zoom.max(MIN_PIN_ZOOM);
+        let zoom = self.values.borrow().zoom.max(MIN_PIN_ZOOM);
         let x = f32::from(position.x) / zoom;
         let y = f32::from(position.y) / zoom;
         let mut base = 0usize;
@@ -1719,7 +1692,7 @@ impl PinView {
             (width * scale).ceil().max(1.0) as u32,
             (height * scale).ceil().max(1.0) as u32,
         );
-        self.zoom = zoom;
+        self.values.borrow_mut().zoom = zoom;
         let settle_bounds = Bounds {
             origin,
             size: size(px(width), px(height)),
@@ -1744,8 +1717,7 @@ impl PinView {
             })
             .detach();
         }
-        update_bounds_state(self.id, settle_bounds);
-        update_meta(self.id, self.zoom, self.opacity);
+        update_bounds_without_save(self.id, settle_bounds);
         cx.notify();
     }
 
@@ -1753,9 +1725,9 @@ impl PinView {
         if serial != self.zoom_serial {
             return true;
         }
-        let difference = self.zoom_target - self.zoom;
+        let difference = self.zoom_target - self.values.borrow().zoom;
         if difference.abs() <= 0.001 {
-            if (self.zoom_target - self.zoom).abs() > f32::EPSILON {
+            if (self.zoom_target - self.values.borrow().zoom).abs() > f32::EPSILON {
                 self.apply_zoom(self.zoom_target, window, cx);
             }
             self.ensure_display_resolution(window);
@@ -1763,7 +1735,7 @@ impl PinView {
             schedule_manifest_save(cx);
             return true;
         }
-        let next = self.zoom + difference * 0.35;
+        let next = self.values.borrow().zoom + difference * 0.35;
         self.apply_zoom(next, window, cx);
         false
     }
@@ -1772,7 +1744,9 @@ impl PinView {
         if self.content.image_size().is_none() {
             return;
         }
-        let fit = self.fitted_zoom_limit(window, cx).clamp(MIN_PIN_ZOOM, 4.0);
+        let fit = self
+            .fitted_zoom_limit(window, cx)
+            .clamp(MIN_PIN_ZOOM, MAX_PIN_ZOOM);
         self.zoom_target = target.clamp(MIN_PIN_ZOOM, fit);
         let language = settings_state::get().language;
         let percent = (self.zoom_target * 100.0).round() as i32;
@@ -1780,7 +1754,7 @@ impl PinView {
             self.zoom_center = None;
             let target = self.zoom_target;
             self.apply_zoom(target, window, cx);
-            self.zoom_target = self.zoom;
+            self.zoom_target = self.values.borrow().zoom;
             self.ensure_display_resolution(window);
             schedule_manifest_save(cx);
             self.show_hud(format!("{} {percent}%", t(language, "pin.zoom_hud")), cx);
@@ -1817,11 +1791,10 @@ impl PinView {
     }
 
     fn set_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
-        self.opacity = opacity.clamp(0.2, 1.0);
-        update_meta(self.id, self.zoom, self.opacity);
+        self.values.borrow_mut().opacity = opacity.clamp(0.2, 1.0);
         schedule_manifest_save(cx);
         let language = settings_state::get().language;
-        let percent = (self.opacity * 100.0).round() as i32;
+        let percent = (self.values.borrow().opacity * 100.0).round() as i32;
         self.show_hud(format!("{} {percent}%", t(language, "pin.opacity_hud")), cx);
         cx.notify();
     }
@@ -1874,7 +1847,7 @@ impl PinView {
             &mut self.content,
             PinContent::from_frame_shared(frame, hash),
         );
-        self.zoom_target = self.zoom;
+        self.zoom_target = self.values.borrow().zoom;
         self.zoom_center = None;
         self.zoom_serial = self.zoom_serial.wrapping_add(1);
         if let PinContent::Image { image, .. } = previous {
@@ -1888,7 +1861,7 @@ impl PinView {
         if let Some(handle) = window_handle
             && let Ok(scale) = handle.update(cx, |_, window, _| window.scale_factor())
         {
-            let (width, height) = self.content.size(self.zoom);
+            let (width, height) = self.content.size(self.values.borrow().zoom);
             self.fit_display_to_size(scale, width, height, cx);
         }
         self.start_ocr(cx);
@@ -2100,7 +2073,9 @@ impl PinView {
     fn body(&self, theme: &PinTheme, viewport: Size<Pixels>) -> Div {
         match &self.content {
             PinContent::Image { image, .. } => {
-                let (width, height) = self.content.size(self.zoom.max(MIN_PIN_ZOOM));
+                let (width, height) = self
+                    .content
+                    .size(self.values.borrow().zoom.max(MIN_PIN_ZOOM));
                 let viewport_width = f32::from(viewport.width);
                 let viewport_height = f32::from(viewport.height);
                 let fit = if viewport_width <= 0.0 || viewport_height <= 0.0 {
@@ -2149,8 +2124,8 @@ impl Render for PinView {
         let hud_leaving = self.hud_leaving;
         let body = self
             .body(&theme, window.viewport_size())
-            .opacity(self.opacity);
-        let zoom = self.zoom.max(MIN_PIN_ZOOM);
+            .opacity(self.values.borrow().opacity);
+        let zoom = self.values.borrow().zoom.max(MIN_PIN_ZOOM);
         let text_layers: Vec<Div> = self
             .selection_rects()
             .into_iter()
@@ -2194,7 +2169,7 @@ impl Render for PinView {
         let qr_bar = self
             .qr_code()
             .map(str::to_owned)
-            .filter(|_| self.hover && !self.click_through && self.drag.is_none())
+            .filter(|_| self.hover && !self.values.borrow().click_through && self.drag.is_none())
             .map(|code| {
                 let language = settings_state::get().language;
                 let url = pin_qr::qr_url(&code);
@@ -2355,9 +2330,8 @@ impl Render for PinView {
                     return;
                 }
                 if key == "escape" {
-                    if this.click_through {
+                    if this.values.borrow().click_through {
                         let id = this.id;
-                        this.click_through = false;
                         let window_handle =
                             PINS.with(|pins| pins.borrow().get(&id).map(|state| state.window));
                         if let Some(handle) = window_handle {
@@ -2505,7 +2479,8 @@ impl Render for PinView {
                         primary * 0.05
                     };
                     if step != 0.0 {
-                        this.set_opacity(this.opacity - step, cx);
+                        let opacity = this.values.borrow().opacity;
+                        this.set_opacity(opacity - step, cx);
                     }
                 } else {
                     let step = if lines {
@@ -2832,7 +2807,7 @@ fn perform_pin_action(id: u64, action: PinMenuAction, cx: &mut App) {
 fn rotate_pin(id: u64, entity: &Entity<PinView>, window_handle: AnyWindowHandle, cx: &mut App) {
     let (frame, zoom) = {
         let view = entity.read(cx);
-        (view.frame_for_action(), view.zoom)
+        (view.frame_for_action(), view.values.borrow().zoom)
     };
     let Some(frame) = frame else {
         return;
@@ -2875,8 +2850,7 @@ fn enable_click_through(
     if !applied {
         return;
     }
-    entity.update(cx, |view, cx| {
-        view.click_through = true;
+    entity.update(cx, |_, cx| {
         set_state_click_through(id, true);
         cx.notify();
     });
@@ -2931,7 +2905,7 @@ fn fit_pin_to_display(
     zoom: f32,
     display: Option<Bounds<Pixels>>,
 ) -> (Bounds<Pixels>, f32) {
-    let mut zoom = zoom.clamp(MIN_PIN_ZOOM, 4.0);
+    let mut zoom = zoom.clamp(MIN_PIN_ZOOM, MAX_PIN_ZOOM);
     if let (Some(size), Some(display)) = (content.image_size(), display) {
         let fit = fit_zoom_limit(
             size.width,
@@ -2978,11 +2952,11 @@ fn fit_zoom_limit(
     screen_height: f32,
 ) -> f32 {
     if image_width == 0 || image_height == 0 || screen_width <= 0.0 || screen_height <= 0.0 {
-        return 4.0;
+        return MAX_PIN_ZOOM;
     }
     (screen_width / image_width as f32)
         .min(screen_height / image_height as f32)
-        .clamp(MIN_PIN_ZOOM, 4.0)
+        .clamp(MIN_PIN_ZOOM, MAX_PIN_ZOOM)
 }
 
 fn pin_display_bounds(window: &Window, cx: &App) -> Option<Bounds<Pixels>> {
@@ -3042,7 +3016,9 @@ mod tests {
     #[test]
     fn zoom_limit_keeps_the_pin_inside_the_display() {
         assert!((super::fit_zoom_limit(1000, 500, 1200.0, 800.0) - 1.2).abs() < 0.001);
-        assert!((super::fit_zoom_limit(200, 100, 1920.0, 1080.0) - 4.0).abs() < 0.001);
+        assert!(
+            (super::fit_zoom_limit(200, 100, 1920.0, 1080.0) - super::MAX_PIN_ZOOM).abs() < 0.001
+        );
         assert!((super::fit_zoom_limit(4000, 3000, 1920.0, 1080.0) - 0.36).abs() < 0.001);
         assert!((super::fit_zoom_limit(3000, 12000, 1920.0, 1080.0) - 0.09).abs() < 0.001);
     }
