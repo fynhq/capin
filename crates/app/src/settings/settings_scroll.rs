@@ -17,7 +17,7 @@ pub(super) fn scrollbar(theme: &Theme, scroll: &ScrollHandle) -> AnyElement {
     let track = |style: ScrollbarTrackStyle| style.bg(hsla(0.0, 0.0, 0.0, 0.0));
     Scrollbar::vertical(scroll)
         .id("settings-scrollbar")
-        .mode(ScrollbarMode::Always)
+        .mode(ScrollbarMode::Scrolling)
         .styles(|styles| {
             styles
                 .track(track)
