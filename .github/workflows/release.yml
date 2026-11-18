@@ -88,7 +88,7 @@ jobs:
             *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
             *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
           esac
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: Capin-*
           path: release-assets
