@@ -188,7 +188,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "core-annotate",
@@ -981,7 +981,7 @@ dependencies = [
 
 [[package]]
 name = "core-annotate"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "core-types",
  "cosmic-text",
@@ -991,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "core-capture"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "core-types",
  "thiserror 2.0.21",
@@ -999,7 +999,7 @@ dependencies = [
 
 [[package]]
 name = "core-compose"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "core-types",
  "thiserror 2.0.21",
@@ -1094,7 +1094,7 @@ dependencies = [
 
 [[package]]
 name = "core-record"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "core-types",
  "thiserror 2.0.21",
@@ -1102,7 +1102,7 @@ dependencies = [
 
 [[package]]
 name = "core-stitch"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "core-types",
  "thiserror 2.0.21",
@@ -1122,7 +1122,7 @@ dependencies = [
 
 [[package]]
 name = "core-types"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "core_detect"
@@ -5135,7 +5135,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "platform-capture"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "block2 0.6.2",
  "core-capture",
@@ -5159,7 +5159,7 @@ dependencies = [
 
 [[package]]
 name = "platform-ocr"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "core-types",
  "image",
@@ -5175,7 +5175,7 @@ dependencies = [
 
 [[package]]
 name = "platform-record"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "block2 0.6.2",
  "core-record",
@@ -5197,7 +5197,7 @@ dependencies = [
 
 [[package]]
 name = "platform-window"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
