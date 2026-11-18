@@ -535,7 +535,6 @@ fn card_border(_dark: bool) -> Rgba {
 
 pub(crate) struct SettingsView {
     section: SettingsSection,
-    settings: AppSettings,
     scroll_handle: ScrollHandle,
     accent: Option<u32>,
     last_accent: Option<u32>,
@@ -557,8 +556,12 @@ pub(crate) struct SettingsView {
 }
 
 impl SettingsView {
+    fn settings(&self) -> std::sync::Arc<AppSettings> {
+        settings_state::get()
+    }
+
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let settings = settings_state::get().as_ref().clone();
+        let settings = settings_state::get();
         let theme = Theme::for_window(window, None);
         let filename_input =
             cx.new(|cx| InputState::new(window, cx).default_value(&settings.filename_template));
@@ -568,7 +571,6 @@ impl SettingsView {
         });
         let mut view = Self {
             section: SettingsSection::General,
-            settings,
             scroll_handle: ScrollHandle::new(),
             accent: system_accent_hex(),
             last_accent: None,
@@ -743,7 +745,7 @@ impl SettingsView {
                 .when(!selected, |item| item.hover(move |style| style.bg(hover)))
                 .id(section.id())
                 .role(Role::Button)
-                .aria_label(section.title(self.settings.language))
+                .aria_label(section.title(self.settings().language))
                 .aria_selected(selected)
                 .active(move |style| style.bg(selected_bg))
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -756,7 +758,7 @@ impl SettingsView {
                     div()
                         .id(format!("settings-nav-icon-{}", section.id()))
                         .role(Role::Image)
-                        .aria_label(section.title(self.settings.language))
+                        .aria_label(section.title(self.settings().language))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -770,7 +772,7 @@ impl SettingsView {
                     div()
                         .text_size(px(layout::NAV_FONT))
                         .text_color(text)
-                        .child(section.title(self.settings.language)),
+                        .child(section.title(self.settings().language)),
                 );
             nav.push(item.into_any_element());
         }
@@ -795,7 +797,7 @@ impl SettingsView {
         let nav = div()
             .id("settings-nav")
             .role(Role::Navigation)
-            .aria_label(t(self.settings.language, "settings.a11y_sidebar"))
+            .aria_label(t(self.settings().language, "settings.a11y_sidebar"))
             .relative()
             .w_full()
             .flex()
@@ -806,7 +808,7 @@ impl SettingsView {
         let mut sidebar = div()
             .id("settings-sidebar")
             .role(Role::Complementary)
-            .aria_label(t(self.settings.language, "settings.a11y_sidebar"))
+            .aria_label(t(self.settings().language, "settings.a11y_sidebar"))
             .w(px(layout::SIDEBAR_WIDTH))
             .h_full()
             .flex()
@@ -856,7 +858,7 @@ impl SettingsView {
                 div()
                     .text_size(px(13.0))
                     .text_color(theme.text)
-                    .child(t(self.settings.language, "settings.title")),
+                    .child(t(self.settings().language, "settings.title")),
             )
     }
 
@@ -932,7 +934,7 @@ impl SettingsView {
                 div()
                     .text_size(px(13.0))
                     .text_color(theme.text)
-                    .child(t(self.settings.language, "settings.title")),
+                    .child(t(self.settings().language, "settings.title")),
             );
 
         div()
@@ -1007,7 +1009,7 @@ impl SettingsView {
         div()
             .id("settings-content")
             .role(Role::Main)
-            .aria_label(t(self.settings.language, "settings.a11y_content"))
+            .aria_label(t(self.settings().language, "settings.a11y_content"))
             .flex_1()
             .h_full()
             .flex()
@@ -1060,7 +1062,7 @@ impl SettingsView {
     }
 
     fn section_header(&self, theme: &Theme) -> Div {
-        let title = self.section.title(self.settings.language);
+        let title = self.section.title(self.settings().language);
         div().flex().flex_col().child(
             div()
                 .id("settings-section-heading")
@@ -1075,7 +1077,7 @@ impl SettingsView {
 
     fn general(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> Div {
         #[cfg(target_os = "macos")]
-        let language = self.settings.language;
+        let language = self.settings().language;
         let content = card(
             theme,
             vec![
@@ -1089,7 +1091,7 @@ impl SettingsView {
                         icon: icons::GENERAL,
                         title_key: "settings.hide_tray",
                         description_key: Some("settings.hide_tray_desc"),
-                        value: self.settings.hide_tray,
+                        value: self.settings().hide_tray,
                         set: |settings, value| {
                             settings.hide_tray = value;
                             crate::tray::set_visible(!value);
@@ -1127,7 +1129,7 @@ impl SettingsView {
 
     #[cfg(target_os = "macos")]
     fn permission_hint(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
-        let language = self.settings.language;
+        let language = self.settings().language;
         div()
             .flex()
             .flex_row()
@@ -1152,7 +1154,7 @@ impl SettingsView {
 
     #[cfg(target_os = "macos")]
     fn permissions_card(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
-        let language = self.settings.language;
+        let language = self.settings().language;
         card(
             theme,
             vec![
@@ -1186,7 +1188,7 @@ impl SettingsView {
         pane: platform_window::PrivacyPane,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let language = self.settings.language;
+        let language = self.settings().language;
         let status = t(
             language,
             if granted {
@@ -1250,7 +1252,7 @@ impl SettingsView {
     }
 
     fn language_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let language = self.settings.language;
+        let language = self.settings().language;
         let mut control = segmented();
         for option in Language::ALL {
             let selected = language == option;
@@ -1264,7 +1266,6 @@ impl SettingsView {
                     .aria_selected(selected)
                     .active(|style| style.opacity(0.9))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.settings.language = option;
                         settings_state::update(|settings| settings.language = option);
                         crate::tray::refresh_menu();
                         window.set_window_title(t(option, "settings.title"));
@@ -1289,8 +1290,8 @@ impl SettingsView {
     }
 
     fn auto_start_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let language = self.settings.language;
-        let value = self.settings.auto_start;
+        let language = self.settings().language;
+        let value = self.settings().auto_start;
 
         a11y_row(
             "settings-row-auto-start",
@@ -1308,8 +1309,8 @@ impl SettingsView {
                         .cursor_pointer()
                         .active(move |style| style.opacity(0.85))
                         .on_click(cx.listener(|this, _, _, cx| {
-                            let language = this.settings.language;
-                            let desired = !this.settings.auto_start;
+                            let language = this.settings().language;
+                            let desired = !this.settings().auto_start;
                             match set_autostart(desired) {
                                 Ok(AutostartState::Unsupported) => {
                                     this.show_status(
@@ -1318,8 +1319,6 @@ impl SettingsView {
                                     );
                                 }
                                 Ok(state) => {
-                                    this.settings.auto_start = desired;
-                                    this.settings.auto_start_explicit = true;
                                     settings_state::update(|settings| {
                                         settings.auto_start = desired;
                                         settings.auto_start_explicit = true;
@@ -1359,7 +1358,7 @@ impl SettingsView {
     }
 
     fn logs_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let language = self.settings.language;
+        let language = self.settings().language;
         let open = action_button(theme, t(language, "settings.open_logs").to_owned())
             .id("settings-open-logs")
             .role(Role::Button)
@@ -1381,7 +1380,7 @@ impl SettingsView {
             .on_click(cx.listener(|this, _, _, cx| {
                 let report = this.diagnostics_report();
                 cx.write_to_clipboard(ClipboardItem::new_string(report));
-                let message = t(this.settings.language, "settings.diagnostics_copied").to_owned();
+                let message = t(this.settings().language, "settings.diagnostics_copied").to_owned();
                 this.show_status(message, cx);
             }));
         a11y_row(
@@ -1406,7 +1405,7 @@ impl SettingsView {
     }
 
     fn diagnostics_report(&self) -> String {
-        let settings = &self.settings;
+        let settings = self.settings();
         let mut report = String::new();
         report.push_str(&crate::build_info::version_label());
         report.push('\n');
@@ -1432,7 +1431,7 @@ impl SettingsView {
     }
 
     fn capture_settings(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
-        let language = self.settings.language;
+        let language = self.settings().language;
 
         div()
             .flex()
@@ -1454,7 +1453,7 @@ impl SettingsView {
                                 icon: icons::CURSOR,
                                 title_key: "settings.capture_cursor",
                                 description_key: None,
-                                value: self.settings.capture_cursor,
+                                value: self.settings().capture_cursor,
                                 set: |settings, value| settings.capture_cursor = value,
                                 refresh_pin: false,
                             },
@@ -1491,7 +1490,7 @@ impl SettingsView {
                             icon: icons::PALETTE,
                             title_key: "settings.annotation_uniform_color",
                             description_key: Some("settings.annotation_uniform_color_desc"),
-                            value: self.settings.annotation_uniform_color,
+                            value: self.settings().annotation_uniform_color,
                             set: |settings, value| settings.annotation_uniform_color = value,
                             refresh_pin: false,
                         },
@@ -1514,7 +1513,7 @@ impl SettingsView {
                                 icon: icons::TEXT,
                                 title_key: "settings.pin_text_ocr",
                                 description_key: Some("settings.pin_text_ocr_desc"),
-                                value: self.settings.pin_text_ocr,
+                                value: self.settings().pin_text_ocr,
                                 set: |settings, value| settings.pin_text_ocr = value,
                                 refresh_pin: true,
                             },
@@ -1527,7 +1526,7 @@ impl SettingsView {
                                 icon: icons::QR,
                                 title_key: "settings.pin_qr",
                                 description_key: None,
-                                value: self.settings.pin_qr,
+                                value: self.settings().pin_qr,
                                 set: |settings, value| settings.pin_qr = value,
                                 refresh_pin: true,
                             },
@@ -1539,7 +1538,7 @@ impl SettingsView {
     }
 
     fn toggle_row(&self, theme: &Theme, cx: &mut Context<Self>, row: ToggleRow) -> AnyElement {
-        let language = self.settings.language;
+        let language = self.settings().language;
         a11y_row(
             row.id,
             t(language, row.title_key),
@@ -1567,7 +1566,6 @@ impl SettingsView {
                             .active(move |style| style.opacity(0.85))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let value = !row.value;
-                                (row.set)(&mut this.settings, value);
                                 settings_state::update(|settings| (row.set)(settings, value));
                                 if row.refresh_pin {
                                     cx.defer(crate::pin::refresh_recognition);
@@ -1582,10 +1580,10 @@ impl SettingsView {
     }
 
     fn window_background_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let language = self.settings.language;
+        let language = self.settings().language;
         let current = t(
             language,
-            background_label_key(self.settings.window_background),
+            background_label_key(self.settings().window_background),
         );
         a11y_row(
             "settings-row-window-background",
@@ -1608,8 +1606,8 @@ impl SettingsView {
     }
 
     fn window_padding_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let language = self.settings.language;
-        let current = self.settings.window_padding.to_string();
+        let language = self.settings().language;
+        let current = self.settings().window_padding.to_string();
         a11y_row(
             "settings-row-window-padding",
             t(language, "settings.window_padding"),
@@ -1631,8 +1629,8 @@ impl SettingsView {
     }
 
     fn repeat_pin_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let language = self.settings.language;
-        let current = t(language, repeat_pin_key(self.settings.repeat_pin));
+        let language = self.settings().language;
+        let current = t(language, repeat_pin_key(self.settings().repeat_pin));
         a11y_row(
             "settings-row-repeat-pin",
             t(language, "settings.repeat_pin"),
@@ -1654,7 +1652,7 @@ impl SettingsView {
     }
 
     fn select_entries(&self, kind: SelectKind) -> Vec<(String, u32, bool)> {
-        let language = self.settings.language;
+        let language = self.settings().language;
         let mut entries: Vec<(String, u32, bool)> = Vec::new();
         match kind {
             SelectKind::WindowBackground => {
@@ -1662,7 +1660,7 @@ impl SettingsView {
                     entries.push((
                         t(language, background_label_key(background)).to_owned(),
                         index as u32,
-                        self.settings.window_background == background,
+                        self.settings().window_background == background,
                     ));
                 }
             }
@@ -1671,7 +1669,7 @@ impl SettingsView {
                     entries.push((
                         t(language, padding_key(padding)).to_owned(),
                         padding,
-                        self.settings.window_padding == padding,
+                        self.settings().window_padding == padding,
                     ));
                 }
             }
@@ -1680,7 +1678,7 @@ impl SettingsView {
                     entries.push((
                         t(language, repeat_pin_key(behavior)).to_owned(),
                         index as u32,
-                        self.settings.repeat_pin == behavior,
+                        self.settings().repeat_pin == behavior,
                     ));
                 }
             }
@@ -1692,18 +1690,15 @@ impl SettingsView {
         match kind {
             SelectKind::WindowBackground => {
                 let background = WindowBackground::ALL[value as usize];
-                self.settings.window_background = background;
                 settings_state::update(|settings| settings.window_background = background);
             }
             SelectKind::WindowPadding => {
                 if WINDOW_PADDINGS.contains(&value) {
-                    self.settings.window_padding = value;
                     settings_state::update(|settings| settings.window_padding = value);
                 }
             }
             SelectKind::RepeatPin => {
                 let behavior = RepeatPinBehavior::ALL[value as usize];
-                self.settings.repeat_pin = behavior;
                 settings_state::update(|settings| settings.repeat_pin = behavior);
             }
         }
@@ -1889,9 +1884,9 @@ impl SettingsView {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let language = self.settings.language;
-        let custom = target.selected_directory(&self.settings).is_some();
-        let directory = target.directory(&self.settings).display().to_string();
+        let language = self.settings().language;
+        let custom = target.selected_directory(&self.settings()).is_some();
+        let directory = target.directory(&self.settings()).display().to_string();
         let open = action_button(theme, t(language, "settings.open_folder").to_owned())
             .id(target.open_id())
             .role(Role::Button)
@@ -1967,7 +1962,7 @@ impl SettingsView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let language = self.settings.language;
+        let language = self.settings().language;
         self.filename_input.update(cx, |state, _| {
             state.set_editor_style(input_editor_style(theme));
         });
@@ -2055,11 +2050,14 @@ impl SettingsView {
         let raw = input.read(cx).value().to_string();
         let template: String = raw.trim().chars().take(120).collect();
         if template.is_empty() {
-            let message =
-                t(self.settings.language, "settings.filename_template_invalid").to_owned();
+            let message = t(
+                self.settings().language,
+                "settings.filename_template_invalid",
+            )
+            .to_owned();
             self.show_status(message, cx);
             input.update(cx, |state, cx| {
-                state.set_value(self.settings.filename_template.clone(), window, cx);
+                state.set_value(self.settings().filename_template.clone(), window, cx);
             });
             return;
         }
@@ -2068,16 +2066,15 @@ impl SettingsView {
                 state.set_value(template.clone(), window, cx);
             });
         }
-        if template == self.settings.filename_template {
+        if template == self.settings().filename_template {
             return;
         }
-        self.settings.filename_template = template.clone();
         settings_state::update(|settings| settings.filename_template = template);
-        let message = t(self.settings.language, "settings.filename_template_saved").to_owned();
+        let message = t(self.settings().language, "settings.filename_template_saved").to_owned();
         self.show_status(message, cx);
     }
     fn choose_directory(&mut self, target: SaveTarget, cx: &mut Context<Self>) {
-        let language = self.settings.language;
+        let language = self.settings().language;
         let prompt = t(language, "settings.choose_folder").to_owned();
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: false,
@@ -2108,7 +2105,7 @@ impl SettingsView {
         error: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let language = self.settings.language;
+        let language = self.settings().language;
         if let Some(error) = error {
             self.show_status(
                 format!("{} {}", t(language, "settings.status_picker_failed"), error),
@@ -2127,21 +2124,19 @@ impl SettingsView {
             return;
         }
         let directory = Some(directory);
-        target.set_directory(&mut self.settings, directory.clone());
         settings_state::update(|settings| target.set_directory(settings, directory));
         self.show_status(t(language, "settings.status_folder_updated").to_owned(), cx);
     }
 
     fn reset_directory(&mut self, target: SaveTarget, cx: &mut Context<Self>) {
-        let language = self.settings.language;
-        target.set_directory(&mut self.settings, None);
+        let language = self.settings().language;
         settings_state::update(|settings| target.set_directory(settings, None));
         self.show_status(t(language, "settings.status_folder_default").to_owned(), cx);
     }
 
     fn open_directory(&mut self, target: SaveTarget, cx: &mut Context<Self>) {
-        let language = self.settings.language;
-        let directory = target.directory(&self.settings);
+        let language = self.settings().language;
+        let directory = target.directory(&self.settings());
         if let Err(error) = storage::ensure_directory(&directory) {
             self.show_status(
                 format!("{} {}", t(language, "settings.status_folder_failed"), error),
@@ -2153,7 +2148,7 @@ impl SettingsView {
     }
 
     fn recording(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
-        let language = self.settings.language;
+        let language = self.settings().language;
         let mut rows = vec![self.toggle_row(
             theme,
             cx,
@@ -2162,12 +2157,12 @@ impl SettingsView {
                 icon: icons::CURSOR,
                 title_key: "settings.record_cursor_highlight",
                 description_key: Some("settings.record_cursor_highlight_desc"),
-                value: self.settings.record_cursor_highlight,
+                value: self.settings().record_cursor_highlight,
                 set: |settings, value| settings.record_cursor_highlight = value,
                 refresh_pin: false,
             },
         )];
-        if self.settings.record_cursor_highlight {
+        if self.settings().record_cursor_highlight {
             rows.push(self.record_highlight_color_row(theme, cx));
         }
         rows.push(self.save_location_row(SaveTarget::Recordings, theme, cx));
@@ -2180,8 +2175,8 @@ impl SettingsView {
     }
 
     fn record_highlight_color_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let language = self.settings.language;
-        let current = self.settings.record_cursor_highlight_color;
+        let language = self.settings().language;
+        let current = self.settings().record_cursor_highlight_color;
         let mut swatches = Vec::new();
         for (index, color) in settings_state::RECORD_HIGHLIGHT_COLORS
             .into_iter()
@@ -2201,7 +2196,6 @@ impl SettingsView {
                 .when(!selected, |item| item.border_color(theme.border))
                 .active(|style| style.opacity(0.85))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.settings.record_cursor_highlight_color = color;
                     this.record_color_picker = None;
                     settings_state::update(|settings| {
                         settings.record_cursor_highlight_color = color
@@ -2302,7 +2296,7 @@ impl SettingsView {
     ) {
         self.record_color_picker = Some(RecordColorPicker {
             anchor,
-            buffer: format!("{:06x}", self.settings.record_cursor_highlight_color),
+            buffer: format!("{:06x}", self.settings().record_cursor_highlight_color),
             fresh: true,
         });
         self.select_menu = None;
@@ -2323,7 +2317,6 @@ impl SettingsView {
             return false;
         };
         let color = rgb & 0x00FF_FFFF;
-        self.settings.record_cursor_highlight_color = color;
         settings_state::update(|settings| settings.record_cursor_highlight_color = color);
         self.status = None;
         cx.notify();
@@ -2382,7 +2375,7 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let picker = self.record_color_picker.as_ref()?;
-        let language = self.settings.language;
+        let language = self.settings().language;
         let width = 240.0;
         let height = 84.0;
         let viewport = window.viewport_size();
@@ -2401,7 +2394,7 @@ impl SettingsView {
             .ok()
             .filter(|_| preview_rgb.len() == 6)
             .map(|rgb| (rgb & 0x00FF_FFFF) << 8 | 0xFF)
-            .unwrap_or((self.settings.record_cursor_highlight_color << 8) | 0xFF);
+            .unwrap_or((self.settings().record_cursor_highlight_color << 8) | 0xFF);
         let mut hue_row = div().flex().flex_row().items_center().gap(px(3.0));
         for index in 0..12u32 {
             let hue_color = crate::ui::hue_rgb(index as f32 * 30.0);
@@ -2418,7 +2411,6 @@ impl SettingsView {
                     .hover(|style| style.opacity(0.85))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let color = hue_color;
-                        this.settings.record_cursor_highlight_color = color;
                         settings_state::update(|settings| {
                             settings.record_cursor_highlight_color = color
                         });
@@ -2528,8 +2520,8 @@ impl SettingsView {
     }
 
     fn shortcuts(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
-        let language = self.settings.language;
-        let pin_hotkey = crate::hotkey::display_hotkey(&self.settings.pin_hotkey);
+        let language = self.settings().language;
+        let pin_hotkey = crate::hotkey::display_hotkey(&self.settings().pin_hotkey);
         let page = div()
             .flex()
             .flex_col()
@@ -2751,12 +2743,12 @@ impl SettingsView {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let language = self.settings.language;
+        let language = self.settings().language;
         let recording = self.recording_shortcut == Some(slot);
         let display = if recording {
             t(language, "shortcuts.recording").to_owned()
         } else {
-            crate::hotkey::display_hotkey(slot.value(&self.settings))
+            crate::hotkey::display_hotkey(slot.value(&self.settings()))
         };
         let accent = theme.accent;
         let selected = theme.selected;
@@ -2818,7 +2810,7 @@ impl SettingsView {
         let Some(slot) = self.recording_shortcut else {
             return false;
         };
-        let language = self.settings.language;
+        let language = self.settings().language;
         if event.keystroke.key == "escape" {
             self.recording_shortcut = None;
             self.status = None;
@@ -2844,9 +2836,10 @@ impl SettingsView {
             return true;
         };
 
+        let settings = self.settings();
         let other = match slot {
-            ShortcutSlot::Capture => &self.settings.pin_hotkey,
-            ShortcutSlot::Pin => &self.settings.capture_hotkey,
+            ShortcutSlot::Capture => &settings.pin_hotkey,
+            ShortcutSlot::Pin => &settings.capture_hotkey,
         };
         if other == &stored {
             let message = t(language, "shortcuts.duplicate").to_owned();
@@ -2854,15 +2847,13 @@ impl SettingsView {
             return true;
         }
 
-        let previous_capture = self.settings.capture_hotkey.clone();
-        let previous_pin = self.settings.pin_hotkey.clone();
+        let previous_capture = self.settings().capture_hotkey.clone();
+        let previous_pin = self.settings().pin_hotkey.clone();
         match slot {
             ShortcutSlot::Capture => {
-                self.settings.capture_hotkey = stored.clone();
                 settings_state::update(|settings| settings.capture_hotkey = stored.clone());
             }
             ShortcutSlot::Pin => {
-                self.settings.pin_hotkey = stored.clone();
                 settings_state::update(|settings| settings.pin_hotkey = stored.clone());
             }
         }
@@ -2874,8 +2865,6 @@ impl SettingsView {
                 self.recording_shortcut = None;
             }
             Err(error) => {
-                self.settings.capture_hotkey = previous_capture.clone();
-                self.settings.pin_hotkey = previous_pin.clone();
                 settings_state::update(|settings| {
                     settings.capture_hotkey = previous_capture;
                     settings.pin_hotkey = previous_pin;
@@ -2896,7 +2885,7 @@ impl SettingsView {
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.settings.record_cursor_highlight {
+        if !self.settings().record_cursor_highlight {
             self.record_color_picker = None;
         }
         let theme = Theme::for_window(window, self.accent);
