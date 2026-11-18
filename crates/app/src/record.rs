@@ -558,8 +558,8 @@ impl Render for RecordBar {
             .into_iter()
             .flatten()
             .collect();
-        let bar = crate::control_bar::bar_shell(&theme, badge, title, status, buttons)
-            .children(progress);
+        let bar =
+            crate::control_bar::bar_shell(&theme, badge, title, status, buttons).children(progress);
 
         if self.closing && !cx.reduce_motion() {
             bar.with_animation(
