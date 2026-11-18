@@ -1,6 +1,4 @@
-use std::ops::Range;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{ops::Range, sync::Arc, time::Duration};
 
 use core_annotate::{AnnotationDocument, AnnotationStyle, Shape, TextAlignment, rasterize};
 use core_capture::CaptureTarget;
