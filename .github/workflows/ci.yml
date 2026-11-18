@@ -45,6 +45,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Check platform crates
         run: cargo check -p platform-capture -p platform-window -p platform-ocr -p platform-record -p app --locked
+      - name: Verify clippy
+        run: cargo clippy --version
       - name: Clippy app
         shell: bash
         # Lint the app binary; unit tests are compiled and run by the next step.
@@ -56,10 +58,14 @@ jobs:
         shell: bash
         # Earlier steps can fail before clippy runs, so the log may not exist.
         run: |
-          test -f clippy.json || exit 0
+          if [ ! -f clippy.json ]; then
+            echo "::error::clippy.json was not created; clippy or an earlier step failed."
+            exit 0
+          fi
           python3 - <<'PY'
           import json
-          for raw in open("clippy.json", encoding="utf-8"):
+          found = 0
+          for raw in open("clippy.json", encoding="utf-8", errors="replace"):
               try:
                   entry = json.loads(raw)
               except json.JSONDecodeError:
@@ -75,10 +81,15 @@ jobs:
               line = span.get("line_start")
               col = span.get("column_start")
               text = message.get("message", "")
+              found += 1
               if file and line:
                   print(f"::error file={file},line={line},col={col}::{text}")
               else:
                   print(f"::error::{text}")
+          if found == 0:
+              print("::error::no compiler diagnostics parsed; raw clippy output tail:")
+              for line in open("clippy.json", encoding="utf-8", errors="replace").read().splitlines()[-20:]:
+                  print(f"::error::{line[:1000]}")
           PY
       - name: Test app
         run: cargo test -p app --locked
