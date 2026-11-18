@@ -22,7 +22,7 @@ pub(super) fn read_clipboard(cx: &mut App) -> (ClipboardContent, Option<u64>) {
             continue;
         };
         let signature = Some(clipboard_signature_of(&image.bytes));
-        let Ok(image) = image::load_from_memory(&image.bytes) else {
+        let Some(image) = crate::image_util::decode_untrusted_image(&image.bytes) else {
             continue;
         };
         let rgba = image.to_rgba8();
@@ -39,7 +39,7 @@ pub(super) fn read_clipboard(cx: &mut App) -> (ClipboardContent, Option<u64>) {
             continue;
         };
         let signature = clipboard_file_signature(path);
-        let Ok(image) = image::open(path) else {
+        let Some(image) = crate::image_util::decode_untrusted_image_file(path) else {
             continue;
         };
         let rgba = image.to_rgba8();

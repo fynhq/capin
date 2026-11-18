@@ -1,4 +1,4 @@
-use std::io::Cursor;
+use std::io::{BufRead, Cursor, Seek};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -246,6 +246,42 @@ pub fn load_frame(path: &Path) -> Option<RgbaFrame> {
     RgbaFrame::from_pixels(width, height, image.into_raw()).ok()
 }
 
+fn is_untrusted_image_format(format: image::ImageFormat) -> bool {
+    matches!(
+        format,
+        image::ImageFormat::Png
+            | image::ImageFormat::Jpeg
+            | image::ImageFormat::Bmp
+            | image::ImageFormat::Gif
+            | image::ImageFormat::WebP
+            | image::ImageFormat::Tiff
+    )
+}
+
+fn decode_untrusted_reader<R: BufRead + Seek>(
+    reader: image::ImageReader<R>,
+) -> Option<image::DynamicImage> {
+    if !is_untrusted_image_format(reader.format()?) {
+        return None;
+    }
+    reader.decode().ok()
+}
+
+pub fn decode_untrusted_image(bytes: &[u8]) -> Option<image::DynamicImage> {
+    let reader = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    decode_untrusted_reader(reader)
+}
+
+pub fn decode_untrusted_image_file(path: &Path) -> Option<image::DynamicImage> {
+    let reader = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?;
+    decode_untrusted_reader(reader)
+}
+
 pub fn encode_png(frame: &RgbaFrame) -> Result<Vec<u8>, image::ImageError> {
     let mut cursor = Cursor::new(Vec::new());
     let packed = frame.packed_pixels();
@@ -281,8 +317,8 @@ pub fn copy_png_bytes(bytes: Vec<u8>, frame: &RgbaFrame, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        blurred_image, blurred_image_from_render, cropped_rgba, image_pixel, image_size,
-        render_image, render_image_ref,
+        blurred_image, blurred_image_from_render, cropped_rgba, decode_untrusted_image, encode_png,
+        image_pixel, image_size, is_untrusted_image_format, render_image, render_image_ref,
     };
     use core_types::{PhysicalRect, PhysicalSize, RgbaFrame};
 
@@ -324,6 +360,29 @@ mod tests {
             assert_eq!(cropped, frame.cropped(rect), "crop mismatch for {rect:?}");
         }
         assert!(cropped_rgba(&image, PhysicalRect::new(5, 4, 1, 1)).is_none());
+    }
+
+    #[test]
+    fn untrusted_image_formats_are_limited() {
+        assert!(is_untrusted_image_format(image::ImageFormat::Png));
+        assert!(is_untrusted_image_format(image::ImageFormat::Jpeg));
+        assert!(is_untrusted_image_format(image::ImageFormat::Bmp));
+        assert!(is_untrusted_image_format(image::ImageFormat::Gif));
+        assert!(is_untrusted_image_format(image::ImageFormat::WebP));
+        assert!(is_untrusted_image_format(image::ImageFormat::Tiff));
+        assert!(!is_untrusted_image_format(image::ImageFormat::OpenExr));
+        assert!(decode_untrusted_image(b"not an image").is_none());
+    }
+
+    #[test]
+    fn untrusted_png_round_trips() {
+        let frame = checker_frame(1, 1);
+        let bytes = encode_png(&frame).unwrap();
+        let image = decode_untrusted_image(&bytes).unwrap();
+        let expected = frame.packed_pixels();
+        let rgba = image.to_rgba8();
+        assert_eq!(rgba.dimensions(), (1, 1));
+        assert_eq!(rgba.into_raw().as_slice(), expected.as_ref());
     }
 
     #[test]
