@@ -29,12 +29,14 @@ jobs:
             echo "tag $GITHUB_REF_NAME does not match workspace version v$version" >&2
             exit 1
           fi
+          # actions/checkout may replace the annotated tag with a lightweight one.
+          git fetch --no-tags --force origin "+refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           if [ "$(git cat-file -t "$GITHUB_REF_NAME")" != "tag" ]; then
             echo "tag $GITHUB_REF_NAME must be annotated" >&2
             exit 1
           fi
           git fetch --no-tags origin main:refs/remotes/origin/main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+          if ! git merge-base --is-ancestor "$(git rev-parse "$GITHUB_REF_NAME^{commit}")" refs/remotes/origin/main; then
             echo "tag $GITHUB_REF_NAME is not on main" >&2
             exit 1
           fi
