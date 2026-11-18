@@ -1,7 +1,6 @@
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use core_capture::{
@@ -36,6 +35,7 @@ use crate::{
 };
 
 mod refresh;
+mod registry;
 
 const DIM: u32 = 0x00000066;
 const FALLBACK_HOVER_ACCENT: u32 = 0x4c9aff;
@@ -52,15 +52,12 @@ const SELECTION_TOOLBAR_WIDTH: f32 = 560.0;
 const HANDLE_SIZE: f32 = 9.0;
 const REGION_GAP: f32 = 8.0;
 
-static OPEN_OVERLAYS: AtomicUsize = AtomicUsize::new(0);
-
 thread_local! {
-    static OVERLAY_VIEWS: RefCell<Vec<WeakEntity<OverlayView>>> = const { RefCell::new(Vec::new()) };
     static RETURN_APP_PID: Cell<Option<i32>> = const { Cell::new(None) };
 }
 
 pub fn has_open_overlays() -> bool {
-    OPEN_OVERLAYS.load(Ordering::Relaxed) > 0
+    registry::has_live()
 }
 
 pub fn close_open_overlays(cx: &mut App) {
@@ -68,8 +65,7 @@ pub fn close_open_overlays(cx: &mut App) {
     log_info!("overlay", "closing overlays ({} windows)", handles.len());
     platform_window::set_cursor_hidden(false);
     crate::windows::close_capture_auxiliary(cx, handles);
-    OPEN_OVERLAYS.store(0, Ordering::Relaxed);
-    OVERLAY_VIEWS.with(|views| views.borrow_mut().clear());
+    registry::clear();
 }
 
 pub(crate) fn remember_frontmost_application() {
@@ -112,16 +108,13 @@ fn live_overlay_window_ids(cx: &App) -> Vec<WindowId> {
 }
 
 fn live_overlay_window_ids_excluding(cx: &App, exclude: Option<EntityId>) -> Vec<WindowId> {
-    OVERLAY_VIEWS.with(|views| {
-        views
-            .borrow()
-            .iter()
-            .filter(|view| exclude != Some(view.entity_id()))
-            .filter_map(WeakEntity::upgrade)
-            .filter_map(|view| view.read(cx).native_id)
-            .map(WindowId::from_raw)
-            .collect()
-    })
+    registry::live()
+        .iter()
+        .filter(|view| exclude != Some(view.entity_id()))
+        .filter_map(WeakEntity::upgrade)
+        .filter_map(|view| view.read(cx).native_id)
+        .map(WindowId::from_raw)
+        .collect()
 }
 
 pub(crate) fn release_textures(cx: &mut App) {
@@ -133,13 +126,10 @@ pub(crate) fn release_textures_except(cx: &mut App, keep: u64) {
 }
 
 fn release_texture_views(cx: &mut App, keep: Option<u64>) {
-    let views: Vec<Entity<OverlayView>> = OVERLAY_VIEWS.with(|views| {
-        views
-            .borrow()
-            .iter()
-            .filter_map(WeakEntity::upgrade)
-            .collect()
-    });
+    let views: Vec<Entity<OverlayView>> = registry::live()
+        .into_iter()
+        .filter_map(|view| view.upgrade())
+        .collect();
     for view in views {
         if keep == Some(view.entity_id().as_u64()) {
             continue;
@@ -157,9 +147,7 @@ fn release_texture_views(cx: &mut App, keep: Option<u64>) {
 }
 
 pub fn pin_current(cx: &mut App) -> bool {
-    let views: Vec<WeakEntity<OverlayView>> = OVERLAY_VIEWS.with(|views| views.borrow().clone());
-    let mut live = Vec::new();
-    for weak in views {
+    for weak in registry::focused() {
         let Some(view) = weak.upgrade() else {
             continue;
         };
@@ -177,9 +165,7 @@ pub fn pin_current(cx: &mut App) -> bool {
         if handled {
             return true;
         }
-        live.push(weak);
     }
-    OVERLAY_VIEWS.with(|views| *views.borrow_mut() = live);
     false
 }
 
@@ -311,18 +297,7 @@ impl AspectPreset {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OverlayMode {
-    Capture,
-    Scroll,
-    Record,
-}
-
 pub fn open_overlays(cx: &mut App) {
-    open_overlays_mode(cx, OverlayMode::Capture);
-}
-
-fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
     if has_open_overlays() {
         return;
     }
@@ -518,14 +493,15 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
                     window_size,
                     accent,
                     accent_hex,
-                    mode,
                     cx,
                 )
             });
+            let entity_id = view.entity_id().as_u64();
+            view.update(cx, |this, _| this.entity_id = entity_id);
             let focus = view.read(cx).focus_handle.clone();
             view.update(cx, |this, cx| this.observe_appearance(window, cx));
             view.update(cx, |view, cx| view.watch_close(window, cx));
-            OVERLAY_VIEWS.with(|views| views.borrow_mut().push(view.downgrade()));
+            registry::register(view.downgrade());
             let geometry = view.clone();
             window.defer(cx, move |window, cx| {
                 if let Err(error) =
@@ -549,7 +525,6 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
             view
         }) {
             Ok(_) => {
-                OPEN_OVERLAYS.fetch_add(1, Ordering::Relaxed);
                 opened += 1;
             }
             Err(error) => log_error!("overlay", "failed to open overlay: {error}"),
@@ -559,11 +534,7 @@ fn open_overlays_mode(cx: &mut App, mode: OverlayMode) {
     if opened == 0 {
         log_error!("overlay", "no overlay windows could be opened");
     } else {
-        log_info!(
-            "overlay",
-            "opened {opened} overlay window(s) for mode {:?}",
-            mode
-        );
+        log_info!("overlay", "opened {opened} overlay window(s)");
     }
 }
 
@@ -629,6 +600,7 @@ struct Magnifier {
 
 struct OverlayView {
     session: SelectionSession,
+    entity_id: u64,
     native_id: Option<u64>,
     image: Arc<RenderImage>,
     image_size: PhysicalSize,
@@ -639,7 +611,6 @@ struct OverlayView {
     accent_hex: u32,
     chrome: ChromeTheme,
     appearance_subscription: Option<Subscription>,
-    mode: OverlayMode,
     aspect: AspectPreset,
     color_format: ColorFormat,
     shift_held: bool,
@@ -681,7 +652,6 @@ impl OverlayView {
         window_size: Size<Pixels>,
         accent: Rgba,
         accent_hex: u32,
-        mode: OverlayMode,
         cx: &mut Context<Self>,
     ) -> Self {
         session.set_window_targeting(true);
@@ -695,6 +665,7 @@ impl OverlayView {
         let settings = settings_state::get();
         Self {
             session,
+            entity_id: 0,
             native_id,
             image,
             image_size,
@@ -705,7 +676,6 @@ impl OverlayView {
             accent_hex,
             chrome: ChromeTheme::for_appearance(false, Some(accent_hex)),
             appearance_subscription: None,
-            mode,
             aspect: AspectPreset::Free,
             color_format: ColorFormat::Hex,
             shift_held: false,
@@ -1074,10 +1044,7 @@ impl OverlayView {
     }
 
     fn set_window_only(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        let enabled = enabled
-            && self.mode == OverlayMode::Capture
-            && self.selected.is_none()
-            && self.editor.is_none();
+        let enabled = enabled && self.selected.is_none() && self.editor.is_none();
         if self.window_only == enabled {
             return;
         }
@@ -1111,7 +1078,7 @@ impl OverlayView {
     }
 
     fn update_magnifier(&mut self, window: &mut Window) {
-        if self.mode != OverlayMode::Capture || self.selected.is_some() {
+        if self.selected.is_some() {
             self.clear_magnifier(window);
             return;
         }
@@ -1451,77 +1418,13 @@ impl OverlayView {
         )
     }
 
-    fn finish_mode(
-        &mut self,
-        outcome: SelectionOutcome,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let monitor_bounds = self.session.monitor_bounds();
-        let region = match &outcome {
-            SelectionOutcome::Region(region) => Some(*region),
-            SelectionOutcome::Window(id) => {
-                let Some(window) = self.session.window(*id) else {
-                    return;
-                };
-                let Some(clipped) = window.bounds.intersection(monitor_bounds) else {
-                    return;
-                };
-                Some(CaptureRegion::new(
-                    self.session.monitor(),
-                    PhysicalRect::new(
-                        clipped.origin.x - monitor_bounds.origin.x,
-                        clipped.origin.y - monitor_bounds.origin.y,
-                        clipped.size.width,
-                        clipped.size.height,
-                    ),
-                ))
-            }
-            SelectionOutcome::Monitor(_) => Some(CaptureRegion::new(
-                self.session.monitor(),
-                PhysicalRect::new(0, 0, monitor_bounds.size.width, monitor_bounds.size.height),
-            )),
-        };
-        if self.mode == OverlayMode::Scroll && matches!(outcome, SelectionOutcome::Monitor(_)) {
-            return;
-        }
-        if self.mode == OverlayMode::Scroll && region.is_none() {
-            return;
-        }
-        let handles = cx.windows();
-        let target = match outcome {
-            SelectionOutcome::Monitor(id) => CaptureTarget::Monitor(id),
-            SelectionOutcome::Window(id) => CaptureTarget::Window(id),
-            SelectionOutcome::Region(region) => CaptureTarget::Region(region),
-        };
-        let mode = self.mode;
-        cx.defer(move |cx| {
-            if mode == OverlayMode::Record {
-                crate::windows::close_capture_auxiliary(cx, handles);
-                crate::record::start(target, cx);
-                return;
-            }
-            if mode == OverlayMode::Scroll {
-                crate::windows::close_capture_auxiliary(cx, handles);
-                let Some(region) = region else {
-                    return;
-                };
-                let mut backend = platform_backend();
-                match backend.capture(CaptureTarget::Region(region)) {
-                    Ok(frame) => crate::scroll::open_session(region, frame, cx),
-                    Err(error) => log_error!("overlay", "capture failed: {error}"),
-                }
-            }
-        });
-        let _ = window;
-    }
-
     fn begin_selection(
         &mut self,
         outcome: SelectionOutcome,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        registry::set_focus(self.entity_id);
         let monitor = self.session.monitor_bounds();
         let (target, rect, scale, ratio) = match outcome {
             SelectionOutcome::Region(region) => (
@@ -1560,10 +1463,9 @@ impl OverlayView {
         self.session.cancel();
         log_info!(
             "overlay",
-            "selection started: {}x{} (mode {:?})",
+            "selection started: {}x{}",
             rect.size.width,
-            rect.size.height,
-            self.mode
+            rect.size.height
         );
         self.selected = Some(Selected {
             target,
@@ -1842,31 +1744,16 @@ impl OverlayView {
         self.screen_targeting = false;
         self.session.set_screen_targeting(false);
         if let SelectionAction::Capture(outcome) = action {
-            if self.mode == OverlayMode::Capture {
-                let click_opens_editor = self.click_opens_editor;
-                self.click_opens_editor = false;
-                self.begin_selection(outcome, window, cx);
-                platform_window::set_cursor_hidden(false);
-                if click_opens_editor {
-                    self.window_only = false;
-                    self.open_editor_for_selected(Tool::Select, window, cx);
-                }
-            } else {
-                self.finish_mode(outcome, window, cx);
+            let click_opens_editor = self.click_opens_editor;
+            self.click_opens_editor = false;
+            self.begin_selection(outcome, window, cx);
+            platform_window::set_cursor_hidden(false);
+            if click_opens_editor {
+                self.window_only = false;
+                self.open_editor_for_selected(Tool::Select, window, cx);
             }
         }
         cx.notify();
-    }
-
-    fn history_pin_shadow(&self) -> Option<HistoryPinShadow> {
-        let selected = self.selected.as_ref()?;
-        if !matches!(selected.target, CaptureTarget::Region(_)) || self.effects.shadow {
-            return None;
-        }
-        Some(HistoryPinShadow {
-            corner_radius: self.effects.corner_radius,
-            scale: self.effective_scale(),
-        })
     }
 
     fn copy_selected(&mut self, cx: &mut Context<Self>) {
@@ -1879,7 +1766,7 @@ impl OverlayView {
             }
         };
         let hash = crate::capture_history::hash_frame(&output);
-        let pin_shadow = self.history_pin_shadow();
+        let pin_shadow = history_pin_shadow(self);
         match image_util::encode_png(&output) {
             Ok(bytes) => {
                 log_info!("overlay", "selection copied to clipboard");
@@ -1906,7 +1793,7 @@ impl OverlayView {
             }
         };
         let hash = crate::capture_history::hash_frame(&output);
-        let pin_shadow = self.history_pin_shadow();
+        let pin_shadow = history_pin_shadow(self);
         match crate::storage::save_png(&output) {
             Ok(path) => {
                 log_info!("overlay", "selection saved");
@@ -2858,7 +2745,7 @@ impl OverlayView {
     }
 
     fn selection_size_tag(&self, language: Language) -> Option<Div> {
-        if self.selected.is_some() || self.mode != OverlayMode::Capture {
+        if self.selected.is_some() {
             return None;
         }
         let rect = self
@@ -2903,10 +2790,7 @@ impl OverlayView {
 
 impl Drop for OverlayView {
     fn drop(&mut self) {
-        platform_window::set_cursor_hidden(false);
-        let _ = OPEN_OVERLAYS.try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-            Some(count.saturating_sub(1))
-        });
+        registry::clear_focus_if(self.entity_id);
     }
 }
 
@@ -3034,87 +2918,54 @@ impl OverlayView {
             .or(screen_bounds)
             .or(self.editing_rect);
 
-        let hint_key = match self.mode {
-            OverlayMode::Capture => None,
-            OverlayMode::Scroll => Some("overlay.scroll_hint"),
-            OverlayMode::Record => Some("overlay.record_hint"),
-        };
-        let mode_hint = (!selected)
-            .then(|| {
-                hint_key.map(|key| {
-                    div()
-                        .absolute()
-                        .top(px(16.0))
-                        .left(px(0.0))
-                        .right(px(0.0))
-                        .flex()
-                        .justify_center()
-                        .child(
-                            div()
-                                .px(px(12.0))
-                                .py(px(7.0))
-                                .rounded(px(self.chrome.radius))
-                                .bg(self.chrome.surface)
-                                .border_1()
-                                .border_color(self.chrome.border)
-                                .shadow(self.chrome.shadow())
-                                .text_size(px(12.5))
-                                .text_color(self.chrome.text)
-                                .child(t(language, key)),
-                        )
-                })
-            })
-            .flatten();
         let magnifier = (!selected && !self.session.is_dragging())
             .then(|| self.magnifier_panel(drag_selection, language, cx))
             .flatten();
         let size_tag = self.selection_size_tag(language);
-        let window_mode_hint = (self.mode == OverlayMode::Capture && !selected && self.window_only)
-            .then(|| {
-                div()
-                    .absolute()
-                    .top(px(16.0))
-                    .left(px(0.0))
-                    .right(px(0.0))
-                    .flex()
-                    .justify_center()
-                    .child(
-                        div()
-                            .px(px(12.0))
-                            .py(px(7.0))
-                            .rounded(px(self.chrome.radius))
-                            .bg(self.chrome.surface)
-                            .border_1()
-                            .border_color(rgba((ELEMENT_HOVER << 8) | 0xAA))
-                            .shadow(self.chrome.shadow())
-                            .text_size(px(12.5))
-                            .text_color(self.chrome.text)
-                            .child(t(language, "overlay.window_mode_hint")),
-                    )
-            });
-        let capture_hint =
-            (self.mode == OverlayMode::Capture && !selected && self.cursor.is_none()).then(|| {
-                div()
-                    .absolute()
-                    .bottom(px(16.0))
-                    .left(px(0.0))
-                    .right(px(0.0))
-                    .flex()
-                    .justify_center()
-                    .child(
-                        div()
-                            .px(px(11.0))
-                            .py(px(5.0))
-                            .rounded(px(6.0))
-                            .bg(self.chrome.surface)
-                            .border_1()
-                            .border_color(self.chrome.border)
-                            .shadow(self.chrome.shadow())
-                            .text_size(px(10.5))
-                            .text_color(self.chrome.muted)
-                            .child(t(language, "overlay.capture_hint")),
-                    )
-            });
+        let window_mode_hint = (!selected && self.window_only).then(|| {
+            div()
+                .absolute()
+                .top(px(16.0))
+                .left(px(0.0))
+                .right(px(0.0))
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .px(px(12.0))
+                        .py(px(7.0))
+                        .rounded(px(self.chrome.radius))
+                        .bg(self.chrome.surface)
+                        .border_1()
+                        .border_color(rgba((ELEMENT_HOVER << 8) | 0xAA))
+                        .shadow(self.chrome.shadow())
+                        .text_size(px(12.5))
+                        .text_color(self.chrome.text)
+                        .child(t(language, "overlay.window_mode_hint")),
+                )
+        });
+        let capture_hint = (!selected && self.cursor.is_none()).then(|| {
+            div()
+                .absolute()
+                .bottom(px(16.0))
+                .left(px(0.0))
+                .right(px(0.0))
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .px(px(11.0))
+                        .py(px(5.0))
+                        .rounded(px(6.0))
+                        .bg(self.chrome.surface)
+                        .border_1()
+                        .border_color(self.chrome.border)
+                        .shadow(self.chrome.shadow())
+                        .text_size(px(10.5))
+                        .text_color(self.chrome.muted)
+                        .child(t(language, "overlay.capture_hint")),
+                )
+        });
         let notice_serial = self.notice_serial;
         let notice_leaving = self.notice_leaving;
         let notice = self.notice.clone().map(|message| {
@@ -3181,8 +3032,7 @@ impl OverlayView {
             layers.push(screen_border(rect, screen_color).into_any_element());
         }
 
-        if self.mode == OverlayMode::Capture
-            && self.selected.is_none()
+        if self.selected.is_none()
             && self.window_only
             && let Some(cursor) = self.cursor
         {
@@ -3232,11 +3082,7 @@ impl OverlayView {
             .on_modifiers_changed(cx.listener(
                 |this, event: &ModifiersChangedEvent, _window, cx| {
                     let shift = event.modifiers.shift;
-                    if shift
-                        && !this.shift_held
-                        && this.mode == OverlayMode::Capture
-                        && this.selected.is_none()
-                    {
+                    if shift && !this.shift_held && this.selected.is_none() {
                         this.toggle_color_format(cx);
                     }
                     this.shift_held = shift;
@@ -3250,11 +3096,7 @@ impl OverlayView {
                 let command =
                     event.keystroke.modifiers.platform || event.keystroke.modifiers.control;
 
-                if key == "shift"
-                    && !this.shift_held
-                    && this.mode == OverlayMode::Capture
-                    && this.selected.is_none()
-                {
+                if key == "shift" && !this.shift_held && this.selected.is_none() {
                     this.toggle_color_format(cx);
                 }
                 if key == "shift" {
@@ -3383,14 +3225,12 @@ impl OverlayView {
                     this.close_overlays(cx);
                     return;
                 }
-                if this.mode == OverlayMode::Capture {
-                    if key.eq_ignore_ascii_case("r") {
-                        this.cycle_aspect(cx);
-                    } else if key.eq_ignore_ascii_case("c") {
-                        this.copy_color(cx);
-                    } else if key == "f5" && !event.is_held {
-                        this.refresh_frame(window, cx);
-                    }
+                if key.eq_ignore_ascii_case("r") {
+                    this.cycle_aspect(cx);
+                } else if key.eq_ignore_ascii_case("c") {
+                    this.copy_color(cx);
+                } else if key == "f5" && !event.is_held {
+                    this.refresh_frame(window, cx);
                 }
                 let _ = window;
             }))
@@ -3478,7 +3318,6 @@ impl OverlayView {
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                     if cfg!(target_os = "macos")
-                        && this.mode == OverlayMode::Capture
                         && this.selected.is_none()
                         && this.editor.is_none()
                         && (this.window_only || control_down(&event.modifiers))
@@ -3567,7 +3406,6 @@ impl OverlayView {
             .children(toolbar)
             .children(magnifier)
             .children(size_tag)
-            .children(mode_hint)
             .children(window_mode_hint)
             .children(capture_hint)
             .children(notice)
@@ -3581,6 +3419,17 @@ impl Render for OverlayView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.render_inner(window, cx)
     }
+}
+
+fn history_pin_shadow(view: &OverlayView) -> Option<HistoryPinShadow> {
+    let selected = view.selected.as_ref()?;
+    if !matches!(selected.target, CaptureTarget::Region(_)) || view.effects.shadow {
+        return None;
+    }
+    Some(HistoryPinShadow {
+        corner_radius: view.effects.corner_radius,
+        scale: view.effective_scale(),
+    })
 }
 
 fn dim_rect(left: f32, top: f32, width: f32, height: f32) -> Div {
