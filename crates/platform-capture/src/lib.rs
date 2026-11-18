@@ -1,5 +1,10 @@
-use core_capture::{CaptureBackend, CaptureError, MonitorInfo, WindowInfo};
-use core_types::{CaptureTarget, PhysicalPoint, PhysicalRect, WindowId};
+use core_capture::CaptureBackend;
+use core_types::{PhysicalPoint, PhysicalRect, WindowId};
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+use core_capture::{CaptureError, MonitorInfo, WindowInfo};
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+use core_types::CaptureTarget;
 
 #[cfg(target_os = "macos")]
 mod macos;
