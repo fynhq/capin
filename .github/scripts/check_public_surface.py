@@ -49,7 +49,8 @@ SECRET = re.compile(
 TREE_ALLOW = {
     "README.md": {"cjk"},
     "README.*.md": {"cjk"},
-    "THIRD_PARTY_NOTICES.md": {"email"},
+    # Third-party license texts can name upstream documents such as CONTRIBUTING.md.
+    "THIRD_PARTY_NOTICES.md": {"email", "private-doc"},
     "**/*.zh-CN.md": {"cjk"},
     "**/*.zh_CN.md": {"cjk"},
     "locales/**": {"cjk"},

@@ -125,6 +125,11 @@ def main() -> int:
         return 1
 
     actual, text = parse_components(notices)
+    native_markers = (
+        "## Bundled native libraries",
+        "ONNX Runtime 1.31.0",
+        "ThirdPartyNotices",
+    )
     fingerprint = hashlib.sha256(
         "\n".join(
             sorted(
@@ -135,6 +140,11 @@ def main() -> int:
     ).hexdigest()
 
     errors = []
+    missing_native = [marker for marker in native_markers if marker not in text]
+    if missing_native:
+        errors.append(
+            "missing bundled native library notice: " + ", ".join(missing_native)
+        )
     match = FINGERPRINT_RE.search(text)
     if not match:
         errors.append("missing dependency-set fingerprint")
