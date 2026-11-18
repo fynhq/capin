@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -255,6 +256,338 @@ impl Default for AppSettings {
     }
 }
 
+struct Field {
+    key: &'static str,
+    write: fn(&AppSettings, &mut String),
+    read: fn(&mut AppSettings, &str),
+}
+
+static FIELDS: &[Field] = &[
+    Field {
+        key: "language",
+        write: |settings, out| out.push_str(settings.language.code()),
+        read: |settings, value| {
+            if let Some(language) = Language::from_code(value) {
+                settings.language = language;
+            }
+        },
+    },
+    Field {
+        key: "auto_start",
+        write: |settings, out| write_bool(out, settings.auto_start),
+        read: |settings, value| settings.auto_start = read_bool_true(value),
+    },
+    Field {
+        key: "auto_start_explicit",
+        write: |settings, out| write_bool(out, settings.auto_start_explicit),
+        read: |settings, value| settings.auto_start_explicit = read_bool_true(value),
+    },
+    Field {
+        key: "capture_hotkey",
+        write: |settings, out| out.push_str(&settings.capture_hotkey),
+        read: |settings, value| settings.capture_hotkey = value.to_owned(),
+    },
+    Field {
+        key: "pin_hotkey",
+        write: |settings, out| out.push_str(&settings.pin_hotkey),
+        read: |settings, value| settings.pin_hotkey = value.to_owned(),
+    },
+    Field {
+        key: "screenshot_dir",
+        write: |settings, out| {
+            if let Some(path) = &settings.screenshot_dir {
+                out.push_str(&path.display().to_string());
+            }
+        },
+        read: |settings, value| settings.screenshot_dir = parse_directory(value),
+    },
+    Field {
+        key: "recording_dir",
+        write: |settings, out| {
+            if let Some(path) = &settings.recording_dir {
+                out.push_str(&path.display().to_string());
+            }
+        },
+        read: |settings, value| settings.recording_dir = parse_directory(value),
+    },
+    Field {
+        key: "filename_template",
+        write: |settings, out| {
+            out.push_str(&settings.filename_template.replace(['\n', '\r'], " "));
+        },
+        read: |settings, value| {
+            if !value.trim().is_empty() {
+                settings.filename_template = value.chars().take(120).collect();
+            }
+        },
+    },
+    Field {
+        key: "window_background",
+        write: |settings, out| out.push_str(settings.window_background.code()),
+        read: |settings, value| {
+            if let Some(background) = WindowBackground::from_code(value) {
+                settings.window_background = background;
+            }
+        },
+    },
+    Field {
+        key: "window_padding",
+        write: |settings, out| write_u32(out, settings.window_padding),
+        read: |settings, value| {
+            if let Ok(padding) = value.parse::<u32>() {
+                settings.window_padding = if WINDOW_PADDINGS.contains(&padding) {
+                    padding
+                } else {
+                    DEFAULT_WINDOW_PADDING
+                };
+            }
+        },
+    },
+    Field {
+        key: "capture_cursor",
+        write: |settings, out| write_bool(out, settings.capture_cursor),
+        read: |settings, value| settings.capture_cursor = read_bool_not_false(value),
+    },
+    Field {
+        key: "region_corner_radius",
+        write: |settings, out| write_u32(out, settings.region_corner_radius),
+        read: |settings, value| {
+            if let Ok(radius) = value.parse::<u32>()
+                && [0, 8, 16, 24].contains(&radius)
+            {
+                settings.region_corner_radius = radius;
+            }
+        },
+    },
+    Field {
+        key: "region_shadow",
+        write: |settings, out| write_bool(out, settings.region_shadow),
+        read: |settings, value| settings.region_shadow = read_bool_true(value),
+    },
+    Field {
+        key: "annotation_color",
+        write: |settings, out| write_color8(out, settings.annotation_color),
+        read: |settings, value| {
+            if let Some(color) = parse_rgba(value) {
+                settings.annotation_color = color;
+                settings.annotation_colors = [color; ANNOTATION_COLOR_TOOL_COUNT];
+            }
+        },
+    },
+    Field {
+        key: "pin_text_ocr",
+        write: |settings, out| write_bool(out, settings.pin_text_ocr),
+        read: |settings, value| settings.pin_text_ocr = read_bool_not_false(value),
+    },
+    Field {
+        key: "pin_qr",
+        write: |settings, out| write_bool(out, settings.pin_qr),
+        read: |settings, value| settings.pin_qr = read_bool_not_false(value),
+    },
+    Field {
+        key: "record_cursor_highlight",
+        write: |settings, out| write_bool(out, settings.record_cursor_highlight),
+        read: |settings, value| settings.record_cursor_highlight = read_bool_not_false(value),
+    },
+    Field {
+        key: "record_cursor_highlight_color",
+        write: |settings, out| write_color6(out, settings.record_cursor_highlight_color),
+        read: |settings, value| {
+            if let Some(color) = parse_rgba(value) {
+                settings.record_cursor_highlight_color = color >> 8;
+            }
+        },
+    },
+    Field {
+        key: "repeat_pin",
+        write: |settings, out| out.push_str(settings.repeat_pin.code()),
+        read: |settings, value| {
+            if let Some(behavior) = RepeatPinBehavior::from_code(value) {
+                settings.repeat_pin = behavior;
+            }
+        },
+    },
+    Field {
+        key: "hide_tray",
+        write: |settings, out| write_bool(out, settings.hide_tray),
+        read: |settings, value| settings.hide_tray = read_bool_true(value),
+    },
+    Field {
+        key: "annotation_uniform_color",
+        write: |settings, out| write_bool(out, settings.annotation_uniform_color),
+        read: |settings, value| settings.annotation_uniform_color = read_bool_not_false(value),
+    },
+    Field {
+        key: "annotation_rect_stroke_width",
+        write: |settings, out| write_f32(out, settings.annotation_rect_stroke_width),
+        read: |settings, value| {
+            if let Some(width) = parse_f32_range(value, 1.0, 32.0) {
+                settings.annotation_rect_stroke_width = width;
+            }
+        },
+    },
+    Field {
+        key: "annotation_arrow_stroke_width",
+        write: |settings, out| write_f32(out, settings.annotation_arrow_stroke_width),
+        read: |settings, value| {
+            if let Some(width) = parse_f32_range(value, 1.0, 32.0) {
+                settings.annotation_arrow_stroke_width = width;
+            }
+        },
+    },
+    Field {
+        key: "annotation_font_size",
+        write: |settings, out| write_f32(out, settings.annotation_font_size),
+        read: |settings, value| {
+            if let Some(size) = parse_f32_range(value, 8.0, 96.0) {
+                settings.annotation_font_size = size;
+            }
+        },
+    },
+    Field {
+        key: "annotation_arrow_start",
+        write: |settings, out| write_bool(out, settings.annotation_arrow_start),
+        read: |settings, value| settings.annotation_arrow_start = read_bool_not_false(value),
+    },
+    Field {
+        key: "annotation_arrow_end",
+        write: |settings, out| write_bool(out, settings.annotation_arrow_end),
+        read: |settings, value| settings.annotation_arrow_end = read_bool_not_false(value),
+    },
+    Field {
+        key: "annotation_arrow_polyline",
+        write: |settings, out| write_bool(out, settings.annotation_arrow_polyline),
+        read: |settings, value| settings.annotation_arrow_polyline = read_bool_not_false(value),
+    },
+    Field {
+        key: "annotation_text_background",
+        write: |settings, out| write_bool(out, settings.annotation_text_background),
+        read: |settings, value| settings.annotation_text_background = read_bool_not_false(value),
+    },
+    Field {
+        key: "annotation_text_outline",
+        write: |settings, out| write_bool(out, settings.annotation_text_outline),
+        read: |settings, value| settings.annotation_text_outline = read_bool_not_false(value),
+    },
+    Field {
+        key: "annotation_text_alignment",
+        write: |settings, out| {
+            out.push_str(text_alignment_code(settings.annotation_text_alignment))
+        },
+        read: |settings, value| {
+            if let Some(alignment) = parse_text_alignment(value) {
+                settings.annotation_text_alignment = alignment;
+            }
+        },
+    },
+    Field {
+        key: "annotation_corner_radius",
+        write: |settings, out| write_f32(out, settings.annotation_corner_radius),
+        read: |settings, value| {
+            if let Some(radius) = parse_f32_range(value, 0.0, 64.0) {
+                settings.annotation_corner_radius = radius;
+            }
+        },
+    },
+    Field {
+        key: "annotation_highlighter_radius",
+        write: |settings, out| write_f32(out, settings.annotation_highlighter_radius),
+        read: |settings, value| {
+            if let Some(radius) = parse_f32_range(value, 0.0, 64.0) {
+                settings.annotation_highlighter_radius = radius;
+            }
+        },
+    },
+    Field {
+        key: "annotation_number_size",
+        write: |settings, out| write_u32(out, settings.annotation_number_size),
+        read: |settings, value| {
+            if let Some(size) = parse_u32_range(value, 8, 96) {
+                settings.annotation_number_size = size;
+            }
+        },
+    },
+    Field {
+        key: "annotation_blur_radius",
+        write: |settings, out| write_u32(out, settings.annotation_blur_radius),
+        read: |settings, value| {
+            if let Some(radius) = parse_u32_range(value, 1, 64) {
+                settings.annotation_blur_radius = radius;
+            }
+        },
+    },
+    Field {
+        key: "annotation_rect_filled",
+        write: |settings, out| write_bool(out, settings.annotation_rect_filled),
+        read: |settings, value| settings.annotation_rect_filled = read_bool_not_false(value),
+    },
+    Field {
+        key: "annotation_ellipse_filled",
+        write: |settings, out| write_bool(out, settings.annotation_ellipse_filled),
+        read: |settings, value| settings.annotation_ellipse_filled = read_bool_not_false(value),
+    },
+    Field {
+        key: "annotation_rect_ellipse",
+        write: |settings, out| write_bool(out, settings.annotation_rect_ellipse),
+        read: |settings, value| settings.annotation_rect_ellipse = read_bool_not_false(value),
+    },
+    Field {
+        key: "annotation_spotlight_intensity",
+        write: |settings, out| write_u32(out, u32::from(settings.annotation_spotlight_intensity)),
+        read: |settings, value| {
+            if let Ok(intensity) = value.parse::<u8>() {
+                settings.annotation_spotlight_intensity = intensity.min(100);
+            }
+        },
+    },
+    Field {
+        key: "annotation_spotlight_radius",
+        write: |settings, out| write_f32(out, settings.annotation_spotlight_radius),
+        read: |settings, value| {
+            if let Some(radius) = parse_f32_range(value, 0.0, 64.0) {
+                settings.annotation_spotlight_radius = radius;
+            }
+        },
+    },
+];
+
+fn write_bool(out: &mut String, value: bool) {
+    out.push_str(if value { "true" } else { "false" });
+}
+
+fn write_u32(out: &mut String, value: u32) {
+    let _ = write!(out, "{value}");
+}
+
+fn write_f32(out: &mut String, value: f32) {
+    let _ = write!(out, "{value}");
+}
+
+fn write_color8(out: &mut String, value: u32) {
+    let _ = write!(out, "{value:08x}");
+}
+
+fn write_color6(out: &mut String, value: u32) {
+    let _ = write!(out, "{:06x}", value & 0x00FF_FFFF);
+}
+
+fn read_bool_true(value: &str) -> bool {
+    value == "true"
+}
+
+fn read_bool_not_false(value: &str) -> bool {
+    value != "false"
+}
+
+fn parse_f32_range(value: &str, min: f32, max: f32) -> Option<f32> {
+    let value = value.parse::<f32>().ok()?;
+    value.is_finite().then(|| value.clamp(min, max))
+}
+
+fn parse_u32_range(value: &str, min: u32, max: u32) -> Option<u32> {
+    Some(value.parse::<u32>().ok()?.clamp(min, max))
+}
+
 static SETTINGS: OnceLock<Mutex<Arc<AppSettings>>> = OnceLock::new();
 static LAST_PERSISTED: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static SAVE_TX: OnceLock<Option<Sender<SaveRequest>>> = OnceLock::new();
@@ -316,140 +649,19 @@ fn parse(text: &str) -> AppSettings {
         };
         let value = value.trim();
         match key.trim() {
-            "language" => {
-                if let Some(language) = Language::from_code(value) {
-                    settings.language = language;
-                }
-            }
-            "auto_start" => settings.auto_start = value == "true",
-            "auto_start_explicit" => settings.auto_start_explicit = value == "true",
-            "record_cursor_highlight" => settings.record_cursor_highlight = value != "false",
-            "record_cursor_highlight_color" => {
-                if let Some(color) = parse_rgba(value) {
-                    settings.record_cursor_highlight_color = color >> 8;
-                }
-            }
-            "capture_hotkey" => settings.capture_hotkey = value.to_owned(),
-            "pin_hotkey" => settings.pin_hotkey = value.to_owned(),
-            "repeat_pin" => {
-                if let Some(behavior) = RepeatPinBehavior::from_code(value) {
-                    settings.repeat_pin = behavior;
-                }
-            }
-            "screenshot_dir" => settings.screenshot_dir = parse_directory(value),
-            "recording_dir" => settings.recording_dir = parse_directory(value),
-            "filename_template" => {
-                if !value.trim().is_empty() {
-                    settings.filename_template = value.chars().take(120).collect();
-                }
-            }
-            "window_background" => {
-                if let Some(background) = WindowBackground::from_code(value) {
-                    settings.window_background = background;
-                }
-            }
-            "window_padding" => {
-                if let Ok(padding) = value.parse::<u32>() {
-                    settings.window_padding = if WINDOW_PADDINGS.contains(&padding) {
-                        padding
-                    } else {
-                        DEFAULT_WINDOW_PADDING
-                    };
-                }
-            }
-            "capture_cursor" => settings.capture_cursor = value != "false",
-            "region_corner_radius" => {
-                if let Ok(radius) = value.parse::<u32>()
-                    && [0, 8, 16, 24].contains(&radius)
-                {
-                    settings.region_corner_radius = radius;
-                }
-            }
-            "region_shadow" => settings.region_shadow = value == "true",
-            "annotation_color" => {
-                if let Some(color) = parse_rgba(value) {
-                    settings.annotation_color = color;
-                    settings.annotation_colors = [color; ANNOTATION_COLOR_TOOL_COUNT];
-                }
-            }
-            "annotation_uniform_color" => {
-                settings.annotation_uniform_color = value != "false";
-            }
             "annotation_stroke_width" => {
-                if let Ok(width) = value.parse::<f32>()
-                    && width.is_finite()
-                {
-                    legacy_stroke_width = Some(width.clamp(1.0, 32.0));
+                if let Some(width) = parse_f32_range(value, 1.0, 32.0) {
+                    legacy_stroke_width = Some(width);
                 }
             }
             "annotation_rect_stroke_width" => {
-                if let Ok(width) = value.parse::<f32>()
-                    && width.is_finite()
-                {
-                    rect_stroke_width = Some(width.clamp(1.0, 32.0));
+                if let Some(width) = parse_f32_range(value, 1.0, 32.0) {
+                    rect_stroke_width = Some(width);
                 }
             }
             "annotation_arrow_stroke_width" => {
-                if let Ok(width) = value.parse::<f32>()
-                    && width.is_finite()
-                {
-                    arrow_stroke_width = Some(width.clamp(1.0, 32.0));
-                }
-            }
-            "annotation_font_size" => {
-                if let Ok(size) = value.parse::<f32>()
-                    && size.is_finite()
-                {
-                    settings.annotation_font_size = size.clamp(8.0, 96.0);
-                }
-            }
-            "annotation_arrow_start" => settings.annotation_arrow_start = value != "false",
-            "annotation_arrow_end" => settings.annotation_arrow_end = value != "false",
-            "annotation_arrow_polyline" => settings.annotation_arrow_polyline = value != "false",
-            "annotation_text_background" => settings.annotation_text_background = value != "false",
-            "annotation_text_outline" => settings.annotation_text_outline = value != "false",
-            "annotation_text_alignment" => {
-                if let Some(alignment) = parse_text_alignment(value) {
-                    settings.annotation_text_alignment = alignment;
-                }
-            }
-            "annotation_corner_radius" => {
-                if let Ok(radius) = value.parse::<f32>()
-                    && radius.is_finite()
-                {
-                    settings.annotation_corner_radius = radius.clamp(0.0, 64.0);
-                }
-            }
-            "annotation_highlighter_radius" => {
-                if let Ok(radius) = value.parse::<f32>()
-                    && radius.is_finite()
-                {
-                    settings.annotation_highlighter_radius = radius.clamp(0.0, 64.0);
-                }
-            }
-            "annotation_number_size" => {
-                if let Ok(size) = value.parse::<u32>() {
-                    settings.annotation_number_size = size.clamp(8, 96);
-                }
-            }
-            "annotation_blur_radius" => {
-                if let Ok(radius) = value.parse::<u32>() {
-                    settings.annotation_blur_radius = radius.clamp(1, 64);
-                }
-            }
-            "annotation_rect_filled" => settings.annotation_rect_filled = value != "false",
-            "annotation_ellipse_filled" => settings.annotation_ellipse_filled = value != "false",
-            "annotation_rect_ellipse" => settings.annotation_rect_ellipse = value != "false",
-            "annotation_spotlight_intensity" => {
-                if let Ok(intensity) = value.parse::<u8>() {
-                    settings.annotation_spotlight_intensity = intensity.min(100);
-                }
-            }
-            "annotation_spotlight_radius" => {
-                if let Ok(radius) = value.parse::<f32>()
-                    && radius.is_finite()
-                {
-                    settings.annotation_spotlight_radius = radius.clamp(0.0, 64.0);
+                if let Some(width) = parse_f32_range(value, 1.0, 32.0) {
+                    arrow_stroke_width = Some(width);
                 }
             }
             key if key.starts_with("annotation_color_") => {
@@ -460,26 +672,18 @@ fn parse(text: &str) -> AppSettings {
                     settings.annotation_colors[tool.index()] = color;
                 }
             }
-            "pin_text_ocr" => settings.pin_text_ocr = value != "false",
-            "pin_qr" => settings.pin_qr = value != "false",
-            "hide_tray" => settings.hide_tray = value == "true",
-            _ => {}
+            key => {
+                if let Some(field) = FIELDS.iter().find(|field| field.key == key) {
+                    (field.read)(&mut settings, value);
+                }
+            }
         }
     }
     settings.annotation_rect_stroke_width =
         rect_stroke_width.or(legacy_stroke_width).unwrap_or(4.0);
     settings.annotation_arrow_stroke_width =
         arrow_stroke_width.or(legacy_stroke_width).unwrap_or(4.0);
-    #[cfg(target_os = "windows")]
-    {
-        if settings.capture_hotkey == LEGACY_CAPTURE_HOTKEY {
-            settings.capture_hotkey = DEFAULT_CAPTURE_HOTKEY.to_owned();
-        }
-        if settings.pin_hotkey == LEGACY_PIN_HOTKEY {
-            settings.pin_hotkey = DEFAULT_PIN_HOTKEY.to_owned();
-        }
-    }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
         if settings.capture_hotkey == LEGACY_CAPTURE_HOTKEY {
             settings.capture_hotkey = DEFAULT_CAPTURE_HOTKEY.to_owned();
@@ -605,70 +809,20 @@ pub fn flush() {
 }
 
 fn serialize(settings: &AppSettings) -> String {
-    let screenshot_dir = settings
-        .screenshot_dir
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
-    let recording_dir = settings
-        .recording_dir
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
-    let mut text = format!(
-        "language={}\nauto_start={}\nauto_start_explicit={}\ncapture_hotkey={}\npin_hotkey={}\nscreenshot_dir={}\nrecording_dir={}\nfilename_template={}\nwindow_background={}\nwindow_padding={}\ncapture_cursor={}\nregion_corner_radius={}\nregion_shadow={}\nannotation_color={:08x}\npin_text_ocr={}\npin_qr={}\n",
-        settings.language.code(),
-        settings.auto_start,
-        settings.auto_start_explicit,
-        settings.capture_hotkey,
-        settings.pin_hotkey,
-        screenshot_dir,
-        recording_dir,
-        settings.filename_template.replace(['\n', '\r'], " "),
-        settings.window_background.code(),
-        settings.window_padding,
-        settings.capture_cursor,
-        settings.region_corner_radius,
-        settings.region_shadow,
-        settings.annotation_color,
-        settings.pin_text_ocr,
-        settings.pin_qr,
-    );
-    text.push_str(&format!(
-        "record_cursor_highlight={}\nrecord_cursor_highlight_color={:06x}\nrepeat_pin={}\nhide_tray={}\n",
-        settings.record_cursor_highlight,
-        settings.record_cursor_highlight_color & 0x00FF_FFFF,
-        settings.repeat_pin.code(),
-        settings.hide_tray,
-    ));
-    text.push_str(&format!(
-        "annotation_uniform_color={}\nannotation_rect_stroke_width={}\nannotation_arrow_stroke_width={}\nannotation_font_size={}\nannotation_arrow_start={}\nannotation_arrow_end={}\nannotation_arrow_polyline={}\nannotation_text_background={}\nannotation_text_outline={}\nannotation_text_alignment={}\nannotation_corner_radius={}\nannotation_highlighter_radius={}\nannotation_number_size={}\nannotation_blur_radius={}\nannotation_rect_filled={}\nannotation_ellipse_filled={}\nannotation_rect_ellipse={}\nannotation_spotlight_intensity={}\nannotation_spotlight_radius={}\n",
-        settings.annotation_uniform_color,
-        settings.annotation_rect_stroke_width,
-        settings.annotation_arrow_stroke_width,
-        settings.annotation_font_size,
-        settings.annotation_arrow_start,
-        settings.annotation_arrow_end,
-        settings.annotation_arrow_polyline,
-        settings.annotation_text_background,
-        settings.annotation_text_outline,
-        text_alignment_code(settings.annotation_text_alignment),
-        settings.annotation_corner_radius,
-        settings.annotation_highlighter_radius,
-        settings.annotation_number_size,
-        settings.annotation_blur_radius,
-        settings.annotation_rect_filled,
-        settings.annotation_ellipse_filled,
-        settings.annotation_rect_ellipse,
-        settings.annotation_spotlight_intensity,
-        settings.annotation_spotlight_radius,
-    ));
+    let mut text = String::new();
+    for field in FIELDS {
+        text.push_str(field.key);
+        text.push('=');
+        (field.write)(settings, &mut text);
+        text.push('\n');
+    }
     for tool in AnnotationColorTool::ALL {
-        text.push_str(&format!(
-            "annotation_color_{}={:08x}\n",
+        let _ = writeln!(
+            text,
+            "annotation_color_{}={:08x}",
             tool.code(),
             settings.annotation_colors[tool.index()]
-        ));
+        );
     }
     text
 }
@@ -798,6 +952,12 @@ mod tests {
         );
         assert_eq!(per_tool.annotation_rect_stroke_width, 2.0);
         assert_eq!(per_tool.annotation_arrow_stroke_width, 12.0);
+    }
+
+    #[test]
+    fn default_settings_round_trip_through_the_field_table() {
+        let settings = AppSettings::default();
+        assert_eq!(parse(&serialize(&settings)), settings);
     }
 
     #[test]
