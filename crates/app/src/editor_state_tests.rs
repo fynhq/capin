@@ -428,9 +428,13 @@ fn snapshot_with(tag: u8, document: AnnotationDocument) -> EditorSnapshot {
     let frame = core_types::RgbaFrame::from_pixels(1, 1, vec![tag, 0, 0, 255]).expect("frame");
     EditorSnapshot {
         frame: std::sync::Arc::new(frame),
-        image_size: PhysicalSize::new(1, 1),
+        image_size: document.image_size(),
         document,
     }
+}
+
+fn state_snapshot(state: &EditorState, tag: u8) -> EditorSnapshot {
+    snapshot_with(tag, state.document.clone())
 }
 
 fn canvas_count(state: &EditorState) -> usize {
@@ -488,33 +492,41 @@ fn document_and_canvas_history_keep_time_order() {
     });
 
     assert_eq!(state.document.objects().len(), 2);
+    let current = state_snapshot(&state, 9);
     assert!(matches!(
-        state.take_undo(snapshot(9)),
+        state.take_undo(current),
         Some(HistoryStep::Document)
     ));
     assert_eq!(state.document.objects().len(), 1);
-    let Some(HistoryStep::Canvas(canvas)) = state.take_undo(snapshot(9)) else {
+    let current = state_snapshot(&state, 9);
+    let Some(HistoryStep::Canvas(canvas)) = state.take_undo(current) else {
         panic!("expected the canvas step between the two document edits");
     };
     state.document = canvas.document;
+    state.image_size = canvas.image_size;
     assert_eq!(state.document.objects().len(), 1);
+    let current = state_snapshot(&state, 9);
     assert!(matches!(
-        state.take_undo(snapshot(9)),
+        state.take_undo(current),
         Some(HistoryStep::Document)
     ));
     assert_eq!(state.document.objects().len(), 0);
-    assert!(state.take_undo(snapshot(9)).is_none());
+    assert!(state.take_undo(state_snapshot(&state, 9)).is_none());
 
+    let current = state_snapshot(&state, 9);
     assert!(matches!(
-        state.take_redo(snapshot(9)),
+        state.take_redo(current),
         Some(HistoryStep::Document)
     ));
-    let Some(HistoryStep::Canvas(canvas)) = state.take_redo(snapshot(9)) else {
+    let current = state_snapshot(&state, 9);
+    let Some(HistoryStep::Canvas(canvas)) = state.take_redo(current) else {
         panic!("expected the canvas redo step");
     };
     state.document = canvas.document;
+    state.image_size = canvas.image_size;
+    let current = state_snapshot(&state, 9);
     assert!(matches!(
-        state.take_redo(snapshot(9)),
+        state.take_redo(current),
         Some(HistoryStep::Document)
     ));
     assert_eq!(state.document.objects().len(), 2);
