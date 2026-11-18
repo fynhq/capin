@@ -246,59 +246,10 @@ impl Render for ScrollView {
             Self::cancel,
         );
 
-        div().size_full().flex().items_center().child(
-            div()
-                .size_full()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(10.0))
-                .px(px(12.0))
-                .rounded(px(10.0))
-                .bg(theme.surface)
-                .border_1()
-                .border_color(theme.border)
-                .shadow(theme.shadow())
-                .text_color(theme.text)
-                .child(
-                    div()
-                        .w(px(30.0))
-                        .h(px(30.0))
-                        .flex_shrink_0()
-                        .rounded(px(8.0))
-                        .bg(theme.accent_tint)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(crate::icons::icon(crate::icons::SCROLL, 16.0, theme.accent)),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(1.0))
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .child(
-                            div()
-                                .text_size(px(12.5))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.text)
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(theme.muted)
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .child(status),
-                        ),
-                )
-                .child(finish)
-                .child(cancel),
-        )
+        let title = crate::control_bar::bar_title(&theme, title);
+        let badge = crate::control_bar::bar_badge(theme.accent_tint, 8.0)
+            .child(crate::icons::icon(crate::icons::SCROLL, 16.0, theme.accent));
+        crate::control_bar::bar_shell(&theme, badge, title, status, [finish, cancel])
     }
 }
 

@@ -532,83 +532,33 @@ impl Render for RecordBar {
                 )
         });
 
-        let bar = div()
-            .size_full()
+        let title = div()
             .flex()
+            .flex_row()
             .items_center()
-            .relative()
+            .gap(px(7.0))
+            .child(crate::control_bar::bar_title(&theme, state.to_owned()))
+            .child(timer_text)
             .child(
                 div()
-                    .size_full()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(10.0))
-                    .px(px(12.0))
-                    .rounded(px(10.0))
-                    .bg(theme.surface)
-                    .border_1()
-                    .border_color(theme.border)
-                    .shadow(theme.shadow())
-                    .text_color(theme.text)
-                    .child(
-                        div()
-                            .w(px(30.0))
-                            .h(px(30.0))
-                            .flex_shrink_0()
-                            .rounded(px(15.0))
-                            .bg(if recording {
-                                rgba(0xFF453A33)
-                            } else {
-                                theme.selected
-                            })
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(dot),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(1.0))
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap(px(7.0))
-                                    .child(
-                                        div()
-                                            .text_size(px(12.5))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(state),
-                                    )
-                                    .child(timer_text)
-                                    .child(
-                                        div()
-                                            .text_size(px(10.5))
-                                            .text_color(theme.muted)
-                                            .child(format!("MP4 · {} fps", FRAME_RATE)),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.0))
-                                    .text_color(theme.muted)
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .child(status),
-                            ),
-                    )
-                    .children(pause)
-                    .children(stop)
-                    .children(open_folder)
-                    .children(close),
-            )
+                    .text_size(px(10.5))
+                    .text_color(theme.muted)
+                    .child(format!("MP4 · {} fps", FRAME_RATE)),
+            );
+        let badge = crate::control_bar::bar_badge(
+            if recording {
+                rgba(0xFF453A33)
+            } else {
+                theme.selected
+            },
+            15.0,
+        )
+        .child(dot);
+        let buttons: Vec<AnyElement> = [pause, stop, open_folder, close]
+            .into_iter()
+            .flatten()
+            .collect();
+        let bar = crate::control_bar::bar_shell(&theme, badge, title, status, buttons)
             .children(progress);
 
         if self.closing && !cx.reduce_motion() {
