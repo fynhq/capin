@@ -14,7 +14,7 @@ rqrr = "0.11.0"
 thiserror.workspace = true
 
 [target.'cfg(all(target_os = "windows", any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
-paddleocr_rs_onnx = "0.2.8"
+paddleocr_rs_onnx = "=0.2.8"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
