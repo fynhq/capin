@@ -7,7 +7,7 @@ use core_types::{PhysicalPoint, PhysicalRect};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use platform_record::Recorder;
-use platform_window::{WindowStyle, apply as apply_window_style, system_accent_hex};
+use platform_window::system_accent_hex;
 
 use crate::chrome_theme::ChromeTheme;
 use crate::i18n::{Language, t};
@@ -78,41 +78,32 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
         crate::display::window_bounds_on_monitor(monitor, desktop_bounds)
     });
     let display_id = monitor_id.map(|id| DisplayId::new(id.raw()));
-    let options = crate::aux_window::popup_options(
+
+    match crate::control_bar::open(
         "capin-record",
         bounds,
         display_id,
-        false,
-        WindowKind::PopUp,
-        WindowBackgroundAppearance::Transparent,
-    );
-
-    match gpui_kit::open_window(options, cx, move |window, cx| {
-        let exclusion_ok = match apply_window_style(&*window, WindowStyle::CAPTURE_BAR) {
-            Ok(()) => true,
-            Err(error) => {
-                log_error!("record", "failed to style recording bar: {error}");
-                false
-            }
-        };
-        let excluded: Vec<u64> = platform_window::native_window_id(&*window)
-            .into_iter()
-            .collect();
-        let window_handle = window.window_handle();
-        cx.new(|cx| {
-            RecordBar::new(
-                output,
-                config,
-                excluded,
-                exclusion_ok,
-                bar_overlaps,
-                shortcuts_ok,
-                window_handle,
-                cx,
-            )
-        })
-    }) {
-        Ok((_, entity)) => {
+        cx,
+        move |window, cx, exclusion_ok| {
+            let excluded: Vec<u64> = platform_window::native_window_id(&*window)
+                .into_iter()
+                .collect();
+            let window_handle = window.window_handle();
+            cx.new(|cx| {
+                RecordBar::new(
+                    output,
+                    config,
+                    excluded,
+                    exclusion_ok,
+                    bar_overlaps,
+                    shortcuts_ok,
+                    window_handle,
+                    cx,
+                )
+            })
+        },
+    ) {
+        Ok(entity) => {
             RECORD_BAR.with(|slot| *slot.borrow_mut() = Some(entity.downgrade()));
         }
         Err(error) => {
@@ -735,46 +726,30 @@ fn bar_bounds(target: CaptureTarget) -> Bounds<Pixels> {
             .map(|window| window.bounds),
     };
 
-    let scale = monitor
-        .as_ref()
-        .map(|monitor| monitor.scale.get())
-        .unwrap_or(1.0);
-    let (monitor_left, monitor_top, monitor_right, monitor_bottom) = monitor
-        .as_ref()
-        .map(|monitor| {
-            let scale = monitor.scale.get();
-            (
-                monitor.bounds.origin.x as f32 / scale,
-                monitor.bounds.origin.y as f32 / scale,
-                (monitor.bounds.origin.x + monitor.bounds.size.width as i32) as f32 / scale,
-                (monitor.bounds.origin.y + monitor.bounds.size.height as i32) as f32 / scale,
-            )
-        })
-        .unwrap_or((0.0, 0.0, 1920.0, 1080.0));
-
+    let span = crate::display::logical_monitor(monitor.as_ref());
     let (anchor_left, anchor_top, anchor_width) = anchor
         .map(|rect| {
             (
-                rect.origin.x as f32 / scale,
-                rect.origin.y as f32 / scale,
-                rect.size.width as f32 / scale,
+                rect.origin.x as f32 / span.scale,
+                rect.origin.y as f32 / span.scale,
+                rect.size.width as f32 / span.scale,
             )
         })
-        .unwrap_or((monitor_left, monitor_top, monitor_right - monitor_left));
+        .unwrap_or((span.left, span.top, span.right - span.left));
 
     let x = (anchor_left + anchor_width / 2.0 - BAR_WIDTH / 2.0).clamp(
-        monitor_left + 8.0,
-        (monitor_right - BAR_WIDTH - 8.0).max(monitor_left + 8.0),
+        span.left + 8.0,
+        (span.right - BAR_WIDTH - 8.0).max(span.left + 8.0),
     );
     let above = anchor_top - BAR_HEIGHT - 8.0;
-    let y = if above >= monitor_top + 8.0 {
+    let y = if above >= span.top + 8.0 {
         above
     } else {
-        (anchor_top + 8.0).min(monitor_bottom - BAR_HEIGHT - 8.0)
+        (anchor_top + 8.0).min(span.bottom - BAR_HEIGHT - 8.0)
     };
 
     Bounds {
-        origin: point(px(x), px(y.max(monitor_top + 8.0))),
+        origin: point(px(x), px(y.max(span.top + 8.0))),
         size: size(px(BAR_WIDTH), px(BAR_HEIGHT)),
     }
 }

@@ -5,7 +5,7 @@ use core_stitch::{StitchConfig, StitchError, Stitcher};
 use core_types::{CaptureRegion, RgbaFrame};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use platform_window::{WindowStyle, apply as apply_window_style, system_accent_hex};
+use platform_window::system_accent_hex;
 
 use crate::chrome_theme::ChromeTheme;
 use crate::i18n::{Language, t};
@@ -45,25 +45,16 @@ pub fn open_session(region: CaptureRegion, first_frame: RgbaFrame, cx: &mut App)
         crate::display::window_bounds_on_monitor(monitor, desktop_bounds)
     });
     let display_id = Some(DisplayId::new(region.monitor.raw()));
-    let options = crate::aux_window::popup_options(
+
+    match crate::control_bar::open(
         "capin-scroll",
         bounds,
         display_id,
-        false,
-        WindowKind::PopUp,
-        WindowBackgroundAppearance::Transparent,
-    );
-
-    match gpui_kit::open_window(options, cx, move |window, cx| {
-        let exclusion_ok = match apply_window_style(&*window, WindowStyle::CAPTURE_BAR) {
-            Ok(()) => true,
-            Err(error) => {
-                log_error!("scroll", "failed to style scroll bar: {error}");
-                false
-            }
-        };
-        cx.new(|cx| ScrollView::new(region, stitcher, exclusion_ok, cx))
-    }) {
+        cx,
+        move |_window, cx, exclusion_ok| {
+            cx.new(|cx| ScrollView::new(region, stitcher, exclusion_ok, cx))
+        },
+    ) {
         Ok(_) => {}
         Err(error) => {
             crate::region_outline::close(cx);
@@ -316,34 +307,23 @@ fn bar_bounds(region: CaptureRegion) -> Bounds<Pixels> {
             .into_iter()
             .find(|monitor| monitor.id == region.monitor)
     });
+    let span = crate::display::logical_monitor(monitor.as_ref());
 
-    let (monitor_left, monitor_top, monitor_right, monitor_bottom, scale) = monitor
-        .map(|monitor| {
-            let scale = monitor.scale.get();
-            (
-                monitor.bounds.origin.x as f32 / scale,
-                monitor.bounds.origin.y as f32 / scale,
-                (monitor.bounds.origin.x + monitor.bounds.size.width as i32) as f32 / scale,
-                (monitor.bounds.origin.y + monitor.bounds.size.height as i32) as f32 / scale,
-                scale,
-            )
-        })
-        .unwrap_or((0.0, 0.0, 1920.0, 1080.0, 1.0));
+    let region_left = span.left + region.rect.origin.x as f32 / span.scale;
+    let region_top = span.top + region.rect.origin.y as f32 / span.scale;
+    let region_bottom = region_top + region.rect.size.height as f32 / span.scale;
 
-    let region_left = monitor_left + region.rect.origin.x as f32 / scale;
-    let region_top = monitor_top + region.rect.origin.y as f32 / scale;
-    let region_bottom = region_top + region.rect.size.height as f32 / scale;
-
-    let x = (region_left + region.rect.size.width as f32 / scale / 2.0 - BAR_WIDTH / 2.0).clamp(
-        monitor_left + 8.0,
-        (monitor_right - BAR_WIDTH - 8.0).max(monitor_left + 8.0),
-    );
+    let x = (region_left + region.rect.size.width as f32 / span.scale / 2.0 - BAR_WIDTH / 2.0)
+        .clamp(
+            span.left + 8.0,
+            (span.right - BAR_WIDTH - 8.0).max(span.left + 8.0),
+        );
     let mut y = region_top - BAR_HEIGHT - 8.0;
-    if y < monitor_top + 8.0 {
+    if y < span.top + 8.0 {
         y = region_bottom + 8.0;
     }
-    if y + BAR_HEIGHT > monitor_bottom - 8.0 {
-        y = monitor_top + 8.0;
+    if y + BAR_HEIGHT > span.bottom - 8.0 {
+        y = span.top + 8.0;
     }
 
     Bounds {

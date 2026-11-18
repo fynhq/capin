@@ -8,6 +8,7 @@ mod build_info;
 mod capture_history;
 mod capture_panels;
 mod chrome_theme;
+mod control_bar;
 mod display;
 mod editor;
 mod editor_state;
