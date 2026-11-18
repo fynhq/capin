@@ -161,6 +161,17 @@ pub(crate) struct EditorSnapshot {
     pub(crate) document: AnnotationDocument,
 }
 
+pub(crate) enum HistoryEntry {
+    Document,
+    Canvas(EditorSnapshot),
+    ExpiredCanvas,
+}
+
+pub(crate) enum HistoryStep {
+    Document,
+    Canvas(EditorSnapshot),
+}
+
 pub(crate) struct TextEdit {
     pub(crate) target: Option<core_annotate::AnnotationId>,
     pub(crate) origin: PhysicalPoint,
@@ -361,8 +372,8 @@ pub(crate) struct EditorState {
     pub(crate) crop_mode: bool,
     pub(crate) crop_draft: Option<CropDraft>,
     pub(crate) polyline_draft: Option<PolylineDraft>,
-    pub(crate) canvas_undo: Vec<EditorSnapshot>,
-    pub(crate) canvas_redo: Vec<EditorSnapshot>,
+    pub(crate) undo: Vec<HistoryEntry>,
+    pub(crate) redo: Vec<HistoryEntry>,
     pub(crate) annotation_clipboard: Option<core_annotate::Annotation>,
     pub(crate) custom_color_open: bool,
     pub(crate) custom_color_buffer: String,
@@ -413,8 +424,8 @@ impl EditorState {
             crop_mode: false,
             crop_draft: None,
             polyline_draft: None,
-            canvas_undo: Vec::new(),
-            canvas_redo: Vec::new(),
+            undo: Vec::new(),
+            redo: Vec::new(),
             annotation_clipboard: None,
             custom_color_open: false,
             custom_color_buffer: String::new(),
@@ -657,14 +668,11 @@ impl EditorState {
             .clamp(0, self.image_size.width.saturating_sub(side) as i32);
         let top = (centre_y - side as i32 / 2)
             .clamp(0, self.image_size.height.saturating_sub(side) as i32);
-        self.document.update_shape(
-            id,
-            Shape::Number {
-                bounds: PhysicalRect::new(left, top, side, side),
-                value,
-            },
-            annotation.style,
-        );
+        let shape = Shape::Number {
+            bounds: PhysicalRect::new(left, top, side, side),
+            value,
+        };
+        self.edit_document(|document| document.update_shape(id, shape, annotation.style));
     }
 
     pub(crate) fn apply_spotlight_radius(&mut self, radius: f32) {
@@ -735,7 +743,7 @@ impl EditorState {
             .map(|annotation| annotation.style)
         {
             style.color = applied;
-            self.document.update_selected_style(style);
+            self.edit_document(|document| document.update_selected_style(style));
             self.style = style;
         }
 
@@ -750,7 +758,7 @@ impl EditorState {
             .map(|annotation| annotation.style);
         if let Some(mut style) = selected_style {
             update(&mut style);
-            self.document.update_selected_style(style);
+            self.edit_document(|document| document.update_selected_style(style));
             self.style = style;
             return;
         }
@@ -832,7 +840,7 @@ impl EditorState {
         let record = !draft.recorded;
         draft.recorded = true;
         let id = draft.id;
-        self.document.update_shape_live(id, shape, record)
+        self.edit_document(|document| document.update_shape_live(id, shape, record))
     }
 
     pub(crate) fn update_resize(&mut self, point: PhysicalPoint) -> bool {
@@ -850,7 +858,7 @@ impl EditorState {
         let record = !draft.recorded;
         draft.recorded = true;
         let id = draft.id;
-        self.document.update_shape_live(id, shape, record)
+        self.edit_document(|document| document.update_shape_live(id, shape, record))
     }
 
     pub(crate) fn preview_shape(&self) -> Option<(Shape, AnnotationStyle)> {
@@ -1168,7 +1176,7 @@ impl EditorState {
         }
         if points.len() >= 2 {
             let style = self.effective_style();
-            self.document.add(Shape::Polyline { points }, style);
+            self.edit_document(|document| document.add(Shape::Polyline { points }, style));
         }
         self.status = None;
         true
@@ -1223,7 +1231,7 @@ impl EditorState {
         let text = edit.content.trim_end().to_owned();
         if text.is_empty() {
             if let Some(id) = edit.target {
-                self.document.remove(id);
+                self.remove_annotation(id);
                 self.status = None;
             }
             return true;
@@ -1232,9 +1240,9 @@ impl EditorState {
         let bounds = edit.finish_bounds();
         let shape = Shape::Text { bounds, text };
         if let Some(id) = edit.target {
-            self.document.update_shape(id, shape, edit.style);
+            self.edit_document(|document| document.update_shape(id, shape, edit.style));
         } else {
-            self.document.add(shape, edit.style);
+            self.add_annotation(shape, edit.style);
         }
         self.style = edit.style;
         self.status = None;
@@ -1308,8 +1316,54 @@ impl EditorState {
 pub(crate) const CANVAS_HISTORY_LIMIT: usize = 3;
 
 const LARGE_CANVAS_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
+const HISTORY_LIMIT: usize = 128 + CANVAS_HISTORY_LIMIT;
 
 impl EditorState {
+    fn push_undo(&mut self, entry: HistoryEntry) {
+        self.undo.push(entry);
+        while self.undo.len() > HISTORY_LIMIT {
+            self.undo.remove(0);
+        }
+    }
+
+    fn note_document_edit(&mut self) {
+        self.push_undo(HistoryEntry::Document);
+        self.redo.clear();
+    }
+
+    pub(crate) fn edit_document<T>(
+        &mut self,
+        edit: impl FnOnce(&mut AnnotationDocument) -> T,
+    ) -> T {
+        let serial = self.document.history_serial();
+        let result = edit(&mut self.document);
+        if self.document.history_serial() != serial {
+            self.note_document_edit();
+        }
+        result
+    }
+
+    pub(crate) fn add_annotation(
+        &mut self,
+        shape: Shape,
+        style: AnnotationStyle,
+    ) -> core_annotate::AnnotationId {
+        self.edit_document(|document| document.add(shape, style))
+    }
+
+    pub(crate) fn paste_annotation(
+        &mut self,
+        annotation: &core_annotate::Annotation,
+        dx: i32,
+        dy: i32,
+    ) -> core_annotate::AnnotationId {
+        self.edit_document(|document| document.paste(annotation, dx, dy))
+    }
+
+    pub(crate) fn remove_annotation(&mut self, id: core_annotate::AnnotationId) -> bool {
+        self.edit_document(|document| document.remove(id))
+    }
+
     pub(crate) fn record_canvas_snapshot(&mut self, snapshot: EditorSnapshot) {
         let bytes = snapshot.image_size.width as usize * snapshot.image_size.height as usize * 4;
         let limit = if bytes > LARGE_CANVAS_SNAPSHOT_BYTES {
@@ -1317,23 +1371,88 @@ impl EditorState {
         } else {
             CANVAS_HISTORY_LIMIT
         };
-        self.canvas_undo.push(snapshot);
-        while self.canvas_undo.len() > limit {
-            self.canvas_undo.remove(0);
+        self.push_undo(HistoryEntry::Canvas(snapshot));
+        let mut canvases = self
+            .undo
+            .iter()
+            .filter(|entry| matches!(entry, HistoryEntry::Canvas(_)))
+            .count();
+        while canvases > limit {
+            let Some(entry) = self
+                .undo
+                .iter_mut()
+                .find(|entry| matches!(entry, HistoryEntry::Canvas(_)))
+            else {
+                break;
+            };
+            *entry = HistoryEntry::ExpiredCanvas;
+            canvases -= 1;
         }
-        self.canvas_redo.clear();
+        self.redo.clear();
     }
 
-    pub(crate) fn take_undo_snapshot(&mut self, current: EditorSnapshot) -> Option<EditorSnapshot> {
-        let snapshot = self.canvas_undo.pop()?;
-        self.canvas_redo.push(current);
-        Some(snapshot)
+    pub(crate) fn clear_history(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+        self.document.clear_history();
     }
 
-    pub(crate) fn take_redo_snapshot(&mut self, current: EditorSnapshot) -> Option<EditorSnapshot> {
-        let snapshot = self.canvas_redo.pop()?;
-        self.canvas_undo.push(current);
-        Some(snapshot)
+    pub(crate) fn can_undo(&self) -> bool {
+        self.undo.iter().any(|entry| match entry {
+            HistoryEntry::Document => self.document.can_undo(),
+            HistoryEntry::Canvas(_) => true,
+            HistoryEntry::ExpiredCanvas => false,
+        })
+    }
+
+    pub(crate) fn can_redo(&self) -> bool {
+        self.redo.iter().any(|entry| match entry {
+            HistoryEntry::Document => self.document.can_redo(),
+            HistoryEntry::Canvas(_) => true,
+            HistoryEntry::ExpiredCanvas => false,
+        })
+    }
+
+    pub(crate) fn take_undo(&mut self, current: EditorSnapshot) -> Option<HistoryStep> {
+        let mut current = Some(current);
+        loop {
+            match self.undo.pop()? {
+                HistoryEntry::Document => {
+                    if self.document.undo() {
+                        self.redo.push(HistoryEntry::Document);
+                        return Some(HistoryStep::Document);
+                    }
+                }
+                HistoryEntry::Canvas(snapshot) => {
+                    if let Some(current) = current.take() {
+                        self.redo.push(HistoryEntry::Canvas(current));
+                    }
+                    return Some(HistoryStep::Canvas(snapshot));
+                }
+                HistoryEntry::ExpiredCanvas => {}
+            }
+        }
+    }
+
+    pub(crate) fn take_redo(&mut self, current: EditorSnapshot) -> Option<HistoryStep> {
+        let mut current = Some(current);
+        loop {
+            match self.redo.pop()? {
+                HistoryEntry::Document => {
+                    if self.document.redo() {
+                        self.push_undo(HistoryEntry::Document);
+                        return Some(HistoryStep::Document);
+                    }
+                }
+                HistoryEntry::Canvas(snapshot) => {
+                    if let Some(current) = current.take() {
+                        self.push_undo(HistoryEntry::Canvas(current));
+                    }
+                    return Some(HistoryStep::Canvas(snapshot));
+                }
+                HistoryEntry::ExpiredCanvas => {}
+            }
+        }
     }
 }
 

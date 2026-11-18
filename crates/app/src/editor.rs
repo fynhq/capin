@@ -16,8 +16,8 @@ use platform_window::{
 
 use crate::chrome_theme::ChromeTheme;
 use crate::editor_state::{
-    BAND_HALF, CropDraft, Draft, EditorSnapshot, EditorState, FullCanvas, HANDLE_HIT, MoveDraft,
-    PolylineDraft, REGION_HANDLE_SIZE, RegionAdjustDraft, ResizeDraft, ResizeHandle,
+    BAND_HALF, CropDraft, Draft, EditorSnapshot, EditorState, FullCanvas, HANDLE_HIT, HistoryStep,
+    MoveDraft, PolylineDraft, REGION_HANDLE_SIZE, RegionAdjustDraft, ResizeDraft, ResizeHandle,
     SELECTION_HANDLE_HALF, TextEdit, annotation_handle_at, distance, finalize_shape, handle_points,
     next_char_boundary, normalized_rect, previous_char_boundary,
 };
@@ -177,6 +177,19 @@ pub(crate) struct FullCanvasInit {
     pub(crate) image: Arc<RenderImage>,
     pub(crate) image_size: PhysicalSize,
     pub(crate) adjustable: bool,
+}
+
+struct RenderedExport {
+    document: AnnotationDocument,
+    output: RgbaFrame,
+    pin_output: Option<RgbaFrame>,
+    hash: u64,
+    record_history: bool,
+    pin_shadow: Option<crate::capture_history::HistoryPinShadow>,
+    scale: f32,
+    pin_padding: u32,
+    stored_effects: RegionEffects,
+    pin_shadow_always: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -411,12 +424,6 @@ impl std::ops::DerefMut for EditorView {
 }
 
 impl EditorView {
-    fn new(frame: Arc<RgbaFrame>, pin_target: Option<u64>, cx: &mut Context<Self>) -> Self {
-        let image_size = PhysicalSize::new(frame.width(), frame.height());
-        let image = image_util::render_image_ref(&frame);
-        Self::new_with_image(frame, image, image_size, pin_target, cx)
-    }
-
     fn new_with_image(
         frame: Arc<RgbaFrame>,
         image: Arc<RenderImage>,
@@ -525,8 +532,8 @@ impl EditorView {
                 crop_mode: false,
                 crop_draft: None,
                 polyline_draft: None,
-                canvas_undo: Vec::new(),
-                canvas_redo: Vec::new(),
+                undo: Vec::new(),
+                redo: Vec::new(),
                 annotation_clipboard: None,
                 custom_color_open: false,
                 custom_color_buffer: String::new(),
@@ -573,7 +580,11 @@ impl EditorView {
         });
         let mut view = match full_canvas {
             Some(full) => Self::new_with_image(frame, full.image, full.image_size, pin_target, cx),
-            None => Self::new(frame, pin_target, cx),
+            None => {
+                let image_size = PhysicalSize::new(frame.width(), frame.height());
+                let image = image_util::render_image_ref(&frame);
+                Self::new_with_image(frame, image, image_size, pin_target, cx)
+            }
         };
         view.full_canvas = full_setting;
         view.ui_scale = if image_rect.size.width > px(0.0) {
@@ -1205,30 +1216,36 @@ impl EditorView {
         self.reset_view(cx);
     }
 
-    fn undo_canvas(&mut self, cx: &mut Context<Self>) -> bool {
-        let current = EditorSnapshot {
+    fn editor_snapshot(&self) -> EditorSnapshot {
+        EditorSnapshot {
             frame: Arc::clone(&self.frame),
             image_size: self.image_size,
             document: self.document.clone(),
-        };
-        let Some(snapshot) = self.state.take_undo_snapshot(current) else {
-            return false;
-        };
-        self.restore_canvas_snapshot(snapshot, cx);
-        true
+        }
     }
 
-    fn redo_canvas(&mut self, cx: &mut Context<Self>) -> bool {
-        let current = EditorSnapshot {
-            frame: Arc::clone(&self.frame),
-            image_size: self.image_size,
-            document: self.document.clone(),
-        };
-        let Some(snapshot) = self.state.take_redo_snapshot(current) else {
-            return false;
-        };
-        self.restore_canvas_snapshot(snapshot, cx);
-        true
+    fn undo_editor(&mut self, cx: &mut Context<Self>) -> bool {
+        let current = self.editor_snapshot();
+        match self.state.take_undo(current) {
+            Some(HistoryStep::Document) => true,
+            Some(HistoryStep::Canvas(snapshot)) => {
+                self.restore_canvas_snapshot(snapshot, cx);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn redo_editor(&mut self, cx: &mut Context<Self>) -> bool {
+        let current = self.editor_snapshot();
+        match self.state.take_redo(current) {
+            Some(HistoryStep::Document) => true,
+            Some(HistoryStep::Canvas(snapshot)) => {
+                self.restore_canvas_snapshot(snapshot, cx);
+                true
+            }
+            None => false,
+        }
     }
 
     fn replace_canvas(&mut self, frame: RgbaFrame, cx: &mut Context<Self>) {
@@ -1379,19 +1396,12 @@ impl EditorView {
         let dx = draft.current.origin.x - draft.original.origin.x;
         let dy = draft.current.origin.y - draft.original.origin.y;
         let new_size = PhysicalSize::new(cropped.width(), cropped.height());
-        let mut document = AnnotationDocument::new(new_size);
-        for annotation in self.document.objects() {
-            let translated = annotation.clone().translated(-dx, -dy);
-            document.add(translated.shape, translated.style);
-        }
-        document.select(None);
-        document.clear_history();
+        let document = self.document.crop_to(PhysicalPoint::new(dx, dy), new_size);
         self.frame = Arc::new(cropped);
         self.image_size = new_size;
         self.refresh_frame_images(cx);
         self.document = document;
-        self.canvas_undo.clear();
-        self.canvas_redo.clear();
+        self.state.clear_history();
         self.text_edit = None;
         self.draft = None;
         self.move_draft = None;
@@ -1778,14 +1788,7 @@ impl EditorView {
         };
         self.push_canvas_snapshot();
         let new_size = PhysicalSize::new(cropped.width(), cropped.height());
-        let mut document = AnnotationDocument::new(new_size);
-        for annotation in self.document.objects() {
-            let translated = annotation
-                .clone()
-                .translated(-rect.origin.x, -rect.origin.y);
-            document.add(translated.shape, translated.style);
-        }
-        document.clear_history();
+        let document = self.document.crop_to(rect.origin, new_size);
         self.frame = Arc::new(cropped);
         self.image_size = new_size;
         self.refresh_frame_images(cx);
@@ -1929,7 +1932,7 @@ impl EditorView {
         let Some(annotation) = self.annotation_clipboard.clone() else {
             return false;
         };
-        let id = self.document.paste(&annotation, 16, 16);
+        let id = self.state.paste_annotation(&annotation, 16, 16);
         self.tool = Tool::Select;
         self.select_annotation(Some(id));
         self.show_status(
@@ -1944,7 +1947,7 @@ impl EditorView {
             log_info!("editor", "delete requested without a selected annotation");
             return false;
         };
-        if !self.document.remove(id) {
+        if !self.state.remove_annotation(id) {
             log_info!("editor", "delete failed for annotation {id:?}");
             return false;
         }
@@ -3080,13 +3083,11 @@ impl EditorView {
             "editor-undo",
             undo_label,
             icons::UNDO,
-            self.document.can_undo() || !self.canvas_undo.is_empty(),
+            self.can_undo(),
             muted,
             cx,
             |this, cx| {
-                if !this.document.undo() {
-                    this.undo_canvas(cx);
-                }
+                this.undo_editor(cx);
                 this.status = None;
                 cx.notify();
             },
@@ -3097,13 +3098,11 @@ impl EditorView {
             "editor-redo",
             redo_label,
             icons::REDO,
-            self.document.can_redo() || !self.canvas_redo.is_empty(),
+            self.can_redo(),
             muted,
             cx,
             |this, cx| {
-                if !this.document.redo() {
-                    this.redo_canvas(cx);
-                }
+                this.redo_editor(cx);
                 this.status = None;
                 cx.notify();
             },
@@ -3675,8 +3674,7 @@ impl EditorView {
         if size_changed {
             self.image_size = new_size;
             self.document = AnnotationDocument::new(new_size);
-            self.canvas_undo.clear();
-            self.canvas_redo.clear();
+            self.state.clear_history();
             self.text_edit = None;
             self.draft = None;
             self.move_draft = None;
@@ -3785,8 +3783,7 @@ impl EditorView {
         self.refresh_frame_images(cx);
         if size_changed {
             self.document = AnnotationDocument::new(image_size);
-            self.canvas_undo.clear();
-            self.canvas_redo.clear();
+            self.state.clear_history();
             self.text_edit = None;
             self.draft = None;
             self.move_draft = None;
@@ -3859,126 +3856,138 @@ impl EditorView {
         });
     }
 
+    fn render_export(
+        &self,
+        with_pin_output: bool,
+    ) -> Result<RenderedExport, core_annotate::RasterError> {
+        let document = self.action_document();
+        let raw = rasterize(&document, &self.frame)?;
+        let scale = self.region_effects_scale();
+        let pin_effects = self.pin_effects();
+        let pin_padding = pin_effects.padding(scale);
+        let effects_active = self.region_effects_active();
+        let (output, pin_output) = if with_pin_output {
+            let copy = if effects_active {
+                self.effects.apply(raw.clone(), scale)
+            } else {
+                raw.clone()
+            };
+            let pin = if pin_effects.active() {
+                pin_effects.apply(raw, scale)
+            } else {
+                raw
+            };
+            (copy, Some(pin))
+        } else {
+            let copy = if effects_active {
+                self.effects.apply(raw, scale)
+            } else {
+                raw
+            };
+            (copy, None)
+        };
+        let hash = crate::capture_history::hash_frame(&output);
+        let record_history = self.pin_target.is_none();
+        let pin_shadow = (record_history && self.region_pin() && !self.effects.shadow).then_some(
+            crate::capture_history::HistoryPinShadow {
+                corner_radius: self.effects.corner_radius,
+                scale,
+            },
+        );
+        Ok(RenderedExport {
+            document,
+            output,
+            pin_output,
+            hash,
+            record_history,
+            pin_shadow,
+            scale,
+            pin_padding,
+            stored_effects: self.stored_region_effects(),
+            pin_shadow_always: self.region_pin(),
+        })
+    }
+
     pub(crate) fn pin(&mut self, cx: &mut Context<Self>) {
         self.commit_text(cx);
         let inline_host = self.inline;
         let selection_bounds = self.full_selection_screen_bounds();
-        let pin_effects = self.pin_effects();
-        let pin_shadow_always = self.region_pin();
-        let effects_scale = self.region_effects_scale();
-        let pin_padding = pin_effects.padding(effects_scale);
         let native_shadow = self.pin_native_shadow();
-        let document = self.action_document();
-        match rasterize(&document, &self.frame) {
-            Ok(raw) => {
-                let export = if self.region_effects_active() {
-                    self.effects.apply(raw.clone(), effects_scale)
-                } else {
-                    raw.clone()
-                };
-                let output = if pin_effects.active() {
-                    pin_effects.apply(raw, effects_scale)
-                } else {
-                    raw
-                };
-                let hash = crate::capture_history::hash_frame(&export);
-                let record_history = self.pin_target.is_none();
-                let pin_shadow = (record_history && self.region_pin() && !self.effects.shadow)
-                    .then_some(crate::capture_history::HistoryPinShadow {
-                        corner_radius: self.effects.corner_radius,
-                        scale: effects_scale,
-                    });
-                let export_padding = if self.effects.shadow { 0 } else { pin_padding };
-                let placement = inline_host.map(|inline| {
-                    let display_scale = if self.image_size.width == 0 {
-                        1.0
-                    } else {
-                        f32::from(inline.image_rect.size.width) / self.image_size.width as f32
-                    }
-                    .max(0.01);
-                    let width = output.width() as f32 * display_scale;
-                    let height = output.height() as f32 * display_scale;
-                    let (center_x, center_y) = if let Some(selection) = selection_bounds {
-                        (
-                            f32::from(inline.screen_origin.x)
-                                + f32::from(selection.origin.x)
-                                + f32::from(selection.size.width) / 2.0,
-                            f32::from(inline.screen_origin.y)
-                                + f32::from(selection.origin.y)
-                                + f32::from(selection.size.height) / 2.0,
-                        )
-                    } else {
-                        (
-                            f32::from(inline.screen_origin.x)
-                                + f32::from(inline.image_rect.origin.x)
-                                + f32::from(inline.image_rect.size.width) / 2.0,
-                            f32::from(inline.screen_origin.y)
-                                + f32::from(inline.image_rect.origin.y)
-                                + f32::from(inline.image_rect.size.height) / 2.0,
-                        )
-                    };
-                    (
-                        Bounds {
-                            origin: point(px(center_x - width / 2.0), px(center_y - height / 2.0)),
-                            size: size(px(width), px(height)),
-                        },
-                        display_scale,
-                    )
-                });
-                let monitor = inline_host
-                    .and_then(|inline| inline.capture)
-                    .map(|capture| capture.region.monitor);
-                if inline_host.is_some() {
-                    self.release_images(cx);
-                }
-                let handles = cx.windows();
-                let edit_state = crate::pin::PinEditState::new(
-                    self.frame.clone(),
-                    document,
-                    self.stored_region_effects(),
-                    pin_shadow_always,
-                    pin_padding,
-                    effects_scale,
-                );
-                cx.defer(move |cx| {
-                    if inline_host.is_some() {
-                        crate::windows::close_capture_auxiliary(cx, handles);
-                    }
-                    if record_history && let Ok(bytes) = image_util::encode_png(&export) {
-                        crate::capture_history::record_png_bytes(
-                            &bytes,
-                            hash,
-                            pin_shadow,
-                            Some(effects_scale),
-                        );
-                    }
-                    let id = if let Some((bounds, zoom)) = placement {
-                        crate::pin::open_frame_at_with_hash(
-                            output,
-                            bounds,
-                            zoom,
-                            hash,
-                            monitor,
-                            native_shadow,
-                            cx,
-                        )
-                    } else {
-                        crate::pin::open_frame_with_hash(output, hash, native_shadow, cx)
-                    };
-                    if let Some(id) = id {
-                        crate::pin::set_edit_state(id, edit_state);
-                        crate::pin::set_export_padding(id, export_padding);
-                    }
-                });
-            }
+        let rendered = match self.render_export(true) {
+            Ok(rendered) => rendered,
             Err(error) => {
                 let language = settings_state::get().language;
                 self.show_status(
                     format!("{}{}", t(language, "editor.export_failed"), error),
                     cx,
                 );
+                cx.notify();
+                return;
             }
+        };
+        let RenderedExport {
+            document,
+            output: export,
+            pin_output,
+            hash,
+            record_history,
+            pin_shadow,
+            scale,
+            pin_padding,
+            stored_effects,
+            pin_shadow_always,
+        } = rendered;
+        let Some(output) = pin_output else {
+            return;
+        };
+        let export_padding = if self.effects.shadow { 0 } else { pin_padding };
+        let placement = pin_placement(
+            inline_host,
+            selection_bounds,
+            self.image_size,
+            output.width(),
+            output.height(),
+        );
+        let monitor = inline_host
+            .and_then(|inline| inline.capture)
+            .map(|capture| capture.region.monitor);
+        if inline_host.is_some() {
+            self.release_images(cx);
         }
+        let handles = cx.windows();
+        let edit_state = crate::pin::PinEditState::new(
+            self.frame.clone(),
+            document,
+            stored_effects,
+            pin_shadow_always,
+            pin_padding,
+            scale,
+        );
+        cx.defer(move |cx| {
+            if inline_host.is_some() {
+                crate::windows::close_capture_auxiliary(cx, handles);
+            }
+            if record_history && let Ok(bytes) = image_util::encode_png(&export) {
+                crate::capture_history::record_png_bytes(&bytes, hash, pin_shadow, Some(scale));
+            }
+            let id = if let Some((bounds, zoom)) = placement {
+                crate::pin::open_frame_at_with_hash(
+                    output,
+                    bounds,
+                    zoom,
+                    hash,
+                    monitor,
+                    native_shadow,
+                    cx,
+                )
+            } else {
+                crate::pin::open_frame_with_hash(output, hash, native_shadow, cx)
+            };
+            if let Some(id) = id {
+                crate::pin::set_edit_state(id, edit_state);
+                crate::pin::set_export_padding(id, export_padding);
+            }
+        });
         log_info!("editor", "pin requested");
         cx.notify();
     }
@@ -3991,40 +4000,21 @@ impl EditorView {
         let mut save_ok = false;
         let mut pin_ok = false;
         let mut history_recorded = false;
-        let document = self.action_document();
-        match rasterize(&document, &self.frame) {
-            Ok(raw) => {
-                let pin_update = (!copy_only).then_some(self.pin_target).flatten();
-                let scale = self.region_effects_scale();
-                let pin_effects = self.pin_effects();
-                let pin_padding = pin_effects.padding(scale);
-                let (output, pin_output) = if pin_update.is_some() {
-                    let copy = if self.region_effects_active() {
-                        self.effects.apply(raw.clone(), scale)
-                    } else {
-                        raw.clone()
-                    };
-                    let pin = if pin_effects.active() {
-                        pin_effects.apply(raw, scale)
-                    } else {
-                        raw
-                    };
-                    (copy, Some(pin))
-                } else {
-                    let copy = if self.region_effects_active() {
-                        self.effects.apply(raw, scale)
-                    } else {
-                        raw
-                    };
-                    (copy, None)
-                };
-                let hash = crate::capture_history::hash_frame(&output);
-                let record_history = self.pin_target.is_none();
-                let pin_shadow = (record_history && self.region_pin() && !self.effects.shadow)
-                    .then_some(crate::capture_history::HistoryPinShadow {
-                        corner_radius: self.effects.corner_radius,
-                        scale,
-                    });
+        let pin_update = (!copy_only).then_some(self.pin_target).flatten();
+        match self.render_export(pin_update.is_some()) {
+            Ok(rendered) => {
+                let RenderedExport {
+                    document,
+                    output,
+                    pin_output,
+                    hash,
+                    record_history,
+                    pin_shadow,
+                    scale,
+                    pin_padding,
+                    stored_effects,
+                    pin_shadow_always,
+                } = rendered;
                 match image_util::encode_png(&output) {
                     Ok(bytes) => {
                         copy_ok = true;
@@ -4072,8 +4062,8 @@ impl EditorView {
                     let edit_state = crate::pin::PinEditState::new(
                         self.frame.clone(),
                         document,
-                        self.stored_region_effects(),
-                        self.region_pin(),
+                        stored_effects,
+                        pin_shadow_always,
                         pin_padding,
                         scale,
                     );
@@ -4949,7 +4939,7 @@ impl Render for EditorView {
                         let top = (point.y - side as i32 / 2).clamp(0, max_top);
                         let value = this.document.next_number();
                         let style = this.effective_style();
-                        this.document.add(
+                        this.state.add_annotation(
                             Shape::Number {
                                 bounds: PhysicalRect::new(left, top, side, side),
                                 value,
@@ -5056,36 +5046,9 @@ impl Render for EditorView {
                         cx.notify();
                         return;
                     }
-                    if this.resize_draft.is_some() {
-                        let point = this.resize_draft.as_ref().map(|draft| draft.current);
-                        if let Some(point) = point {
-                            this.finish_resize(point, cx);
-                        } else {
-                            this.resize_draft = None;
-                            cx.notify();
-                        }
-                        return;
-                    }
-                    if this.move_draft.take().is_some() {
-                        this.status = None;
+                    if finish_pointer_gestures(this, event, window, cx) {
                         cx.notify();
-                        return;
                     }
-
-                    let Some(mut draft) = this.draft.take() else {
-                        return;
-                    };
-                    let point = this
-                        .to_image_point(event.position, window)
-                        .unwrap_or(draft.current);
-                    draft.current = point;
-                    draft.shift = event.modifiers.shift;
-                    if let Some(shape) = finalize_shape(&draft, point) {
-                        let style = this.effective_style();
-                        this.document.add(shape, style);
-                        this.status = None;
-                    }
-                    cx.notify();
                 }),
             )
             .on_mouse_exit(cx.listener(|this, _, _, cx| {
@@ -5188,36 +5151,7 @@ impl Render for EditorView {
                     if let Some(edit) = this.text_edit.as_mut() {
                         edit.selecting = false;
                     }
-                    if this.region_drag.is_some() {
-                        this.finish_region_drag(cx);
-                    }
-                    let mut changed = false;
-                    if this.move_draft.take().is_some() {
-                        changed = true;
-                    }
-                    if this.resize_draft.is_some() {
-                        let point = this.resize_draft.as_ref().map(|draft| draft.current);
-                        if let Some(point) = point {
-                            this.finish_resize(point, cx);
-                        } else {
-                            this.resize_draft = None;
-                        }
-                        changed = true;
-                    }
-                    if let Some(mut draft) = this.draft.take() {
-                        let point = this
-                            .to_image_point(event.position, window)
-                            .unwrap_or(draft.current);
-                        draft.current = point;
-                        draft.shift = event.modifiers.shift;
-                        if let Some(shape) = finalize_shape(&draft, point) {
-                            let style = this.effective_style();
-                            this.document.add(shape, style);
-                            this.status = None;
-                        }
-                        changed = true;
-                    }
-                    if changed {
+                    if finish_pointer_gestures(this, event, window, cx) {
                         cx.notify();
                     }
                 }),
@@ -5513,11 +5447,9 @@ impl Render for EditorView {
                 }
                 if command && key == "z" {
                     if event.keystroke.modifiers.shift {
-                        if !this.document.redo() {
-                            this.redo_canvas(cx);
-                        }
-                    } else if !this.document.undo() {
-                        this.undo_canvas(cx);
+                        this.redo_editor(cx);
+                    } else {
+                        this.undo_editor(cx);
                     }
                     this.status = None;
                     cx.notify();
@@ -5877,16 +5809,91 @@ fn full_selection_bounds(
 }
 
 fn cropped_document(document: &AnnotationDocument, selection: PhysicalRect) -> AnnotationDocument {
-    let mut cropped = AnnotationDocument::new(selection.size);
-    for annotation in document.objects() {
-        let translated = annotation
-            .clone()
-            .translated(-selection.origin.x, -selection.origin.y);
-        cropped.add(translated.shape, translated.style);
+    document.crop_to(selection.origin, selection.size)
+}
+
+fn finish_pointer_gestures(
+    view: &mut EditorView,
+    event: &MouseUpEvent,
+    window: &mut Window,
+    cx: &mut Context<EditorView>,
+) -> bool {
+    let mut changed = false;
+    if view.region_drag.is_some() {
+        view.finish_region_drag(cx);
+        changed = true;
     }
-    cropped.select(None);
-    cropped.clear_history();
-    cropped
+    if view.move_draft.take().is_some() {
+        view.status = None;
+        changed = true;
+    }
+    if view.resize_draft.is_some() {
+        if let Some(point) = view.resize_draft.as_ref().map(|draft| draft.current) {
+            view.finish_resize(point, cx);
+        } else {
+            view.resize_draft = None;
+        }
+        changed = true;
+    }
+    if let Some(mut draft) = view.draft.take() {
+        let point = view
+            .to_image_point(event.position, window)
+            .unwrap_or(draft.current);
+        draft.current = point;
+        draft.shift = event.modifiers.shift;
+        if let Some(shape) = finalize_shape(&draft, point) {
+            let style = view.effective_style();
+            view.state.add_annotation(shape, style);
+            view.status = None;
+        }
+        changed = true;
+    }
+    changed
+}
+
+fn pin_placement(
+    inline: Option<InlineHost>,
+    selection_bounds: Option<Bounds<Pixels>>,
+    image_size: PhysicalSize,
+    width: u32,
+    height: u32,
+) -> Option<(Bounds<Pixels>, f32)> {
+    inline.map(|inline| {
+        let display_scale = if image_size.width == 0 {
+            1.0
+        } else {
+            f32::from(inline.image_rect.size.width) / image_size.width as f32
+        }
+        .max(0.01);
+        let width = width as f32 * display_scale;
+        let height = height as f32 * display_scale;
+        let (center_x, center_y) = if let Some(selection) = selection_bounds {
+            (
+                f32::from(inline.screen_origin.x)
+                    + f32::from(selection.origin.x)
+                    + f32::from(selection.size.width) / 2.0,
+                f32::from(inline.screen_origin.y)
+                    + f32::from(selection.origin.y)
+                    + f32::from(selection.size.height) / 2.0,
+            )
+        } else {
+            (
+                f32::from(inline.screen_origin.x)
+                    + f32::from(inline.image_rect.origin.x)
+                    + f32::from(inline.image_rect.size.width) / 2.0,
+                f32::from(inline.screen_origin.y)
+                    + f32::from(inline.image_rect.origin.y)
+                    + f32::from(inline.image_rect.size.height) / 2.0,
+            )
+        };
+        (
+            Bounds {
+                origin: point(px(center_x - width / 2.0), px(center_y - height / 2.0)),
+                size: size(px(width), px(height)),
+            },
+            display_scale,
+        )
+    })
 }
 
 fn handle_cursor(handle: ResizeHandle) -> CursorStyle {

@@ -421,12 +421,24 @@ fn cancel_text_reports_whether_an_edit_was_open() {
 }
 
 fn snapshot(tag: u8) -> EditorSnapshot {
+    snapshot_with(tag, AnnotationDocument::new(PhysicalSize::new(1, 1)))
+}
+
+fn snapshot_with(tag: u8, document: AnnotationDocument) -> EditorSnapshot {
     let frame = core_types::RgbaFrame::from_pixels(1, 1, vec![tag, 0, 0, 255]).expect("frame");
     EditorSnapshot {
         frame: std::sync::Arc::new(frame),
         image_size: PhysicalSize::new(1, 1),
-        document: AnnotationDocument::new(PhysicalSize::new(1, 1)),
+        document,
     }
+}
+
+fn canvas_count(state: &EditorState) -> usize {
+    state
+        .undo
+        .iter()
+        .filter(|entry| matches!(entry, HistoryEntry::Canvas(_)))
+        .count()
 }
 
 #[test]
@@ -435,26 +447,75 @@ fn canvas_history_keeps_three_steps_and_clears_redo() {
     for tag in 0..4 {
         state.record_canvas_snapshot(snapshot(tag));
     }
-    assert_eq!(state.canvas_undo.len(), 3);
-    assert_eq!(state.canvas_undo[0].frame.pixel(0, 0).unwrap()[0], 1);
+    assert_eq!(canvas_count(&state), 3);
+    assert!(matches!(state.undo[0], HistoryEntry::ExpiredCanvas));
 
-    let restored = state.take_undo_snapshot(snapshot(9)).expect("undo step");
+    let Some(HistoryStep::Canvas(restored)) = state.take_undo(snapshot(9)) else {
+        panic!("expected a canvas undo step");
+    };
     assert_eq!(restored.frame.pixel(0, 0).unwrap()[0], 3);
-    assert_eq!(state.canvas_redo.len(), 1);
+    assert_eq!(state.redo.len(), 1);
 
     state.record_canvas_snapshot(snapshot(8));
-    assert!(state.canvas_redo.is_empty());
-    assert_eq!(state.canvas_undo.len(), 3);
+    assert!(state.redo.is_empty());
+    assert_eq!(canvas_count(&state), 3);
 }
 
 #[test]
 fn redo_moves_the_current_canvas_back_to_undo() {
     let mut state = state();
     state.record_canvas_snapshot(snapshot(1));
-    let undone = state.take_undo_snapshot(snapshot(2)).expect("undo step");
+    let Some(HistoryStep::Canvas(undone)) = state.take_undo(snapshot(2)) else {
+        panic!("expected a canvas undo step");
+    };
     assert_eq!(undone.frame.pixel(0, 0).unwrap()[0], 1);
 
-    let redone = state.take_redo_snapshot(snapshot(1)).expect("redo step");
+    let Some(HistoryStep::Canvas(redone)) = state.take_redo(snapshot(1)) else {
+        panic!("expected a canvas redo step");
+    };
     assert_eq!(redone.frame.pixel(0, 0).unwrap()[0], 2);
-    assert_eq!(state.canvas_undo.len(), 1);
+    assert_eq!(canvas_count(&state), 1);
+}
+
+#[test]
+fn document_and_canvas_history_keep_time_order() {
+    let mut state = state();
+    state.add_annotation(rect(1, 1, 20, 20), AnnotationStyle::default());
+    let canvas_document = state.document.clone();
+    state.record_canvas_snapshot(snapshot_with(1, canvas_document));
+    state.edit_document(|document| {
+        document.add(rect(40, 40, 20, 20), AnnotationStyle::default());
+    });
+
+    assert_eq!(state.document.objects().len(), 2);
+    assert!(matches!(
+        state.take_undo(snapshot(9)),
+        Some(HistoryStep::Document)
+    ));
+    assert_eq!(state.document.objects().len(), 1);
+    let Some(HistoryStep::Canvas(canvas)) = state.take_undo(snapshot(9)) else {
+        panic!("expected the canvas step between the two document edits");
+    };
+    state.document = canvas.document;
+    assert_eq!(state.document.objects().len(), 1);
+    assert!(matches!(
+        state.take_undo(snapshot(9)),
+        Some(HistoryStep::Document)
+    ));
+    assert_eq!(state.document.objects().len(), 0);
+    assert!(state.take_undo(snapshot(9)).is_none());
+
+    assert!(matches!(
+        state.take_redo(snapshot(9)),
+        Some(HistoryStep::Document)
+    ));
+    let Some(HistoryStep::Canvas(canvas)) = state.take_redo(snapshot(9)) else {
+        panic!("expected the canvas redo step");
+    };
+    state.document = canvas.document;
+    assert!(matches!(
+        state.take_redo(snapshot(9)),
+        Some(HistoryStep::Document)
+    ));
+    assert_eq!(state.document.objects().len(), 2);
 }

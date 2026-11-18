@@ -182,6 +182,7 @@ pub struct AnnotationDocument {
     next_id: u64,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
+    history_serial: u64,
     selected: Option<AnnotationId>,
 }
 
@@ -193,6 +194,7 @@ impl AnnotationDocument {
             next_id: 1,
             undo: Vec::new(),
             redo: Vec::new(),
+            history_serial: 0,
             selected: None,
         }
     }
@@ -203,6 +205,21 @@ impl AnnotationDocument {
 
     pub fn objects(&self) -> &[Annotation] {
         &self.objects
+    }
+
+    pub fn crop_to(&self, origin: PhysicalPoint, size: PhysicalSize) -> Self {
+        let mut cropped = Self::new(size);
+        for annotation in &self.objects {
+            let translated = annotation.clone().translated(-origin.x, -origin.y);
+            let id = AnnotationId(cropped.next_id);
+            cropped.next_id += 1;
+            cropped.objects.push(Annotation {
+                id,
+                shape: translated.shape,
+                style: translated.style,
+            });
+        }
+        cropped
     }
 
     pub fn selected(&self) -> Option<AnnotationId> {
@@ -387,6 +404,10 @@ impl AnnotationDocument {
         !self.redo.is_empty()
     }
 
+    pub fn history_serial(&self) -> u64 {
+        self.history_serial
+    }
+
     pub fn clear_history(&mut self) {
         self.undo.clear();
         self.redo.clear();
@@ -428,6 +449,7 @@ impl AnnotationDocument {
     }
 
     fn record_before_edit(&mut self) {
+        self.history_serial = self.history_serial.wrapping_add(1);
         self.undo.push(self.snapshot());
         if self.undo.len() > HISTORY_LIMIT {
             self.undo.remove(0);
@@ -800,6 +822,24 @@ mod tests {
             Shape::Number { value, .. } => value,
             _ => panic!("expected a sequence badge"),
         }
+    }
+
+    #[test]
+    fn crop_to_translates_objects_and_clears_history() {
+        let mut doc = document();
+        doc.add(
+            Shape::Rect(PhysicalRect::new(10, 10, 20, 20)),
+            AnnotationStyle::default(),
+        );
+        let mut cropped = doc.crop_to(PhysicalPoint::new(5, 7), PhysicalSize::new(40, 30));
+        assert_eq!(cropped.image_size(), PhysicalSize::new(40, 30));
+        assert_eq!(cropped.objects().len(), 1);
+        assert_eq!(
+            cropped.objects()[0].bounds().origin,
+            PhysicalPoint::new(5, 3)
+        );
+        assert!(cropped.selected().is_none());
+        assert!(!cropped.undo());
     }
 
     #[test]
