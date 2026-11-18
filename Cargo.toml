@@ -18,6 +18,7 @@ core-record = { path = "crates/core-record" }
 core-stitch = { path = "crates/core-stitch" }
 core-types = { path = "crates/core-types" }
 gpui-kit = { version = "0.10.0", default-features = false }
+platform-capture = { path = "crates/platform-capture" }
 platform-ocr = { path = "crates/platform-ocr" }
 platform-record = { path = "crates/platform-record" }
 platform-window = { path = "crates/platform-window" }

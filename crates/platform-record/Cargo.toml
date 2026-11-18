@@ -8,9 +8,9 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-core-capture.workspace = true
 core-record.workspace = true
 core-types.workspace = true
+platform-capture.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]

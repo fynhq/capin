@@ -5,13 +5,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use block2::RcBlock;
-use core_capture::CaptureTarget;
-use core_capture::macos_sck_support as sck;
 use core_record::{
     CURSOR_HIGHLIGHT_ALPHA, CURSOR_HIGHLIGHT_RADIUS, CursorHighlight, FRAME_RATE, FrameDecision,
     FrameTimeline, RecordConfig, paint_cursor_highlight_bgra, video_bitrate,
 };
-use core_types::PhysicalRect;
+use core_types::{CaptureTarget, PhysicalRect};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
@@ -37,6 +35,7 @@ use objc2_screen_capture_kit::{
     SCContentFilter, SCDisplay, SCShareableContent, SCStream, SCStreamConfiguration,
     SCStreamOutput, SCStreamOutputType, SCWindow,
 };
+use platform_capture::macos_sck_support as sck;
 
 use crate::Flags;
 
@@ -269,7 +268,7 @@ fn build_plan(
 }
 
 fn own_windows(content: &SCShareableContent, extra: &[u64]) -> Vec<Retained<SCWindow>> {
-    let excluded = core_capture::capture_excluded_window_ids();
+    let excluded = platform_capture::capture_excluded_window_ids();
     unsafe { content.windows() }
         .iter()
         .filter(|window| {

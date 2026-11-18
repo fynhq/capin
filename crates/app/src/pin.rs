@@ -493,7 +493,7 @@ pub fn open_frame_at_with_hash(
 ) -> Option<u64> {
     LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
     let source = monitor.and_then(|id| {
-        core_capture::platform_backend()
+        platform_capture::platform_backend()
             .monitors()
             .ok()?
             .into_iter()

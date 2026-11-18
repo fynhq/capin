@@ -23,7 +23,8 @@ use objc2_screen_capture_kit::{
     SCStreamConfiguration, SCStreamOutput, SCStreamOutputType, SCWindow,
 };
 
-use crate::{CaptureError, CaptureTarget, Result};
+use core_capture::{CaptureError, Result};
+use core_types::CaptureTarget;
 
 use crate::macos_sck_support as support;
 

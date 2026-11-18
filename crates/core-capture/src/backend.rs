@@ -23,39 +23,6 @@ pub trait CaptureBackend {
     }
 }
 
-pub fn platform_backend() -> Box<dyn CaptureBackend> {
-    #[cfg(target_os = "windows")]
-    {
-        Box::new(crate::WindowsCapture::new())
-    }
-    #[cfg(target_os = "macos")]
-    {
-        Box::new(crate::MacosCapture)
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        Box::new(UnsupportedCapture)
-    }
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-struct UnsupportedCapture;
-
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-impl CaptureBackend for UnsupportedCapture {
-    fn monitors(&mut self) -> Result<Vec<MonitorInfo>, CaptureError> {
-        Err(CaptureError::UnsupportedPlatform)
-    }
-
-    fn windows(&mut self) -> Result<Vec<WindowInfo>, CaptureError> {
-        Err(CaptureError::UnsupportedPlatform)
-    }
-
-    fn capture(&mut self, _target: CaptureTarget) -> Result<RgbaFrame, CaptureError> {
-        Err(CaptureError::UnsupportedPlatform)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

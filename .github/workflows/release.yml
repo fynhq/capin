@@ -42,15 +42,15 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99.1"
+          toolchain: "1.100.0"
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy -p core-types -p core-capture -p core-compose -p core-annotate -p core-record -p core-stitch -p platform-record -p platform-ocr --all-targets --locked -- -D warnings
+        run: cargo clippy -p core-types -p core-capture -p core-compose -p core-annotate -p core-record -p core-stitch -p platform-capture -p platform-record -p platform-ocr --all-targets --locked -- -D warnings
       - name: Test
-        run: cargo test -p core-types -p core-capture -p core-compose -p core-annotate -p core-record -p core-stitch -p platform-record -p platform-ocr --locked
+        run: cargo test -p core-types -p core-capture -p core-compose -p core-annotate -p core-record -p core-stitch -p platform-capture -p platform-record -p platform-ocr --locked
       - name: Third-party notices
         run: python3 .github/scripts/check_third_party_notices.py
       - name: Public surface

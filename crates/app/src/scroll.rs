@@ -1,10 +1,11 @@
 use std::time::{Duration, Instant};
 
-use core_capture::{CaptureTarget, platform_backend};
+use core_capture::CaptureTarget;
 use core_stitch::{StitchConfig, StitchError, Stitcher};
 use core_types::{CaptureRegion, RgbaFrame};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use platform_capture::platform_backend;
 use platform_window::system_accent_hex;
 
 use crate::chrome_theme::ChromeTheme;

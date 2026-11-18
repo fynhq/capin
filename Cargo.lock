@@ -200,6 +200,7 @@ dependencies = [
  "global-hotkey",
  "gpui-kit",
  "image",
+ "platform-capture",
  "platform-ocr",
  "platform-record",
  "platform-window",
@@ -992,24 +993,8 @@ dependencies = [
 name = "core-capture"
 version = "0.1.0"
 dependencies = [
- "block2 0.6.2",
- "core-foundation 0.10.1",
- "core-graphics 0.24.0",
  "core-types",
- "dispatch2",
- "foreign-types 0.5.0",
- "objc2 0.6.5",
- "objc2-app-kit 0.3.2",
- "objc2-application-services",
- "objc2-core-foundation",
- "objc2-core-graphics",
- "objc2-core-media",
- "objc2-core-video",
- "objc2-foundation 0.3.2",
- "objc2-screen-capture-kit",
  "thiserror 2.0.21",
- "windows 0.62.2",
- "windows-capture 2.0.1",
 ]
 
 [[package]]
@@ -5149,6 +5134,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
+name = "platform-capture"
+version = "0.1.0"
+dependencies = [
+ "block2 0.6.2",
+ "core-capture",
+ "core-foundation 0.10.1",
+ "core-graphics 0.24.0",
+ "core-types",
+ "dispatch2",
+ "foreign-types 0.5.0",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-application-services",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-core-media",
+ "objc2-core-video",
+ "objc2-foundation 0.3.2",
+ "objc2-screen-capture-kit",
+ "windows 0.62.2",
+ "windows-capture 2.0.1",
+]
+
+[[package]]
 name = "platform-ocr"
 version = "0.1.0"
 dependencies = [
@@ -5169,7 +5178,6 @@ name = "platform-record"
 version = "0.1.0"
 dependencies = [
  "block2 0.6.2",
- "core-capture",
  "core-record",
  "core-types",
  "dispatch2",
@@ -5181,6 +5189,7 @@ dependencies = [
  "objc2-core-video",
  "objc2-foundation 0.3.2",
  "objc2-screen-capture-kit",
+ "platform-capture",
  "thiserror 2.0.21",
  "windows 0.62.2",
  "windows-capture 2.0.1",

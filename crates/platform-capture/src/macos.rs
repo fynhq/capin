@@ -31,7 +31,8 @@ use core_graphics::window::{
 };
 use core_types::{DpiScale, MonitorId, PhysicalRect, RgbaFrame, WindowId};
 
-use crate::{CaptureBackend, CaptureError, CaptureTarget, MonitorInfo, Result, WindowInfo};
+use core_capture::{CaptureBackend, CaptureError, MonitorInfo, Result, WindowInfo};
+use core_types::CaptureTarget;
 
 pub struct MacosCapture;
 

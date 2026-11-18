@@ -16,7 +16,7 @@ pub fn compose_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> Rgb
     let scale = scale.max(0.1);
     #[cfg(target_os = "windows")]
     let frame = trim_capture_fringe(frame);
-    let fallback_radius = core_capture::window_corner_radius(id, scale);
+    let fallback_radius = platform_capture::window_corner_radius(id, scale);
     #[cfg(target_os = "macos")]
     let corner_radius = if platform_window::window_capture_includes_native_shadow() {
         fallback_radius

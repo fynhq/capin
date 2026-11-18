@@ -1,9 +1,10 @@
 use std::time::{Duration, Instant};
 
-use core_capture::{CaptureBackend, CaptureTarget, SelectionSession, platform_backend};
+use core_capture::{CaptureBackend, CaptureTarget, SelectionSession};
 use core_types::{MonitorId, PhysicalSize, RgbaFrame, WindowId};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use platform_capture::platform_backend;
 
 use crate::image_util;
 
@@ -74,7 +75,7 @@ impl OverlayView {
     ) -> core_capture::Result<Option<RgbaFrame>> {
         let started = self.monitor_stream.is_none();
         if started {
-            match core_capture::MonitorStream::start(monitor) {
+            match platform_capture::MonitorStream::start(monitor) {
                 Ok(stream) => self.monitor_stream = Some(stream),
                 Err(error) => {
                     crate::logging::log_warn!("overlay", "monitor stream unavailable: {error}");

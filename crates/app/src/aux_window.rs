@@ -1,6 +1,7 @@
-use core_capture::{CaptureTarget, MonitorInfo, platform_backend};
+use core_capture::{CaptureTarget, MonitorInfo};
 use core_types::{PhysicalPoint, PhysicalRect};
 use gpui_kit::*;
+use platform_capture::platform_backend;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn popup_options(

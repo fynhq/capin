@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use core_capture::{
     CaptureBackend, CaptureError, CaptureTarget, MonitorInfo, SelectionAction, SelectionOutcome,
-    SelectionSession, WindowInfo, platform_backend,
+    SelectionSession, WindowInfo,
 };
 use core_types::{
     CaptureRegion, MonitorId, PhysicalPoint, PhysicalRect, PhysicalSize, RgbaFrame, WindowId,
@@ -306,10 +306,10 @@ pub fn open_overlays(cx: &mut App) {
         platform_window::set_macos_accessory_activation_policy();
     }
     #[cfg(target_os = "windows")]
-    core_capture::init_process_dpi_awareness();
+    platform_capture::init_process_dpi_awareness();
     platform_window::set_cursor_hidden(false);
 
-    let mut backend = platform_backend();
+    let mut backend = platform_capture::platform_backend();
     let mut monitors = match backend.monitors() {
         Ok(monitors) => monitors,
         Err(error) => {
@@ -620,7 +620,7 @@ struct OverlayView {
     cursor_style: CursorStyle,
     magnifier: Option<Magnifier>,
     #[cfg(target_os = "windows")]
-    monitor_stream: Option<core_capture::MonitorStream>,
+    monitor_stream: Option<platform_capture::MonitorStream>,
     last_refresh: Option<Instant>,
     notice: Option<String>,
     notice_serial: u64,
@@ -947,7 +947,7 @@ impl OverlayView {
         cx.spawn(async move |this, cx| {
             let elements = cx
                 .background_executor()
-                .spawn(async move { core_capture::ui_elements_at(window_id, point) })
+                .spawn(async move { platform_capture::ui_elements_at(window_id, point) })
                 .await;
             let empty = elements.is_empty();
             let applied = this
@@ -988,7 +988,7 @@ impl OverlayView {
             }
             let elements = cx
                 .background_executor()
-                .spawn(async move { core_capture::ui_elements_at(window_id, point) })
+                .spawn(async move { platform_capture::ui_elements_at(window_id, point) })
                 .await;
             this.update(cx, |this, cx| {
                 if this
@@ -1519,7 +1519,7 @@ impl OverlayView {
                         selected.scale,
                     )
                 } else {
-                    let mut backend = platform_backend();
+                    let mut backend = platform_capture::platform_backend();
                     let captured = if settings_state::get().capture_cursor {
                         backend.capture_with_cursor(CaptureTarget::Window(id))
                     } else {
@@ -1541,7 +1541,7 @@ impl OverlayView {
             }
             _ if !settings_state::get().capture_cursor => self.crop_selected_frame(selected)?,
             _ => {
-                let mut backend = platform_backend();
+                let mut backend = platform_capture::platform_backend();
                 backend
                     .capture_with_cursor(selected.target)
                     .map_err(|error| error.to_string())?

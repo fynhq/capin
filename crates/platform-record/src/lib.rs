@@ -3,9 +3,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use core_capture::{CaptureTarget, platform_backend};
 use core_record::RecordConfig;
-use core_types::PhysicalSize;
+use core_types::{CaptureTarget, PhysicalSize};
+use platform_capture::platform_backend;
 use thiserror::Error;
 
 #[cfg(target_os = "macos")]

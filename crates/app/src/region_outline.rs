@@ -1,6 +1,7 @@
-use core_capture::{CaptureTarget, platform_backend};
+use core_capture::CaptureTarget;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use platform_capture::platform_backend;
 use platform_window::{WindowStyle, apply as apply_window_style, hide_native_border};
 
 const BORDER_WIDTH: f32 = 3.0;

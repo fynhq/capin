@@ -40,7 +40,8 @@ use windows_capture::settings::{
 };
 use windows_capture::window::Window;
 
-use crate::{CaptureBackend, CaptureError, CaptureTarget, MonitorInfo, Result, WindowInfo};
+use core_capture::{CaptureBackend, CaptureError, MonitorInfo, Result, WindowInfo};
+use core_types::CaptureTarget;
 
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(2);
 

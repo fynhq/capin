@@ -1,11 +1,12 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use core_capture::{CaptureTarget, MonitorInfo, platform_backend};
+use core_capture::{CaptureTarget, MonitorInfo};
 use core_record::{CursorHighlight, FRAME_RATE, RecordConfig};
 use core_types::{PhysicalPoint, PhysicalRect};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use platform_capture::platform_backend;
 use platform_record::Recorder;
 use platform_window::system_accent_hex;
 

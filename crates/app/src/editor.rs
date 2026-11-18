@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use core_annotate::{AnnotationDocument, AnnotationStyle, Shape, TextAlignment, rasterize};
-use core_capture::{CaptureTarget, platform_backend};
+use core_capture::CaptureTarget;
 use core_types::{
     CaptureRegion, MonitorId, PhysicalPoint, PhysicalRect, PhysicalSize, RgbaFrame,
     prefers_dark_foreground,
@@ -3638,7 +3638,7 @@ impl EditorView {
         };
         let monitor = capture.region.monitor;
         let region_target = matches!(capture.target, CaptureTarget::Region(_));
-        let mut backend = core_capture::platform_backend();
+        let mut backend = platform_capture::platform_backend();
         let captured = if settings_state::get().capture_cursor {
             backend.capture_with_cursor(CaptureTarget::Monitor(monitor))
         } else {
@@ -3745,7 +3745,7 @@ impl EditorView {
         let Some(capture) = self.inline.and_then(|inline| inline.capture) else {
             return;
         };
-        let mut backend = core_capture::platform_backend();
+        let mut backend = platform_capture::platform_backend();
         let captured = if settings_state::get().capture_cursor {
             backend.capture_with_cursor(capture.target)
         } else {
@@ -3771,7 +3771,7 @@ impl EditorView {
             }
         };
         if matches!(capture.target, CaptureTarget::Region(_))
-            && let Ok(source) = core_capture::platform_backend()
+            && let Ok(source) = platform_capture::platform_backend()
                 .capture(CaptureTarget::Monitor(capture.region.monitor))
         {
             self.region_source = Some(image_util::render_image(source));
@@ -5629,7 +5629,9 @@ pub fn open_long_capture_inline(
             missed_frames
         )
     });
-    let monitors = platform_backend().monitors().unwrap_or_default();
+    let monitors = platform_capture::platform_backend()
+        .monitors()
+        .unwrap_or_default();
     let monitor = monitors.iter().find(|monitor| monitor.id == monitor_id);
     let (window_bounds, display_id, screen_origin) = match monitor {
         Some(monitor) => {

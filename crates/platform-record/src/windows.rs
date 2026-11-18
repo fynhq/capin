@@ -6,12 +6,12 @@ use std::time::Duration;
 
 use windows::Win32::Media::MediaFoundation::MFGetSystemTime;
 
-use core_capture::{CaptureTarget, platform_backend};
 use core_record::{
     CURSOR_HIGHLIGHT_ALPHA, CURSOR_HIGHLIGHT_RADIUS, CursorHighlight, FRAME_RATE, FrameDecision,
     FrameTimeline, RecordConfig, paint_cursor_highlight_bgra, video_bitrate,
 };
-use core_types::PhysicalRect;
+use core_types::{CaptureTarget, PhysicalRect};
+use platform_capture::platform_backend;
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
 use windows_capture::encoder::{
     AudioSettingsBuilder, ContainerSettingsBuilder, VideoEncoder, VideoSettingsBuilder,
