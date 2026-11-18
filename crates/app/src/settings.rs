@@ -1020,7 +1020,7 @@ impl SettingsView {
                 div()
                     .relative()
                     .flex_1()
-                    .w_full()
+                    .min_h_0()
                     .child(
                         div()
                             .size_full()
