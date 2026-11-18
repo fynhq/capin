@@ -3,6 +3,8 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "0 3 * * 1"
 
 permissions:
   contents: read
@@ -10,6 +12,7 @@ permissions:
 jobs:
   quality:
     name: Quality
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,9 +30,14 @@ jobs:
         run: cargo test -p core-types -p core-capture -p core-compose -p core-annotate -p core-record -p core-stitch -p platform-capture -p platform-record -p platform-ocr --locked
       - name: Release build
         run: cargo build -p core-types -p core-capture -p core-compose -p core-annotate -p core-record -p core-stitch --release --locked
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Dependency audit
+        run: bash .github/scripts/check_dependencies.sh
 
   platform-check:
     name: Platform check
+    if: github.event_name != 'schedule'
     strategy:
       fail-fast: false
       matrix:
@@ -96,6 +104,7 @@ jobs:
 
   third-party:
     name: Third-party notices
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -106,8 +115,25 @@ jobs:
       - name: Check notices
         run: python3 .github/scripts/check_third_party_notices.py
 
+  dependency-audit:
+    name: Dependency audit
+    if: github.event_name == 'schedule'
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100.0"
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit
+        run: bash .github/scripts/check_dependencies.sh
+
   public-surface:
     name: Public surface
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
