@@ -21,7 +21,7 @@ Capin 是面向 Windows 10+ 与 macOS 13+ 的截图、标注、贴图、OCR、�
 
 ## 资源占用
 
-Windows 11：后台常驻内存约 14 MB；截图操作期间约 100–150 MB，截图完成后逐步回落。
+Windows 11：托盘空闲时约 5 MB；截图操作期间约 100–150 MB，截图完成后逐步回落。
 
 ## 安装
 
@@ -97,7 +97,7 @@ Capin is a screenshot, annotation, pin, OCR, scrolling-capture, and screen-recor
 
 ## Resource usage
 
-Windows 11: about 14 MB of memory while resident in the tray; 100–150 MB during a capture, settling back down after the capture completes.
+Windows 11: about 5 MB idle in the tray; 100–150 MB during a capture, settling back down afterwards.
 
 ## Install
 
