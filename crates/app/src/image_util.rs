@@ -2,7 +2,7 @@ use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 
-use core_types::{PhysicalRect, PhysicalSize, RgbaFrame};
+use core_types::{PhysicalRect, PhysicalSize, RgbaFrame, swap_red_blue_in_place};
 use gpui_kit::*;
 use image::ImageEncoder;
 
@@ -10,9 +10,7 @@ pub fn render_image(frame: RgbaFrame) -> Arc<RenderImage> {
     let width = frame.width();
     let height = frame.height();
     let mut pixels = frame.into_packed_pixels();
-    for pixel in pixels.as_chunks_mut::<4>().0 {
-        pixel.swap(0, 2);
-    }
+    swap_red_blue_in_place(&mut pixels);
 
     let buffer = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(width, height, pixels)
         .expect("capture frames are validated before conversion");
@@ -23,9 +21,7 @@ pub fn render_image_ref(frame: &RgbaFrame) -> Arc<RenderImage> {
     let width = frame.width();
     let height = frame.height();
     let mut pixels = frame.packed_pixels().into_owned();
-    for pixel in pixels.as_chunks_mut::<4>().0 {
-        pixel.swap(0, 2);
-    }
+    swap_red_blue_in_place(&mut pixels);
 
     let buffer = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(width, height, pixels)
         .expect("capture frames are validated before conversion");
@@ -51,9 +47,7 @@ pub fn downscaled_render_image(
         image::imageops::FilterType::Triangle,
     );
     let mut pixels = resized.into_raw();
-    for pixel in pixels.as_chunks_mut::<4>().0 {
-        pixel.swap(0, 2);
-    }
+    swap_red_blue_in_place(&mut pixels);
     let buffer = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(width, height, pixels)?;
     Some((
         Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])),
@@ -239,9 +233,7 @@ fn blur_from_view(
     let sigma = (radius.max(1) as f32 / 2.0).max(0.5);
     let blurred = image::imageops::blur(&small, sigma);
     let mut pixels = blurred.into_raw();
-    for pixel in pixels.as_chunks_mut::<4>().0 {
-        pixel.swap(0, 2);
-    }
+    swap_red_blue_in_place(&mut pixels);
     let buffer =
         image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(small_width, small_height, pixels)
             .expect("blurred image size is valid");

@@ -1,7 +1,7 @@
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use core_types::{PhysicalRect, RgbaFrame};
+use core_types::{PhysicalRect, RgbaFrame, swap_red_blue_in_place};
 use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
 use windows::Media::Ocr::OcrEngine;
 use windows::Security::Cryptography::CryptographicBuffer;
@@ -527,9 +527,7 @@ fn ocr_upscale(width: u32, height: u32, max_dimension: u32) -> f32 {
 fn ocr_bitmap(image: &image::RgbaImage, upscale: f32) -> (Vec<u8>, i32, i32) {
     if upscale <= 1.0 {
         let mut bgra = image.as_raw().clone();
-        for pixel in bgra.as_chunks_mut::<4>().0 {
-            pixel.swap(0, 2);
-        }
+        swap_red_blue_in_place(&mut bgra);
         return (bgra, image.width() as i32, image.height() as i32);
     }
     let width = (image.width() as f32 * upscale).round().max(1.0) as u32;
@@ -537,9 +535,7 @@ fn ocr_bitmap(image: &image::RgbaImage, upscale: f32) -> (Vec<u8>, i32, i32) {
     let resized =
         image::imageops::resize(image, width, height, image::imageops::FilterType::Lanczos3);
     let mut bgra = resized.into_raw();
-    for pixel in bgra.as_chunks_mut::<4>().0 {
-        pixel.swap(0, 2);
-    }
+    swap_red_blue_in_place(&mut bgra);
     (bgra, width as i32, height as i32)
 }
 

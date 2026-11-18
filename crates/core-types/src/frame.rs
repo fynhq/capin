@@ -157,6 +157,12 @@ impl fmt::Display for FrameError {
 
 impl std::error::Error for FrameError {}
 
+pub fn swap_red_blue_in_place(pixels: &mut [u8]) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,5 +293,12 @@ mod tests {
         let packed = frame.into_packed_pixels();
         assert_eq!(packed, vec![1, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(packed.as_ptr(), pointer);
+    }
+
+    #[test]
+    fn swap_red_blue_exchanges_only_the_color_channels() {
+        let mut pixels = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        super::swap_red_blue_in_place(&mut pixels);
+        assert_eq!(pixels, vec![3, 2, 1, 4, 7, 6, 5, 8]);
     }
 }
