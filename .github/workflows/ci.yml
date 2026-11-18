@@ -41,6 +41,7 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.100.0"
+          components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Check platform crates
         run: cargo check -p platform-capture -p platform-window -p platform-ocr -p platform-record -p app --locked
@@ -51,7 +52,7 @@ jobs:
           set -o pipefail
           cargo clippy -p app --locked --message-format=json -- -D warnings 2>&1 | tee clippy.json
       - name: Report clippy diagnostics
-        if: failure()
+        if: always()
         shell: bash
         # Earlier steps can fail before clippy runs, so the log may not exist.
         run: |
