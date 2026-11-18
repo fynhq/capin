@@ -2480,7 +2480,7 @@ impl Render for PinView {
                     };
                     if step != 0.0 {
                         let opacity = this.values.borrow().opacity;
-                        this.set_opacity(opacity - step, cx);
+                        this.set_opacity(opacity + step, cx);
                     }
                 } else {
                     let step = if lines {
