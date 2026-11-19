@@ -15,7 +15,7 @@ const SHADOW_OPACITY: f32 = 0.35;
 
 #[cfg(target_os = "macos")]
 pub fn measure_window_corner_radius(id: WindowId, scale: f32) -> Option<u32> {
-    use core_capture::{CaptureBackend, CaptureTarget};
+    use core_capture::CaptureTarget;
 
     if platform_window::window_capture_includes_native_shadow() {
         return None;
