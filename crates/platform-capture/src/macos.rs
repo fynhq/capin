@@ -469,10 +469,14 @@ pub fn ui_elements(id: WindowId) -> Vec<PhysicalRect> {
     let Some((info, _application, window)) = ax_window_context(id) else {
         return Vec::new();
     };
+    collect_window_elements(&window, &info)
+}
+
+fn collect_window_elements(window: &AXUIElement, info: &AxWindowInfo) -> Vec<PhysicalRect> {
     let window_rect = ax_physical_rect(info.bounds, info.scale);
     let mut result = Vec::new();
     let mut queue: VecDeque<(CFRetained<AXUIElement>, usize)> = VecDeque::new();
-    for child in ax_children(&window) {
+    for child in ax_children(window) {
         queue.push_back((child, 1));
     }
 
@@ -508,42 +512,109 @@ pub fn ui_elements(id: WindowId) -> Vec<PhysicalRect> {
 }
 
 pub fn ui_elements_at(id: WindowId, point: core_types::PhysicalPoint) -> Vec<PhysicalRect> {
-    let Some((info, application, _window)) = ax_window_context(id) else {
+    let Some((info, application, window)) = ax_window_context(id) else {
         return Vec::new();
     };
-    let x = f64::from(point.x) / info.scale;
-    let y = f64::from(point.y) / info.scale;
-    let Some(element) = ax_element_at_position(&application, x, y) else {
-        return ui_elements(id);
-    };
-
     let window_rect = ax_physical_rect(info.bounds, info.scale);
+    let own_process = info.pid == std::process::id() as i32;
     let mut chain = Vec::new();
-    let mut current = Some(element);
+    let mut reached_window = false;
+    if !own_process {
+        let x = f64::from(point.x) / info.scale;
+        let y = f64::from(point.y) / info.scale;
+        if let Some(element) = ax_element_at_position(&application, x, y) {
+            (chain, reached_window) = ax_parent_chain(&element, window_rect, info.scale);
+        }
+    }
+    if !reached_window || chain.is_empty() {
+        chain = ax_chain_at_point(&window, &info, point);
+    }
+    if chain.is_empty() {
+        return collect_window_elements(&window, &info);
+    }
+    chain.sort_by_key(|rect| u64::from(rect.size.width) * u64::from(rect.size.height));
+    chain.dedup();
+    chain
+}
+
+fn ax_parent_chain(
+    element: &CFRetained<AXUIElement>,
+    window_rect: PhysicalRect,
+    scale: f64,
+) -> (Vec<PhysicalRect>, bool) {
+    let mut chain = Vec::new();
+    let mut current = Some(element.clone());
     while let Some(element) = current {
         if chain.len() >= MAX_AX_DEPTH {
             break;
         }
         if let Some(frame) = ax_frame(&element) {
-            let rect = ax_physical_rect(frame, info.scale);
+            let rect = ax_physical_rect(frame, scale);
+            if ax_rects_close(rect, window_rect) {
+                return (chain, true);
+            }
             if rect.size.width > 1
                 && rect.size.height > 1
-                && rect != window_rect
                 && rect.size.width <= window_rect.size.width
                 && rect.size.height <= window_rect.size.height
                 && rect.intersection(window_rect).is_some()
             {
                 chain.push(rect);
             }
-            if rect == window_rect {
-                break;
-            }
         }
         current = ax_parent(&element);
     }
-    chain.sort_by_key(|rect| u64::from(rect.size.width) * u64::from(rect.size.height));
-    chain.dedup();
+    (chain, false)
+}
+
+fn ax_chain_at_point(
+    window: &CFRetained<AXUIElement>,
+    info: &AxWindowInfo,
+    point: core_types::PhysicalPoint,
+) -> Vec<PhysicalRect> {
+    let window_rect = ax_physical_rect(info.bounds, info.scale);
+    let mut chain = Vec::new();
+    let mut current = window.clone();
+    let started = std::time::Instant::now();
+    let mut visits = 0usize;
+    for _ in 0..MAX_AX_DEPTH {
+        let mut best: Option<(CFRetained<AXUIElement>, PhysicalRect, u64)> = None;
+        for child in ax_children(&current) {
+            visits += 1;
+            if visits > MAX_AX_VISITS || started.elapsed() > AX_QUERY_BUDGET {
+                break;
+            }
+            let Some(frame) = ax_frame(&child) else {
+                continue;
+            };
+            let rect = ax_physical_rect(frame, info.scale);
+            if rect.size.width <= 1 || rect.size.height <= 1 || !rect.contains(point) {
+                continue;
+            }
+            let area = u64::from(rect.size.width) * u64::from(rect.size.height);
+            if best
+                .as_ref()
+                .is_none_or(|(_, _, best_area)| area < *best_area)
+            {
+                best = Some((child, rect, area));
+            }
+        }
+        let Some((child, rect, _)) = best else {
+            break;
+        };
+        if !ax_rects_close(rect, window_rect) {
+            chain.push(rect);
+        }
+        current = child;
+    }
     chain
+}
+
+fn ax_rects_close(left: PhysicalRect, right: PhysicalRect) -> bool {
+    (left.origin.x - right.origin.x).abs() <= 2
+        && (left.origin.y - right.origin.y).abs() <= 2
+        && (left.size.width as i32 - right.size.width as i32).abs() <= 2
+        && (left.size.height as i32 - right.size.height as i32).abs() <= 2
 }
 
 fn ax_window_context(
@@ -566,11 +637,16 @@ fn ax_window_context(
 }
 
 fn enable_manual_accessibility(application: &AXUIElement) {
-    let name = AxString::from_str("AXManualAccessibility");
+    set_boolean_attribute(application, "AXManualAccessibility");
+    set_boolean_attribute(application, "AXEnhancedUserInterface");
+}
+
+fn set_boolean_attribute(element: &AXUIElement, name: &str) {
+    let name = AxString::from_str(name);
     let value = objc2_core_foundation::CFBoolean::new(true);
     // SAFETY: every CoreFoundation object shares the CFType representation.
     let value = unsafe { &*(value as *const objc2_core_foundation::CFBoolean as *const AxType) };
-    let _ = unsafe { application.set_attribute_value(&name, value) };
+    let _ = unsafe { element.set_attribute_value(&name, value) };
 }
 
 fn ax_element_at_position(
@@ -627,27 +703,72 @@ fn ax_window_info(id: WindowId) -> Option<AxWindowInfo> {
 
 fn ax_window(application: &AXUIElement, info: &AxWindowInfo) -> Option<CFRetained<AXUIElement>> {
     let windows = ax_elements(application, "AXWindows");
-    let single = windows.len() == 1;
-    let mut fallback = None;
-    for window in windows {
-        let matches_frame =
-            ax_frame(&window).is_some_and(|frame| ax_frames_overlap(frame, info.bounds));
+    let mut exact = Vec::new();
+    let mut similar: Option<(f64, &CFRetained<AXUIElement>)> = None;
+    for window in &windows {
+        let frame = ax_frame(window);
+        let distance = frame.map(|frame| ax_frame_distance(frame, info.bounds));
         let matches_title = !info.title.is_empty()
-            && ax_string(&window, "AXTitle").is_some_and(|title| title == info.title.as_str());
-        if matches_frame || matches_title {
-            return Some(window);
+            && ax_string(window, "AXTitle").is_some_and(|title| title == info.title.as_str());
+        if distance.is_some_and(|distance| distance <= 2.0) {
+            exact.push((window, matches_title));
+            continue;
         }
-        if single {
-            fallback = Some(window);
+        if matches_title && frame.is_none_or(|frame| ax_frames_are_similar(frame, info.bounds)) {
+            return Some(window.clone());
         }
+        if let (Some(frame), Some(distance)) = (frame, distance)
+            && ax_frames_are_similar(frame, info.bounds)
+            && similar.is_none_or(|(best, _)| distance < best)
+        {
+            similar = Some((distance, window));
+        }
+    }
+    if let Some(window) = exact
+        .iter()
+        .find_map(|(window, matches_title)| (*matches_title).then_some(*window))
+    {
+        return Some(window.clone());
+    }
+    if let Some((window, _)) = exact.first() {
+        return Some((*window).clone());
+    }
+    if let Some((_, window)) = similar {
+        return Some(window.clone());
     }
     if let Some(focused) = ax_attribute(application, "AXFocusedWindow")
         .and_then(|value| value.downcast::<AXUIElement>().ok())
-        && ax_frame(&focused).is_some_and(|frame| ax_frames_overlap(frame, info.bounds))
     {
-        return Some(focused);
+        let matches = ax_frame(&focused).is_some_and(|frame| {
+            let distance = ax_frame_distance(frame, info.bounds);
+            distance <= 2.0 || ax_frames_are_similar(frame, info.bounds)
+        });
+        if matches {
+            return Some(focused);
+        }
     }
-    fallback
+    if windows.len() == 1 {
+        return windows.into_iter().next();
+    }
+    None
+}
+
+fn ax_frame_distance(left: AxRect, right: AxRect) -> f64 {
+    (left.origin.x - right.origin.x)
+        .abs()
+        .max((left.origin.y - right.origin.y).abs())
+        .max((left.size.width - right.size.width).abs())
+        .max((left.size.height - right.size.height).abs())
+}
+
+fn ax_frames_are_similar(left: AxRect, right: AxRect) -> bool {
+    let left_area = left.size.width * left.size.height;
+    let right_area = right.size.width * right.size.height;
+    if left_area <= 0.0 || right_area <= 0.0 {
+        return false;
+    }
+    let ratio = left_area.min(right_area) / left_area.max(right_area);
+    ratio >= 0.9 && ax_frames_overlap(left, right)
 }
 
 fn ax_children(element: &AXUIElement) -> Vec<CFRetained<AXUIElement>> {
