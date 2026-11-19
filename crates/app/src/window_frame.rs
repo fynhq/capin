@@ -4,6 +4,8 @@ use core_types::PhysicalRect;
 use core_types::{RgbaFrame, WindowId};
 
 use crate::logging::log_error;
+#[cfg(target_os = "macos")]
+use crate::logging::log_warn;
 use crate::settings_state::{self, AppSettings, WindowBackground};
 
 const WHITE_CANVAS: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
@@ -11,7 +13,43 @@ const SHADOW_OFFSET: f32 = 6.0;
 const SHADOW_BLUR: f32 = 16.0;
 const SHADOW_OPACITY: f32 = 0.35;
 
+#[cfg(target_os = "macos")]
+pub fn measure_window_corner_radius(id: WindowId, scale: f32) -> Option<u32> {
+    use core_capture::{CaptureBackend, CaptureTarget};
+
+    if platform_window::window_capture_includes_native_shadow() {
+        return None;
+    }
+    let mut backend = platform_capture::platform_backend();
+    let frame = match backend.capture(CaptureTarget::Window(id)) {
+        Ok(frame) => frame,
+        Err(error) => {
+            log_warn!("window", "failed to probe the window shape: {error}");
+            return None;
+        }
+    };
+    core_compose::estimate_corner_radius(&frame, (64.0 * scale.max(0.1)).round() as u32)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn measure_window_corner_radius(_id: WindowId, _scale: f32) -> Option<u32> {
+    None
+}
+
+pub fn compose_frozen_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> RgbaFrame {
+    compose_window_capture_measured(id, frame, scale, measure_window_corner_radius(id, scale))
+}
+
 pub fn compose_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> RgbaFrame {
+    compose_window_capture_measured(id, frame, scale, None)
+}
+
+pub fn compose_window_capture_measured(
+    id: WindowId,
+    frame: RgbaFrame,
+    scale: f32,
+    measured_radius: Option<u32>,
+) -> RgbaFrame {
     let settings = settings_state::get();
     let scale = scale.max(0.1);
     #[cfg(target_os = "windows")]
@@ -21,11 +59,15 @@ pub fn compose_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> Rgb
     let corner_radius = if platform_window::window_capture_includes_native_shadow() {
         fallback_radius
     } else {
-        core_compose::estimate_corner_radius(&frame, (64.0 * scale).round() as u32)
+        measured_radius
+            .or_else(|| core_compose::estimate_corner_radius(&frame, (64.0 * scale).round() as u32))
             .unwrap_or(fallback_radius)
     };
     #[cfg(not(target_os = "macos"))]
-    let corner_radius = fallback_radius;
+    let corner_radius = {
+        let _ = measured_radius;
+        fallback_radius
+    };
     let canvas = WindowCanvas {
         padding: (settings.window_padding as f32 * scale)
             .round()

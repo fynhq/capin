@@ -1491,7 +1491,7 @@ impl OverlayView {
                 };
                 log_info!("overlay", "window {} frozen capture: {frozen}", id.raw());
                 if frozen {
-                    crate::window_frame::compose_window_capture(
+                    crate::window_frame::compose_frozen_window_capture(
                         id,
                         self.crop_selected_frame(selected)?,
                         selected.scale,
