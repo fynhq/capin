@@ -98,7 +98,6 @@ impl SelectionSession {
     pub fn set_screen_targeting(&mut self, enabled: bool) {
         self.screen_targeting = enabled && self.window_targeting;
         if self.screen_targeting {
-            self.hovered = None;
             self.hovered_element = None;
         }
     }
@@ -710,6 +709,23 @@ mod tests {
         assert_eq!(session.hovered_window(), None);
         session.set_screen_targeting(false);
         session.pointer_moved(PhysicalPoint::new(260, 210));
+        assert_eq!(
+            session.hovered_window().map(|window| window.id),
+            Some(WindowId::from_raw(10))
+        );
+    }
+
+    #[test]
+    fn screen_targeting_keeps_the_window_under_the_pointer() {
+        let mut session = session();
+        session.set_window_targeting(true);
+        session.pointer_moved(PhysicalPoint::new(250, 200));
+        session.set_screen_targeting(true);
+        assert_eq!(
+            session.window_under_pointer().map(|window| window.id),
+            Some(WindowId::from_raw(10))
+        );
+        session.set_screen_targeting(false);
         assert_eq!(
             session.hovered_window().map(|window| window.id),
             Some(WindowId::from_raw(10))

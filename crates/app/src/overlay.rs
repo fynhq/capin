@@ -34,8 +34,11 @@ use crate::{
     ui::tooltip_view,
 };
 
+mod element_scroll;
 mod refresh;
 mod registry;
+
+use element_scroll::ElementScroll;
 
 const DIM: u32 = 0x00000066;
 const FALLBACK_HOVER_ACCENT: u32 = 0x4c9aff;
@@ -633,6 +636,7 @@ struct OverlayView {
     element_pending_point: Option<PhysicalPoint>,
     element_candidates: Vec<PhysicalRect>,
     element_level: usize,
+    element_scroll: ElementScroll,
     screen_targeting: bool,
     focus_handle: FocusHandle,
     editor: Option<Entity<EditorView>>,
@@ -698,6 +702,7 @@ impl OverlayView {
             element_pending_point: None,
             element_candidates: Vec::new(),
             element_level: 0,
+            element_scroll: ElementScroll::default(),
             screen_targeting: false,
             focus_handle: cx.focus_handle(),
             editor: None,
@@ -878,6 +883,7 @@ impl OverlayView {
             self.element_pending_point = None;
             self.element_candidates.clear();
             self.element_level = 0;
+            self.element_scroll.reset();
             self.screen_targeting = false;
             self.session.set_screen_targeting(false);
             self.session.set_hovered_element(None);
@@ -889,6 +895,7 @@ impl OverlayView {
             self.element_pending_point = None;
             self.element_candidates.clear();
             self.element_level = 0;
+            self.element_scroll.reset();
             self.screen_targeting = false;
             self.session.set_screen_targeting(false);
             self.session.set_hovered_element(None);
@@ -899,6 +906,7 @@ impl OverlayView {
             self.element_cache_point = None;
             self.element_level = 0;
             self.element_candidates.clear();
+            self.element_scroll.reset();
             self.session.set_hovered_element(None);
         }
         let cached_for_point = {
@@ -1012,37 +1020,6 @@ impl OverlayView {
         .detach();
     }
 
-    fn adjust_auto_target(&mut self, delta: f32) {
-        if delta == 0.0 || self.session.has_drag() {
-            return;
-        }
-        if !self.screen_targeting && self.session.window_under_pointer().is_none() {
-            return;
-        }
-        let max = self.element_candidates.len();
-        if self.screen_targeting {
-            if delta < 0.0 {
-                self.screen_targeting = false;
-                self.element_level = max;
-            }
-        } else if delta > 0.0 {
-            if self.element_level < max {
-                self.element_level += 1;
-            } else {
-                self.screen_targeting = true;
-            }
-        } else {
-            self.element_level = self.element_level.saturating_sub(1);
-        }
-        self.session.set_screen_targeting(self.screen_targeting);
-        let selected = if self.screen_targeting {
-            None
-        } else {
-            self.element_candidates.get(self.element_level).copied()
-        };
-        self.session.set_hovered_element(selected);
-    }
-
     fn set_window_only(&mut self, enabled: bool, cx: &mut Context<Self>) {
         let enabled = enabled && self.selected.is_none() && self.editor.is_none();
         if self.window_only == enabled {
@@ -1054,6 +1031,7 @@ impl OverlayView {
         self.element_pending_point = None;
         self.element_candidates.clear();
         self.element_level = 0;
+        self.element_scroll.reset();
         self.screen_targeting = false;
         self.session.set_screen_targeting(false);
         self.session.set_hovered_element(None);
@@ -3248,6 +3226,9 @@ impl OverlayView {
             }))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 let point = this.to_physical(event.position);
+                if this.cursor != Some(point) {
+                    this.element_scroll.reset();
+                }
                 this.cursor = Some(point);
                 this.set_window_only(control_down(&event.modifiers), cx);
                 if this.window_only && this.selected.is_none() {
@@ -3304,14 +3285,13 @@ impl OverlayView {
                 if this.selected.is_some() {
                     return;
                 }
-                let delta = match event.delta {
-                    ScrollDelta::Lines(delta) => delta.y,
-                    ScrollDelta::Pixels(delta) => f32::from(delta.y),
+                let Some(direction) =
+                    this.element_scroll
+                        .step(Instant::now(), event.delta, event.touch_phase)
+                else {
+                    return;
                 };
-                if let Some(point) = this.cursor {
-                    this.refresh_auto_target(point, cx);
-                }
-                this.adjust_auto_target(delta);
+                this.adjust_auto_target(direction);
                 cx.notify();
             }))
             .on_mouse_down(
@@ -3389,6 +3369,7 @@ impl OverlayView {
                 this.element_pending_point = None;
                 this.element_candidates.clear();
                 this.element_level = 0;
+                this.element_scroll.reset();
                 this.screen_targeting = false;
                 this.session.pointer_left();
                 cx.notify();

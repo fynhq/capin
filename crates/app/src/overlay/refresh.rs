@@ -48,6 +48,7 @@ impl OverlayView {
         self.element_pending_point = None;
         self.element_candidates.clear();
         self.element_level = 0;
+        self.element_scroll.reset();
         self.screen_targeting = false;
         let monitor_bounds = self.session.monitor_bounds();
         let mut excluded = live_overlay_window_ids_excluding(cx, Some(cx.entity().entity_id()));
