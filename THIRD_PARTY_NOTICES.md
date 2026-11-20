@@ -7,7 +7,7 @@ The list covers the components used by the Windows and macOS binaries
 (531 packages in the union of all four shipped targets).
 A package may be present on only some platforms or architectures.
 
-Generated from Cargo.lock. Dependency-set fingerprint: 63d2aa94a77aebe1e00d9427b0c57e1b3779e3610fff988c731fb9b2769e1f3c.
+Generated from Cargo.lock. Dependency-set fingerprint: 9dc163720192f60deedfba12c204f10cb613fc207e37264d86773e6ead142e01.
 
 License expressions are shown as declared by the upstream package (usually
 SPDX syntax). Where a component is offered under several licenses, Capin
@@ -180,7 +180,7 @@ authoritative.
 | hashbrown | 0.16.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |
 | hashbrown | 0.17.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |
 | heapless | 0.8.0 | MIT OR Apache-2.0 | https://github.com/rust-embedded/heapless |
-| heapless | 0.9.3 | MIT OR Apache-2.0 | https://github.com/rust-embedded/heapless |
+| heapless | 0.9.4 | MIT OR Apache-2.0 | https://github.com/rust-embedded/heapless |
 | heck | 0.5.0 | MIT OR Apache-2.0 | https://github.com/withoutboats/heck |
 | html5ever | 0.27.0 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
 | http | 1.5.0 | MIT OR Apache-2.0 | https://github.com/hyperium/http |
@@ -958,7 +958,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### LICENSE-APACHE / aclysma__profiling / master__LICENSE-APACHE / servo__pathfinder / main__LICENSE-APACHE / servo__pathfinder / master__LICENSE-APACHE
 
-Used by: addr2line 0.27.1, aligned 0.4.3, arrayvec 0.7.8, as-slice 0.2.1, async-channel 2.5.0, async-executor 1.14.1, async-fs 2.2.0, async-io 2.6.0, async-lock 3.5.0, async-net 2.0.0, async-process 2.5.0, async-signal 0.2.14, async-task 4.7.1, atomic-waker 1.1.2, backtrace 0.3.77, base64 0.22.1, base64 0.23.1, bitflags 1.3.2, bitflags 2.13.2, bitstream-io 4.10.0, blocking 1.7.0, bumpalo 3.20.3, cfg-if 1.0.5, concurrent-queue 2.5.0, core-foundation 0.10.1, core-foundation-sys 0.8.7, core-graphics 0.24.0, core-graphics-types 0.2.0, core-text 21.0.0, crossbeam-channel 0.5.17, crossbeam-deque 0.8.8, crossbeam-epoch 0.9.21, crossbeam-utils 0.8.23, data-url 0.3.2, displaydoc 0.2.7, either 1.19.0, equivalent 1.0.3, errno 0.3.14, euclid 0.22.14, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, flate2 1.1.11, form_urlencoded 1.2.2, futf 0.1.5, futures-lite 2.6.1, geo-types 0.7.20, gif 0.14.2, gimli 0.34.0, global-hotkey 0.10.0, hash32 0.3.1, hashbrown 0.16.1, hashbrown 0.17.1, heapless 0.8.0, heapless 0.9.3, heck 0.5.0, html5ever 0.27.0, httparse 1.10.1, idna 1.1.0, idna_adapter 1.2.2, indexmap 2.14.2, itertools 0.13.0, itertools 0.14.0, keyboard-types 0.8.3, lazy_static 1.5.1, lock_api 0.4.14, lock_api 0.5.0, log 0.4.35, markup5ever 0.12.1, markup5ever_rcdom 0.3.0, matrixmultiply 0.3.11, muda 0.21.2, ndarray 0.17.2, num 0.4.3, num-bigint 0.4.8, num-complex 0.4.6, num-derive 0.4.2, num-integer 0.1.47, num-iter 0.1.46, num-rational 0.4.2, num-traits 0.2.19, num_cpus 1.17.0, object 0.40.0, once_cell 1.21.4, parking 2.2.1, parking_lot 0.12.5, parking_lot 0.13.0, parking_lot_core 0.10.0, parking_lot_core 0.9.12, pathfinder_geometry 0.5.1, pathfinder_simd 0.5.6, percent-encoding 2.3.2, piper 0.2.5, png 0.17.16, png 0.18.1, polling 3.11.0, pollster 0.4.0, primal-check 0.3.4, profiling 1.0.18, profiling-procmacros 1.0.18, rawpointer 0.2.1, rayon 1.12.0, rayon-core 1.13.0, regex 1.13.1, regex-automata 0.4.18, regex-syntax 0.8.11, robust 1.2.0, roxmltree 0.21.2, rustc-demangle 0.1.28, rustix 1.1.6, scopeguard 1.2.0, signal-hook-registry 1.4.8, simplecss 0.2.2, smallvec 1.16.4, smol 2.0.2, smol_str 0.3.7, stable_deref_trait 1.2.1, string_cache 0.8.9, svgtypes 0.16.2, swash 0.2.10, tendril 0.4.3, tray-icon 0.26.1, ttf-parser 0.25.1, unicode-bidi 0.3.18, unicode-bidi-mirroring 0.4.0, unicode-ccc 0.4.0, unicode-id 0.3.7, unicode-properties 0.1.5, unicode-segmentation 1.13.3, unicode-vo 0.1.0, url 2.5.8, uuid 1.29.0, waker-fn 1.2.0, wasm-bindgen 0.2.130, wasm-bindgen-macro 0.2.130, wasm-bindgen-macro-support 0.2.130, wasm-bindgen-shared 0.2.130, weezl 0.1.12, xml5ever 0.18.1, yazi 0.2.2, zed-font-kit 0.14.1-zed, zeno 0.3.3
+Used by: addr2line 0.27.1, aligned 0.4.3, arrayvec 0.7.8, as-slice 0.2.1, async-channel 2.5.0, async-executor 1.14.1, async-fs 2.2.0, async-io 2.6.0, async-lock 3.5.0, async-net 2.0.0, async-process 2.5.0, async-signal 0.2.14, async-task 4.7.1, atomic-waker 1.1.2, backtrace 0.3.77, base64 0.22.1, base64 0.23.1, bitflags 1.3.2, bitflags 2.13.2, bitstream-io 4.10.0, blocking 1.7.0, bumpalo 3.20.3, cfg-if 1.0.5, concurrent-queue 2.5.0, core-foundation 0.10.1, core-foundation-sys 0.8.7, core-graphics 0.24.0, core-graphics-types 0.2.0, core-text 21.0.0, crossbeam-channel 0.5.17, crossbeam-deque 0.8.8, crossbeam-epoch 0.9.21, crossbeam-utils 0.8.23, data-url 0.3.2, displaydoc 0.2.7, either 1.19.0, equivalent 1.0.3, errno 0.3.14, euclid 0.22.14, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, flate2 1.1.11, form_urlencoded 1.2.2, futf 0.1.5, futures-lite 2.6.1, geo-types 0.7.20, gif 0.14.2, gimli 0.34.0, global-hotkey 0.10.0, hash32 0.3.1, hashbrown 0.16.1, hashbrown 0.17.1, heapless 0.8.0, heapless 0.9.4, heck 0.5.0, html5ever 0.27.0, httparse 1.10.1, idna 1.1.0, idna_adapter 1.2.2, indexmap 2.14.2, itertools 0.13.0, itertools 0.14.0, keyboard-types 0.8.3, lazy_static 1.5.1, lock_api 0.4.14, lock_api 0.5.0, log 0.4.35, markup5ever 0.12.1, markup5ever_rcdom 0.3.0, matrixmultiply 0.3.11, muda 0.21.2, ndarray 0.17.2, num 0.4.3, num-bigint 0.4.8, num-complex 0.4.6, num-derive 0.4.2, num-integer 0.1.47, num-iter 0.1.46, num-rational 0.4.2, num-traits 0.2.19, num_cpus 1.17.0, object 0.40.0, once_cell 1.21.4, parking 2.2.1, parking_lot 0.12.5, parking_lot 0.13.0, parking_lot_core 0.10.0, parking_lot_core 0.9.12, pathfinder_geometry 0.5.1, pathfinder_simd 0.5.6, percent-encoding 2.3.2, piper 0.2.5, png 0.17.16, png 0.18.1, polling 3.11.0, pollster 0.4.0, primal-check 0.3.4, profiling 1.0.18, profiling-procmacros 1.0.18, rawpointer 0.2.1, rayon 1.12.0, rayon-core 1.13.0, regex 1.13.1, regex-automata 0.4.18, regex-syntax 0.8.11, robust 1.2.0, roxmltree 0.21.2, rustc-demangle 0.1.28, rustix 1.1.6, scopeguard 1.2.0, signal-hook-registry 1.4.8, simplecss 0.2.2, smallvec 1.16.4, smol 2.0.2, smol_str 0.3.7, stable_deref_trait 1.2.1, string_cache 0.8.9, svgtypes 0.16.2, swash 0.2.10, tendril 0.4.3, tray-icon 0.26.1, ttf-parser 0.25.1, unicode-bidi 0.3.18, unicode-bidi-mirroring 0.4.0, unicode-ccc 0.4.0, unicode-id 0.3.7, unicode-properties 0.1.5, unicode-segmentation 1.13.3, unicode-vo 0.1.0, url 2.5.8, uuid 1.29.0, waker-fn 1.2.0, wasm-bindgen 0.2.130, wasm-bindgen-macro 0.2.130, wasm-bindgen-macro-support 0.2.130, wasm-bindgen-shared 0.2.130, weezl 0.1.12, xml5ever 0.18.1, yazi 0.2.2, zed-font-kit 0.14.1-zed, zeno 0.3.3
 
 <pre>
 Apache License
@@ -1494,7 +1494,7 @@ For more information, please refer to <http://unlicense.org/>
 
 ### LICENSE-MIT
 
-Used by: aligned 0.4.3, heapless 0.8.0, heapless 0.9.3
+Used by: aligned 0.4.3, heapless 0.8.0, heapless 0.9.4
 
 <pre>
 Copyright (c) 2017 Jorge Aparicio
@@ -17162,8 +17162,8 @@ at the versions pinned in `Cargo.lock`.
 Capin bundles the PaddleOCR PP-OCRv6 tiny detection and recognition models
 (`PP-OCRv6_tiny_det.onnx`, `PP-OCRv6_tiny_rec.onnx`) together with the
 recognition dictionary (`ppocrv6_dict.txt`). They are distributed under the
-Apache License 2.0; the full license text is reproduced in the Standard license
-texts section. The models are used only by the Windows x64/ARM64 OCR
+Apache License 2.0; the full license text is reproduced in the Standard
+license texts section. The models are used only by the Windows x64/ARM64 OCR
 backend and run locally through ONNX Runtime. Sources:
 https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_det_onnx and
 https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_rec_onnx.
