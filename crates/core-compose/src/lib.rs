@@ -511,7 +511,7 @@ fn paint_border_outside(
     }
 }
 
-const EDGE_FEATHER_WIDTH: f32 = 1.0;
+const EDGE_FEATHER_WIDTH: f32 = 2.0;
 
 fn rounded_distance_point(point_x: f32, point_y: f32, width: f32, height: f32, radius: f32) -> f32 {
     let radius = radius.max(0.0).min(width.min(height) / 2.0);
@@ -761,12 +761,19 @@ mod tests {
         let width = 20.0;
         let height = 20.0;
         let radius = 5.0;
-        let outside = feathered_coverage(10.0, -0.25, width, height, radius);
-        let inside = feathered_coverage(10.0, 0.25, width, height, radius);
+        let feather = EDGE_FEATHER_WIDTH;
+        let outside = feathered_coverage(10.0, -feather * 0.25, width, height, radius);
+        let inside = feathered_coverage(10.0, feather * 0.25, width, height, radius);
         assert!(outside > 0.0 && outside < 0.5);
         assert!(inside > 0.5 && inside < 1.0);
-        assert_eq!(feathered_coverage(10.0, -0.75, width, height, radius), 0.0);
-        assert_eq!(feathered_coverage(10.0, 0.75, width, height, radius), 1.0);
+        assert_eq!(
+            feathered_coverage(10.0, -feather * 1.25, width, height, radius),
+            0.0
+        );
+        assert_eq!(
+            feathered_coverage(10.0, feather * 1.25, width, height, radius),
+            1.0
+        );
     }
 
     #[test]

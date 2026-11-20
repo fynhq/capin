@@ -136,18 +136,8 @@ fn window_canvas(
 }
 
 #[cfg(target_os = "macos")]
-fn system_border(scale: f32) -> Option<Border> {
-    let width = (scale.max(0.1)).round().max(1.0) as u32;
-    let light = platform_window::system_uses_light_theme().unwrap_or(true);
-    Some(Border {
-        width,
-        color: if light {
-            [0x00, 0x00, 0x00, 0x28]
-        } else {
-            [0xFF, 0xFF, 0xFF, 0x1E]
-        },
-        outside: false,
-    })
+fn system_border(_scale: f32) -> Option<Border> {
+    None
 }
 
 #[cfg(target_os = "windows")]
@@ -211,9 +201,9 @@ mod tests {
         assert!(canvas.shadow.is_some());
         assert!(canvas.edge_bleed);
         assert!(canvas.edge_feather);
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(target_os = "windows")]
         assert!(canvas.border.is_some());
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(target_os = "windows"))]
         assert!(canvas.border.is_none());
     }
 }
