@@ -76,6 +76,11 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+      - name: Restore the annotated tag
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: git fetch --no-tags --force origin "+refs/tags/$TAG:refs/tags/$TAG"
       - name: Read release metadata
         id: meta
         shell: bash
@@ -162,7 +167,9 @@ jobs:
             fi
             gh release upload "$TAG" release-assets/* --clobber
           else
-            args=( "$TAG" --title "capin v$VERSION" --draft --verify-tag --notes-from-tag )
+            git tag -l --format='%(contents)' "$TAG" > release-notes.md
+            test -s release-notes.md
+            args=( "$TAG" --title "capin v$VERSION" --draft --verify-tag --notes-file release-notes.md )
             if [ "$PRERELEASE" = "true" ]; then
               args+=(--prerelease)
             fi
