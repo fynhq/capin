@@ -404,7 +404,7 @@ pub fn display_backing_scale(raw: u64) -> Option<f32> {
 }
 
 pub(super) fn display_pixel_size(id: u32) -> Option<(usize, usize)> {
-    let scale = screen_backing_scale(id)?;
+    let scale = f64::from(display_backing_scale(u64::from(id))?);
     let point_bounds = CGDisplay::new(id).bounds();
     let width = (point_bounds.size.width * scale).round().max(1.0) as usize;
     let height = (point_bounds.size.height * scale).round().max(1.0) as usize;
