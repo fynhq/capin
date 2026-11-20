@@ -76,12 +76,17 @@ fn compose_window_capture_measured(
         fallback_radius
     };
     let native_shadow = platform_window::window_capture_includes_native_shadow();
+    #[cfg(target_os = "macos")]
+    let edge_feather = !native_shadow;
+    #[cfg(not(target_os = "macos"))]
+    let edge_feather = false;
     let canvas = window_canvas(
         &settings,
         scale,
         corner_radius,
         native_shadow,
         edge_bleed && !native_shadow,
+        edge_feather,
     );
 
     match compose_window(&frame, &canvas) {
@@ -99,6 +104,7 @@ fn window_canvas(
     corner_radius: u32,
     native_shadow: bool,
     edge_bleed: bool,
+    edge_feather: bool,
 ) -> WindowCanvas {
     let padding = (settings.window_padding as f32 * scale)
         .round()
@@ -111,6 +117,7 @@ fn window_canvas(
             background: background(settings),
             border: None,
             edge_bleed: false,
+            edge_feather: false,
         };
     }
     WindowCanvas {
@@ -124,6 +131,7 @@ fn window_canvas(
         background: background(settings),
         border: system_border(scale),
         edge_bleed,
+        edge_feather,
     }
 }
 
@@ -186,21 +194,23 @@ mod tests {
 
     #[test]
     fn native_window_shadow_keeps_the_native_frame_intact() {
-        let canvas = window_canvas(&AppSettings::default(), 2.0, 20, true, true);
+        let canvas = window_canvas(&AppSettings::default(), 2.0, 20, true, true, true);
         assert_eq!(canvas.padding, 48);
         assert_eq!(canvas.corner_radius, 0);
         assert!(canvas.shadow.is_none());
         assert!(canvas.border.is_none());
         assert!(!canvas.edge_bleed);
+        assert!(!canvas.edge_feather);
     }
 
     #[test]
     fn composed_window_shadow_adds_effects_when_native_is_absent() {
-        let canvas = window_canvas(&AppSettings::default(), 2.0, 20, false, true);
+        let canvas = window_canvas(&AppSettings::default(), 2.0, 20, false, true, true);
         assert_eq!(canvas.padding, 48);
         assert_eq!(canvas.corner_radius, 20);
         assert!(canvas.shadow.is_some());
         assert!(canvas.edge_bleed);
+        assert!(canvas.edge_feather);
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         assert!(canvas.border.is_some());
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]

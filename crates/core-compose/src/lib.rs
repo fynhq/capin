@@ -43,6 +43,7 @@ pub struct WindowCanvas {
     pub background: Background,
     pub border: Option<Border>,
     pub edge_bleed: bool,
+    pub edge_feather: bool,
 }
 
 impl Default for WindowCanvas {
@@ -54,6 +55,7 @@ impl Default for WindowCanvas {
             background: Background::Transparent,
             border: None,
             edge_bleed: false,
+            edge_feather: false,
         }
     }
 }
@@ -161,6 +163,7 @@ pub fn compose_window(
         window,
         canvas.corner_radius,
         canvas.edge_bleed,
+        canvas.edge_feather,
     );
     if let Some(border) = &canvas.border {
         paint_border(
@@ -170,6 +173,7 @@ pub fn compose_window(
             window,
             canvas.corner_radius,
             border,
+            canvas.edge_feather,
         );
     }
 
@@ -262,6 +266,7 @@ fn paint_window(
     window: &RgbaFrame,
     corner_radius: u32,
     edge_bleed: bool,
+    edge_feather: bool,
 ) {
     let width = window.width();
     let height = window.height();
@@ -274,7 +279,17 @@ fn paint_window(
             let Some(source) = row.get(source_offset..source_offset + 4) else {
                 continue;
             };
-            let coverage = rounded_coverage(x, y, width, height, corner_radius);
+            let coverage = if edge_feather {
+                feathered_coverage(
+                    x as f32 + 0.5,
+                    y as f32 + 0.5,
+                    width as f32,
+                    height as f32,
+                    corner_radius as f32,
+                )
+            } else {
+                rounded_coverage(x, y, width, height, corner_radius)
+            };
             if coverage <= 0.0 {
                 continue;
             }
@@ -336,10 +351,7 @@ fn bleeded_color(
         return fallback;
     }
 
-    let qx = (point_x - half_width).abs() - (half_width - radius);
-    let qy = (point_y - half_height).abs() - (half_height - radius);
-    let distance =
-        (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0) - radius;
+    let distance = rounded_distance_point(point_x, point_y, width as f32, height as f32, radius);
     if distance < -EDGE_BLEED_BAND {
         return fallback;
     }
@@ -370,6 +382,7 @@ fn paint_border(
     window: &RgbaFrame,
     corner_radius: u32,
     border: &Border,
+    edge_feather: bool,
 ) {
     if border.outside {
         paint_border_outside(pixels, canvas_width, padding, window, corner_radius, border);
@@ -391,7 +404,17 @@ fn paint_border(
 
     for y in 0..window_height {
         for x in 0..window_width {
-            let outer = rounded_coverage(x, y, window_width, window_height, corner_radius);
+            let outer = if edge_feather {
+                feathered_coverage(
+                    x as f32 + 0.5,
+                    y as f32 + 0.5,
+                    window_width as f32,
+                    window_height as f32,
+                    corner_radius as f32,
+                )
+            } else {
+                rounded_coverage(x, y, window_width, window_height, corner_radius)
+            };
             if outer <= 0.0 {
                 continue;
             }
@@ -486,6 +509,26 @@ fn paint_border_outside(
             );
         }
     }
+}
+
+const EDGE_FEATHER_WIDTH: f32 = 1.0;
+
+fn rounded_distance_point(point_x: f32, point_y: f32, width: f32, height: f32, radius: f32) -> f32 {
+    let radius = radius.max(0.0).min(width.min(height) / 2.0);
+    let half_width = width / 2.0;
+    let half_height = height / 2.0;
+    let qx = (point_x - half_width).abs() - (half_width - radius);
+    let qy = (point_y - half_height).abs() - (half_height - radius);
+    (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0) - radius
+}
+
+fn feathered_coverage(point_x: f32, point_y: f32, width: f32, height: f32, radius: f32) -> f32 {
+    if width <= 0.0 || height <= 0.0 {
+        return 0.0;
+    }
+    let distance = rounded_distance_point(point_x, point_y, width, height, radius);
+    let t = (0.5 - distance / EDGE_FEATHER_WIDTH).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn rounded_coverage(x: u32, y: u32, width: u32, height: u32, radius: u32) -> f32 {
@@ -648,6 +691,7 @@ mod tests {
             background,
             border: None,
             edge_bleed: false,
+            edge_feather: false,
         }
     }
 
@@ -704,11 +748,25 @@ mod tests {
                 outside: true,
             }),
             edge_bleed: false,
+            edge_feather: false,
         };
         let output = compose_window(&window, &options).unwrap();
         assert_eq!(output.pixel(1, 6).unwrap(), [0, 255, 0, 255]);
         assert_eq!(output.pixel(2, 6).unwrap(), [200, 50, 50, 255]);
         assert_eq!(output.pixel(13, 6).unwrap()[3], 0);
+    }
+
+    #[test]
+    fn edge_feather_softens_the_rounded_boundary() {
+        let width = 20.0;
+        let height = 20.0;
+        let radius = 5.0;
+        let outside = feathered_coverage(10.0, -0.25, width, height, radius);
+        let inside = feathered_coverage(10.0, 0.25, width, height, radius);
+        assert!(outside > 0.0 && outside < 0.5);
+        assert!(inside > 0.5 && inside < 1.0);
+        assert_eq!(feathered_coverage(10.0, -0.75, width, height, radius), 0.0);
+        assert_eq!(feathered_coverage(10.0, 0.75, width, height, radius), 1.0);
     }
 
     #[test]
@@ -721,6 +779,7 @@ mod tests {
             background: Background::Transparent,
             border: None,
             edge_bleed: false,
+            edge_feather: false,
         };
         let output = compose_window(&window, &options).unwrap();
         let mut levels = std::collections::BTreeSet::new();
@@ -762,6 +821,7 @@ mod tests {
             background: Background::Transparent,
             border: None,
             edge_bleed: false,
+            edge_feather: false,
         };
         let plain = compose_window(&window, &options).unwrap();
         options.edge_bleed = true;
@@ -802,6 +862,7 @@ mod tests {
             background: Background::Transparent,
             border: None,
             edge_bleed: false,
+            edge_feather: false,
         };
         let output = compose_window(&window, &options).unwrap();
 
@@ -822,6 +883,7 @@ mod tests {
                 outside: false,
             }),
             edge_bleed: false,
+            edge_feather: false,
         };
         let output = compose_window(&window, &options).unwrap();
 
@@ -843,6 +905,7 @@ mod tests {
                 outside: false,
             }),
             edge_bleed: false,
+            edge_feather: false,
         };
         let output = compose_window(&window, &options).unwrap();
 
@@ -867,6 +930,7 @@ mod tests {
             background: Background::Solid([10, 20, 30, 255]),
             border: None,
             edge_bleed: false,
+            edge_feather: false,
         };
         let output = compose_window(&window, &options).unwrap();
 
@@ -890,6 +954,7 @@ mod tests {
             background: Background::Solid([10, 20, 30, 255]),
             border: None,
             edge_bleed: false,
+            edge_feather: false,
         };
         let output = compose_window(&window, &options).unwrap();
 
