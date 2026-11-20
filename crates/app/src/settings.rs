@@ -13,7 +13,7 @@ use crate::i18n::{Language, t};
 use crate::icons;
 use crate::logging::{log_error, log_info, log_warn};
 use crate::settings_state::{
-    self, AppSettings, RepeatPinBehavior, WINDOW_PADDINGS, WindowBackground,
+    self, AppSettings, DoubleClickAction, RepeatPinBehavior, WINDOW_PADDINGS, WindowBackground,
 };
 use crate::storage;
 
@@ -319,6 +319,7 @@ enum SelectKind {
     WindowBackground,
     WindowPadding,
     RepeatPin,
+    DoubleClick,
 }
 
 #[derive(Clone, Copy)]
@@ -1458,6 +1459,7 @@ impl SettingsView {
                                 refresh_pin: false,
                             },
                         ),
+                        self.double_click_row(theme, cx),
                         self.save_location_row(SaveTarget::Screenshots, theme, cx),
                     ],
                 ),
@@ -1651,6 +1653,32 @@ impl SettingsView {
         )
     }
 
+    fn double_click_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let language = self.settings().language;
+        let current = t(
+            language,
+            double_click_key(self.settings().capture_double_click),
+        );
+        a11y_row(
+            "settings-row-double-click",
+            t(language, "settings.double_click"),
+            row_shell()
+                .child(row_label_with_icon(
+                    theme,
+                    icons::CURSOR,
+                    t(language, "settings.double_click"),
+                    t(language, "settings.double_click_desc"),
+                ))
+                .child(self.select_trigger(
+                    theme,
+                    current,
+                    "settings-double-click",
+                    SelectKind::DoubleClick,
+                    cx,
+                )),
+        )
+    }
+
     fn select_entries(&self, kind: SelectKind) -> Vec<(String, u32, bool)> {
         let language = self.settings().language;
         let mut entries: Vec<(String, u32, bool)> = Vec::new();
@@ -1682,6 +1710,15 @@ impl SettingsView {
                     ));
                 }
             }
+            SelectKind::DoubleClick => {
+                for (index, action) in DoubleClickAction::ALL.into_iter().enumerate() {
+                    entries.push((
+                        t(language, double_click_key(action)).to_owned(),
+                        index as u32,
+                        self.settings().capture_double_click == action,
+                    ));
+                }
+            }
         }
         entries
     }
@@ -1700,6 +1737,10 @@ impl SettingsView {
             SelectKind::RepeatPin => {
                 let behavior = RepeatPinBehavior::ALL[value as usize];
                 settings_state::update(|settings| settings.repeat_pin = behavior);
+            }
+            SelectKind::DoubleClick => {
+                let action = DoubleClickAction::ALL[value as usize];
+                settings_state::update(|settings| settings.capture_double_click = action);
             }
         }
         self.status = None;
@@ -2607,7 +2648,7 @@ impl SettingsView {
                             theme,
                             t(language, "shortcuts.copy_selection"),
                             "",
-                            t(language, "shortcuts.value.enter_or_double_click"),
+                            "Enter",
                             Some(icons::COPY),
                         ),
                         info_row(
@@ -3381,6 +3422,14 @@ fn repeat_pin_key(behavior: RepeatPinBehavior) -> &'static str {
     match behavior {
         RepeatPinBehavior::RestoreHistory => "settings.repeat_pin_history",
         RepeatPinBehavior::FlashCurrent => "settings.repeat_pin_flash",
+    }
+}
+
+fn double_click_key(action: DoubleClickAction) -> &'static str {
+    match action {
+        DoubleClickAction::NoAction => "double_click.none",
+        DoubleClickAction::Copy => "double_click.copy",
+        DoubleClickAction::Pin => "double_click.pin",
     }
 }
 

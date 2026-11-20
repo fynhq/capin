@@ -146,6 +146,35 @@ impl RepeatPinBehavior {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DoubleClickAction {
+    #[default]
+    NoAction,
+    Copy,
+    Pin,
+}
+
+impl DoubleClickAction {
+    pub const ALL: [Self; 3] = [Self::NoAction, Self::Copy, Self::Pin];
+
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::NoAction => "none",
+            Self::Copy => "copy",
+            Self::Pin => "pin",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "none" => Some(Self::NoAction),
+            "copy" => Some(Self::Copy),
+            "pin" => Some(Self::Pin),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppSettings {
     pub language: Language,
@@ -162,6 +191,7 @@ pub struct AppSettings {
     pub window_background: WindowBackground,
     pub window_padding: u32,
     pub capture_cursor: bool,
+    pub capture_double_click: DoubleClickAction,
     pub region_corner_radius: u32,
     pub region_shadow: bool,
     pub annotation_color: u32,
@@ -226,6 +256,7 @@ impl Default for AppSettings {
             window_background: WindowBackground::Transparent,
             window_padding: DEFAULT_WINDOW_PADDING,
             capture_cursor: false,
+            capture_double_click: DoubleClickAction::NoAction,
             region_corner_radius: 0,
             region_shadow: false,
             annotation_color: DEFAULT_ANNOTATION_COLOR,
@@ -347,6 +378,15 @@ static FIELDS: &[Field] = &[
         key: "capture_cursor",
         write: |settings, out| write_bool(out, settings.capture_cursor),
         read: |settings, value| settings.capture_cursor = read_bool_not_false(value),
+    },
+    Field {
+        key: "capture_double_click",
+        write: |settings, out| out.push_str(settings.capture_double_click.code()),
+        read: |settings, value| {
+            if let Some(action) = DoubleClickAction::from_code(value) {
+                settings.capture_double_click = action;
+            }
+        },
     },
     Field {
         key: "region_corner_radius",
@@ -1003,6 +1043,37 @@ mod tests {
 
         let invalid = parse("region_corner_radius=10\n");
         assert_eq!(invalid.region_corner_radius, 0);
+    }
+
+    #[test]
+    fn capture_double_click_defaults_and_round_trips() {
+        assert_eq!(
+            AppSettings::default().capture_double_click,
+            DoubleClickAction::NoAction
+        );
+
+        assert_eq!(
+            parse("capture_double_click=copy\n").capture_double_click,
+            DoubleClickAction::Copy
+        );
+        assert_eq!(
+            parse("capture_double_click=pin\n").capture_double_click,
+            DoubleClickAction::Pin
+        );
+        assert_eq!(
+            parse("capture_double_click=bogus\n").capture_double_click,
+            DoubleClickAction::NoAction
+        );
+        assert_eq!(
+            parse("capture_double_click=none\n").capture_double_click,
+            DoubleClickAction::NoAction
+        );
+
+        let settings = AppSettings {
+            capture_double_click: DoubleClickAction::Pin,
+            ..Default::default()
+        };
+        assert_eq!(parse(&serialize(&settings)), settings);
     }
 
     #[test]

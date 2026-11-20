@@ -55,7 +55,7 @@ tccutil reset ScreenCapture io.github.fynhq.capin
 ## 使用
 
 - **开始截图**：单击托盘图标、托盘菜单「开始截图」或全局热键。悬停选窗口/元素，滚轮调整层级，拖拽选区域，桌面空白单击截整屏。按住 Ctrl 进入窗口模式，单击直接标注；Esc、Cmd/Ctrl+W/Q 或再次按截图快捷键取消，右键确认标注、不退出。macOS 元素识别需在「系统设置 → 隐私与安全性 → 辅助功能」授权 Capin。
-- **选区与标注**：按 `R` 切换自由/1:1/4:3/16:9；放大镜显示像素颜色与尺寸，`Shift` 切换十六进制/RGB，`C` 复制色值。框选后在 overlay 内直接标注；区域截图在未选中对象且未使用标注工具时可拖选区边缘调整导出范围，框外标注保留但不显示；双击或 Enter 复制；空格隐藏工具栏，F1 快捷键，F5 只刷新底图。
+- **选区与标注**：按 `R` 切换自由/1:1/4:3/16:9；放大镜显示像素颜色与尺寸，`Shift` 切换十六进制/RGB，`C` 复制色值。框选后在 overlay 内直接标注；区域截图在未选中对象且未使用标注工具时可拖选区边缘调整导出范围，框外标注保留但不显示；双击动作可在设置中选择（默认无动作），Enter 复制；空格隐藏工具栏，F1 快捷键，F5 只刷新底图。
 - **编辑器**：复制/保存用 `Ctrl/Cmd+C`、`Ctrl/Cmd+S`；选中对象后可移动、缩放、复制粘贴、删除、改属性；右键或 Esc 退出当前工具。贴图可裁剪、旋转、翻转；长截图可裁剪，并用 `Ctrl/Cmd+滚轮` 缩放、`Space+拖动` 平移、`Ctrl/Cmd+0/1` 适应/100%。
 - **贴图**：置顶、透明度、缩放、旋转、多贴、穿透；空白或边缘拖动，Alt 任意位置拖动；Esc 或中键关闭；未划选文字时 `Ctrl/Cmd+C` 复制整图、`Ctrl/Cmd+V` 粘贴为新贴图、`Ctrl/Cmd+S` 保存图片，F1 显示快捷键帮助；右键菜单含旋转、标注、设置、穿透与关闭；二维码悬停可打开或复制；按贴图键沿截图与剪贴板图片的同一时间线回看最近 7 天历史。
 - **录屏**：框选或悬停窗口后点工具栏录屏；3 秒倒计时，F9 暂停/继续，F10 结束；始终录入光标，演示光标可在设置开启并选色；停止后保存单个 MP4，可打开文件夹。
@@ -131,7 +131,7 @@ tccutil reset ScreenCapture io.github.fynhq.capin
 ## Usage
 
 - **Start a capture** — tray, menu or hotkey; hover to pick a window/element, scroll to change level, drag a region, or click empty desktop for the full display. Hold Ctrl for window-only mode and click to annotate; Esc/Cmd/Ctrl+W/Q cancels; right-click confirms annotation without exiting. macOS element detection needs Accessibility permission.
-- **Selection and annotation** — press `R` to cycle ratios; `Shift` switches the color format and `C` copies the value; annotate in the overlay. Region captures expose edge/corner handles to resize the export frame after annotating; outside objects stay but are hidden. Double-click or Enter copies; Space hides the toolbar, F1 shows shortcuts, F5 refreshes only the base image.
+- **Selection and annotation** — press `R` to cycle ratios; `Shift` switches the color format and `C` copies the value; annotate in the overlay. Region captures expose edge/corner handles to resize the export frame after annotating; outside objects stay but are hidden. Enter copies; the double-click action is configurable in Settings (No action by default); Space hides the toolbar, F1 shows shortcuts, F5 refreshes only the base image.
 - **Editor** — `Ctrl/Cmd+C/S` copies/saves; objects can be moved, resized, copied/pasted, deleted and restyled; right-click or Esc leaves the current tool. Pins support crop/rotate/flip; scrolling captures support crop and `Ctrl/Cmd+wheel` zoom, `Space+drag` pan, `Ctrl/Cmd+0/1` fit/100%.
 - **Pins** — always on top, opacity, zoom, rotation, multiple pins, click-through; drag from blank areas/edges or Alt+drag anywhere; Esc/middle-click closes; `Ctrl/Cmd+C/V/S` copies, pastes a new pin, and saves the whole pin when no text is selected; F1 shows shortcuts; the right-click menu offers rotate, edit, settings, click-through and close; hovering a recognized QR code opens or copies it; the pin hotkey walks one timeline of screenshots and copied images from the last 7 days.
 - **Recording** — select a region or hover a window and click record; 3-second countdown, F9 pause/resume, F10 stop; the cursor is always captured and the demo highlight can be enabled in settings; stop saves one MP4 and can open its folder.

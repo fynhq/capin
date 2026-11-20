@@ -25,7 +25,7 @@ use crate::selection_geometry::{
     ResizeHandle as RegionHandle, corner_handle_offset, edge_resize_handle, handle_positions,
     region_handle_cursor, resize_rect,
 };
-use crate::settings_state::AnnotationColorTool;
+use crate::settings_state::{AnnotationColorTool, DoubleClickAction};
 use crate::ui::tooltip_view;
 use crate::{i18n::t, icons, image_util, settings_state};
 
@@ -4878,7 +4878,15 @@ impl Render for EditorView {
                         && this.text_edit.is_none()
                         && this.document.hit_test(point).is_none()
                     {
-                        this.export(true, cx);
+                        if this.inline.and_then(|inline| inline.capture).is_some() {
+                            match settings_state::get().capture_double_click {
+                                DoubleClickAction::NoAction => {}
+                                DoubleClickAction::Copy => this.export(true, cx),
+                                DoubleClickAction::Pin => this.pin(cx),
+                            }
+                        } else {
+                            this.export(true, cx);
+                        }
                         return;
                     }
                     if this.tool == Tool::Arrow && this.arrow_polyline {

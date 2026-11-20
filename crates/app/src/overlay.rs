@@ -30,7 +30,7 @@ use crate::{
         MIN_REGION_SIZE, ResizeHandle, corner_handle_offset, edge_resize_handle, handle_positions,
         region_handle_cursor, resize_rect,
     },
-    settings_state,
+    settings_state::{self, DoubleClickAction},
     ui::tooltip_view,
 };
 
@@ -2811,7 +2811,11 @@ impl OverlayView {
                 && local.y <= selected.rect.origin.y + selected.rect.size.height as i32
             {
                 if event.click_count >= 2 {
-                    self.copy_selected(cx);
+                    match settings_state::get().capture_double_click {
+                        DoubleClickAction::NoAction => {}
+                        DoubleClickAction::Copy => self.copy_selected(cx),
+                        DoubleClickAction::Pin => self.pin_selected(cx),
+                    }
                     return;
                 }
                 if let Some(selected) = self.selected.as_mut() {
