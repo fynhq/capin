@@ -45,6 +45,7 @@ impl RegionEffects {
             shadow,
             background: Background::Transparent,
             border: None,
+            edge_bleed: false,
         };
 
         match compose_window(&frame, &canvas) {

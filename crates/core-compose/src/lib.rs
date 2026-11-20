@@ -42,6 +42,7 @@ pub struct WindowCanvas {
     pub shadow: Option<Shadow>,
     pub background: Background,
     pub border: Option<Border>,
+    pub edge_bleed: bool,
 }
 
 impl Default for WindowCanvas {
@@ -52,6 +53,7 @@ impl Default for WindowCanvas {
             shadow: Some(Shadow::default()),
             background: Background::Transparent,
             border: None,
+            edge_bleed: false,
         }
     }
 }
@@ -152,7 +154,14 @@ pub fn compose_window(
         );
     }
 
-    paint_window(&mut pixels, width, padding, window, canvas.corner_radius);
+    paint_window(
+        &mut pixels,
+        width,
+        padding,
+        window,
+        canvas.corner_radius,
+        canvas.edge_bleed,
+    );
     if let Some(border) = &canvas.border {
         paint_border(
             &mut pixels,
@@ -252,6 +261,7 @@ fn paint_window(
     padding: u32,
     window: &RgbaFrame,
     corner_radius: u32,
+    edge_bleed: bool,
 ) {
     let width = window.width();
     let height = window.height();
@@ -272,19 +282,85 @@ fn paint_window(
             if alpha == 0 {
                 continue;
             }
+            let color = if edge_bleed {
+                bleeded_color(
+                    window,
+                    x,
+                    y,
+                    width,
+                    height,
+                    corner_radius,
+                    [source[0], source[1], source[2]],
+                )
+            } else {
+                [source[0], source[1], source[2]]
+            };
             let target_x = padding + x;
             let target_y = padding + y;
             let target_offset = (target_y as usize * canvas_width as usize + target_x as usize) * 4;
             if alpha == 255 {
-                pixels[target_offset..target_offset + 4].copy_from_slice(source);
+                pixels[target_offset..target_offset + 4]
+                    .copy_from_slice(&[color[0], color[1], color[2], 255]);
             } else {
                 blend_pixel(
                     &mut pixels[target_offset..target_offset + 4],
-                    [source[0], source[1], source[2], alpha],
+                    [color[0], color[1], color[2], alpha],
                 );
             }
         }
     }
+}
+
+const EDGE_BLEED_BAND: f32 = 2.0;
+
+fn bleeded_color(
+    window: &RgbaFrame,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    corner_radius: u32,
+    fallback: [u8; 3],
+) -> [u8; 3] {
+    if corner_radius == 0 || width < 3 || height < 3 {
+        return fallback;
+    }
+    let radius = corner_radius.min(width.min(height) / 2) as f32;
+    let point_x = x as f32 + 0.5;
+    let point_y = y as f32 + 0.5;
+    let half_width = width as f32 / 2.0;
+    let half_height = height as f32 / 2.0;
+    let in_corner = (point_x < radius || point_x > width as f32 - radius)
+        && (point_y < radius || point_y > height as f32 - radius);
+    if !in_corner {
+        return fallback;
+    }
+
+    let qx = (point_x - half_width).abs() - (half_width - radius);
+    let qy = (point_y - half_height).abs() - (half_height - radius);
+    let distance =
+        (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0) - radius;
+    if distance < -EDGE_BLEED_BAND {
+        return fallback;
+    }
+
+    let step = EDGE_BLEED_BAND + 1.0;
+    let sample_x = if point_x < half_width {
+        point_x + step
+    } else {
+        point_x - step
+    };
+    let sample_y = if point_y < half_height {
+        point_y + step
+    } else {
+        point_y - step
+    };
+    let sample_x = (sample_x.round() as i64).clamp(0, i64::from(width) - 1) as u32;
+    let sample_y = (sample_y.round() as i64).clamp(0, i64::from(height) - 1) as u32;
+    window
+        .pixel(sample_x, sample_y)
+        .map(|sample| [sample[0], sample[1], sample[2]])
+        .unwrap_or(fallback)
 }
 
 fn paint_border(
@@ -571,6 +647,7 @@ mod tests {
             shadow: None,
             background,
             border: None,
+            edge_bleed: false,
         }
     }
 
@@ -626,6 +703,7 @@ mod tests {
                 color: [0, 255, 0, 255],
                 outside: true,
             }),
+            edge_bleed: false,
         };
         let output = compose_window(&window, &options).unwrap();
         assert_eq!(output.pixel(1, 6).unwrap(), [0, 255, 0, 255]);
@@ -642,6 +720,7 @@ mod tests {
             shadow: None,
             background: Background::Transparent,
             border: None,
+            edge_bleed: false,
         };
         let output = compose_window(&window, &options).unwrap();
         let mut levels = std::collections::BTreeSet::new();
@@ -658,6 +737,62 @@ mod tests {
     }
 
     #[test]
+    fn edge_bleed_removes_wallpaper_color_from_rounded_corners() {
+        let width = 24;
+        let height = 24;
+        let radius = 8;
+        let mut pixels = vec![0u8; width as usize * height as usize * 4];
+        for y in 0..height {
+            for x in 0..width {
+                let inside = rounded_coverage(x, y, width, height, radius) >= 0.99;
+                let color = if inside {
+                    [20, 20, 20, 255]
+                } else {
+                    [240, 240, 240, 255]
+                };
+                let offset = (y as usize * width as usize + x as usize) * 4;
+                pixels[offset..offset + 4].copy_from_slice(&color);
+            }
+        }
+        let window = RgbaFrame::from_pixels(width, height, pixels).unwrap();
+        let mut options = WindowCanvas {
+            padding: 0,
+            corner_radius: radius,
+            shadow: None,
+            background: Background::Transparent,
+            border: None,
+            edge_bleed: false,
+        };
+        let plain = compose_window(&window, &options).unwrap();
+        options.edge_bleed = true;
+        let bled = compose_window(&window, &options).unwrap();
+
+        let mut checked = false;
+        for y in 0..radius {
+            for x in 0..radius {
+                let source = window.pixel(x, y).unwrap();
+                let plain = plain.pixel(x, y).unwrap();
+                let bled = bled.pixel(x, y).unwrap();
+                if source[0] == 240 && plain[3] > 0 && plain[3] < 255 {
+                    checked = true;
+                    assert!(
+                        plain[0] > 200,
+                        "plain composition should keep the wallpaper fringe: {plain:?}"
+                    );
+                    assert!(
+                        bled[0] < 80,
+                        "edge bleed should use the window color: {bled:?}"
+                    );
+                }
+            }
+        }
+        assert!(
+            checked,
+            "the corner test needs a partially covered edge pixel"
+        );
+    }
+
+    #[test]
     fn zero_radius_keeps_square_corners() {
         let window = solid_frame(6, 6, [200, 50, 50, 255]);
         let options = WindowCanvas {
@@ -666,6 +801,7 @@ mod tests {
             shadow: None,
             background: Background::Transparent,
             border: None,
+            edge_bleed: false,
         };
         let output = compose_window(&window, &options).unwrap();
 
@@ -685,6 +821,7 @@ mod tests {
                 color: [0, 255, 0, 255],
                 outside: false,
             }),
+            edge_bleed: false,
         };
         let output = compose_window(&window, &options).unwrap();
 
@@ -705,6 +842,7 @@ mod tests {
                 color: [0, 0, 0, 255],
                 outside: false,
             }),
+            edge_bleed: false,
         };
         let output = compose_window(&window, &options).unwrap();
 
@@ -728,6 +866,7 @@ mod tests {
             }),
             background: Background::Solid([10, 20, 30, 255]),
             border: None,
+            edge_bleed: false,
         };
         let output = compose_window(&window, &options).unwrap();
 
@@ -750,6 +889,7 @@ mod tests {
             }),
             background: Background::Solid([10, 20, 30, 255]),
             border: None,
+            edge_bleed: false,
         };
         let output = compose_window(&window, &options).unwrap();
 
