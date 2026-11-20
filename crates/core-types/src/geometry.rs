@@ -1,5 +1,7 @@
 use crate::MonitorId;
 
+pub const ARC_HANDLE: f32 = 0.552_284_8;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct PhysicalPoint {
     pub x: i32,

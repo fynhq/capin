@@ -116,33 +116,7 @@ pub fn write(level: Level, target: &str, message: &str) {
 }
 
 pub fn log_directory() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        let base = std::env::var_os("LOCALAPPDATA")
-            .or_else(|| std::env::var_os("APPDATA"))
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        base.join("Capin").join("logs")
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
-            .join("Library")
-            .join("Logs")
-            .join("Capin")
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
-            .join(".local")
-            .join("state")
-            .join("Capin")
-            .join("logs")
-    }
+    crate::paths::logs_dir()
 }
 
 pub fn recent_lines(limit: usize) -> Vec<String> {
@@ -268,7 +242,13 @@ macro_rules! log_info {
     };
 }
 
-pub(crate) use {log_error, log_info, log_warn};
+macro_rules! log_debug {
+    ($target:expr, $($arg:tt)*) => {
+        $crate::logging::write($crate::logging::Level::Debug, $target, &format!($($arg)*))
+    };
+}
+
+pub(crate) use {log_debug, log_error, log_info, log_warn};
 
 #[cfg(test)]
 mod tests {
