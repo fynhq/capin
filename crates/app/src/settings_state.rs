@@ -629,12 +629,11 @@ fn parse_u32_range(value: &str, min: u32, max: u32) -> Option<u32> {
 }
 
 static SETTINGS: OnceLock<Mutex<Arc<AppSettings>>> = OnceLock::new();
-static LAST_PERSISTED: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static SAVE_TX: OnceLock<Option<Sender<SaveRequest>>> = OnceLock::new();
 
 enum SaveRequest {
     Text(String),
-    Flush(Sender<()>),
+    Flush(Sender<bool>),
 }
 
 pub fn get() -> Arc<AppSettings> {
@@ -670,7 +669,7 @@ pub fn apply_startup_autostart() {
 }
 
 fn load() -> Option<AppSettings> {
-    let text = std::fs::read_to_string(config_path()?).ok()?;
+    let text = std::fs::read_to_string(crate::paths::config_path()?).ok()?;
     Some(parse(&text))
 }
 
@@ -769,19 +768,48 @@ fn parse_rgba(value: &str) -> Option<u32> {
 
 fn persist(settings: &AppSettings) {
     let text = serialize(settings);
-    let last = LAST_PERSISTED.get_or_init(|| Mutex::new(None));
-    let mut last = last.lock().unwrap_or_else(|poison| poison.into_inner());
-    if last.as_deref() == Some(text.as_str()) {
-        return;
-    }
     if let Some(worker) = save_worker()
         && worker.send(SaveRequest::Text(text.clone())).is_ok()
     {
-        *last = Some(text);
         return;
     }
-    if write_settings(&text).is_ok() {
-        *last = Some(text);
+    if let Err(error) = write_settings(&text) {
+        log_error!("settings", "failed to save settings synchronously: {error}");
+    }
+}
+
+fn flush_pending(
+    reply: Option<Sender<bool>>,
+    pending: &mut Option<String>,
+    written: &mut Option<String>,
+    write: &mut impl FnMut(&str) -> std::io::Result<()>,
+) {
+    let Some(text) = pending.as_ref() else {
+        if let Some(reply) = reply {
+            let _ = reply.send(true);
+        }
+        return;
+    };
+    if written.as_deref() == Some(text.as_str()) {
+        *pending = None;
+        if let Some(reply) = reply {
+            let _ = reply.send(true);
+        }
+        return;
+    }
+    match write(text) {
+        Ok(()) => {
+            *written = Some(text.clone());
+            *pending = None;
+            if let Some(reply) = reply {
+                let _ = reply.send(true);
+            }
+        }
+        Err(_) => {
+            if let Some(reply) = reply {
+                let _ = reply.send(false);
+            }
+        }
     }
 }
 
@@ -793,24 +821,25 @@ fn save_worker() -> Option<&'static Sender<SaveRequest>> {
                 .name("capin-settings".to_owned())
                 .spawn(move || {
                     let mut pending: Option<String> = None;
+                    let mut written: Option<String> = None;
+                    let mut write = write_settings;
                     loop {
                         match receiver.recv_timeout(Duration::from_millis(300)) {
-                            Ok(SaveRequest::Text(text)) => pending = Some(text),
-                            Ok(SaveRequest::Flush(reply)) => {
-                                if let Some(text) = pending.take() {
-                                    let _ = write_settings(&text);
+                            Ok(SaveRequest::Text(text)) => {
+                                if written.as_deref() == Some(text.as_str()) {
+                                    pending = None;
+                                } else if pending.as_deref() != Some(text.as_str()) {
+                                    pending = Some(text);
                                 }
-                                let _ = reply.send(());
+                            }
+                            Ok(SaveRequest::Flush(reply)) => {
+                                flush_pending(Some(reply), &mut pending, &mut written, &mut write);
                             }
                             Err(mpsc::RecvTimeoutError::Timeout) => {
-                                if let Some(text) = pending.take() {
-                                    let _ = write_settings(&text);
-                                }
+                                flush_pending(None, &mut pending, &mut written, &mut write);
                             }
                             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                                if let Some(text) = pending.take() {
-                                    let _ = write_settings(&text);
-                                }
+                                flush_pending(None, &mut pending, &mut written, &mut write);
                                 break;
                             }
                         }
@@ -828,7 +857,7 @@ fn save_worker() -> Option<&'static Sender<SaveRequest>> {
 }
 
 fn write_settings(text: &str) -> std::io::Result<()> {
-    let Some(path) = config_path() else {
+    let Some(path) = crate::paths::config_path() else {
         return Ok(());
     };
     if let Err(error) = crate::persist::write_atomic(&path, text.as_bytes()) {
@@ -843,8 +872,10 @@ pub fn flush() {
         return;
     };
     let (reply, response) = mpsc::channel();
-    if worker.send(SaveRequest::Flush(reply)).is_ok() {
-        let _ = response.recv_timeout(Duration::from_secs(2));
+    if worker.send(SaveRequest::Flush(reply)).is_ok()
+        && !matches!(response.recv_timeout(Duration::from_secs(2)), Ok(true))
+    {
+        log_error!("settings", "failed to flush settings before exit");
     }
 }
 
@@ -865,32 +896,6 @@ fn serialize(settings: &AppSettings) -> String {
         );
     }
     text
-}
-
-#[cfg(target_os = "windows")]
-fn config_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|base| PathBuf::from(base).join("Capin").join("settings.conf"))
-}
-
-#[cfg(target_os = "macos")]
-fn config_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|base| {
-        PathBuf::from(base)
-            .join("Library")
-            .join("Application Support")
-            .join("Capin")
-            .join("settings.conf")
-    })
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn config_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|base| {
-        PathBuf::from(base)
-            .join(".config")
-            .join("capin")
-            .join("settings.conf")
-    })
 }
 
 #[cfg(test)]
@@ -1172,6 +1177,41 @@ mod tests {
         let mixed = parse("capture_hotkey=control+alt+KeyQ\npin_hotkey=shift+meta+KeyD\n");
         assert_eq!(mixed.capture_hotkey, "control+alt+KeyQ");
         assert_eq!(mixed.pin_hotkey, DEFAULT_PIN_HOTKEY);
+    }
+
+    #[test]
+    fn failed_flush_keeps_pending_and_succeeds_on_retry() {
+        let mut pending = Some("capture_cursor=true\n".to_owned());
+        let mut written = None;
+        let mut fail = |_: &str| Err(std::io::Error::other("disk full"));
+        let (reply, response) = mpsc::channel();
+        flush_pending(Some(reply), &mut pending, &mut written, &mut fail);
+        assert_eq!(response.recv_timeout(Duration::from_secs(1)), Ok(false));
+        assert_eq!(pending.as_deref(), Some("capture_cursor=true\n"));
+        assert!(written.is_none());
+
+        let mut success = |_: &str| Ok(());
+        let (reply, response) = mpsc::channel();
+        flush_pending(Some(reply), &mut pending, &mut written, &mut success);
+        assert_eq!(response.recv_timeout(Duration::from_secs(1)), Ok(true));
+        assert!(pending.is_none());
+        assert_eq!(written.as_deref(), Some("capture_cursor=true\n"));
+    }
+
+    #[test]
+    fn flushing_an_already_written_value_skips_the_writer() {
+        let mut pending = Some("capture_cursor=true\n".to_owned());
+        let mut written = pending.clone();
+        let mut writes = 0;
+        let mut write = |_: &str| {
+            writes += 1;
+            Ok(())
+        };
+        let (reply, response) = mpsc::channel();
+        flush_pending(Some(reply), &mut pending, &mut written, &mut write);
+        assert_eq!(response.recv_timeout(Duration::from_secs(1)), Ok(true));
+        assert_eq!(writes, 0);
+        assert!(pending.is_none());
     }
 
     #[cfg(target_os = "macos")]
