@@ -1,0 +1,11 @@
+# Normalize line endings: keep LF in the working tree so formatting output and
+# diffs stay stable across all supported platforms.
+* text=auto eol=lf
+
+# Binary assets stay untouched.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.icns binary
+*.onnx binary
