@@ -2,9 +2,15 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::i18n::t;
+use crate::icons;
+use crate::image_util;
+use crate::logging::{log_error, log_info, log_warn};
+use crate::settings_state;
+use crate::ui::centered_bounds;
 use core_annotate::AnnotationDocument;
 use core_types::{DpiScale, PhysicalRect, PhysicalSize, RgbaFrame};
 use gpui_kit::prelude::*;
@@ -13,26 +19,45 @@ use platform_window::{
     WindowStyle, apply as apply_window_style, disable_native_shadow, enable_native_shadow,
     hide_native_border, place_on_monitor_deferred, set_click_through, system_accent_hex,
 };
-use serde::{Deserialize, Serialize};
 
-use crate::i18n::{Language, t};
-use crate::icons;
-use crate::image_util;
-use crate::logging::{log_error, log_info, log_warn};
-use crate::settings_state;
-use crate::storage;
-use crate::ui::centered_bounds;
-
+mod gallery;
+mod manifest;
+mod menu;
+mod pin_base;
 mod pin_clipboard;
 mod pin_content;
 mod pin_display;
 mod pin_help;
 mod pin_qr;
+mod pin_view;
+mod window;
 
-use pin_clipboard::{
-    ClipboardContent, clipboard_image_signature, clipboard_text_signature, read_clipboard,
-    text_signature,
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub(crate) use gallery::pin_last;
+pub(crate) use gallery::{open_frame_at_with_hash, open_frame_with_hash};
+use gallery::{open_history_pin, open_text_pin};
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub(crate) use menu::is_pin_menu_open;
+pub(crate) use menu::{close_pin_menu, open_pin_menu};
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub(crate) use window::{click_through_count, flush_manifest, release_click_through};
+pub(crate) use window::{
+    close_pin, is_pin_window, refresh_recognition, replace_image_with_edit_state, restore,
+    set_edit_state, set_export_padding,
 };
+use window::{
+    close_pin_inner, next_pin_id, persist_rotated_image, save_manifest, save_pin_image,
+    schedule_manifest_save, set_state_click_through, update_bounds, update_bounds_without_save,
+};
+
+use manifest::PersistedPin;
+use pin_base::PinBase;
+use pin_display::{
+    clamp_to_display, fit_pin_to_display, pin_display_bounds, pin_open_display_bounds,
+    saved_display_id,
+};
+
+use pin_clipboard::{clipboard_image_signature, clipboard_text_signature, text_signature};
 use pin_content::PinContent;
 
 const MAX_RESTORED_PINS: usize = 20;
@@ -62,7 +87,6 @@ thread_local! {
     static PIN_MENU: RefCell<Option<AnyWindowHandle>> = const { RefCell::new(None) };
     static MANIFEST_REVISION: Cell<u64> = const { Cell::new(0) };
     static LAST_PIN_TRIGGER: Cell<Option<u64>> = const { Cell::new(None) };
-    static LAST_PIN_SHADOW: Cell<bool> = const { Cell::new(false) };
     static PIN_CLIPBOARD: Cell<Option<u64>> = const { Cell::new(None) };
     static PIN_CLIPBOARD_TEXT: Cell<Option<u64>> = const { Cell::new(None) };
     static PIN_WALK_GENERATION: Cell<Option<u64>> = const { Cell::new(None) };
@@ -71,7 +95,7 @@ thread_local! {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PinMenuAction {
+pub(crate) enum PinMenuAction {
     Rotate,
     Edit,
     Settings,
@@ -168,21 +192,12 @@ enum PinKind {
 
 #[derive(Clone)]
 pub(crate) struct PinEditState {
-    base: PinBase,
+    base: Arc<Mutex<PinBase>>,
     pub document: AnnotationDocument,
     pub effects: crate::effects::RegionEffects,
     pub shadow_always: bool,
     pub display_padding: u32,
     pub effects_scale: f32,
-}
-
-#[derive(Clone)]
-enum PinBase {
-    Frame(Arc<RgbaFrame>),
-    Encoded {
-        bytes: Arc<[u8]>,
-        size: PhysicalSize,
-    },
 }
 
 const PIN_BASE_KEEP_RAW_BYTES: usize = 8 * 1024 * 1024;
@@ -196,8 +211,31 @@ impl PinEditState {
         display_padding: u32,
         effects_scale: f32,
     ) -> Self {
+        let state = Arc::new(Mutex::new(PinBase::Frame(Arc::clone(&base))));
+        let raw_bytes = base.width() as usize * base.height() as usize * 4;
+        if raw_bytes > PIN_BASE_KEEP_RAW_BYTES {
+            let shared = Arc::clone(&state);
+            let size = PhysicalSize::new(base.width(), base.height());
+            std::thread::Builder::new()
+                .name("capin-pin-base".to_owned())
+                .spawn(move || {
+                    let Ok(bytes) = crate::image_util::encode_png(&base) else {
+                        return;
+                    };
+                    if bytes.len() >= raw_bytes {
+                        return;
+                    }
+                    if let Ok(mut state) = shared.lock() {
+                        *state = PinBase::Encoded {
+                            bytes: bytes.into(),
+                            size,
+                        };
+                    }
+                })
+                .ok();
+        }
         Self {
-            base: PinBase::new(base),
+            base: state,
             document,
             effects,
             shadow_always,
@@ -207,38 +245,7 @@ impl PinEditState {
     }
 
     pub(crate) fn base_frame(&self) -> Option<Arc<RgbaFrame>> {
-        self.base.frame()
-    }
-}
-
-impl PinBase {
-    fn new(frame: Arc<RgbaFrame>) -> Self {
-        let raw_bytes = frame.width() as usize * frame.height() as usize * 4;
-        if raw_bytes > PIN_BASE_KEEP_RAW_BYTES
-            && let Ok(bytes) = crate::image_util::encode_png(&frame)
-            && bytes.len() < raw_bytes
-        {
-            return Self::Encoded {
-                bytes: bytes.into(),
-                size: PhysicalSize::new(frame.width(), frame.height()),
-            };
-        }
-        Self::Frame(frame)
-    }
-
-    fn frame(&self) -> Option<Arc<RgbaFrame>> {
-        match self {
-            Self::Frame(frame) => Some(frame.clone()),
-            Self::Encoded { bytes, size } => {
-                let image = image::load_from_memory(bytes).ok()?.into_rgba8();
-                if image.dimensions() != (size.width, size.height) {
-                    return None;
-                }
-                let frame =
-                    RgbaFrame::from_pixels(size.width, size.height, image.into_raw()).ok()?;
-                Some(Arc::new(frame))
-            }
-        }
+        self.base.lock().ok()?.frame()
     }
 }
 
@@ -260,380 +267,9 @@ struct PinState {
     bounds: Bounds<Pixels>,
     values: SharedPinWindowState,
     native_shadow: bool,
+    display: Option<DisplayId>,
     edit_state: Option<PinEditState>,
     export_padding: u32,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct PersistedPin {
-    id: u64,
-    kind: String,
-    image: Option<String>,
-    text: Option<String>,
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-    opacity: f32,
-    zoom: f32,
-    #[serde(default)]
-    click_through: bool,
-    #[serde(default)]
-    shadow: bool,
-    #[serde(default)]
-    export_padding: u32,
-}
-
-pub fn pin_last(cx: &mut App) {
-    let generation = crate::capture_history::generation();
-    if PIN_WALK_GENERATION.with(|slot| slot.get()) != Some(generation) {
-        LAST_PIN_TRIGGER.with(|slot| slot.set(None));
-        PIN_WALK_EXHAUSTED.with(|slot| slot.set(false));
-    }
-    if PIN_WALK_EXHAUSTED.with(|slot| slot.get()) {
-        LAST_PIN_TRIGGER.with(|slot| slot.set(None));
-        PIN_WALK_EXHAUSTED.with(|slot| slot.set(false));
-    }
-    let (content, signature) = read_clipboard(cx);
-    match content {
-        ClipboardContent::Image(frame) => {
-            let previous_clipboard = PIN_CLIPBOARD.get();
-            let clipboard_changed = match (previous_clipboard, signature) {
-                (Some(previous), Some(current)) => previous != current,
-                (None, Some(_)) => true,
-                _ => false,
-            };
-            let walk_active = LAST_PIN_TRIGGER.with(|slot| slot.get()).is_some();
-            if walk_active && !clipboard_changed {
-                pin_history_step(cx);
-                return;
-            }
-            let clipboard_image = crate::capture_history::HistoryImage {
-                frame,
-                pin_shadow: None,
-                scale: None,
-            };
-            let start_with_clipboard = clipboard_changed
-                || previous_clipboard.is_none()
-                || !crate::capture_history::has_entries();
-            if start_with_clipboard {
-                let hash = crate::capture_history::hash_frame(&clipboard_image.frame);
-                crate::capture_history::record_frame(&clipboard_image.frame, hash, None, None);
-                pin_image(clipboard_image, cx);
-            } else if let Some(image) = crate::capture_history::latest() {
-                pin_image(image, cx);
-            }
-            return;
-        }
-        ClipboardContent::Text(text) => {
-            let text_changed = match (PIN_CLIPBOARD_TEXT.get(), signature) {
-                (Some(previous), Some(current)) => previous != current,
-                (None, Some(_)) => true,
-                _ => false,
-            };
-            let walk_active = LAST_PIN_TRIGGER.with(|slot| slot.get()).is_some();
-            let hash = text_signature(&text);
-            let text_live = PINS.with(|pins| {
-                pins.borrow()
-                    .values()
-                    .any(|state| state.content_hash == Some(hash))
-            });
-            if walk_active && !text_changed {
-                if !text_live {
-                    open_text_pin(text, cx);
-                    return;
-                }
-                if pin_history_step(cx) {
-                    return;
-                }
-                open_text_pin(text, cx);
-                return;
-            }
-            let start_with_text = text_changed
-                || PIN_CLIPBOARD_TEXT.get().is_none()
-                || !crate::capture_history::has_entries();
-            if start_with_text {
-                open_text_pin(text, cx);
-            } else if let Some(image) = crate::capture_history::latest() {
-                pin_image(image, cx);
-            } else {
-                open_text_pin(text, cx);
-            }
-            return;
-        }
-        ClipboardContent::Empty => {}
-    }
-
-    if LAST_PIN_TRIGGER.with(|slot| slot.get()).is_some() {
-        pin_history_step(cx);
-        return;
-    }
-    if let Some(image) = crate::capture_history::latest() {
-        pin_image(image, cx);
-    } else {
-        log_warn!("pin", "no clipboard content or recent capture to pin");
-    }
-}
-
-fn open_text_pin(text: String, cx: &mut App) {
-    let hash = text_signature(&text);
-    if open_pin_content(PinContent::Text(text), cx).is_some() {
-        LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
-        mark_walk();
-    }
-}
-
-fn mark_walk() {
-    PIN_WALK_GENERATION.with(|slot| slot.set(Some(crate::capture_history::generation())));
-    PIN_WALK_EXHAUSTED.with(|slot| slot.set(false));
-}
-
-fn pin_history_step(cx: &mut App) -> bool {
-    let Some(current) = LAST_PIN_TRIGGER.with(|slot| slot.get()) else {
-        return false;
-    };
-    let live = PINS.with(|pins| {
-        pins.borrow()
-            .values()
-            .any(|state| state.content_hash == Some(current))
-    });
-    if !live && let Some(image) = crate::capture_history::find(current) {
-        open_history_pin(image, LAST_PIN_SHADOW.with(|slot| slot.get()), cx);
-        mark_walk();
-        return true;
-    }
-    if settings_state::get().repeat_pin == settings_state::RepeatPinBehavior::FlashCurrent
-        && flash_existing_pin(current, cx)
-    {
-        return true;
-    }
-    let Some(image) = crate::capture_history::cycle(current) else {
-        log_info!("pin", "screenshot history has no older entry");
-        PIN_WALK_EXHAUSTED.with(|slot| slot.set(true));
-        return true;
-    };
-    let hash = crate::capture_history::hash_frame(&image.frame);
-    LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
-    if !flash_existing_pin(hash, cx) {
-        open_history_pin(image, false, cx);
-    }
-    mark_walk();
-    true
-}
-
-fn pin_image(image: crate::capture_history::HistoryImage, cx: &mut App) {
-    let hash = crate::capture_history::hash_frame(&image.frame);
-    let repeated = LAST_PIN_TRIGGER.with(|slot| slot.get() == Some(hash))
-        || PINS.with(|pins| {
-            pins.borrow()
-                .values()
-                .any(|state| state.content_hash == Some(hash))
-        });
-    if repeated {
-        let behavior = settings_state::get().repeat_pin;
-        if behavior == settings_state::RepeatPinBehavior::RestoreHistory
-            && crate::capture_history::contains(hash)
-            && let Some(history_image) = crate::capture_history::cycle(hash)
-        {
-            let history_hash = crate::capture_history::hash_frame(&history_image.frame);
-            LAST_PIN_TRIGGER.with(|slot| slot.set(Some(history_hash)));
-            if !flash_existing_pin(history_hash, cx) {
-                open_history_pin(history_image, false, cx);
-            } else {
-                mark_walk();
-            }
-            return;
-        }
-        if flash_existing_pin(hash, cx) {
-            return;
-        }
-    }
-    open_history_pin(image, false, cx);
-}
-
-fn flash_existing_pin(hash: u64, cx: &mut App) -> bool {
-    let target = PINS.with(|pins| {
-        pins.borrow()
-            .values()
-            .find(|state| state.content_hash == Some(hash))
-            .map(|state| (state.entity.clone(), state.window))
-    });
-    let Some((entity, window)) = target else {
-        return false;
-    };
-    entity.update(cx, |view, cx| view.flash(cx));
-    let _ = window.update(cx, |_, window, _| window.activate_window());
-    true
-}
-
-pub fn open_frame_with_hash(
-    frame: RgbaFrame,
-    hash: u64,
-    native_shadow: bool,
-    cx: &mut App,
-) -> Option<u64> {
-    LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
-    let content = PinContent::from_frame_with_hash(frame, hash);
-    let zoom = content.preferred_zoom();
-    let (width, height) = content.size(zoom);
-    let bounds = default_bounds(cx, width, height);
-    let id = open_pin_content_at(content, bounds, zoom, None, native_shadow, cx);
-    mark_walk();
-    id
-}
-
-pub fn open_frame_at_with_hash(
-    frame: RgbaFrame,
-    bounds: Bounds<Pixels>,
-    zoom: f32,
-    hash: u64,
-    monitor: Option<core_types::MonitorId>,
-    native_shadow: bool,
-    cx: &mut App,
-) -> Option<u64> {
-    LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
-    let source = monitor.and_then(|id| {
-        platform_capture::platform_backend()
-            .monitors()
-            .ok()?
-            .into_iter()
-            .find(|monitor| monitor.id == id)
-    });
-    let bounds = source.as_ref().map_or(bounds, |monitor| {
-        crate::display::window_bounds_on_monitor(monitor, bounds)
-    });
-    let display_id = source
-        .as_ref()
-        .map(|monitor| DisplayId::new(monitor.id.raw()));
-    let id = open_pin_content_at(
-        PinContent::from_frame_with_hash(frame, hash),
-        bounds,
-        zoom,
-        display_id,
-        native_shadow,
-        cx,
-    );
-    mark_walk();
-    id
-}
-
-fn open_history_pin(
-    image: crate::capture_history::HistoryImage,
-    native_shadow: bool,
-    cx: &mut App,
-) {
-    let crate::capture_history::HistoryImage {
-        frame,
-        pin_shadow,
-        scale,
-    } = image;
-    let hash = crate::capture_history::hash_frame(&frame);
-    LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
-    let zoom = scale.map(|scale| (1.0 / scale.max(0.1)).clamp(MIN_PIN_ZOOM, MAX_PIN_ZOOM));
-    let Some(shadow) = pin_shadow else {
-        let content = PinContent::from_frame_with_hash(frame, hash);
-        if let Some(zoom) = zoom {
-            let (width, height) = content.size(zoom);
-            let bounds = default_bounds(cx, width, height);
-            if open_pin_content_at(content, bounds, zoom, None, native_shadow, cx).is_none() {
-                crate::logging::log_warn!("pin", "failed to open a restored pin");
-            }
-        } else if open_pin_content_with_shadow(content, native_shadow, cx).is_none() {
-            crate::logging::log_warn!("pin", "failed to open a restored pin");
-        }
-        mark_walk();
-        return;
-    };
-    let display_effects = crate::effects::RegionEffects {
-        corner_radius: shadow.corner_radius,
-        shadow: true,
-    };
-    let display = display_effects.apply(frame, shadow.scale);
-    let display_padding = display_effects.padding(shadow.scale);
-    let content = PinContent::from_frame_with_hash(display, hash);
-    let id = match zoom {
-        Some(zoom) => {
-            let (width, height) = content.size(zoom);
-            let bounds = default_bounds(cx, width, height);
-            open_pin_content_at(content, bounds, zoom, None, false, cx)
-        }
-        None => open_pin_content_with_shadow(content, false, cx),
-    };
-    if let Some(id) = id {
-        set_export_padding(id, display_padding);
-    }
-    mark_walk();
-}
-
-fn open_pin_content(content: PinContent, cx: &mut App) -> Option<u64> {
-    open_pin_content_with_shadow(content, false, cx)
-}
-
-fn open_pin_content_with_shadow(
-    content: PinContent,
-    native_shadow: bool,
-    cx: &mut App,
-) -> Option<u64> {
-    let zoom = content.preferred_zoom();
-    let (width, height) = content.size(zoom);
-    log_info!("pin", "opening pin {}x{}", width.round(), height.round());
-    let bounds = default_bounds(cx, width, height);
-    open_pin_inner(
-        content,
-        None,
-        bounds,
-        zoom,
-        1.0,
-        false,
-        None,
-        true,
-        native_shadow,
-        None,
-        cx,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn open_pin_content_at(
-    content: PinContent,
-    bounds: Bounds<Pixels>,
-    zoom: f32,
-    display_id: Option<DisplayId>,
-    native_shadow: bool,
-    cx: &mut App,
-) -> Option<u64> {
-    let zoom = zoom.clamp(MIN_PIN_ZOOM, MAX_PIN_ZOOM);
-    let size = bounds.size;
-    log_info!(
-        "pin",
-        "opening pin at {}x{}",
-        f32::from(size.width).round(),
-        f32::from(size.height).round()
-    );
-    open_pin_inner(
-        content,
-        None,
-        bounds,
-        zoom,
-        1.0,
-        false,
-        None,
-        true,
-        native_shadow,
-        display_id,
-        cx,
-    )
-}
-
-fn default_bounds(cx: &App, width: f32, height: f32) -> Bounds<Pixels> {
-    let mut bounds = centered_bounds(cx, width, height);
-    let cascade = PIN_CASCADE.with(|index| {
-        let value = index.get();
-        index.set((value + 1) % 8);
-        value as f32 * 24.0
-    });
-    bounds.origin = point(bounds.origin.x + px(cascade), bounds.origin.y + px(cascade));
-    bounds
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -650,6 +286,7 @@ fn open_pin_inner(
     display_id: Option<DisplayId>,
     cx: &mut App,
 ) -> Option<u64> {
+    let display_id = display_id.or_else(|| cx.primary_display().map(|display| display.id()));
     let display = pin_open_display_bounds(cx, bounds, display_id);
     let (bounds, zoom) = fit_pin_to_display(&content, bounds, zoom, display);
     let values = Rc::new(RefCell::new(PinWindowState {
@@ -659,7 +296,6 @@ fn open_pin_inner(
     }));
     let view_values = values.clone();
     let id = id.unwrap_or_else(next_pin_id);
-    LAST_PIN_SHADOW.with(|slot| slot.set(native_shadow));
     let kind = content.kind();
     let content_hash = content.hash();
     let had_existing_image = existing_image.is_some();
@@ -671,7 +307,6 @@ fn open_pin_inner(
         None
     };
     let initial_ocr_path = image_path.clone();
-    let display_id = display_id.or_else(|| display_for_bounds(cx, bounds));
     let options = crate::aux_window::popup_options(
         "capin-pin",
         bounds,
@@ -696,8 +331,16 @@ fn open_pin_inner(
         if click_through && let Err(error) = set_click_through(&*window, true) {
             crate::logging::log_warn!("pin", "failed to enable click-through: {error}");
         }
-        let view =
-            cx.new(|cx| PinView::new(id, content_for_view, view_values, initial_ocr_path, cx));
+        let view = cx.new(|cx| {
+            PinView::new(
+                id,
+                content_for_view,
+                display_id,
+                view_values,
+                initial_ocr_path,
+                cx,
+            )
+        });
         view.update(cx, |view, cx| {
             view.watch_close(window, cx);
             view.fit_display_to_size(
@@ -723,6 +366,7 @@ fn open_pin_inner(
                 bounds,
                 values,
                 native_shadow,
+                display: display_id,
                 edit_state: None,
                 export_padding: 0,
             };
@@ -747,444 +391,6 @@ fn open_pin_inner(
     }
 }
 
-pub fn restore(cx: &mut App) {
-    if PINS.with(|pins| !pins.borrow().is_empty()) {
-        return;
-    }
-    let Some(directory) = storage::pins_dir() else {
-        return;
-    };
-    let manifest_path = directory.join("pins.json");
-    let Ok(text) = std::fs::read_to_string(&manifest_path) else {
-        return;
-    };
-    let Ok(entries) = serde_json::from_str::<Vec<PersistedPin>>(&text) else {
-        return;
-    };
-
-    let mut deferred = Vec::new();
-    let mut restored = 0usize;
-    for entry in entries {
-        if restored >= MAX_RESTORED_PINS {
-            if persisted_pin_is_usable(&entry, &directory) {
-                deferred.push(entry);
-            }
-            continue;
-        }
-        if !entry.x.is_finite()
-            || !entry.y.is_finite()
-            || !entry.width.is_finite()
-            || !entry.height.is_finite()
-            || entry.width < 1.0
-            || entry.height < 1.0
-        {
-            continue;
-        }
-        let content = match entry.kind.as_str() {
-            "image" => {
-                let Some(name) = entry
-                    .image
-                    .as_deref()
-                    .and_then(|name| Path::new(name).file_name().map(|name| name.to_owned()))
-                else {
-                    continue;
-                };
-                let path = directory.join(name);
-                let Some(frame) = image_util::load_frame(&path) else {
-                    continue;
-                };
-                PinContent::from_frame(frame)
-            }
-            "text" => {
-                let Some(text) = entry.text.filter(|text| !text.is_empty()) else {
-                    continue;
-                };
-                PinContent::Text(text)
-            }
-            _ => continue,
-        };
-        let zoom = entry.zoom.clamp(MIN_PIN_ZOOM, MAX_PIN_ZOOM);
-        let (width, height) = content.size(zoom);
-        let bounds = ensure_visible(
-            cx,
-            Bounds {
-                origin: point(px(entry.x), px(entry.y)),
-                size: size(px(width), px(height)),
-            },
-        );
-        let existing_image = match &content {
-            PinContent::Image { .. } => entry
-                .image
-                .as_deref()
-                .and_then(|name| Path::new(name).file_name())
-                .map(|name| directory.join(name)),
-            _ => None,
-        };
-        let id = open_pin_inner(
-            content,
-            Some(entry.id),
-            bounds,
-            zoom,
-            entry.opacity.clamp(0.2, 1.0),
-            entry.click_through,
-            existing_image,
-            false,
-            entry.shadow,
-            None,
-            cx,
-        );
-        if let Some(id) = id {
-            restored += 1;
-            set_export_padding(id, entry.export_padding);
-        }
-    }
-    DEFERRED_PINS.with(|pins| *pins.borrow_mut() = deferred);
-    save_manifest();
-}
-
-fn persisted_pin_is_usable(entry: &PersistedPin, directory: &Path) -> bool {
-    if !entry.x.is_finite()
-        || !entry.y.is_finite()
-        || !entry.width.is_finite()
-        || !entry.height.is_finite()
-        || entry.width < 1.0
-        || entry.height < 1.0
-    {
-        return false;
-    }
-    match entry.kind.as_str() {
-        "image" => entry
-            .image
-            .as_deref()
-            .and_then(|name| Path::new(name).file_name())
-            .is_some_and(|name| directory.join(name).exists()),
-        "text" => entry.text.as_deref().is_some_and(|text| !text.is_empty()),
-        _ => false,
-    }
-}
-
-pub(crate) fn set_edit_state(id: u64, edit_state: PinEditState) {
-    PINS.with(|pins| {
-        if let Some(state) = pins.borrow_mut().get_mut(&id) {
-            state.edit_state = Some(edit_state);
-        }
-    });
-}
-
-pub(crate) fn set_export_padding(id: u64, padding: u32) {
-    PINS.with(|pins| {
-        if let Some(state) = pins.borrow_mut().get_mut(&id) {
-            state.export_padding = padding;
-        }
-    });
-}
-
-pub(crate) fn replace_image_with_edit_state(
-    id: u64,
-    frame: RgbaFrame,
-    edit_state: PinEditState,
-    cx: &mut App,
-) -> bool {
-    replace_image_inner(id, frame, Some(edit_state), cx)
-}
-
-fn replace_image_inner(
-    id: u64,
-    frame: RgbaFrame,
-    edit_state: Option<PinEditState>,
-    cx: &mut App,
-) -> bool {
-    let hash = crate::capture_history::hash_frame(&frame);
-    let state = PINS.with(|pins| {
-        let pins = pins.borrow();
-        let state = pins.get(&id)?;
-        let zoom = state.values.borrow().zoom;
-        Some((
-            state.entity.clone(),
-            state.window,
-            state.image_path.clone(),
-            zoom,
-            state.bounds.origin,
-        ))
-    });
-    let Some((entity, window_handle, image_path, zoom, origin)) = state else {
-        return false;
-    };
-    let path = if let Some(path) = image_path {
-        if !write_pin_image(&path, &frame) {
-            return false;
-        }
-        Some(path)
-    } else {
-        save_pin_image(id, &frame)
-    };
-    let width = frame.width() as f32 * zoom;
-    let height = frame.height() as f32 * zoom;
-    entity.update(cx, |view, cx| {
-        view.replace_image(Arc::new(frame), hash, cx);
-    });
-    let _ = window_handle.update(cx, |_, window, _| {
-        window.resize(size(px(width), px(height)));
-    });
-    PINS.with(|pins| {
-        if let Some(state) = pins.borrow_mut().get_mut(&id) {
-            state.kind = PinKind::Image;
-            state.content_hash = Some(hash);
-            state.image_path = path;
-            state.bounds = Bounds {
-                origin,
-                size: size(px(width), px(height)),
-            };
-            state.edit_state = edit_state;
-        }
-    });
-    save_manifest();
-    true
-}
-
-pub fn close_pin(id: u64, cx: &mut App) {
-    close_pin_inner(id, cx, true);
-}
-
-fn close_pin_inner(id: u64, cx: &mut App, remove_window: bool) {
-    pin_help::close(cx);
-    close_pin_menu(cx);
-    let state = PINS.with(|pins| pins.borrow_mut().remove(&id));
-    let Some(state) = state else {
-        return;
-    };
-    state.entity.update(cx, |view, cx| view.release_image(cx));
-    if remove_window {
-        let _ = state
-            .window
-            .update(cx, |_, window, _| window.remove_window());
-    }
-    save_manifest();
-    if let Some(path) = state.image_path {
-        let _ = std::fs::remove_file(path);
-    }
-    crate::windows::schedule_memory_trim();
-}
-
-fn persist_rotated_image(id: u64, frame: &RgbaFrame, hash: u64, bounds: Bounds<Pixels>) -> bool {
-    let path = PINS.with(|pins| {
-        pins.borrow()
-            .get(&id)
-            .and_then(|state| state.image_path.clone())
-    });
-    let saved = match path {
-        Some(path) => {
-            if !write_pin_image(&path, frame) {
-                return false;
-            }
-            Some(path)
-        }
-        None => save_pin_image(id, frame),
-    };
-    if saved.is_none() {
-        return false;
-    }
-    PINS.with(|pins| {
-        if let Some(state) = pins.borrow_mut().get_mut(&id) {
-            state.kind = PinKind::Image;
-            state.content_hash = Some(hash);
-            state.image_path = saved;
-            state.bounds = bounds;
-        }
-    });
-    save_manifest();
-    true
-}
-
-pub fn is_pin_window(handle: &AnyWindowHandle) -> bool {
-    PINS.with(|pins| {
-        pins.borrow()
-            .values()
-            .any(|state| state.window.window_id() == handle.window_id())
-    })
-}
-
-pub fn refresh_recognition(cx: &mut App) {
-    let entities: Vec<Entity<PinView>> = PINS.with(|pins| {
-        pins.borrow()
-            .values()
-            .map(|state| state.entity.clone())
-            .collect()
-    });
-    for entity in entities {
-        entity.update(cx, |view, cx| {
-            view.ocr = None;
-            view.selection = None;
-            view.selecting = false;
-            view.content_generation = view.content_generation.wrapping_add(1);
-            view.start_ocr(cx);
-            cx.notify();
-        });
-    }
-}
-
-pub fn click_through_count() -> usize {
-    PINS.with(|pins| {
-        pins.borrow()
-            .values()
-            .filter(|state| state.values.borrow().click_through)
-            .count()
-    })
-}
-
-pub fn release_click_through(cx: &mut App) -> usize {
-    let states: Vec<(u64, Entity<PinView>, AnyWindowHandle)> = PINS.with(|pins| {
-        pins.borrow()
-            .iter()
-            .filter(|(_, state)| state.values.borrow().click_through)
-            .map(|(id, state)| (*id, state.entity.clone(), state.window))
-            .collect()
-    });
-    let count = states.len();
-    for (id, entity, window) in states {
-        let _ = window.update(cx, |_, window, _| {
-            let _ = set_click_through(&*window, false);
-        });
-        entity.update(cx, |_, cx| cx.notify());
-        PINS.with(|pins| {
-            if let Some(state) = pins.borrow_mut().get_mut(&id) {
-                state.values.borrow_mut().click_through = false;
-            }
-        });
-    }
-    save_manifest();
-    crate::tray::refresh_menu();
-    count
-}
-
-fn update_bounds(id: u64, bounds: Bounds<Pixels>) {
-    PINS.with(|pins| {
-        if let Some(state) = pins.borrow_mut().get_mut(&id) {
-            state.bounds = bounds;
-        }
-    });
-    save_manifest();
-}
-
-fn update_bounds_without_save(id: u64, bounds: Bounds<Pixels>) {
-    PINS.with(|pins| {
-        if let Some(state) = pins.borrow_mut().get_mut(&id) {
-            state.bounds = bounds;
-        }
-    });
-}
-
-fn schedule_manifest_save(cx: &mut Context<PinView>) {
-    let revision = MANIFEST_REVISION.with(|revision| {
-        let next = revision.get().wrapping_add(1);
-        revision.set(next);
-        next
-    });
-    cx.spawn(async move |this, cx| {
-        cx.background_executor()
-            .timer(Duration::from_millis(250))
-            .await;
-        let _ = this.update(cx, |_, _| {
-            if MANIFEST_REVISION.with(|current| current.get()) == revision {
-                save_manifest();
-            }
-        });
-    })
-    .detach();
-}
-
-fn set_state_click_through(id: u64, enabled: bool) {
-    PINS.with(|pins| {
-        if let Some(state) = pins.borrow_mut().get_mut(&id) {
-            state.values.borrow_mut().click_through = enabled;
-        }
-    });
-    save_manifest();
-}
-
-fn next_pin_id() -> u64 {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or_default();
-    let mut id = millis.max(1);
-    PINS.with(|pins| {
-        while pins.borrow().contains_key(&id) {
-            id += 1;
-        }
-    });
-    id
-}
-
-fn save_pin_image(id: u64, frame: &RgbaFrame) -> Option<PathBuf> {
-    let directory = storage::pins_dir()?;
-    let path = directory.join(format!("pin-{id}.png"));
-    write_pin_image(&path, frame).then_some(path)
-}
-
-fn write_pin_image(path: &Path, frame: &RgbaFrame) -> bool {
-    let Ok(bytes) = crate::image_util::encode_png(frame) else {
-        return false;
-    };
-    crate::persist::write_atomic(path, &bytes).is_ok()
-}
-
-fn save_manifest() {
-    let Some(directory) = storage::pins_dir() else {
-        return;
-    };
-    let path = directory.join("pins.json");
-    let mut entries: Vec<PersistedPin> = PINS.with(|pins| {
-        let mut entries: Vec<PersistedPin> = pins
-            .borrow()
-            .iter()
-            .filter_map(|(id, state)| {
-                let (kind, image, text) = match &state.kind {
-                    PinKind::Image => {
-                        let image = state
-                            .image_path
-                            .as_ref()
-                            .and_then(|path| path.file_name())
-                            .map(|name| name.to_string_lossy().to_string())?;
-                        ("image", Some(image), None)
-                    }
-                    PinKind::Text(text) => ("text", None, Some(text.clone())),
-                };
-                let values = state.values.borrow();
-                Some(PersistedPin {
-                    id: *id,
-                    kind: kind.to_owned(),
-                    image,
-                    text,
-                    x: f32::from(state.bounds.origin.x),
-                    y: f32::from(state.bounds.origin.y),
-                    width: f32::from(state.bounds.size.width),
-                    height: f32::from(state.bounds.size.height),
-                    opacity: values.opacity,
-                    zoom: values.zoom,
-                    click_through: values.click_through,
-                    shadow: state.native_shadow,
-                    export_padding: state.export_padding,
-                })
-            })
-            .collect();
-        entries.sort_by_key(|entry| entry.id);
-        entries
-    });
-    entries.extend(DEFERRED_PINS.with(|pins| pins.borrow().clone()));
-    entries.sort_by_key(|entry| entry.id);
-    entries.dedup_by_key(|entry| entry.id);
-    if entries.is_empty() {
-        let _ = std::fs::remove_file(path);
-        return;
-    }
-    if let Ok(text) = serde_json::to_string_pretty(&entries)
-        && let Err(error) = crate::persist::write_atomic(&path, text.as_bytes())
-    {
-        log_error!("pin", "failed to save the pin manifest: {error}");
-    }
-}
-
 struct PinTheme {
     card: Rgba,
     text: Rgba,
@@ -1197,37 +403,21 @@ struct PinTheme {
 }
 
 impl PinTheme {
-    fn for_window(window: &Window) -> Self {
+    fn for_window(window: &Window, accent_hex: u32) -> Self {
         let dark = matches!(
             window.appearance(),
             WindowAppearance::Dark | WindowAppearance::VibrantDark
         );
-        let accent_hex =
-            system_accent_hex().unwrap_or_else(|| crate::chrome_theme::fallback_accent(dark));
-        let accent = rgb(accent_hex);
-        let selection = rgba(((accent_hex & 0x00FF_FFFF) << 8) | 0x66);
-        if dark {
-            Self {
-                card: rgba(0x1E1E1EF2),
-                text: rgb(0xF2F2F2),
-                border: rgba(0xFFFFFF24),
-                menu: rgba(0x2B2B2BFA),
-                menu_hover: rgba(0xFFFFFF16),
-                menu_border: rgba(0xFFFFFF22),
-                accent,
-                selection,
-            }
-        } else {
-            Self {
-                card: rgba(0xFFFFFFF2),
-                text: rgb(0x1A1A1A),
-                border: rgba(0x0000001A),
-                menu: rgba(0xF9F9F9FA),
-                menu_hover: rgba(0x00000010),
-                menu_border: rgba(0x0000001A),
-                accent,
-                selection,
-            }
+        let palette = crate::theme::pin_palette(dark);
+        Self {
+            card: palette.card,
+            text: palette.text,
+            border: palette.border,
+            menu: palette.menu,
+            menu_hover: palette.menu_hover,
+            menu_border: palette.menu_border,
+            accent: rgb(accent_hex),
+            selection: rgba(((accent_hex & 0x00FF_FFFF) << 8) | 0x66),
         }
     }
 }
@@ -1240,6 +430,8 @@ struct PinDrag {
 struct PinView {
     id: u64,
     content: PinContent,
+    display: Option<DisplayId>,
+    accent_hex: u32,
     values: SharedPinWindowState,
     zoom_target: f32,
     zoom_serial: u64,
@@ -1268,14 +460,19 @@ impl PinView {
     fn new(
         id: u64,
         content: PinContent,
+        display: Option<DisplayId>,
         values: SharedPinWindowState,
         ocr_path: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) -> Self {
         let zoom = values.borrow().zoom;
+        let accent_hex =
+            system_accent_hex().unwrap_or_else(|| crate::theme::fallback_accent(false));
         let mut view = Self {
             id,
             content,
+            display,
+            accent_hex,
             values,
             zoom_target: zoom,
             zoom_serial: 0,
@@ -1309,6 +506,7 @@ impl PinView {
         view
     }
 
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     fn flash(&mut self, cx: &mut Context<Self>) {
         self.flash_generation = self.flash_generation.wrapping_add(1);
         self.flash_active = true;
@@ -1476,18 +674,13 @@ impl PinView {
             let length = line.chars.len();
             if index < base + length {
                 let local = index - base;
-                if !line.chars[local].ch.is_ascii() {
+                let ch = line.chars[local].ch;
+                if !ch.is_ascii() || ch.is_whitespace() {
                     return Some((base + local, base + local));
                 }
-                let mut start = local;
-                while start > 0 && !line.chars[start - 1].ch.is_whitespace() {
-                    start -= 1;
-                }
-                let mut end = local;
-                while end + 1 < length && !line.chars[end + 1].ch.is_whitespace() {
-                    end += 1;
-                }
-                return Some((base + start, base + end));
+                let chars: Vec<char> = line.chars.iter().map(|item| item.ch).collect();
+                let range = crate::text_scan::word_range(&chars, local, |ch| !ch.is_whitespace())?;
+                return Some((base + range.start, base + range.end - 1));
             }
             base += length;
         }
@@ -1717,7 +910,9 @@ impl PinView {
             })
             .detach();
         }
-        update_bounds_without_save(self.id, settle_bounds);
+        let display = window.display(cx).map(|display| display.id());
+        self.display = display;
+        update_bounds_without_save(self.id, settle_bounds, display);
         cx.notify();
     }
 
@@ -2028,999 +1223,102 @@ impl PinView {
             }
         }
     }
-
-    fn open_editor(&mut self, cx: &mut Context<Self>) {
-        let edit_state = PINS.with(|pins| {
-            pins.borrow()
-                .get(&self.id)
-                .and_then(|state| state.edit_state.clone())
-        });
-        let (frame, edit_state) = match edit_state {
-            Some(state) => match state.base_frame() {
-                Some(base) => (Some(base), Some(state)),
-                None => (self.frame_for_action(), None),
-            },
-            None => (self.frame_for_action(), None),
-        };
-        let Some(frame) = frame else {
-            return;
-        };
-        let bounds = PINS.with(|pins| pins.borrow().get(&self.id).map(|state| state.bounds));
-        let Some(bounds) = bounds else {
-            return;
-        };
-        if !crate::editor::open_pin_editor_overlay(self.id, frame, bounds, edit_state, cx) {
-            let language = settings_state::get().language;
-            self.show_notice(t(language, "pin.edit_failed").to_owned(), cx);
-        }
-    }
-
-    fn menu_items(&self, language: Language) -> Vec<(PinMenuAction, String)> {
-        let mut items = Vec::new();
-        if matches!(&self.content, PinContent::Image { .. }) {
-            items.push(PinMenuAction::Rotate);
-            items.push(PinMenuAction::Edit);
-        }
-        items.push(PinMenuAction::Settings);
-        items.push(PinMenuAction::Through);
-        items.push(PinMenuAction::Close);
-        items
-            .into_iter()
-            .map(|action| (action, t(language, action.label_key()).to_owned()))
-            .collect()
-    }
-
-    fn body(&self, theme: &PinTheme, viewport: Size<Pixels>) -> Div {
-        match &self.content {
-            PinContent::Image { image, .. } => {
-                let (width, height) = self
-                    .content
-                    .size(self.values.borrow().zoom.max(MIN_PIN_ZOOM));
-                let viewport_width = f32::from(viewport.width);
-                let viewport_height = f32::from(viewport.height);
-                let fit = if viewport_width <= 0.0 || viewport_height <= 0.0 {
-                    1.0
-                } else {
-                    (viewport_width / width.max(1.0))
-                        .min(viewport_height / height.max(1.0))
-                        .min(1.0)
-                };
-                div()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        div()
-                            .w(px(width * fit))
-                            .h(px(height * fit))
-                            .flex_shrink_0()
-                            .child(img(image.clone()).size_full().object_fit(ObjectFit::Fill)),
-                    )
-            }
-            PinContent::Text(text) => div()
-                .size_full()
-                .p(px(12.0))
-                .rounded(px(10.0))
-                .bg(theme.card)
-                .border_1()
-                .border_color(theme.border)
-                .overflow_hidden()
-                .text_size(px(14.0))
-                .text_color(theme.text)
-                .child(text.clone()),
-        }
-    }
-}
-
-impl Render for PinView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = PinTheme::for_window(window);
-        let notice = self.notice.clone();
-        let notice_serial = self.notice_serial;
-        let notice_leaving = self.notice_leaving;
-        let hud = self.hud.clone();
-        let hud_serial = self.hud_serial;
-        let hud_leaving = self.hud_leaving;
-        let body = self
-            .body(&theme, window.viewport_size())
-            .opacity(self.values.borrow().opacity);
-        let zoom = self.values.borrow().zoom.max(MIN_PIN_ZOOM);
-        let text_layers: Vec<Div> = self
-            .selection_rects()
-            .into_iter()
-            .map(|rect| {
-                div()
-                    .absolute()
-                    .left(px(rect.origin.x as f32 * zoom))
-                    .top(px(rect.origin.y as f32 * zoom))
-                    .w(px(rect.size.width as f32 * zoom))
-                    .h(px(rect.size.height as f32 * zoom))
-                    .bg(theme.selection)
-            })
-            .collect();
-        let flash = self.flash_active.then(|| {
-            let outline = div()
-                .absolute()
-                .inset_0()
-                .border_4()
-                .border_color(theme.accent);
-            if cx.reduce_motion() {
-                outline.opacity(self.flash_alpha).into_any_element()
-            } else {
-                outline
-                    .with_animation(
-                        SharedString::from(format!("pin-flash-{}", self.flash_generation)),
-                        Animation::new(Duration::from_millis(520)).with_easing(|delta| {
-                            let pulse = (delta * std::f32::consts::TAU * 2.0).sin().abs();
-                            (pulse * (1.0 - delta) * 1.15).min(1.0)
-                        }),
-                        |outline, delta| outline.opacity(delta),
-                    )
-                    .into_any_element()
-            }
-        });
-        let content = div()
-            .absolute()
-            .inset_0()
-            .child(body)
-            .children(text_layers)
-            .children(flash);
-        let qr_bar = self
-            .qr_code()
-            .map(str::to_owned)
-            .filter(|_| self.hover && !self.values.borrow().click_through && self.drag.is_none())
-            .map(|code| {
-                let language = settings_state::get().language;
-                let url = pin_qr::qr_url(&code);
-                let menu = theme.menu;
-                let menu_border = theme.menu_border;
-                let menu_hover = theme.menu_hover;
-                let accent = theme.accent;
-                let text_color = theme.text;
-                let selection = theme.selection;
-                let mut bar = div()
-                    .id("pin-qr-bar")
-                    .absolute()
-                    .left(px(8.0))
-                    .right(px(8.0))
-                    .bottom(px(8.0))
-                    .h(px(30.0))
-                    .px(px(8.0))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.0))
-                    .rounded(px(7.0))
-                    .bg(menu)
-                    .border_1()
-                    .border_color(menu_border)
-                    .shadow(vec![
-                        BoxShadow::new(px(0.0), px(4.0), hsla(0.0, 0.0, 0.0, 0.25))
-                            .blur_radius(px(12.0)),
-                    ])
-                    .cursor(CursorStyle::Arrow)
-                    .occlude()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            window.focus(&this.focus_handle, cx);
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .child(icons::icon(icons::QR, 14.0, accent));
-                let mut label = div()
-                    .id("pin-qr-open")
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(px(11.0))
-                    .text_color(text_color);
-                if url.is_some() {
-                    label = label
-                        .cursor_pointer()
-                        .hover(move |style| style.text_color(accent))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let Some(code) = this.qr_code().map(str::to_owned) else {
-                                return;
-                            };
-                            if let Some(url) = pin_qr::qr_url(&code) {
-                                cx.open_url(&url);
-                            }
-                        }));
-                }
-                bar = bar.child(label.child(code.clone()));
-                if url.is_some() {
-                    bar = bar.child(
-                        div()
-                            .id("pin-qr-open-button")
-                            .h(px(20.0))
-                            .px(px(7.0))
-                            .flex_shrink_0()
-                            .flex()
-                            .items_center()
-                            .rounded(px(5.0))
-                            .bg(menu_hover)
-                            .text_size(px(11.0))
-                            .text_color(accent)
-                            .cursor_pointer()
-                            .hover(move |style| style.bg(selection))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let Some(code) = this.qr_code().map(str::to_owned) else {
-                                    return;
-                                };
-                                if let Some(url) = pin_qr::qr_url(&code) {
-                                    cx.open_url(&url);
-                                }
-                            }))
-                            .child(t(language, "pin.qr_open")),
-                    );
-                }
-                bar.child(
-                    div()
-                        .id("pin-qr-copy")
-                        .h(px(20.0))
-                        .px(px(7.0))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .rounded(px(5.0))
-                        .bg(menu_hover)
-                        .text_size(px(11.0))
-                        .text_color(text_color)
-                        .cursor_pointer()
-                        .hover(move |style| style.bg(selection))
-                        .on_click(cx.listener(|this, _, _, cx| this.copy_qr(cx)))
-                        .child(t(language, "pin.qr_copy")),
-                )
-                .into_any_element()
-            });
-        let cursor = match &self.content {
-            PinContent::Image { .. } if self.drag.is_some() => crate::ui::closed_hand_cursor(),
-            PinContent::Image { .. } if self.hover_text => CursorStyle::IBeam,
-            PinContent::Image { .. } => crate::ui::open_hand_cursor(),
-            PinContent::Text(_) => CursorStyle::IBeam,
-        };
-        let root = div()
-            .size_full()
-            .id("pin-window")
-            .cursor(cursor)
-            .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                let key = event.keystroke.key.as_str();
-                let command =
-                    event.keystroke.modifiers.platform || event.keystroke.modifiers.control;
-                if command && key == "c" {
-                    if this
-                        .selection_range()
-                        .is_some_and(|(start, end)| end > start)
-                    {
-                        this.copy_selected_text(cx);
-                    } else if matches!(&this.content, PinContent::Image { .. }) {
-                        this.copy_image(cx);
-                    } else {
-                        this.copy_content(cx);
-                    }
-                    cx.stop_propagation();
-                    return;
-                }
-                if command && key == "v" {
-                    cx.defer(pin_clipboard::paste_clipboard);
-                    cx.stop_propagation();
-                    return;
-                }
-                if command && key == "s" {
-                    if matches!(&this.content, PinContent::Image { .. }) {
-                        this.save_image(cx);
-                    }
-                    cx.stop_propagation();
-                    return;
-                }
-                if command && key == "a" && this.select_all_text(cx) {
-                    cx.stop_propagation();
-                    return;
-                }
-                if key == "f1" {
-                    let bounds = window.bounds();
-                    let image = matches!(&this.content, PinContent::Image { .. });
-                    cx.defer(move |cx| pin_help::toggle(bounds, image, cx));
-                    cx.stop_propagation();
-                    return;
-                }
-                if key == "escape" {
-                    if this.values.borrow().click_through {
-                        let id = this.id;
-                        let window_handle =
-                            PINS.with(|pins| pins.borrow().get(&id).map(|state| state.window));
-                        if let Some(handle) = window_handle {
-                            let _ = handle.update(cx, |_, window, _| {
-                                let _ = set_click_through(&*window, false);
-                            });
-                        }
-                        set_state_click_through(id, false);
-                        crate::tray::refresh_menu();
-                        cx.notify();
-                    } else {
-                        let id = this.id;
-                        cx.defer(move |cx| crate::pin::close_pin(id, cx));
-                    }
-                    cx.stop_propagation();
-                }
-            }))
-            .on_mouse_down(
-                MouseButton::Middle,
-                cx.listener(|this, _, _, cx| {
-                    let id = this.id;
-                    cx.defer(move |cx| crate::pin::close_pin(id, cx));
-                    cx.stop_propagation();
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    crate::pin::close_pin_menu(cx);
-                    window.focus(&this.focus_handle, cx);
-                    this.hover_text = this.text_index_at(event.position).is_some();
-                    if event.click_count >= 2 {
-                        this.select_word_at(event.position, cx);
-                        cx.notify();
-                        return;
-                    }
-                    let bounds = window.bounds().size;
-                    let x = f32::from(event.position.x);
-                    let y = f32::from(event.position.y);
-                    let width = f32::from(bounds.width);
-                    let height = f32::from(bounds.height);
-                    let margin = 6.0;
-                    let near_edge =
-                        x < margin || y < margin || x > width - margin || y > height - margin;
-                    let over_text = this.begin_text_selection(event.position);
-                    if near_edge || event.modifiers.alt || !over_text {
-                        this.selection = None;
-                        this.selecting = false;
-                        this.begin_window_drag(window);
-                    }
-                    cx.notify();
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    let bounds = window.bounds();
-                    let position = point(
-                        px(f32::from(bounds.origin.x) + f32::from(event.position.x)),
-                        px(f32::from(bounds.origin.y) + f32::from(event.position.y)),
-                    );
-                    let items = this.menu_items(settings_state::get().language);
-                    let pin_id = this.id;
-                    cx.defer(move |cx| crate::pin::open_pin_menu(pin_id, position, items, cx));
-                    cx.stop_propagation();
-                }),
-            )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                if this.drag.is_some() {
-                    this.update_window_drag(window);
-                    return;
-                }
-                if this.selecting {
-                    this.update_text_selection(event.position);
-                    cx.notify();
-                    return;
-                }
-                let over_text = this.text_index_at(event.position).is_some();
-                let mut changed = false;
-                if !this.hover {
-                    this.hover = true;
-                    changed = true;
-                }
-                if over_text != this.hover_text {
-                    this.hover_text = over_text;
-                    changed = true;
-                }
-                if changed {
-                    cx.notify();
-                }
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    if this.drag.take().is_some() {
-                        update_bounds(this.id, window.bounds());
-                        cx.notify();
-                        return;
-                    }
-                    if this.selecting {
-                        this.finish_text_selection(cx);
-                    } else {
-                        update_bounds(this.id, window.bounds());
-                    }
-                }),
-            )
-            .on_mouse_exit(cx.listener(|this, _, window, cx| {
-                let mut changed = false;
-                if this.drag.take().is_some() {
-                    update_bounds(this.id, window.bounds());
-                    changed = true;
-                }
-                if this.selecting {
-                    this.finish_text_selection(cx);
-                }
-                if this.hover_text {
-                    this.hover_text = false;
-                    changed = true;
-                }
-                if this.hover {
-                    this.hover = false;
-                    changed = true;
-                }
-                if changed {
-                    cx.notify();
-                }
-            }))
-            .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
-                let lines = matches!(event.delta, ScrollDelta::Lines(_));
-                let (delta_x, delta_y) = match event.delta {
-                    ScrollDelta::Lines(delta) => (delta.x, delta.y),
-                    ScrollDelta::Pixels(delta) => {
-                        (f32::from(delta.x) / 20.0, f32::from(delta.y) / 20.0)
-                    }
-                };
-                let primary = if delta_y.abs() > f32::EPSILON {
-                    delta_y
-                } else {
-                    delta_x
-                };
-                if event.modifiers.shift || this.content.image_size().is_none() {
-                    let step = if lines {
-                        primary.signum() * 0.05
-                    } else {
-                        primary * 0.05
-                    };
-                    if step != 0.0 {
-                        let opacity = this.values.borrow().opacity;
-                        this.set_opacity(opacity + step, cx);
-                    }
-                } else {
-                    let step = if lines {
-                        delta_y.signum() * 0.10
-                    } else {
-                        delta_y * 0.10
-                    };
-                    if step != 0.0 {
-                        this.zoom_toward(this.zoom_target + step, window, cx);
-                    }
-                }
-            }))
-            .child(content)
-            .children(qr_bar);
-
-        root.children(hud.map(|message| {
-            let duration = if hud_leaving {
-                Duration::from_millis(150)
-            } else {
-                Duration::from_millis(120)
-            };
-            div()
-                .absolute()
-                .top(px(6.0))
-                .left(px(0.0))
-                .right(px(0.0))
-                .flex()
-                .justify_center()
-                .child(
-                    div()
-                        .px(px(8.0))
-                        .py(px(3.0))
-                        .rounded(px(5.0))
-                        .bg(theme.menu)
-                        .border_1()
-                        .border_color(theme.menu_border)
-                        .text_size(px(10.5))
-                        .text_color(theme.text)
-                        .child(message),
-                )
-                .with_animation(
-                    SharedString::from(format!("pin-hud-{hud_serial}-{hud_leaving}")),
-                    Animation::new(duration).with_easing(|delta| 1.0 - (1.0 - delta).powi(3)),
-                    move |hud, delta| {
-                        if hud_leaving {
-                            hud.opacity(1.0 - delta)
-                        } else {
-                            hud.opacity(delta).top(px(6.0 - (1.0 - delta) * 3.0))
-                        }
-                    },
-                )
-        }))
-        .children(notice.map(|notice| {
-            let duration = if notice_leaving {
-                Duration::from_millis(150)
-            } else {
-                Duration::from_millis(120)
-            };
-            div()
-                .absolute()
-                .bottom(px(8.0))
-                .left(px(0.0))
-                .right(px(0.0))
-                .flex()
-                .justify_center()
-                .child(
-                    div()
-                        .px(px(10.0))
-                        .py(px(4.0))
-                        .rounded(px(6.0))
-                        .bg(rgba(0x000000CC))
-                        .text_size(px(10.0))
-                        .text_color(rgb(0xFFFFFF))
-                        .max_w_full()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child(notice),
-                )
-                .with_animation(
-                    SharedString::from(format!("pin-notice-{notice_serial}-{notice_leaving}")),
-                    Animation::new(duration).with_easing(|delta| 1.0 - (1.0 - delta).powi(3)),
-                    move |notice, delta| {
-                        if notice_leaving {
-                            notice.opacity(1.0 - delta)
-                        } else {
-                            notice.opacity(delta).bottom(px(8.0 - (1.0 - delta) * 4.0))
-                        }
-                    },
-                )
-        }))
-    }
-}
-
-struct PinMenuView {
-    pin_id: u64,
-    items: Vec<(PinMenuAction, String)>,
-    selected: Option<usize>,
-    focus_handle: FocusHandle,
-    _blur_subscription: Option<gpui_kit::Subscription>,
-}
-
-impl Render for PinMenuView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = PinTheme::for_window(window);
-        let pin_id = self.pin_id;
-        let actions: Vec<PinMenuAction> = self.items.iter().map(|(action, _)| *action).collect();
-        let mut menu = div()
-            .size_full()
-            .p(px(PIN_MENU_PADDING))
-            .rounded(px(8.0))
-            .bg(theme.menu)
-            .border_1()
-            .border_color(theme.menu_border)
-            .shadow(vec![
-                BoxShadow::new(px(0.0), px(6.0), hsla(0.0, 0.0, 0.0, 0.28)).blur_radius(px(18.0)),
-            ])
-            .flex()
-            .flex_col()
-            .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                match event.keystroke.key.as_str() {
-                    "escape" => {
-                        forget_pin_menu();
-                        window.remove_window();
-                        cx.stop_propagation();
-                    }
-                    "up" => {
-                        this.selected = Some(match this.selected {
-                            Some(index) => index.saturating_sub(1),
-                            None => actions.len().saturating_sub(1),
-                        });
-                        cx.notify();
-                        cx.stop_propagation();
-                    }
-                    "down" => {
-                        this.selected = Some(match this.selected {
-                            Some(index) => (index + 1).min(actions.len().saturating_sub(1)),
-                            None => 0,
-                        });
-                        cx.notify();
-                        cx.stop_propagation();
-                    }
-                    "enter" => {
-                        let action = this.selected.and_then(|index| actions.get(index).copied());
-                        if let Some(action) = action {
-                            forget_pin_menu();
-                            window.remove_window();
-                            cx.defer(move |cx| perform_pin_action(pin_id, action, cx));
-                        }
-                        cx.stop_propagation();
-                    }
-                    _ => {}
-                }
-            }));
-        for (index, (action, label)) in self.items.iter().enumerate() {
-            let action = *action;
-            let label = label.clone();
-            let selected = self.selected == Some(index);
-            if index > 0 && action.separated() {
-                menu = menu.child(
-                    div()
-                        .w_full()
-                        .py(px(4.0))
-                        .child(div().h(px(1.0)).mx(px(4.0)).bg(theme.menu_border)),
-                );
-            }
-            menu = menu.child(
-                div()
-                    .id(action.id())
-                    .occlude()
-                    .h(px(PIN_MENU_ITEM_HEIGHT))
-                    .px(px(10.0))
-                    .rounded(px(4.0))
-                    .flex()
-                    .items_center()
-                    .text_size(px(12.5))
-                    .text_color(theme.text)
-                    .when(selected, |item| item.bg(theme.menu_hover))
-                    .hover(move |style| style.bg(theme.menu_hover))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|_, _, _, cx| cx.stop_propagation()),
-                    )
-                    .on_click(cx.listener(move |_, _, window, cx| {
-                        forget_pin_menu();
-                        window.remove_window();
-                        cx.defer(move |cx| perform_pin_action(pin_id, action, cx));
-                    }))
-                    .child(label),
-            );
-        }
-        crate::ui::enter_fade(menu, "pin-menu-enter", Duration::from_millis(90))
-    }
-}
-
-pub(crate) fn is_pin_menu_open() -> bool {
-    PIN_MENU.with(|slot| slot.borrow().is_some())
-}
-
-fn forget_pin_menu() {
-    PIN_MENU.with(|slot| {
-        slot.borrow_mut().take();
-    });
-}
-
-fn close_pin_menu(cx: &mut App) {
-    let handle = PIN_MENU.with(|slot| slot.borrow_mut().take());
-    if let Some(handle) = handle {
-        let _ = handle.update(cx, |_, window, _| window.remove_window());
-    }
-}
-
-fn open_pin_menu(
-    pin_id: u64,
-    position: Point<Pixels>,
-    items: Vec<(PinMenuAction, String)>,
-    cx: &mut App,
-) {
-    close_pin_menu(cx);
-    let width = PIN_MENU_WIDTH;
-    let separators = items
-        .iter()
-        .enumerate()
-        .filter(|(index, (action, _))| *index > 0 && action.separated())
-        .count() as f32;
-    let height = PIN_MENU_PADDING * 2.0
-        + PIN_MENU_ITEM_HEIGHT * items.len() as f32
-        + PIN_MENU_SEPARATOR * separators
-        + 2.0;
-    let position_x = f32::from(position.x);
-    let position_y = f32::from(position.y);
-    let display = cx.displays().into_iter().find(|display| {
-        let bounds = display.bounds();
-        let left = f32::from(bounds.origin.x);
-        let top = f32::from(bounds.origin.y);
-        position_x >= left
-            && position_x < left + f32::from(bounds.size.width)
-            && position_y >= top
-            && position_y < top + f32::from(bounds.size.height)
-    });
-    let (display_id, area) = match display {
-        Some(display) => (Some(display.id()), display.bounds()),
-        None => match cx.primary_display() {
-            Some(display) => (Some(display.id()), display.bounds()),
-            None => (None, Bounds::default()),
-        },
-    };
-    let left = f32::from(area.origin.x);
-    let top = f32::from(area.origin.y);
-    let right = left + f32::from(area.size.width);
-    let bottom = top + f32::from(area.size.height);
-    let origin = point(
-        px(position_x.clamp(left, (right - width).max(left))),
-        px(position_y.clamp(top, (bottom - height).max(top))),
-    );
-    let options = crate::aux_window::popup_options(
-        "capin-pin-menu",
-        Bounds {
-            origin,
-            size: size(px(width), px(height)),
-        },
-        display_id,
-        true,
-        pin_window_kind(),
-        WindowBackgroundAppearance::Transparent,
-    );
-
-    match gpui_kit::open_window(options, cx, move |window, cx| {
-        let _ = apply_window_style(&*window, WindowStyle::PIN_MENU);
-        let view = cx.new(|cx| PinMenuView {
-            pin_id,
-            items,
-            selected: None,
-            focus_handle: cx.focus_handle(),
-            _blur_subscription: None,
-        });
-        let focus = view.read(cx).focus_handle.clone();
-        view.update(cx, |view, cx| {
-            view._blur_subscription = Some(cx.on_blur(&focus, window, |_, window, _| {
-                forget_pin_menu();
-                window.remove_window();
-            }));
-        });
-        window.defer(cx, move |window, cx| window.focus(&focus, cx));
-        view
-    }) {
-        Ok((handle, _)) => {
-            PIN_MENU.with(|slot| *slot.borrow_mut() = Some(handle));
-        }
-        Err(error) => log_error!("pin", "failed to open pin menu: {error}"),
-    }
-}
-
-fn pin_handles(id: u64) -> Option<(Entity<PinView>, AnyWindowHandle)> {
-    PINS.with(|pins| {
-        pins.borrow()
-            .get(&id)
-            .map(|state| (state.entity.clone(), state.window))
-    })
-}
-
-fn perform_pin_action(id: u64, action: PinMenuAction, cx: &mut App) {
-    let Some((entity, window_handle)) = pin_handles(id) else {
-        return;
-    };
-    match action {
-        PinMenuAction::Rotate => rotate_pin(id, &entity, window_handle, cx),
-        PinMenuAction::Edit => {
-            entity.update(cx, |view, cx| view.open_editor(cx));
-        }
-        PinMenuAction::Settings => {
-            crate::settings::open_settings(cx);
-        }
-        PinMenuAction::Through => {
-            enable_click_through(id, &entity, window_handle, cx);
-        }
-        PinMenuAction::Close => {
-            close_pin(id, cx);
-        }
-    }
-}
-
-fn rotate_pin(id: u64, entity: &Entity<PinView>, window_handle: AnyWindowHandle, cx: &mut App) {
-    let (frame, zoom) = {
-        let view = entity.read(cx);
-        (view.frame_for_action(), view.values.borrow().zoom)
-    };
-    let Some(frame) = frame else {
-        return;
-    };
-    let rotated = frame.rotated_cw();
-    let hash = crate::capture_history::hash_frame(&rotated);
-    let width = rotated.width() as f32 * zoom;
-    let height = rotated.height() as f32 * zoom;
-    let Ok(origin) = window_handle.update(cx, |_, window, _| window.bounds().origin) else {
-        return;
-    };
-    let bounds = Bounds {
-        origin,
-        size: size(px(width), px(height)),
-    };
-    if !persist_rotated_image(id, &rotated, hash, bounds) {
-        entity.update(cx, |view, cx| {
-            let language = settings_state::get().language;
-            view.show_notice(t(language, "pin.rotate_failed").to_owned(), cx);
-        });
-        return;
-    }
-    let _ = window_handle.update(cx, |_, window, _| {
-        window.resize(size(px(width), px(height)))
-    });
-    entity.update(cx, |view, cx| {
-        view.replace_image(Arc::new(rotated), hash, cx)
-    });
-}
-
-fn enable_click_through(
-    id: u64,
-    entity: &Entity<PinView>,
-    window_handle: AnyWindowHandle,
-    cx: &mut App,
-) {
-    let applied = window_handle
-        .update(cx, |_, window, _| set_click_through(&*window, true).is_ok())
-        .unwrap_or(false);
-    if !applied {
-        return;
-    }
-    entity.update(cx, |_, cx| {
-        set_state_click_through(id, true);
-        cx.notify();
-    });
-    crate::tray::refresh_menu();
-}
-
-fn display_for_bounds(cx: &App, bounds: Bounds<Pixels>) -> Option<DisplayId> {
-    let center_x = bounds.origin.x + bounds.size.width / 2.0;
-    let center_y = bounds.origin.y + bounds.size.height / 2.0;
-    cx.displays()
-        .into_iter()
-        .find(|display| {
-            let display = display.bounds();
-            center_x >= display.origin.x
-                && center_x < display.origin.x + display.size.width
-                && center_y >= display.origin.y
-                && center_y < display.origin.y + display.size.height
-        })
-        .map(|display| display.id())
-        .or_else(|| cx.primary_display().map(|display| display.id()))
-}
-
-fn pin_open_display_bounds(
-    cx: &App,
-    bounds: Bounds<Pixels>,
-    display_id: Option<DisplayId>,
-) -> Option<Bounds<Pixels>> {
-    let displays = cx.displays();
-    if let Some(id) = display_id
-        && let Some(display) = displays.iter().find(|display| display.id() == id)
-    {
-        return Some(display.bounds());
-    }
-    let center_x = bounds.origin.x + bounds.size.width / 2.0;
-    let center_y = bounds.origin.y + bounds.size.height / 2.0;
-    displays
-        .iter()
-        .find(|display| {
-            let bounds = display.bounds();
-            center_x >= bounds.origin.x
-                && center_x < bounds.origin.x + bounds.size.width
-                && center_y >= bounds.origin.y
-                && center_y < bounds.origin.y + bounds.size.height
-        })
-        .map(|display| display.bounds())
-        .or_else(|| cx.primary_display().map(|display| display.bounds()))
-}
-
-fn fit_pin_to_display(
-    content: &PinContent,
-    bounds: Bounds<Pixels>,
-    zoom: f32,
-    display: Option<Bounds<Pixels>>,
-) -> (Bounds<Pixels>, f32) {
-    let mut zoom = zoom.clamp(MIN_PIN_ZOOM, MAX_PIN_ZOOM);
-    if let (Some(size), Some(display)) = (content.image_size(), display) {
-        let fit = fit_zoom_limit(
-            size.width,
-            size.height,
-            f32::from(display.size.width),
-            f32::from(display.size.height),
-        );
-        zoom = zoom.min(fit);
-    }
-    let (width, height) = content.size(zoom);
-    let center_x = f32::from(bounds.origin.x) + f32::from(bounds.size.width) / 2.0;
-    let center_y = f32::from(bounds.origin.y) + f32::from(bounds.size.height) / 2.0;
-    let mut origin_x = center_x - width / 2.0;
-    let mut origin_y = center_y - height / 2.0;
-    if let Some(display) = display {
-        let left = f32::from(display.origin.x);
-        let top = f32::from(display.origin.y);
-        let screen_width = f32::from(display.size.width);
-        let screen_height = f32::from(display.size.height);
-        origin_x = if width <= screen_width {
-            origin_x.clamp(left, left + screen_width - width)
-        } else {
-            left + (screen_width - width) / 2.0
-        };
-        origin_y = if height <= screen_height {
-            origin_y.clamp(top, top + screen_height - height)
-        } else {
-            top + (screen_height - height) / 2.0
-        };
-    }
-    (
-        Bounds {
-            origin: point(px(origin_x), px(origin_y)),
-            size: size(px(width), px(height)),
-        },
-        zoom,
-    )
-}
-
-fn fit_zoom_limit(
-    image_width: u32,
-    image_height: u32,
-    screen_width: f32,
-    screen_height: f32,
-) -> f32 {
-    if image_width == 0 || image_height == 0 || screen_width <= 0.0 || screen_height <= 0.0 {
-        return MAX_PIN_ZOOM;
-    }
-    (screen_width / image_width as f32)
-        .min(screen_height / image_height as f32)
-        .clamp(MIN_PIN_ZOOM, MAX_PIN_ZOOM)
-}
-
-fn pin_display_bounds(window: &Window, cx: &App) -> Option<Bounds<Pixels>> {
-    let bounds = window.bounds();
-    let center_x = f32::from(bounds.origin.x) + f32::from(bounds.size.width) / 2.0;
-    let center_y = f32::from(bounds.origin.y) + f32::from(bounds.size.height) / 2.0;
-    cx.displays()
-        .into_iter()
-        .find(|display| {
-            let display = display.bounds();
-            let left = f32::from(display.origin.x);
-            let top = f32::from(display.origin.y);
-            center_x >= left
-                && center_x < left + f32::from(display.size.width)
-                && center_y >= top
-                && center_y < top + f32::from(display.size.height)
-        })
-        .map(|display| display.bounds())
-        .or_else(|| window.display(cx).map(|display| display.bounds()))
-        .or_else(|| cx.primary_display().map(|display| display.bounds()))
-}
-
-fn ensure_visible(cx: &App, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
-    let left = f32::from(bounds.origin.x);
-    let top = f32::from(bounds.origin.y);
-    let right = left + f32::from(bounds.size.width);
-    let bottom = top + f32::from(bounds.size.height);
-    for display in cx.displays() {
-        let display = display.bounds();
-        let display_left = f32::from(display.origin.x);
-        let display_top = f32::from(display.origin.y);
-        let display_right = display_left + f32::from(display.size.width);
-        let display_bottom = display_top + f32::from(display.size.height);
-        if right > display_left
-            && left < display_right
-            && bottom > display_top
-            && top < display_bottom
-        {
-            return bounds;
-        }
-    }
-    centered_bounds(
-        cx,
-        f32::from(bounds.size.width),
-        f32::from(bounds.size.height),
-    )
 }
 
 #[cfg(test)]
 mod tests {
+    use super::manifest::{self, PersistedPin};
     use super::{PinBase, PinEditState, text_pin_size};
     use crate::effects::RegionEffects;
     use core_annotate::AnnotationDocument;
     use core_types::{PhysicalSize, RgbaFrame};
     use std::sync::Arc;
 
+    fn persisted(id: u64) -> PersistedPin {
+        PersistedPin {
+            id,
+            kind: "text".to_owned(),
+            image: None,
+            text: Some(format!("pin-{id}")),
+            x: 0.0,
+            y: 0.0,
+            width: 120.0,
+            height: 80.0,
+            opacity: 1.0,
+            zoom: 1.0,
+            click_through: false,
+            shadow: false,
+            export_padding: 0,
+            display: None,
+        }
+    }
+
+    #[test]
+    fn restore_prefers_the_newest_pins() {
+        let mut entries = vec![persisted(1), persisted(30), persisted(12), persisted(25)];
+        manifest::sort_restore_entries(&mut entries);
+        let ids: Vec<u64> = entries.iter().map(|entry| entry.id).collect();
+        assert_eq!(ids, vec![30, 25, 12, 1]);
+    }
+
     #[test]
     fn zoom_limit_keeps_the_pin_inside_the_display() {
-        assert!((super::fit_zoom_limit(1000, 500, 1200.0, 800.0) - 1.2).abs() < 0.001);
+        assert!((super::pin_display::fit_zoom_limit(1000, 500, 1200.0, 800.0) - 1.2).abs() < 0.001);
         assert!(
-            (super::fit_zoom_limit(200, 100, 1920.0, 1080.0) - super::MAX_PIN_ZOOM).abs() < 0.001
+            (super::pin_display::fit_zoom_limit(200, 100, 1920.0, 1080.0) - super::MAX_PIN_ZOOM)
+                .abs()
+                < 0.001
         );
-        assert!((super::fit_zoom_limit(4000, 3000, 1920.0, 1080.0) - 0.36).abs() < 0.001);
-        assert!((super::fit_zoom_limit(3000, 12000, 1920.0, 1080.0) - 0.09).abs() < 0.001);
+        assert!(
+            (super::pin_display::fit_zoom_limit(4000, 3000, 1920.0, 1080.0) - 0.36).abs() < 0.001
+        );
+        assert!(
+            (super::pin_display::fit_zoom_limit(3000, 12000, 1920.0, 1080.0) - 0.09).abs() < 0.001
+        );
+    }
+
+    #[test]
+    fn available_saved_display_is_kept() {
+        let primary = super::DisplayId::new(1);
+        let secondary = super::DisplayId::new(2);
+        let displays = [primary, secondary];
+        assert_eq!(
+            super::pin_display::resolve_display_id(Some(2), &displays, Some(primary))
+                .map(u64::from),
+            Some(2)
+        );
+        assert_eq!(
+            super::pin_display::resolve_display_id(Some(9), &displays, Some(primary))
+                .map(u64::from),
+            Some(1)
+        );
+        assert_eq!(
+            super::pin_display::resolve_display_id(None, &displays, Some(primary)).map(u64::from),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn clamping_keeps_the_pin_inside_the_saved_display() {
+        use gpui_kit::{Bounds, point, px, size};
+
+        let secondary = Bounds {
+            origin: point(px(1920.0), px(0.0)),
+            size: size(px(1920.0), px(1080.0)),
+        };
+        let pin = Bounds {
+            origin: point(px(1900.0), px(1000.0)),
+            size: size(px(100.0), px(100.0)),
+        };
+        let clamped = super::pin_display::clamp_bounds_to_display(pin, Some(secondary));
+        assert_eq!(f32::from(clamped.origin.x), 1920.0);
+        assert_eq!(f32::from(clamped.origin.y), 980.0);
+        assert_eq!(f32::from(clamped.size.width), 100.0);
+        assert_eq!(f32::from(clamped.size.height), 100.0);
+
+        let unclamped = super::pin_display::clamp_bounds_to_display(pin, None);
+        assert_eq!(f32::from(unclamped.origin.x), 1900.0);
+        assert_eq!(f32::from(unclamped.origin.y), 1000.0);
     }
 
     #[test]
@@ -3092,7 +1390,10 @@ mod tests {
             0,
             1.0,
         );
-        assert!(matches!(state.base, PinBase::Frame(_)));
+        assert!(matches!(
+            *state.base.lock().expect("base lock"),
+            PinBase::Frame(_)
+        ));
     }
 
     #[test]
@@ -3109,7 +1410,17 @@ mod tests {
             0,
             1.0,
         );
-        assert!(matches!(state.base, PinBase::Encoded { .. }));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !matches!(
+            *state.base.lock().expect("base lock"),
+            PinBase::Encoded { .. }
+        ) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "pin base compression timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         let decoded = state.base_frame().expect("compressed base decodes");
         assert_eq!(decoded.pixels(), frame.pixels());
     }

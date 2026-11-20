@@ -15,21 +15,23 @@ thread_local! {
     static PIN_HELP: RefCell<Option<AnyWindowHandle>> = const { RefCell::new(None) };
 }
 
-pub(super) fn toggle(anchor: Bounds<Pixels>, image: bool, cx: &mut App) {
+pub(super) fn toggle(
+    anchor: Bounds<Pixels>,
+    display_id: Option<DisplayId>,
+    image: bool,
+    cx: &mut App,
+) {
     if close(cx) {
         return;
     }
-    open(anchor, image, cx);
+    open(anchor, display_id, image, cx);
 }
 
-fn open(anchor: Bounds<Pixels>, image: bool, cx: &mut App) {
+fn open(anchor: Bounds<Pixels>, display_id: Option<DisplayId>, image: bool, cx: &mut App) {
     let language = settings_state::get().language;
     let rows = rows(image, language);
-    let anchor_center = anchor.center();
-    let display = cx
-        .displays()
-        .into_iter()
-        .find(|display| display.bounds().contains(&anchor_center))
+    let display = display_id
+        .and_then(|id| cx.displays().into_iter().find(|display| display.id() == id))
         .or_else(|| cx.primary_display());
     let Some(display) = display else {
         return;
@@ -75,6 +77,7 @@ fn open(anchor: Bounds<Pixels>, image: bool, cx: &mut App) {
         let view = cx.new(|cx| PinHelpView {
             rows,
             width,
+            accent_hex: system_accent_hex().unwrap_or_else(|| crate::theme::fallback_accent(false)),
             focus_handle: cx.focus_handle(),
             _blur_subscription: None,
         });
@@ -155,13 +158,14 @@ fn rows(image: bool, language: Language) -> Vec<(String, String)> {
 struct PinHelpView {
     rows: Vec<(String, String)>,
     width: f32,
+    accent_hex: u32,
     focus_handle: FocusHandle,
     _blur_subscription: Option<gpui_kit::Subscription>,
 }
 
 impl Render for PinHelpView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = ChromeTheme::for_window(window, system_accent_hex());
+        let theme = ChromeTheme::for_window(window, Some(self.accent_hex));
         let language = settings_state::get().language;
         div()
             .size_full()

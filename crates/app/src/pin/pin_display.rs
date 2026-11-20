@@ -1,10 +1,4 @@
-use gpui_kit::prelude::*;
-use gpui_kit::*;
-
-use crate::image_util;
-use crate::logging::log_warn;
-
-use super::{MIN_PIN_ZOOM, PinContent, PinView, fit_zoom_limit, pin_display_bounds};
+use super::*;
 
 impl PinView {
     pub(super) fn fitted_zoom_limit(&self, window: &Window, cx: &App) -> f32 {
@@ -108,4 +102,157 @@ impl PinView {
             cx.drop_image(image.clone(), None);
         }
     }
+}
+
+pub(super) fn resolve_display_id(
+    saved: Option<u64>,
+    available: &[DisplayId],
+    primary: Option<DisplayId>,
+) -> Option<DisplayId> {
+    saved
+        .map(DisplayId::new)
+        .filter(|id| available.contains(id))
+        .or(primary)
+}
+
+pub(super) fn saved_display_id(cx: &App, saved: Option<u64>) -> Option<DisplayId> {
+    let available: Vec<DisplayId> = cx.displays().iter().map(|display| display.id()).collect();
+    resolve_display_id(
+        saved,
+        &available,
+        cx.primary_display().map(|display| display.id()),
+    )
+}
+
+pub(super) fn clamp_to_display(
+    cx: &App,
+    bounds: Bounds<Pixels>,
+    display_id: Option<DisplayId>,
+) -> Bounds<Pixels> {
+    clamp_bounds_to_display(bounds, pin_open_display_bounds(cx, bounds, display_id))
+}
+
+pub(super) fn clamp_bounds_to_display(
+    bounds: Bounds<Pixels>,
+    display: Option<Bounds<Pixels>>,
+) -> Bounds<Pixels> {
+    let Some(display) = display else {
+        return bounds;
+    };
+    let left = f32::from(display.origin.x);
+    let top = f32::from(display.origin.y);
+    let display_width = f32::from(display.size.width);
+    let display_height = f32::from(display.size.height);
+    let width = f32::from(bounds.size.width);
+    let height = f32::from(bounds.size.height);
+    let origin_x = f32::from(bounds.origin.x);
+    let origin_y = f32::from(bounds.origin.y);
+    Bounds {
+        origin: point(
+            px(if width <= display_width {
+                origin_x.clamp(left, left + display_width - width)
+            } else {
+                left + (display_width - width) / 2.0
+            }),
+            px(if height <= display_height {
+                origin_y.clamp(top, top + display_height - height)
+            } else {
+                top + (display_height - height) / 2.0
+            }),
+        ),
+        size: bounds.size,
+    }
+}
+
+pub(super) fn pin_open_display_bounds(
+    cx: &App,
+    bounds: Bounds<Pixels>,
+    display_id: Option<DisplayId>,
+) -> Option<Bounds<Pixels>> {
+    let displays = cx.displays();
+    if let Some(id) = display_id
+        && let Some(display) = displays.iter().find(|display| display.id() == id)
+    {
+        return Some(display.bounds());
+    }
+    let center_x = bounds.origin.x + bounds.size.width / 2.0;
+    let center_y = bounds.origin.y + bounds.size.height / 2.0;
+    displays
+        .iter()
+        .find(|display| {
+            let bounds = display.bounds();
+            center_x >= bounds.origin.x
+                && center_x < bounds.origin.x + bounds.size.width
+                && center_y >= bounds.origin.y
+                && center_y < bounds.origin.y + bounds.size.height
+        })
+        .map(|display| display.bounds())
+        .or_else(|| cx.primary_display().map(|display| display.bounds()))
+}
+
+pub(super) fn fit_pin_to_display(
+    content: &PinContent,
+    bounds: Bounds<Pixels>,
+    zoom: f32,
+    display: Option<Bounds<Pixels>>,
+) -> (Bounds<Pixels>, f32) {
+    let mut zoom = zoom.clamp(MIN_PIN_ZOOM, MAX_PIN_ZOOM);
+    if let (Some(size), Some(display)) = (content.image_size(), display) {
+        let fit = fit_zoom_limit(
+            size.width,
+            size.height,
+            f32::from(display.size.width),
+            f32::from(display.size.height),
+        );
+        zoom = zoom.min(fit);
+    }
+    let (width, height) = content.size(zoom);
+    let center_x = f32::from(bounds.origin.x) + f32::from(bounds.size.width) / 2.0;
+    let center_y = f32::from(bounds.origin.y) + f32::from(bounds.size.height) / 2.0;
+    let mut origin_x = center_x - width / 2.0;
+    let mut origin_y = center_y - height / 2.0;
+    if let Some(display) = display {
+        let left = f32::from(display.origin.x);
+        let top = f32::from(display.origin.y);
+        let screen_width = f32::from(display.size.width);
+        let screen_height = f32::from(display.size.height);
+        origin_x = if width <= screen_width {
+            origin_x.clamp(left, left + screen_width - width)
+        } else {
+            left + (screen_width - width) / 2.0
+        };
+        origin_y = if height <= screen_height {
+            origin_y.clamp(top, top + screen_height - height)
+        } else {
+            top + (screen_height - height) / 2.0
+        };
+    }
+    (
+        Bounds {
+            origin: point(px(origin_x), px(origin_y)),
+            size: size(px(width), px(height)),
+        },
+        zoom,
+    )
+}
+
+pub(super) fn fit_zoom_limit(
+    image_width: u32,
+    image_height: u32,
+    screen_width: f32,
+    screen_height: f32,
+) -> f32 {
+    if image_width == 0 || image_height == 0 || screen_width <= 0.0 || screen_height <= 0.0 {
+        return MAX_PIN_ZOOM;
+    }
+    (screen_width / image_width as f32)
+        .min(screen_height / image_height as f32)
+        .clamp(MIN_PIN_ZOOM, MAX_PIN_ZOOM)
+}
+
+pub(super) fn pin_display_bounds(window: &Window, cx: &App) -> Option<Bounds<Pixels>> {
+    window
+        .display(cx)
+        .map(|display| display.bounds())
+        .or_else(|| cx.primary_display().map(|display| display.bounds()))
 }

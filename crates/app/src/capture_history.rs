@@ -1,13 +1,13 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use core_types::RgbaFrame;
 use serde::{Deserialize, Serialize};
 
-use crate::logging::log_warn;
-use crate::storage;
+use crate::logging::{log_debug, log_warn};
+use crate::paths::history_dir;
 
 const HISTORY_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 const HISTORY_LIMIT: usize = 50;
@@ -22,6 +22,8 @@ struct HistoryEntry {
     pin_shadow: Option<HistoryPinShadow>,
     #[serde(default)]
     scale: Option<f32>,
+    #[serde(default)]
+    native_shadow: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -32,17 +34,191 @@ pub struct HistoryPinShadow {
 
 pub struct HistoryImage {
     pub frame: RgbaFrame,
+    pub hash: u64,
     pub pin_shadow: Option<HistoryPinShadow>,
     pub scale: Option<f32>,
+    pub native_shadow: bool,
 }
 
 thread_local! {
-    static ENTRIES: RefCell<Option<std::rc::Rc<Vec<HistoryEntry>>>> = const { RefCell::new(None) };
+    static STORE: RefCell<Option<HistoryStore>> = const { RefCell::new(None) };
     static GENERATION: Cell<u64> = const { Cell::new(0) };
+}
+
+struct HistoryStore {
+    directory: PathBuf,
+    entries: Vec<HistoryEntry>,
+}
+
+fn with_store<T>(action: impl FnOnce(&mut HistoryStore) -> T) -> Option<T> {
+    let directory = history_dir()?;
+    STORE.with(|slot| {
+        let mut store = slot.borrow_mut();
+        if store.is_none() {
+            *store = Some(HistoryStore::load(directory));
+        }
+        store.as_mut().map(action)
+    })
 }
 
 pub fn generation() -> u64 {
     GENERATION.with(Cell::get)
+}
+
+impl HistoryStore {
+    fn load(directory: PathBuf) -> Self {
+        let Ok(text) = std::fs::read_to_string(directory.join(HISTORY_MANIFEST)) else {
+            return Self {
+                directory,
+                entries: Vec::new(),
+            };
+        };
+        let Ok(mut entries) = serde_json::from_str::<Vec<HistoryEntry>>(&text) else {
+            log_warn!(
+                "history",
+                "history manifest is corrupt; keeping recent images"
+            );
+            cleanup_orphans(&directory, now_millis(), &HashSet::new());
+            return Self {
+                directory,
+                entries: Vec::new(),
+            };
+        };
+        let before = entries.len();
+        let now = now_millis();
+        prune(&mut entries, &directory, now);
+        if entries.len() != before {
+            write_entries(&directory, &entries);
+        }
+        let referenced = entries
+            .iter()
+            .filter_map(|entry| {
+                Path::new(&entry.file)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .collect::<HashSet<_>>();
+        cleanup_orphans(&directory, now, &referenced);
+        Self { directory, entries }
+    }
+
+    fn record(
+        &mut self,
+        hash: u64,
+        pin_shadow: Option<HistoryPinShadow>,
+        scale: Option<f32>,
+        native_shadow: bool,
+        write: impl FnOnce(&Path) -> bool,
+    ) -> bool {
+        let now = now_millis();
+        let updated_first =
+            if let Some(first) = self.entries.first_mut().filter(|entry| entry.hash == hash) {
+                first.created_at = now;
+                first.pin_shadow = pin_shadow;
+                first.scale = scale;
+                first.native_shadow = native_shadow;
+                true
+            } else {
+                false
+            };
+        if updated_first {
+            write_entries(&self.directory, &self.entries);
+            return true;
+        }
+
+        let path = unique_history_path(&self.directory, now);
+        if !write(&path) {
+            return false;
+        }
+        let Some(file) = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+        else {
+            return false;
+        };
+        if let Some(index) = self.entries.iter().position(|entry| entry.hash == hash) {
+            let duplicate = self.entries.remove(index);
+            if let Some(name) = Path::new(&duplicate.file).file_name() {
+                let _ = std::fs::remove_file(self.directory.join(name));
+            }
+        }
+        self.entries.insert(
+            0,
+            HistoryEntry {
+                file,
+                created_at: now,
+                hash,
+                pin_shadow,
+                scale,
+                native_shadow,
+            },
+        );
+        prune(&mut self.entries, &self.directory, now);
+        write_entries(&self.directory, &self.entries);
+        true
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    fn cycle(&self, hash: u64) -> Option<HistoryImage> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        let mut index = older_index(&self.entries, hash);
+        while let Some(entry) = self.entries.get(index) {
+            if entry.hash != hash
+                && let Some(frame) = load_entry(&self.directory, entry)
+            {
+                return Some(HistoryImage {
+                    frame,
+                    hash: entry.hash,
+                    pin_shadow: entry.pin_shadow,
+                    scale: entry.scale,
+                    native_shadow: entry.native_shadow,
+                });
+            }
+            index += 1;
+        }
+        None
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    fn find(&self, hash: u64) -> Option<HistoryImage> {
+        self.entries
+            .iter()
+            .find(|entry| entry.hash == hash)
+            .and_then(|entry| {
+                Some(HistoryImage {
+                    frame: load_entry(&self.directory, entry)?,
+                    hash: entry.hash,
+                    pin_shadow: entry.pin_shadow,
+                    scale: entry.scale,
+                    native_shadow: entry.native_shadow,
+                })
+            })
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    fn latest(&self) -> Option<HistoryImage> {
+        self.entries.iter().find_map(|entry| {
+            Some(HistoryImage {
+                frame: load_entry(&self.directory, entry)?,
+                hash: entry.hash,
+                pin_shadow: entry.pin_shadow,
+                scale: entry.scale,
+                native_shadow: entry.native_shadow,
+            })
+        })
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    fn contains(&self, hash: u64) -> bool {
+        self.entries.iter().any(|entry| entry.hash == hash)
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    fn has_entries(&self) -> bool {
+        !self.entries.is_empty()
+    }
 }
 
 pub fn record_png_bytes(
@@ -50,10 +226,21 @@ pub fn record_png_bytes(
     hash: u64,
     pin_shadow: Option<HistoryPinShadow>,
     scale: Option<f32>,
+    native_shadow: bool,
 ) -> bool {
-    let recorded = record_png(hash, pin_shadow, scale, |path| {
-        crate::persist::write_atomic(path, bytes).is_ok()
-    });
+    let started = Instant::now();
+    let recorded = with_store(|store| {
+        store.record(hash, pin_shadow, scale, native_shadow, |path| {
+            crate::persist::write_atomic(path, bytes).is_ok()
+        })
+    })
+    .unwrap_or(false);
+    log_debug!(
+        "history",
+        "record bytes={} duration_ms={} ok={recorded}",
+        bytes.len(),
+        started.elapsed().as_millis()
+    );
     if recorded {
         GENERATION.with(|cell| cell.set(cell.get().wrapping_add(1)));
     }
@@ -65,11 +252,21 @@ pub fn record_frame(
     hash: u64,
     pin_shadow: Option<HistoryPinShadow>,
     scale: Option<f32>,
+    native_shadow: bool,
 ) -> bool {
+    let started = Instant::now();
     let Ok(bytes) = crate::image_util::encode_png(frame) else {
         return false;
     };
-    record_png_bytes(&bytes, hash, pin_shadow, scale)
+    log_debug!(
+        "history",
+        "encode frame={}x{} bytes={} duration_ms={}",
+        frame.width(),
+        frame.height(),
+        bytes.len(),
+        started.elapsed().as_millis()
+    );
+    record_png_bytes(&bytes, hash, pin_shadow, scale, native_shadow)
 }
 
 pub fn record_png_file(
@@ -77,92 +274,32 @@ pub fn record_png_file(
     hash: u64,
     pin_shadow: Option<HistoryPinShadow>,
     scale: Option<f32>,
+    native_shadow: bool,
 ) -> bool {
-    let recorded = record_png(hash, pin_shadow, scale, |path| {
-        crate::persist::copy_atomic(source, path).is_ok()
-    });
+    let started = Instant::now();
+    let recorded = with_store(|store| {
+        store.record(hash, pin_shadow, scale, native_shadow, |path| {
+            crate::persist::copy_atomic(source, path).is_ok()
+        })
+    })
+    .unwrap_or(false);
+    log_debug!(
+        "history",
+        "record file duration_ms={} ok={recorded}",
+        started.elapsed().as_millis()
+    );
     if recorded {
         GENERATION.with(|cell| cell.set(cell.get().wrapping_add(1)));
     }
     recorded
 }
 
-fn record_png(
-    hash: u64,
-    pin_shadow: Option<HistoryPinShadow>,
-    scale: Option<f32>,
-    write: impl FnOnce(&Path) -> bool,
-) -> bool {
-    let Some(directory) = history_dir() else {
-        return false;
-    };
-    let now = now_millis();
-    let mut entries = entries();
-    let list = std::rc::Rc::make_mut(&mut entries);
-    if let Some(first) = list.first_mut().filter(|entry| entry.hash == hash) {
-        first.created_at = now;
-        first.pin_shadow = pin_shadow;
-        first.scale = scale;
-        write_entries(&directory, list);
-        ENTRIES.with(|slot| *slot.borrow_mut() = Some(entries));
-        return true;
-    }
-
-    let path = unique_history_path(&directory, now);
-    if !write(&path) {
-        return false;
-    }
-    let Some(file) = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-    else {
-        return false;
-    };
-
-    if let Some(index) = list.iter().position(|entry| entry.hash == hash) {
-        let duplicate = list.remove(index);
-        if let Some(name) = Path::new(&duplicate.file).file_name() {
-            let _ = std::fs::remove_file(directory.join(name));
-        }
-    }
-    list.insert(
-        0,
-        HistoryEntry {
-            file,
-            created_at: now,
-            hash,
-            pin_shadow,
-            scale,
-        },
-    );
-    prune(list, &directory, now);
-    write_entries(&directory, list);
-    ENTRIES.with(|slot| *slot.borrow_mut() = Some(entries));
-    true
-}
-
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn cycle(hash: u64) -> Option<HistoryImage> {
-    let entries = entries();
-    if entries.is_empty() {
-        return None;
-    }
-    let directory = history_dir()?;
-    let mut index = older_index(&entries, hash);
-    while let Some(entry) = entries.get(index) {
-        if entry.hash != hash
-            && let Some(frame) = load_entry(&directory, entry)
-        {
-            return Some(HistoryImage {
-                frame,
-                pin_shadow: entry.pin_shadow,
-                scale: entry.scale,
-            });
-        }
-        index += 1;
-    }
-    None
+    with_store(|store| store.cycle(hash)).flatten()
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn older_index(entries: &[HistoryEntry], hash: u64) -> usize {
     match entries.iter().position(|entry| entry.hash == hash) {
         Some(index) => index + 1,
@@ -170,94 +307,31 @@ fn older_index(entries: &[HistoryEntry], hash: u64) -> usize {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn contains(hash: u64) -> bool {
-    entries().iter().any(|entry| entry.hash == hash)
+    with_store(|store| store.contains(hash)).unwrap_or(false)
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn has_entries() -> bool {
-    !entries().is_empty()
+    with_store(|store| store.has_entries()).unwrap_or(false)
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn find(hash: u64) -> Option<HistoryImage> {
-    let entries = entries();
-    let directory = history_dir()?;
-    entries
-        .iter()
-        .find(|entry| entry.hash == hash)
-        .and_then(|entry| {
-            Some(HistoryImage {
-                frame: load_entry(&directory, entry)?,
-                pin_shadow: entry.pin_shadow,
-                scale: entry.scale,
-            })
-        })
+    with_store(|store| store.find(hash)).flatten()
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn latest() -> Option<HistoryImage> {
-    let entries = entries();
-    let directory = history_dir()?;
-    entries.iter().find_map(|entry| {
-        Some(HistoryImage {
-            frame: load_entry(&directory, entry)?,
-            pin_shadow: entry.pin_shadow,
-            scale: entry.scale,
-        })
-    })
+    with_store(|store| store.latest()).flatten()
 }
 
 pub fn hash_frame(frame: &RgbaFrame) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    let packed = frame.packed_pixels();
-    for byte in packed.as_ref() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x1000_0000_01b3);
-    }
+    let mut hash = core_types::fnv1a64(frame.packed_pixels().as_ref());
     hash ^= u64::from(frame.width()) << 32;
     hash ^= u64::from(frame.height());
     hash
-}
-
-fn entries() -> std::rc::Rc<Vec<HistoryEntry>> {
-    ENTRIES.with(|slot| {
-        if slot.borrow().is_none() {
-            let loaded = load_entries();
-            *slot.borrow_mut() = Some(std::rc::Rc::new(loaded));
-        }
-        slot.borrow().as_ref().cloned().unwrap_or_default()
-    })
-}
-
-fn load_entries() -> Vec<HistoryEntry> {
-    let Some(directory) = history_dir() else {
-        return Vec::new();
-    };
-    let Ok(text) = std::fs::read_to_string(directory.join(HISTORY_MANIFEST)) else {
-        return Vec::new();
-    };
-    let Ok(mut entries) = serde_json::from_str::<Vec<HistoryEntry>>(&text) else {
-        log_warn!(
-            "history",
-            "history manifest is corrupt; keeping recent images"
-        );
-        cleanup_orphans(&directory, now_millis(), &HashSet::new());
-        return Vec::new();
-    };
-    let before = entries.len();
-    let now = now_millis();
-    prune(&mut entries, &directory, now);
-    if entries.len() != before {
-        write_entries(&directory, &entries);
-    }
-    let referenced = entries
-        .iter()
-        .filter_map(|entry| {
-            Path::new(&entry.file)
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        })
-        .collect::<HashSet<_>>();
-    cleanup_orphans(&directory, now, &referenced);
-    entries
 }
 
 fn prune(entries: &mut Vec<HistoryEntry>, directory: &Path, now: u64) {
@@ -321,6 +395,7 @@ fn cleanup_orphans(directory: &Path, now: u64, referenced: &HashSet<String>) {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn load_entry(directory: &Path, entry: &HistoryEntry) -> Option<RgbaFrame> {
     let file = Path::new(&entry.file).file_name()?;
     crate::image_util::load_frame(&directory.join(file))
@@ -334,12 +409,6 @@ fn unique_history_path(directory: &Path, now: u64) -> PathBuf {
         suffix += 1;
     }
     path
-}
-
-fn history_dir() -> Option<PathBuf> {
-    let directory = storage::app_data_dir()?.join("history");
-    std::fs::create_dir_all(&directory).ok()?;
-    Some(directory)
 }
 
 fn now_millis() -> u64 {
@@ -371,6 +440,37 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    fn store_records_reloads_and_returns_the_latest_image() {
+        let directory = std::env::temp_dir().join(format!(
+            "capin-history-store-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let source = frame(3);
+        let bytes = crate::image_util::encode_png(&source).unwrap();
+        let hash = hash_frame(&source);
+        let mut store = HistoryStore::load(directory.clone());
+        assert!(store.record(hash, None, Some(2.0), true, |path| {
+            std::fs::write(path, &bytes).is_ok()
+        }));
+        assert!(store.contains(hash));
+        assert!(store.has_entries());
+
+        let latest = store.latest().expect("latest history image");
+        assert_eq!(latest.hash, hash);
+        assert_eq!(latest.scale, Some(2.0));
+        assert!(latest.native_shadow);
+        assert_eq!(latest.frame.pixels(), source.pixels());
+
+        drop(store);
+        let reloaded = HistoryStore::load(directory.clone());
+        assert!(reloaded.contains(hash));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn prune_keeps_only_the_most_recent_entries() {
         let directory = std::env::temp_dir().join(format!(
             "capin-history-test-{}-{}",
@@ -388,6 +488,7 @@ mod tests {
                 hash: index as u64,
                 pin_shadow: None,
                 scale: None,
+                native_shadow: false,
             });
         }
         let now = HISTORY_LIMIT as u64 + 10;
@@ -418,6 +519,7 @@ mod tests {
                 hash,
                 pin_shadow: None,
                 scale: None,
+                native_shadow: false,
             });
         }
         prune(&mut entries, &directory, 100);
@@ -433,6 +535,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     fn history_walk_advances_forward_and_stops_at_the_oldest() {
         let entries = vec![
             HistoryEntry {
@@ -441,6 +544,7 @@ mod tests {
                 hash: 30,
                 pin_shadow: None,
                 scale: None,
+                native_shadow: false,
             },
             HistoryEntry {
                 file: "mid.png".to_owned(),
@@ -448,6 +552,7 @@ mod tests {
                 hash: 20,
                 pin_shadow: None,
                 scale: None,
+                native_shadow: false,
             },
             HistoryEntry {
                 file: "old.png".to_owned(),
@@ -455,6 +560,7 @@ mod tests {
                 hash: 10,
                 pin_shadow: None,
                 scale: None,
+                native_shadow: false,
             },
         ];
         assert_eq!(older_index(&entries, 30), 1);
@@ -468,6 +574,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     fn next_walk_position_never_repeats_a_hash() {
         let entries = vec![
             HistoryEntry {
@@ -476,6 +583,7 @@ mod tests {
                 hash: 1,
                 pin_shadow: None,
                 scale: None,
+                native_shadow: false,
             },
             HistoryEntry {
                 file: "b.png".to_owned(),
@@ -483,6 +591,7 @@ mod tests {
                 hash: 2,
                 pin_shadow: None,
                 scale: None,
+                native_shadow: false,
             },
             HistoryEntry {
                 file: "c.png".to_owned(),
@@ -490,6 +599,7 @@ mod tests {
                 hash: 3,
                 pin_shadow: None,
                 scale: None,
+                native_shadow: false,
             },
         ];
         let mut index = older_index(&entries, 1);

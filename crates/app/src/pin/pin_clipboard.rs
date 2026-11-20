@@ -68,14 +68,15 @@ pub(super) fn paste_clipboard(cx: &mut App) {
     match read_clipboard(cx).0 {
         ClipboardContent::Image(frame) => {
             let hash = capture_history::hash_frame(&frame);
-            capture_history::record_frame(&frame, hash, None, None);
+            capture_history::record_frame(&frame, hash, None, None, false);
             super::open_history_pin(
                 capture_history::HistoryImage {
                     frame,
+                    hash,
                     pin_shadow: None,
                     scale: None,
+                    native_shadow: false,
                 },
-                false,
                 cx,
             );
         }
@@ -85,12 +86,7 @@ pub(super) fn paste_clipboard(cx: &mut App) {
 }
 
 fn clipboard_signature_of(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x1000_0000_01b3);
-    }
-    hash
+    core_types::fnv1a64(bytes)
 }
 
 pub(super) fn clipboard_image_signature(cx: &mut App) -> Option<u64> {
