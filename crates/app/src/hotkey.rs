@@ -2,6 +2,7 @@
 mod imp {
     use std::cell::{Cell, RefCell};
     use std::str::FromStr;
+    use std::sync::{Arc, Mutex, mpsc};
     use std::time::Duration;
 
     use global_hotkey::hotkey::{Code, HotKey, Modifiers};
@@ -156,62 +157,65 @@ mod imp {
         MANAGER.with(|slot| *slot.borrow_mut() = Some(manager));
         REGISTERED.with(|slot| *slot.borrow_mut() = registered);
 
+        let (sender, receiver) = mpsc::channel::<u32>();
+        GlobalHotKeyEvent::set_event_handler(Some(move |event| {
+            if event.state() == HotKeyState::Pressed {
+                let _ = sender.send(event.id());
+            }
+        }));
+        let receiver = Arc::new(Mutex::new(receiver));
         cx.spawn(async move |cx| {
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(50))
+                let receiver = Arc::clone(&receiver);
+                let id = cx
+                    .background_executor()
+                    .spawn(async move {
+                        receiver.lock().ok().and_then(|receiver| {
+                            receiver.recv_timeout(Duration::from_millis(250)).ok()
+                        })
+                    })
                     .await;
-                let mut actions = Vec::new();
-                while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-                    if event.state() == HotKeyState::Pressed {
-                        actions.push(event.id());
-                    }
+                match id {
+                    Some(id) => cx.update(|cx| handle_event(id, cx)),
+                    None => cx.update(sync_through_escape),
                 }
-                cx.update(sync_through_escape);
-                if actions.is_empty() {
-                    continue;
-                }
-                cx.update(|cx| {
-                    let capture_id = CAPTURE_ID.with(|id| id.get());
-                    let pin_id = PIN_ID.with(|id| id.get());
-                    let record_pause_id = RECORD_PAUSE_ID.with(|id| id.get());
-                    let record_stop_id = RECORD_STOP_ID.with(|id| id.get());
-                    let through_escape_id = THROUGH_ESCAPE_ID.with(|id| id.get());
-                    let capture_enabled = CAPTURE_ENABLED.with(|enabled| enabled.get());
-                    let pin_enabled = PIN_ENABLED.with(|enabled| enabled.get());
-                    for id in actions {
-                        if capture_enabled && id == capture_id {
-                            log_info!("hotkey", "capture shortcut pressed");
-                            if crate::overlay::has_open_overlays() {
-                                crate::overlay::close_open_overlays(cx);
-                            } else {
-                                crate::overlay::open_overlays(cx);
-                            }
-                        } else if pin_enabled && id == pin_id {
-                            log_info!("hotkey", "pin shortcut pressed");
-                            if crate::overlay::has_open_overlays() {
-                                let _ = crate::overlay::pin_current(cx);
-                            } else if !crate::editor::pin_current(cx) {
-                                crate::pin::pin_last(cx);
-                            }
-                        } else if through_escape_id != 0 && id == through_escape_id {
-                            log_info!("hotkey", "click-through escape pressed");
-                            crate::pin::release_click_through(cx);
-                        } else if record_pause_id != 0 && id == record_pause_id {
-                            log_info!("hotkey", "recording pause shortcut pressed");
-                            crate::record::handle_shortcut(
-                                crate::record::RecordShortcut::Pause,
-                                cx,
-                            );
-                        } else if record_stop_id != 0 && id == record_stop_id {
-                            log_info!("hotkey", "recording stop shortcut pressed");
-                            crate::record::handle_shortcut(crate::record::RecordShortcut::Stop, cx);
-                        }
-                    }
-                });
             }
         })
         .detach();
+    }
+
+    fn handle_event(id: u32, cx: &mut App) {
+        let capture_id = CAPTURE_ID.with(|id| id.get());
+        let pin_id = PIN_ID.with(|id| id.get());
+        let record_pause_id = RECORD_PAUSE_ID.with(|id| id.get());
+        let record_stop_id = RECORD_STOP_ID.with(|id| id.get());
+        let through_escape_id = THROUGH_ESCAPE_ID.with(|id| id.get());
+        let capture_enabled = CAPTURE_ENABLED.with(|enabled| enabled.get());
+        let pin_enabled = PIN_ENABLED.with(|enabled| enabled.get());
+        if capture_enabled && id == capture_id {
+            log_info!("hotkey", "capture shortcut pressed");
+            if crate::overlay::has_open_overlays() {
+                crate::overlay::close_open_overlays(cx);
+            } else {
+                crate::overlay::open_overlays(cx);
+            }
+        } else if pin_enabled && id == pin_id {
+            log_info!("hotkey", "pin shortcut pressed");
+            if crate::overlay::has_open_overlays() {
+                let _ = crate::overlay::pin_current(cx);
+            } else if !crate::editor::pin_current(cx) {
+                crate::pin::pin_last(cx);
+            }
+        } else if through_escape_id != 0 && id == through_escape_id {
+            log_info!("hotkey", "click-through escape pressed");
+            crate::pin::release_click_through(cx);
+        } else if record_pause_id != 0 && id == record_pause_id {
+            log_info!("hotkey", "recording pause shortcut pressed");
+            crate::record::handle_shortcut(crate::record::RecordShortcut::Pause, cx);
+        } else if record_stop_id != 0 && id == record_stop_id {
+            log_info!("hotkey", "recording stop shortcut pressed");
+            crate::record::handle_shortcut(crate::record::RecordShortcut::Stop, cx);
+        }
     }
 
     pub fn registration_error() -> Option<String> {
