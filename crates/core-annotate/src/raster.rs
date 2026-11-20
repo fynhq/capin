@@ -378,15 +378,44 @@ fn push_rounded_rect(
     let top = rect.top();
     let right = rect.right();
     let bottom = rect.bottom();
+    let handle = radius * core_types::ARC_HANDLE;
     builder.move_to(left + radius, top);
     builder.line_to(right - radius, top);
-    builder.quad_to(right, top, right, top + radius);
+    builder.cubic_to(
+        right - radius + handle,
+        top,
+        right,
+        top + radius - handle,
+        right,
+        top + radius,
+    );
     builder.line_to(right, bottom - radius);
-    builder.quad_to(right, bottom, right - radius, bottom);
+    builder.cubic_to(
+        right,
+        bottom - radius + handle,
+        right - radius + handle,
+        bottom,
+        right - radius,
+        bottom,
+    );
     builder.line_to(left + radius, bottom);
-    builder.quad_to(left, bottom, left, bottom - radius);
+    builder.cubic_to(
+        left + radius - handle,
+        bottom,
+        left,
+        bottom - radius + handle,
+        left,
+        bottom - radius,
+    );
     builder.line_to(left, top + radius);
-    builder.quad_to(left, top, left + radius, top);
+    builder.cubic_to(
+        left,
+        top + radius - handle,
+        left + radius - handle,
+        top,
+        left + radius,
+        top,
+    );
     builder.close();
     Ok(())
 }

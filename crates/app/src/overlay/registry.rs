@@ -42,6 +42,7 @@ pub(super) fn register(view: WeakEntity<OverlayView>) {
     VIEWS.with(|views| views.borrow_mut().push(view));
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub(super) fn clear() {
     FOCUSED.with(|slot| slot.set(None));
     VIEWS.with(|views| views.borrow_mut().clear());

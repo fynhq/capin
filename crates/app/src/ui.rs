@@ -74,8 +74,6 @@ pub fn align_client_to_bounds(window: &Window, bounds: Bounds<Pixels>) {
     }
 }
 
-const ARC_HANDLE: f32 = 0.552_284_8;
-
 pub fn push_rounded_rect(builder: &mut PathBuilder, rect: Bounds<Pixels>, radius: f32) {
     let left = f32::from(rect.origin.x);
     let top = f32::from(rect.origin.y);
@@ -87,7 +85,7 @@ pub fn push_rounded_rect(builder: &mut PathBuilder, rect: Bounds<Pixels>, radius
     }
     let right = left + width;
     let bottom = top + height;
-    let handle = radius * ARC_HANDLE;
+    let handle = radius * core_types::ARC_HANDLE;
     builder.move_to(point(px(left + radius), px(top)));
     builder.line_to(point(px(right - radius), px(top)));
     builder.cubic_bezier_to(

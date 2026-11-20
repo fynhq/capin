@@ -92,16 +92,12 @@ pub(crate) fn resize_rect(
     handle: ResizeHandle,
     cursor: PhysicalPoint,
     ratio: Option<f32>,
-    shift: bool,
-    alt: bool,
     size: PhysicalSize,
 ) -> PhysicalRect {
     let original_left = i64::from(original.origin.x);
     let original_top = i64::from(original.origin.y);
     let original_right = original_left + i64::from(original.size.width);
     let original_bottom = original_top + i64::from(original.size.height);
-    let center_x = (original_left + original_right) / 2;
-    let center_y = (original_top + original_bottom) / 2;
     let cursor_x = i64::from(cursor.x).clamp(0, i64::from(size.width));
     let cursor_y = i64::from(cursor.y).clamp(0, i64::from(size.height));
 
@@ -122,19 +118,6 @@ pub(crate) fn resize_rect(
         bottom = cursor_y;
     }
 
-    if alt {
-        if handle_has_west(handle) {
-            left = center_x * 2 - right;
-        } else if handle_has_east(handle) {
-            right = center_x * 2 - left;
-        }
-        if handle_has_north(handle) {
-            top = center_y * 2 - bottom;
-        } else if handle_has_south(handle) {
-            bottom = center_y * 2 - top;
-        }
-    }
-
     if right < left + i64::from(MIN_REGION_SIZE) {
         if handle_has_west(handle) {
             left = right - i64::from(MIN_REGION_SIZE);
@@ -150,7 +133,6 @@ pub(crate) fn resize_rect(
         }
     }
 
-    let ratio = ratio.or_else(|| shift.then_some(1.0));
     if let Some(ratio) = ratio {
         let anchor_right = handle_has_west(handle);
         let anchor_bottom = handle_has_north(handle);
@@ -235,8 +217,8 @@ pub(crate) fn corner_handle_offset(handle: ResizeHandle, radius: f32) -> (f32, f
 
 #[cfg(test)]
 mod tests {
-    use super::{ResizeHandle, edge_resize_handle};
-    use core_types::{PhysicalPoint, PhysicalRect};
+    use super::{ResizeHandle, edge_resize_handle, resize_rect};
+    use core_types::{PhysicalPoint, PhysicalRect, PhysicalSize};
 
     #[test]
     fn selection_borders_map_to_resize_handles() {
@@ -248,5 +230,33 @@ mod tests {
         assert_eq!(handle(110, 100), Some(ResizeHandle::SouthEast));
         assert_eq!(handle(60, 60), None);
         assert_eq!(handle(140, 60), None);
+    }
+
+    #[test]
+    fn resize_keeps_the_opposite_edge_fixed() {
+        let original = PhysicalRect::new(100, 100, 200, 100);
+        let resized = resize_rect(
+            original,
+            ResizeHandle::East,
+            PhysicalPoint::new(400, 120),
+            None,
+            PhysicalSize::new(1000, 800),
+        );
+        assert_eq!(resized, PhysicalRect::new(100, 100, 300, 100));
+    }
+
+    #[test]
+    fn resize_applies_a_fixed_ratio() {
+        let original = PhysicalRect::new(100, 100, 160, 90);
+        let resized = resize_rect(
+            original,
+            ResizeHandle::SouthEast,
+            PhysicalPoint::new(420, 300),
+            Some(16.0 / 9.0),
+            PhysicalSize::new(1000, 800),
+        );
+        let ratio = resized.size.width as f32 / resized.size.height as f32;
+        assert!((ratio - 16.0 / 9.0).abs() < 0.01, "ratio was {ratio}");
+        assert_eq!(resized.origin, original.origin);
     }
 }

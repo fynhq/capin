@@ -366,6 +366,8 @@ pub(crate) struct EditorState {
     pub(crate) shape_ellipse: bool,
     pub(crate) spotlight_intensity: u8,
     pub(crate) active_color_tool: AnnotationColorTool,
+    pub(crate) palette: [u32; settings_state::ANNOTATION_COLOR_TOOL_COUNT],
+    pub(crate) uniform_color: bool,
     pub(crate) draft: Option<Draft>,
     pub(crate) move_draft: Option<MoveDraft>,
     pub(crate) resize_draft: Option<ResizeDraft>,
@@ -418,6 +420,9 @@ impl EditorState {
             shape_ellipse: false,
             spotlight_intensity: 40,
             active_color_tool: AnnotationColorTool::Rect,
+            palette: [settings_state::DEFAULT_ANNOTATION_COLOR;
+                settings_state::ANNOTATION_COLOR_TOOL_COUNT],
+            uniform_color: true,
             draft: None,
             move_draft: None,
             resize_draft: None,
@@ -494,7 +499,11 @@ impl EditorState {
     }
 
     pub(crate) fn tool_color(&self, tool: AnnotationColorTool) -> u32 {
-        settings_state::get().annotation_color_for(tool)
+        if self.uniform_color {
+            self.palette[0]
+        } else {
+            self.palette[tool.index()]
+        }
     }
 
     pub(crate) fn palette_color_tool(&self) -> AnnotationColorTool {
@@ -735,6 +744,11 @@ impl EditorState {
             });
         let applied = (color & 0xFFFFFF00) | alpha;
         self.style.color = (self.style.color & 0xFFFFFF00) | alpha;
+        if self.uniform_color {
+            self.palette = [applied; settings_state::ANNOTATION_COLOR_TOOL_COUNT];
+        } else {
+            self.palette[tool.index()] = applied;
+        }
 
         if let Some(mut style) = self
             .document

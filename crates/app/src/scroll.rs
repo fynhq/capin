@@ -1,8 +1,11 @@
+use std::collections::VecDeque;
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use core_capture::CaptureTarget;
-use core_stitch::{StitchConfig, StitchError, Stitcher};
-use core_types::{CaptureRegion, RgbaFrame};
+use core_stitch::{AppendReport, StitchConfig, StitchError, Stitcher};
+use core_types::{CaptureRegion, PhysicalRect, RgbaFrame};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use platform_capture::platform_backend;
@@ -10,7 +13,7 @@ use platform_window::system_accent_hex;
 
 use crate::chrome_theme::ChromeTheme;
 use crate::i18n::{Language, t};
-use crate::logging::{log_error, log_info};
+use crate::logging::{log_debug, log_error, log_info};
 use crate::settings_state;
 
 const BAR_WIDTH: f32 = 460.0;
@@ -18,6 +21,10 @@ const BAR_HEIGHT: f32 = 62.0;
 const CAPTURE_INTERVAL: Duration = Duration::from_millis(400);
 const SLOW_CAPTURE_INTERVAL: Duration = Duration::from_millis(700);
 const SLOW_CAPTURE_THRESHOLD: Duration = Duration::from_millis(200);
+
+pub(crate) fn supports_target(target: CaptureTarget) -> bool {
+    matches!(target, CaptureTarget::Region(_))
+}
 
 pub fn open_session(region: CaptureRegion, first_frame: RgbaFrame, cx: &mut App) {
     let config = StitchConfig::default();
@@ -64,13 +71,140 @@ pub fn open_session(region: CaptureRegion, first_frame: RgbaFrame, cx: &mut App)
     }
 }
 
+enum StitchCommand {
+    Push(Arc<RgbaFrame>),
+    Finish,
+}
+
+enum StitchEvent {
+    Appended(AppendReport),
+    NoOverlap,
+    Failed { message: String, fatal: bool },
+    Finished(RgbaFrame),
+}
+
+struct StitchWorker {
+    commands: mpsc::Sender<StitchCommand>,
+    events: Arc<Mutex<VecDeque<StitchEvent>>>,
+}
+
+impl StitchWorker {
+    fn new(stitcher: Stitcher) -> Self {
+        let (commands, receiver) = mpsc::channel();
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let worker_events = Arc::clone(&events);
+        let spawned = std::thread::Builder::new()
+            .name("capin-stitch".to_owned())
+            .spawn(move || stitch_loop(stitcher, receiver, worker_events));
+        if let Err(error) = spawned
+            && let Ok(mut events) = events.lock()
+        {
+            events.push_back(StitchEvent::Failed {
+                message: error.to_string(),
+                fatal: true,
+            });
+        }
+        Self { commands, events }
+    }
+
+    fn push(&self, frame: RgbaFrame) {
+        let _ = self.commands.send(StitchCommand::Push(Arc::new(frame)));
+    }
+
+    fn finish(&self) {
+        let _ = self.commands.send(StitchCommand::Finish);
+    }
+
+    fn drain(&self) -> Vec<StitchEvent> {
+        self.events
+            .lock()
+            .map(|mut events| events.drain(..).collect())
+            .unwrap_or_default()
+    }
+}
+
+fn stitch_loop(
+    mut stitcher: Stitcher,
+    receiver: mpsc::Receiver<StitchCommand>,
+    events: Arc<Mutex<VecDeque<StitchEvent>>>,
+) {
+    while let Ok(command) = receiver.recv() {
+        let started = Instant::now();
+        let (event, operation) = match command {
+            StitchCommand::Push(frame) => {
+                let event = match stitcher.push(&frame) {
+                    Ok(report) => StitchEvent::Appended(report),
+                    Err(StitchError::NoOverlap) => StitchEvent::NoOverlap,
+                    Err(error) => StitchEvent::Failed {
+                        message: error.to_string(),
+                        fatal: matches!(
+                            error,
+                            StitchError::HeightLimit(_) | StitchError::MemoryLimit(_)
+                        ),
+                    },
+                };
+                (event, "push")
+            }
+            StitchCommand::Finish => {
+                let event = match stitcher.finish() {
+                    Ok(frame) => StitchEvent::Finished(frame),
+                    Err(error) => StitchEvent::Failed {
+                        message: error.to_string(),
+                        fatal: true,
+                    },
+                };
+                (event, "finish")
+            }
+        };
+        match &event {
+            StitchEvent::Appended(report) => log_debug!(
+                "stitch",
+                "{operation} duration_ms={} appended={} total_height={} frames={}",
+                started.elapsed().as_millis(),
+                report.appended_rows,
+                report.total_height,
+                report.frames
+            ),
+            StitchEvent::NoOverlap => log_debug!(
+                "stitch",
+                "{operation} duration_ms={} result=no_overlap",
+                started.elapsed().as_millis()
+            ),
+            StitchEvent::Failed { message, fatal } => log_debug!(
+                "stitch",
+                "{operation} duration_ms={} failed={} fatal={fatal}",
+                started.elapsed().as_millis(),
+                message
+            ),
+            StitchEvent::Finished(frame) => log_debug!(
+                "stitch",
+                "finish duration_ms={} size={}x{}",
+                started.elapsed().as_millis(),
+                frame.width(),
+                frame.height()
+            ),
+        }
+        let finished = matches!(event, StitchEvent::Finished(_));
+        if let Ok(mut events) = events.lock() {
+            events.push_back(event);
+        }
+        if finished {
+            break;
+        }
+    }
+}
+
 struct ScrollView {
     region: CaptureRegion,
-    stitcher: Stitcher,
+    worker: StitchWorker,
+    finished_frame: Option<RgbaFrame>,
     status: String,
     language: Language,
+    accent_hex: u32,
     running: bool,
     missed_frames: u32,
+    worker_failed: bool,
+    finishing: bool,
 }
 
 impl ScrollView {
@@ -81,17 +215,23 @@ impl ScrollView {
         cx: &mut Context<Self>,
     ) -> Self {
         let language = settings_state::get().language;
+        let accent_hex =
+            system_accent_hex().unwrap_or_else(|| crate::theme::fallback_accent(false));
         let view = Self {
             region,
-            stitcher,
+            worker: StitchWorker::new(stitcher),
+            finished_frame: None,
             status: if exclusion_ok {
                 t(language, "scroll.ready").to_owned()
             } else {
                 t(language, "scroll.exclusion_failed").to_owned()
             },
             language,
+            accent_hex,
             running: true,
             missed_frames: 0,
+            worker_failed: false,
+            finishing: false,
         };
         cx.on_release(|_, cx| crate::region_outline::close(cx))
             .detach();
@@ -145,18 +285,29 @@ impl ScrollView {
     }
 
     fn apply_capture(&mut self, captured: Result<RgbaFrame, String>, cx: &mut Context<Self>) {
-        let previous = self.status.clone();
         match captured {
-            Ok(frame) => match self.stitcher.push(&frame) {
-                Ok(report) if report.appended_rows == 0 => {}
-                Ok(report) => {
+            Ok(frame) => self.worker.push(frame),
+            Err(error) => {
+                self.missed_frames += 1;
+                self.status = format!("{}{}", t(self.language, "scroll.failed"), error);
+            }
+        }
+        self.apply_worker_events(cx);
+    }
+
+    fn apply_worker_events(&mut self, cx: &mut Context<Self>) {
+        let previous = self.status.clone();
+        for event in self.worker.drain() {
+            match event {
+                StitchEvent::Appended(report) if report.appended_rows == 0 => {}
+                StitchEvent::Appended(report) => {
                     self.status = format!(
                         "{} · {} px",
                         t(self.language, "scroll.added"),
                         report.appended_rows
                     );
                 }
-                Err(StitchError::NoOverlap) => {
+                StitchEvent::NoOverlap => {
                     self.missed_frames += 1;
                     self.status = format!(
                         "{} ({})",
@@ -164,20 +315,18 @@ impl ScrollView {
                         self.missed_frames
                     );
                 }
-                Err(error) => {
+                StitchEvent::Failed { message, fatal } => {
                     self.missed_frames += 1;
-                    if matches!(
-                        error,
-                        StitchError::HeightLimit(_) | StitchError::MemoryLimit(_)
-                    ) {
+                    self.worker_failed = true;
+                    if fatal {
                         self.running = false;
                     }
-                    self.status = format!("{}{}", t(self.language, "scroll.failed"), error);
+                    self.status = format!("{}{}", t(self.language, "scroll.failed"), message);
                 }
-            },
-            Err(error) => {
-                self.missed_frames += 1;
-                self.status = format!("{}{}", t(self.language, "scroll.failed"), error);
+                StitchEvent::Finished(frame) => {
+                    self.finished_frame = Some(frame);
+                    self.running = false;
+                }
             }
         }
         if self.status != previous {
@@ -186,28 +335,55 @@ impl ScrollView {
     }
 
     fn finish(&mut self, cx: &mut Context<Self>) {
+        if self.finishing {
+            return;
+        }
+        self.finishing = true;
         let was_running = self.running;
         self.running = false;
         if was_running {
             self.capture_frame(cx);
         }
-        match self.stitcher.finish() {
-            Ok(frame) => {
-                let handles = cx.windows();
-                let monitor = self.region.monitor;
-                let missed_frames = self.missed_frames;
-                cx.defer(move |cx| {
-                    crate::windows::close_capture_auxiliary(cx, handles);
-                    if !crate::editor::open_long_capture_inline(frame, monitor, missed_frames, cx) {
-                        log_error!("scroll", "failed to open the in-place long-capture editor");
-                    }
-                });
+        self.worker.finish();
+        let handles = cx.windows();
+        let monitor = self.region.monitor;
+        cx.spawn(async move |this, cx| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let finished = this
+                    .update(cx, |this, cx| {
+                        this.apply_worker_events(cx);
+                        this.finished_frame.is_some()
+                    })
+                    .unwrap_or(false);
+                if finished || Instant::now() >= deadline {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(50))
+                    .await;
             }
-            Err(error) => {
-                self.status = format!("{}{}", t(self.language, "scroll.failed"), error);
-                cx.notify();
-            }
-        }
+            let _ = this.update(cx, |this, cx| {
+                let missed_frames = this.missed_frames;
+                if let Some(frame) = this.finished_frame.take() {
+                    cx.defer(move |cx| {
+                        crate::windows::close_capture_auxiliary(cx, handles);
+                        if !crate::editor::open_long_capture_inline(
+                            frame,
+                            monitor,
+                            missed_frames,
+                            cx,
+                        ) {
+                            log_error!("scroll", "failed to open the in-place long-capture editor");
+                        }
+                    });
+                } else if !this.worker_failed {
+                    this.status = t(this.language, "scroll.finish_timeout").to_owned();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn cancel(&mut self, cx: &mut Context<Self>) {
@@ -221,7 +397,7 @@ impl ScrollView {
 
 impl Render for ScrollView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = ChromeTheme::for_window(window, system_accent_hex());
+        let theme = ChromeTheme::for_window(window, Some(self.accent_hex));
         let language = self.language;
         let title = t(language, "scroll.title").to_owned();
         let status = self.status.clone();
@@ -259,27 +435,58 @@ fn bar_bounds(region: CaptureRegion) -> Bounds<Pixels> {
             .into_iter()
             .find(|monitor| monitor.id == region.monitor)
     });
-    let span = crate::display::logical_monitor(monitor.as_ref());
+    let anchor = monitor.as_ref().map(|monitor| {
+        PhysicalRect::new(
+            monitor.bounds.origin.x + region.rect.origin.x,
+            monitor.bounds.origin.y + region.rect.origin.y,
+            region.rect.size.width,
+            region.rect.size.height,
+        )
+    });
+    crate::control_bar::bounds_for_anchor(anchor, monitor.as_ref(), BAR_WIDTH, BAR_HEIGHT)
+}
 
-    let region_left = span.left + region.rect.origin.x as f32 / span.scale;
-    let region_top = span.top + region.rect.origin.y as f32 / span.scale;
-    let region_bottom = region_top + region.rect.size.height as f32 / span.scale;
+#[cfg(test)]
+mod tests {
+    use super::{StitchEvent, StitchWorker, supports_target};
+    use core_capture::CaptureTarget;
+    use core_stitch::{StitchConfig, Stitcher};
+    use core_types::{CaptureRegion, MonitorId, PhysicalRect, RgbaFrame, WindowId};
+    use std::time::{Duration, Instant};
 
-    let x = (region_left + region.rect.size.width as f32 / span.scale / 2.0 - BAR_WIDTH / 2.0)
-        .clamp(
-            span.left + 8.0,
-            (span.right - BAR_WIDTH - 8.0).max(span.left + 8.0),
-        );
-    let mut y = region_top - BAR_HEIGHT - 8.0;
-    if y < span.top + 8.0 {
-        y = region_bottom + 8.0;
+    #[test]
+    fn stitch_worker_returns_a_finished_frame() {
+        let frame = RgbaFrame::from_pixels(4, 4, vec![32; 4 * 4 * 4]).unwrap();
+        let mut stitcher = Stitcher::new(4, StitchConfig::default()).unwrap();
+        stitcher.push_owned(frame.clone()).unwrap();
+        let worker = StitchWorker::new(stitcher);
+        worker.push(frame);
+        worker.finish();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if worker
+                .drain()
+                .into_iter()
+                .any(|event| matches!(event, StitchEvent::Finished(frame) if frame.width() == 4))
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "stitch worker did not finish");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
-    if y + BAR_HEIGHT > span.bottom - 8.0 {
-        y = span.top + 8.0;
-    }
 
-    Bounds {
-        origin: point(px(x), px(y)),
-        size: size(px(BAR_WIDTH), px(BAR_HEIGHT)),
+    #[test]
+    fn scrolling_capture_accepts_regions_and_elements_but_not_windows_or_displays() {
+        let region = CaptureRegion::new(MonitorId::from_raw(1), PhysicalRect::new(0, 0, 320, 200));
+        let element = CaptureRegion::new(MonitorId::from_raw(1), PhysicalRect::new(10, 20, 80, 30));
+        assert!(supports_target(CaptureTarget::Region(region)));
+        assert!(supports_target(CaptureTarget::Region(element)));
+        assert!(!supports_target(CaptureTarget::Monitor(
+            MonitorId::from_raw(1)
+        )));
+        assert!(!supports_target(CaptureTarget::Window(WindowId::from_raw(
+            1
+        ))));
     }
 }

@@ -68,19 +68,8 @@ pub fn compose_window_capture_measured(
         let _ = measured_radius;
         fallback_radius
     };
-    let canvas = WindowCanvas {
-        padding: (settings.window_padding as f32 * scale)
-            .round()
-            .clamp(0.0, 2048.0) as u32,
-        corner_radius,
-        shadow: (!platform_window::window_capture_includes_native_shadow()).then_some(Shadow {
-            offset_y: (SHADOW_OFFSET * scale).round() as i32,
-            blur_radius: (SHADOW_BLUR * scale).round() as u32,
-            opacity: SHADOW_OPACITY,
-        }),
-        background: background(&settings),
-        border: system_border(scale),
-    };
+    let native_shadow = platform_window::window_capture_includes_native_shadow();
+    let canvas = window_canvas(&settings, scale, corner_radius, native_shadow);
 
     match compose_window(&frame, &canvas) {
         Ok(frame) => frame,
@@ -88,6 +77,37 @@ pub fn compose_window_capture_measured(
             log_error!("window", "failed to compose the window capture: {error}");
             frame
         }
+    }
+}
+
+fn window_canvas(
+    settings: &AppSettings,
+    scale: f32,
+    corner_radius: u32,
+    native_shadow: bool,
+) -> WindowCanvas {
+    let padding = (settings.window_padding as f32 * scale)
+        .round()
+        .clamp(0.0, 2048.0) as u32;
+    if native_shadow {
+        return WindowCanvas {
+            padding,
+            corner_radius: 0,
+            shadow: None,
+            background: background(settings),
+            border: None,
+        };
+    }
+    WindowCanvas {
+        padding,
+        corner_radius,
+        shadow: Some(Shadow {
+            offset_y: (SHADOW_OFFSET * scale).round() as i32,
+            blur_radius: (SHADOW_BLUR * scale).round() as u32,
+            opacity: SHADOW_OPACITY,
+        }),
+        background: background(settings),
+        border: system_border(scale),
     }
 }
 
@@ -141,5 +161,31 @@ fn background(settings: &AppSettings) -> Background {
     match settings.window_background {
         WindowBackground::Transparent => Background::Transparent,
         WindowBackground::White => Background::Solid(WHITE_CANVAS),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppSettings, window_canvas};
+
+    #[test]
+    fn native_window_shadow_keeps_the_native_frame_intact() {
+        let canvas = window_canvas(&AppSettings::default(), 2.0, 20, true);
+        assert_eq!(canvas.padding, 48);
+        assert_eq!(canvas.corner_radius, 0);
+        assert!(canvas.shadow.is_none());
+        assert!(canvas.border.is_none());
+    }
+
+    #[test]
+    fn composed_window_shadow_adds_effects_when_native_is_absent() {
+        let canvas = window_canvas(&AppSettings::default(), 2.0, 20, false);
+        assert_eq!(canvas.padding, 48);
+        assert_eq!(canvas.corner_radius, 20);
+        assert!(canvas.shadow.is_some());
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert!(canvas.border.is_some());
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        assert!(canvas.border.is_none());
     }
 }

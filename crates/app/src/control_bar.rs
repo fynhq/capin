@@ -1,7 +1,41 @@
+use core_capture::MonitorInfo;
+use core_types::PhysicalRect;
 use gpui_kit::*;
 use platform_window::{WindowStyle, apply as apply_window_style};
 
 use crate::chrome_theme::ChromeTheme;
+
+pub(crate) fn bounds_for_anchor(
+    anchor: Option<PhysicalRect>,
+    monitor: Option<&MonitorInfo>,
+    width: f32,
+    height: f32,
+) -> Bounds<Pixels> {
+    let span = crate::display::logical_monitor(monitor);
+    let (anchor_left, anchor_top, anchor_width) = anchor
+        .map(|rect| {
+            (
+                rect.origin.x as f32 / span.scale,
+                rect.origin.y as f32 / span.scale,
+                rect.size.width as f32 / span.scale,
+            )
+        })
+        .unwrap_or((span.left, span.top, span.right - span.left));
+    let x = (anchor_left + anchor_width / 2.0 - width / 2.0).clamp(
+        span.left + 8.0,
+        (span.right - width - 8.0).max(span.left + 8.0),
+    );
+    let above = anchor_top - height - 8.0;
+    let y = if above >= span.top + 8.0 {
+        above
+    } else {
+        (anchor_top + 8.0).min(span.bottom - height - 8.0)
+    };
+    Bounds {
+        origin: point(px(x), px(y.max(span.top + 8.0))),
+        size: size(px(width), px(height)),
+    }
+}
 
 pub(crate) fn bar_badge(background: Rgba, radius: f32) -> Div {
     div()
