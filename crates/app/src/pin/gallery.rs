@@ -1,6 +1,9 @@
 use super::*;
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
+use super::pin_clipboard::{ClipboardContent, read_clipboard};
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub(crate) fn pin_last(cx: &mut App) {
     let generation = crate::capture_history::generation();
     if PIN_WALK_GENERATION.with(|slot| slot.get()) != Some(generation) {

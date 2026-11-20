@@ -158,7 +158,7 @@ mod imp {
         REGISTERED.with(|slot| *slot.borrow_mut() = registered);
 
         let (sender, receiver) = mpsc::channel::<u32>();
-        GlobalHotKeyEvent::set_event_handler(Some(move |event| {
+        GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
             if event.state() == HotKeyState::Pressed {
                 let _ = sender.send(event.id());
             }
