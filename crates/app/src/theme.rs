@@ -288,8 +288,8 @@ pub(crate) fn settings_palette(dark: bool) -> SettingsPalette {
             selected: rgba(0x0000000F),
             toggle_off: rgba(0x0000001A),
             popover: rgb(0xFFFFFF),
-            page: Some(rgba(0xFFFFFFD1)),
-            card: rgba(0xFFFFFFD1),
+            page: Some(rgba(0xFFFFFFE6)),
+            card: rgba(0xFFFFFFF5),
             card_border: rgba(0x00000000),
         }
     }
