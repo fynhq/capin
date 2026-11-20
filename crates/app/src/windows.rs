@@ -90,6 +90,7 @@ pub(crate) fn schedule_memory_trim() {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn close_auxiliary(cx: &mut App, handles: Vec<AnyWindowHandle>) {
     close_matching(cx, handles, None, false, true);
 }

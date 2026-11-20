@@ -25,12 +25,14 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RecordShortcut {
     Pause,
     Stop,
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub(crate) fn handle_shortcut(shortcut: RecordShortcut, cx: &mut App) {
     let view = RECORD_BAR.with(|slot| slot.borrow().as_ref().and_then(|weak| weak.upgrade()));
     if let Some(view) = view {
@@ -39,6 +41,16 @@ pub(crate) fn handle_shortcut(shortcut: RecordShortcut, cx: &mut App) {
             RecordShortcut::Stop => bar.stop(cx),
         });
     }
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub(crate) fn shutdown(cx: &mut App, timeout: Duration) -> bool {
+    let view = RECORD_BAR.with(|slot| slot.borrow().as_ref().and_then(|weak| weak.upgrade()));
+    if let Some(view) = view {
+        return view.update(cx, |bar, _| bar.shutdown(timeout));
+    }
+    platform_record::stop_active();
+    platform_record::wait_active(timeout)
 }
 
 pub fn start(target: CaptureTarget, cx: &mut App) {
@@ -54,6 +66,7 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
             return;
         }
     };
+    let cleanup_path = output.clone();
     let config = RecordConfig {
         target,
         include_cursor: true,
@@ -108,6 +121,7 @@ pub fn start(target: CaptureTarget, cx: &mut App) {
             RECORD_BAR.with(|slot| *slot.borrow_mut() = Some(entity.downgrade()));
         }
         Err(error) => {
+            let _ = std::fs::remove_file(&cleanup_path);
             crate::hotkey::set_recording_shortcuts(false);
             crate::region_outline::close(cx);
             log_error!("record", "failed to open recording bar: {error}");
@@ -121,16 +135,13 @@ struct RecordBar {
     recorder: Option<Recorder>,
     config: RecordConfig,
     excluded: Vec<u64>,
-    started: Option<Instant>,
     countdown_started: Instant,
-    paused_total: Duration,
-    pause_started: Option<Instant>,
-    paused: bool,
     stopping: bool,
     completed: bool,
     blocked: bool,
     status: Option<String>,
     language: Language,
+    accent_hex: u32,
     shortcuts_ok: bool,
     auto_close_scheduled: bool,
     closing: bool,
@@ -150,6 +161,8 @@ impl RecordBar {
     ) -> Self {
         let settings = settings_state::get();
         let language = settings.language;
+        let accent_hex =
+            system_accent_hex().unwrap_or_else(|| crate::theme::fallback_accent(false));
         let blocked = !exclusion_ok && bar_overlaps;
         let mut status = None;
         if blocked {
@@ -164,16 +177,13 @@ impl RecordBar {
             recorder: None,
             config,
             excluded,
-            started: None,
             countdown_started: Instant::now(),
-            paused_total: Duration::ZERO,
-            pause_started: None,
-            paused: false,
             stopping: false,
             completed: false,
             blocked,
             status,
             language,
+            accent_hex,
             shortcuts_ok,
             auto_close_scheduled: false,
             closing: false,
@@ -237,13 +247,13 @@ impl RecordBar {
         match Recorder::start_excluding(self.config.clone(), self.output.clone(), &self.excluded) {
             Ok(recorder) => {
                 self.recorder = Some(recorder);
-                self.started.get_or_insert_with(Instant::now);
                 self.status = None;
                 if let Some(highlight) = self.config.cursor_highlight {
                     crate::record_spotlight::open(self.config.target, highlight.color, cx);
                 }
             }
             Err(error) => {
+                let _ = std::fs::remove_file(&self.output);
                 self.completed = true;
                 self.status = Some(format!("{}{}", t(self.language, "record.failed"), error));
             }
@@ -263,7 +273,10 @@ impl RecordBar {
             return;
         };
         self.status = Some(match recorder.error() {
-            Some(error) => format!("{}{}", t(self.language, "record.failed"), error),
+            Some(error) => {
+                let _ = std::fs::remove_file(&self.output);
+                format!("{}{}", t(self.language, "record.failed"), error)
+            }
             None => format!(
                 "{} {}",
                 t(self.language, "record.saved"),
@@ -314,14 +327,9 @@ impl RecordBar {
     }
 
     fn elapsed(&self) -> Duration {
-        let Some(started) = self.started else {
-            return Duration::ZERO;
-        };
-        let mut elapsed = started.elapsed().saturating_sub(self.paused_total);
-        if let Some(pause_started) = self.pause_started {
-            elapsed = elapsed.saturating_sub(pause_started.elapsed());
-        }
-        elapsed
+        self.recorder
+            .as_ref()
+            .map_or(Duration::ZERO, Recorder::elapsed_active)
     }
 
     fn toggle_pause(&mut self, cx: &mut Context<Self>) {
@@ -331,17 +339,7 @@ impl RecordBar {
         let Some(recorder) = self.recorder.as_ref() else {
             return;
         };
-        if self.paused {
-            self.paused = false;
-            recorder.set_paused(false);
-            if let Some(started) = self.pause_started.take() {
-                self.paused_total += started.elapsed();
-            }
-        } else {
-            self.paused = true;
-            self.pause_started = Some(Instant::now());
-            recorder.set_paused(true);
-        }
+        recorder.set_paused(!recorder.is_paused());
         cx.notify();
     }
 
@@ -350,6 +348,7 @@ impl RecordBar {
             return;
         }
         let Some(recorder) = self.recorder.as_ref() else {
+            let _ = std::fs::remove_file(&self.output);
             self.completed = true;
             self.status = Some(t(self.language, "record.cancelled").to_owned());
             cx.notify();
@@ -362,7 +361,24 @@ impl RecordBar {
         cx.notify();
     }
 
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    fn shutdown(&mut self, timeout: Duration) -> bool {
+        if self.completed {
+            return true;
+        }
+        let Some(recorder) = self.recorder.as_mut() else {
+            let _ = std::fs::remove_file(&self.output);
+            self.completed = true;
+            return true;
+        };
+        self.stopping = true;
+        recorder.stop_and_wait(timeout)
+    }
+
     fn close(&mut self, cx: &mut Context<Self>) {
+        if !self.output_saved() {
+            let _ = std::fs::remove_file(&self.output);
+        }
         crate::hotkey::set_recording_shortcuts(false);
         RECORD_BAR.with(|slot| *slot.borrow_mut() = None);
         crate::record_spotlight::close(cx);
@@ -379,9 +395,10 @@ impl RecordBar {
 
 impl Render for RecordBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = ChromeTheme::for_window(window, system_accent_hex());
+        let theme = ChromeTheme::for_window(window, Some(self.accent_hex));
         let language = self.language;
         let elapsed = self.elapsed();
+        let paused = self.recorder.as_ref().is_some_and(Recorder::is_paused);
         let counting_down = !self.blocked && self.recorder.is_none() && !self.completed;
         let timer = if self.blocked {
             "--:--".to_owned()
@@ -400,7 +417,7 @@ impl Render for RecordBar {
             t(language, "record.done")
         } else if self.stopping {
             t(language, "record.saving")
-        } else if self.paused {
+        } else if paused {
             t(language, "record.paused")
         } else if counting_down {
             t(language, "record.countdown")
@@ -411,7 +428,7 @@ impl Render for RecordBar {
             .status
             .clone()
             .unwrap_or_else(|| self.output.display().to_string());
-        let mut pause_label = if self.paused {
+        let mut pause_label = if paused {
             t(language, "record.resume").to_owned()
         } else {
             t(language, "record.pause").to_owned()
@@ -469,7 +486,7 @@ impl Render for RecordBar {
             )
         });
         let recording = self.recorder.is_some() && !self.stopping && !self.completed;
-        let dot = if self.paused || self.blocked {
+        let dot = if paused || self.blocked {
             theme.muted
         } else if self.completed {
             theme.accent
@@ -677,30 +694,5 @@ fn bar_bounds(target: CaptureTarget) -> Bounds<Pixels> {
             .map(|window| window.bounds),
     };
 
-    let span = crate::display::logical_monitor(monitor.as_ref());
-    let (anchor_left, anchor_top, anchor_width) = anchor
-        .map(|rect| {
-            (
-                rect.origin.x as f32 / span.scale,
-                rect.origin.y as f32 / span.scale,
-                rect.size.width as f32 / span.scale,
-            )
-        })
-        .unwrap_or((span.left, span.top, span.right - span.left));
-
-    let x = (anchor_left + anchor_width / 2.0 - BAR_WIDTH / 2.0).clamp(
-        span.left + 8.0,
-        (span.right - BAR_WIDTH - 8.0).max(span.left + 8.0),
-    );
-    let above = anchor_top - BAR_HEIGHT - 8.0;
-    let y = if above >= span.top + 8.0 {
-        above
-    } else {
-        (anchor_top + 8.0).min(span.bottom - BAR_HEIGHT - 8.0)
-    };
-
-    Bounds {
-        origin: point(px(x), px(y.max(span.top + 8.0))),
-        size: size(px(BAR_WIDTH), px(BAR_HEIGHT)),
-    }
+    crate::control_bar::bounds_for_anchor(anchor, monitor.as_ref(), BAR_WIDTH, BAR_HEIGHT)
 }

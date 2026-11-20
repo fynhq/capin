@@ -25,9 +25,8 @@ impl FrameTimeline {
             return FrameDecision::Drop;
         }
 
-        let duplicates = index - self.next_index;
         self.next_index = index + 1;
-        FrameDecision::Encode { index, duplicates }
+        FrameDecision::Encode { index }
     }
 
     pub const fn next_index(&self) -> u64 {
@@ -48,7 +47,7 @@ impl Default for FrameTimeline {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameDecision {
-    Encode { index: u64, duplicates: u64 },
+    Encode { index: u64 },
     Drop,
 }
 
@@ -61,10 +60,7 @@ mod tests {
         let mut timeline = FrameTimeline::new();
         assert_eq!(
             timeline.submit(Duration::from_secs(5)),
-            FrameDecision::Encode {
-                index: 0,
-                duplicates: 0
-            }
+            FrameDecision::Encode { index: 0 }
         );
     }
 
@@ -73,24 +69,15 @@ mod tests {
         let mut timeline = FrameTimeline::new();
         assert_eq!(
             timeline.submit(Duration::ZERO),
-            FrameDecision::Encode {
-                index: 0,
-                duplicates: 0
-            }
+            FrameDecision::Encode { index: 0 }
         );
         assert_eq!(
             timeline.submit(Duration::from_millis(34)),
-            FrameDecision::Encode {
-                index: 1,
-                duplicates: 0
-            }
+            FrameDecision::Encode { index: 1 }
         );
         assert_eq!(
             timeline.submit(Duration::from_millis(67)),
-            FrameDecision::Encode {
-                index: 2,
-                duplicates: 0
-            }
+            FrameDecision::Encode { index: 2 }
         );
     }
 
@@ -106,15 +93,12 @@ mod tests {
     }
 
     #[test]
-    fn gaps_report_duplicate_count() {
+    fn gaps_advance_to_the_next_frame_index() {
         let mut timeline = FrameTimeline::new();
         timeline.submit(Duration::ZERO);
         assert_eq!(
             timeline.submit(Duration::from_millis(100)),
-            FrameDecision::Encode {
-                index: 3,
-                duplicates: 2
-            }
+            FrameDecision::Encode { index: 3 }
         );
     }
 
@@ -126,10 +110,7 @@ mod tests {
         timeline.reset();
         assert_eq!(
             timeline.submit(Duration::from_secs(10)),
-            FrameDecision::Encode {
-                index: 0,
-                duplicates: 0
-            }
+            FrameDecision::Encode { index: 0 }
         );
     }
 }

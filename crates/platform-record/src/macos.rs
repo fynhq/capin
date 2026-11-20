@@ -21,7 +21,7 @@ use objc2_av_foundation::{
     AVVideoMaxKeyFrameIntervalKey, AVVideoWidthKey,
 };
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
-use objc2_core_graphics::{CGEvent, CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess};
+use objc2_core_graphics::{CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess};
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
@@ -129,8 +129,7 @@ impl CursorSpace {
     }
 
     fn cursor_in_frame(self, width: usize, height: usize) -> Option<(f32, f32)> {
-        let event = CGEvent::new(None)?;
-        let location = CGEvent::location(Some(&*event));
+        let (location_x, location_y) = sck::cursor_location()?;
         let (x, y) = match self {
             Self::Screen {
                 frame_x,
@@ -141,8 +140,8 @@ impl CursorSpace {
                 source_height,
                 ..
             } => (
-                (location.x - frame_x - source_x) * (width as f64 / source_width.max(1.0)),
-                (location.y - frame_y - source_y) * (height as f64 / source_height.max(1.0)),
+                (location_x - frame_x - source_x) * (width as f64 / source_width.max(1.0)),
+                (location_y - frame_y - source_y) * (height as f64 / source_height.max(1.0)),
             ),
             Self::Window {
                 origin_x,
@@ -151,8 +150,8 @@ impl CursorSpace {
                 height: source_height,
                 ..
             } => (
-                (location.x - origin_x) * (width as f64 / source_width.max(1.0)),
-                (location.y - origin_y) * (height as f64 / source_height.max(1.0)),
+                (location_x - origin_x) * (width as f64 / source_width.max(1.0)),
+                (location_y - origin_y) * (height as f64 / source_height.max(1.0)),
             ),
         };
         Some((x as f32, y as f32))
@@ -168,7 +167,7 @@ fn build_plan(
         CaptureTarget::Monitor(id) => {
             let display = find_display(content, id.raw())?;
             let frame = unsafe { display.frame() };
-            let excluded = own_windows(content, extra_exclusions);
+            let excluded = sck::excluded_windows(content, extra_exclusions);
             let windows = NSArray::from_retained_slice(&excluded);
             let filter = unsafe {
                 SCContentFilter::initWithDisplay_excludingWindows(
@@ -214,7 +213,7 @@ fn build_plan(
                     region.rect.size.height as f64 / scale,
                 ),
             );
-            let excluded = own_windows(content, extra_exclusions);
+            let excluded = sck::excluded_windows(content, extra_exclusions);
             let windows = NSArray::from_retained_slice(&excluded);
             let filter = unsafe {
                 SCContentFilter::initWithDisplay_excludingWindows(
@@ -265,17 +264,6 @@ fn build_plan(
             })
         }
     }
-}
-
-fn own_windows(content: &SCShareableContent, extra: &[u64]) -> Vec<Retained<SCWindow>> {
-    let excluded = platform_capture::capture_excluded_window_ids();
-    unsafe { content.windows() }
-        .iter()
-        .filter(|window| {
-            let id = unsafe { window.windowID() };
-            excluded.contains(&id) || extra.contains(&(id as u64))
-        })
-        .collect()
 }
 
 fn find_display(content: &SCShareableContent, raw: u64) -> Result<Retained<SCDisplay>, String> {

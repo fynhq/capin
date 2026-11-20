@@ -340,16 +340,7 @@ fn build_config(
 }
 
 fn own_windows(content: &SCShareableContent) -> Vec<Retained<SCWindow>> {
-    let process = std::process::id() as i32;
-    let excluded = super::capture_excluded_window_ids();
-    unsafe { content.windows() }
-        .iter()
-        .filter(|window| {
-            unsafe { window.owningApplication() }
-                .is_some_and(|application| unsafe { application.processID() } == process)
-        })
-        .filter(|window| excluded.contains(&unsafe { window.windowID() }))
-        .collect()
+    support::own_windows(content, &[])
 }
 
 fn find_display(content: &SCShareableContent, raw: u64) -> Result<Retained<SCDisplay>> {

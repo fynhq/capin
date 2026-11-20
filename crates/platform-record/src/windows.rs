@@ -69,7 +69,7 @@ impl CursorSpace {
     }
 
     fn cursor_in_frame(self, width: u32, height: u32) -> Option<(f32, f32)> {
-        let (cursor_x, cursor_y) = cursor_position()?;
+        let (cursor_x, cursor_y) = platform_window::cursor_screen_position()?;
         self.point_in_frame(width, height, cursor_x, cursor_y)
     }
 
@@ -129,7 +129,7 @@ impl CursorTrace {
             .name("capin-cursor-trace".to_owned())
             .spawn(move || {
                 while !shared.stop_requested() && !shared.is_finished() {
-                    if let Some((x, y)) = cursor_position() {
+                    if let Some((x, y)) = platform_window::cursor_screen_position() {
                         // SAFETY: MFGetSystemTime has no preconditions.
                         let ticks = unsafe { MFGetSystemTime() };
                         if let Ok(mut samples) = thread_trace.samples.lock() {
@@ -296,21 +296,16 @@ fn supervise(
     control: CaptureControl<Recorder, Box<dyn std::error::Error + Send + Sync>>,
     shared: Arc<Flags>,
 ) {
-    std::thread::Builder::new()
-        .name("capin-record-stop".to_owned())
-        .spawn(move || {
-            while !shared.stop_requested() {
-                if shared.finished.load(Ordering::Acquire) {
-                    let _ = control.wait();
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(80));
-            }
-            if let Err(error) = control.stop() {
-                shared.fail(error.to_string());
-            }
-        })
-        .ok();
+    while !shared.stop_requested() {
+        if shared.finished.load(Ordering::Acquire) {
+            let _ = control.wait();
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(80));
+    }
+    if let Err(error) = control.stop() {
+        shared.fail(error.to_string());
+    }
 }
 
 fn interval(fps: u32) -> MinimumUpdateIntervalSettings {
@@ -323,15 +318,6 @@ fn cursor_settings(include_cursor: bool) -> CursorCaptureSettings {
     } else {
         CursorCaptureSettings::WithoutCursor
     }
-}
-
-fn cursor_position() -> Option<(i32, i32)> {
-    use windows::Win32::Foundation::POINT;
-    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
-
-    let mut point = POINT::default();
-    unsafe { GetCursorPos(&mut point).ok()? };
-    Some((point.x, point.y))
 }
 
 fn window_rect(hwnd: isize) -> Option<(i32, i32, u32, u32)> {

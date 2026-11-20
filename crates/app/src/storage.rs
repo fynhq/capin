@@ -15,7 +15,7 @@ fn instance_lock() -> &'static Mutex<Option<File>> {
 }
 
 pub fn acquire_single_instance() -> bool {
-    let Some(directory) = app_data_dir() else {
+    let Some(directory) = crate::paths::app_data_dir() else {
         return true;
     };
     if ensure_directory(&directory).is_err() {
@@ -43,6 +43,7 @@ pub fn acquire_single_instance() -> bool {
     true
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn release_single_instance() {
     if let Some(lock) = INSTANCE_LOCK.get() {
         let mut slot = lock.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -80,26 +81,6 @@ pub fn default_recording_dir() -> PathBuf {
 
 pub fn ensure_directory(directory: &Path) -> Result<(), std::io::Error> {
     std::fs::create_dir_all(directory)
-}
-
-pub fn app_data_dir() -> Option<PathBuf> {
-    #[cfg(target_os = "windows")]
-    let base = std::env::var_os("APPDATA").map(PathBuf::from);
-    #[cfg(target_os = "macos")]
-    let base = std::env::var_os("HOME").map(|home| {
-        PathBuf::from(home)
-            .join("Library")
-            .join("Application Support")
-    });
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let base = std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config"));
-    base.map(|base| base.join(APP_FOLDER))
-}
-
-pub fn pins_dir() -> Option<PathBuf> {
-    let directory = app_data_dir()?.join("pins");
-    ensure_directory(&directory).ok()?;
-    Some(directory)
 }
 
 pub fn save_png(frame: &RgbaFrame) -> Result<PathBuf, std::io::Error> {
@@ -208,8 +189,10 @@ pub fn recording_path(width: u32, height: u32) -> Result<PathBuf, std::io::Error
             format!("{stem}_{suffix}.mp4")
         };
         let path = directory.join(name);
-        if !path.exists() {
-            return Ok(path);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
         }
     }
     Err(std::io::Error::new(

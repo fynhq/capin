@@ -1,13 +1,32 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use block2::RcBlock;
 use objc2::rc::Retained;
+use objc2_core_graphics::{CGEvent, CGEventSource, CGEventSourceStateID};
 use objc2_foundation::NSError;
 use objc2_screen_capture_kit::{SCDisplay, SCShareableContent, SCWindow};
 
+struct ContentSlot {
+    pointer: Mutex<Option<usize>>,
+    abandoned: AtomicBool,
+}
+
+fn release_pointer(pointer: usize) {
+    unsafe {
+        drop(Retained::from_raw(pointer as *mut SCShareableContent));
+    }
+}
+
 pub fn shareable_content() -> Result<Retained<SCShareableContent>, String> {
-    let (tx, rx) = channel::<Result<usize, String>>();
+    let (tx, rx) = channel::<Result<(), String>>();
+    let slot = Arc::new(ContentSlot {
+        pointer: Mutex::new(None),
+        abandoned: AtomicBool::new(false),
+    });
+    let block_slot = Arc::clone(&slot);
     let block = RcBlock::new(
         move |content: *mut SCShareableContent, error: *mut NSError| {
             if content.is_null() {
@@ -16,9 +35,28 @@ pub fn shareable_content() -> Result<Retained<SCShareableContent>, String> {
                 let _ = tx.send(Err(message));
                 return;
             }
-            let retained = unsafe { Retained::retain(content) };
-            let pointer = retained.map_or(0, |content| Retained::into_raw(content) as usize);
-            let _ = tx.send(Ok(pointer));
+            let Some(retained) = (unsafe { Retained::retain(content) }) else {
+                let _ = tx.send(Err("could not retain shareable content".to_owned()));
+                return;
+            };
+            let pointer = Retained::into_raw(retained) as usize;
+            if block_slot.abandoned.load(Ordering::Acquire) {
+                release_pointer(pointer);
+                return;
+            }
+            let Ok(mut current) = block_slot.pointer.lock() else {
+                release_pointer(pointer);
+                let _ = tx.send(Err("shareable content slot is unavailable".to_owned()));
+                return;
+            };
+            if block_slot.abandoned.load(Ordering::Acquire) {
+                drop(current);
+                release_pointer(pointer);
+                return;
+            }
+            *current = Some(pointer);
+            drop(current);
+            let _ = tx.send(Ok(()));
         },
     );
     unsafe {
@@ -28,11 +66,33 @@ pub fn shareable_content() -> Result<Retained<SCShareableContent>, String> {
             &block,
         );
     }
-    let pointer = rx
-        .recv_timeout(Duration::from_secs(10))
-        .map_err(|_| "timed out while querying shareable content".to_owned())??;
-    unsafe { Retained::from_raw(pointer as *mut SCShareableContent) }
-        .ok_or_else(|| "the system returned empty shareable content".to_owned())
+    match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(())) => {
+            let pointer = slot
+                .pointer
+                .lock()
+                .ok()
+                .and_then(|mut pointer| pointer.take());
+            let Some(pointer) = pointer else {
+                return Err("the system returned empty shareable content".to_owned());
+            };
+            unsafe { Retained::from_raw(pointer as *mut SCShareableContent) }
+                .ok_or_else(|| "the system returned empty shareable content".to_owned())
+        }
+        Ok(Err(message)) => Err(message),
+        Err(_) => {
+            slot.abandoned.store(true, Ordering::Release);
+            let pointer = slot
+                .pointer
+                .lock()
+                .ok()
+                .and_then(|mut pointer| pointer.take());
+            if let Some(pointer) = pointer {
+                release_pointer(pointer);
+            }
+            Err("timed out while querying shareable content".to_owned())
+        }
+    }
 }
 
 /// # Safety
@@ -42,6 +102,35 @@ pub unsafe fn error_message(error: *mut NSError) -> Option<String> {
         return None;
     }
     unsafe { Retained::retain(error) }.map(|error| error.localizedDescription().to_string())
+}
+
+pub fn own_windows(content: &SCShareableContent, extra: &[u64]) -> Vec<Retained<SCWindow>> {
+    let process = std::process::id() as i32;
+    excluded_windows(content, extra)
+        .into_iter()
+        .filter(|window| {
+            unsafe { window.owningApplication() }
+                .is_some_and(|application| unsafe { application.processID() } == process)
+        })
+        .collect()
+}
+
+pub fn excluded_windows(content: &SCShareableContent, extra: &[u64]) -> Vec<Retained<SCWindow>> {
+    let excluded = crate::capture_excluded_window_ids();
+    unsafe { content.windows() }
+        .iter()
+        .filter(|window| {
+            let id = unsafe { window.windowID() };
+            excluded.contains(&id) || extra.contains(&(u64::from(id)))
+        })
+        .collect()
+}
+
+pub fn cursor_location() -> Option<(f64, f64)> {
+    let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)?;
+    let event = CGEvent::new(Some(&source))?;
+    let location = CGEvent::location(Some(&event));
+    Some((location.x, location.y))
 }
 
 pub fn find_display(content: &SCShareableContent, raw: u64) -> Option<Retained<SCDisplay>> {

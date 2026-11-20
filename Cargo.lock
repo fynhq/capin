@@ -5190,6 +5190,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-screen-capture-kit",
  "platform-capture",
+ "platform-window",
  "thiserror 2.0.21",
  "windows 0.62.2",
  "windows-capture 2.0.1",

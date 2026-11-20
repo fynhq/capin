@@ -227,7 +227,13 @@ mod imp {
                 crate::pin::release_click_through(cx);
             }
             MENU_RESTART => restart(cx),
-            MENU_QUIT => cx.quit(),
+            MENU_QUIT => {
+                if !crate::record::shutdown(cx, Duration::from_secs(10)) {
+                    log_error!("record", "timed out while finalizing the recording");
+                }
+                crate::pin::flush_manifest();
+                cx.quit();
+            }
             _ => {}
         }
     }
@@ -252,6 +258,10 @@ mod imp {
     }
 
     pub fn restart(cx: &mut App) {
+        if !crate::record::shutdown(cx, Duration::from_secs(10)) {
+            log_error!("record", "timed out while finalizing the recording");
+        }
+        crate::pin::flush_manifest();
         crate::storage::release_single_instance();
         match relaunch() {
             Ok(()) => {
@@ -302,8 +312,3 @@ pub fn refresh_menu() {}
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn set_visible(_visible: bool) {}
-
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-pub fn replace_windows(cx: &mut gpui_kit::App, open: impl FnOnce(&mut gpui_kit::App) + 'static) {
-    open(cx);
-}

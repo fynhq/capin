@@ -20,8 +20,6 @@ use core_graphics::access::ScreenCaptureAccess;
 use core_graphics::base::{CGFloat, kCGBitmapByteOrder32Big, kCGImageAlphaPremultipliedLast};
 use core_graphics::context::CGContext;
 use core_graphics::display::CGDisplay;
-use core_graphics::event::CGEvent;
-use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use core_graphics::image::CGImage;
 use core_graphics::window::{
@@ -143,9 +141,10 @@ impl CaptureBackend for MacosCapture {
 
     fn capture_with_cursor(&mut self, target: CaptureTarget) -> Result<RgbaFrame> {
         let frame = self.capture(target)?;
-        let Some(cursor) = cursor_point() else {
+        let Some((cursor_x, cursor_y)) = crate::macos_sck_support::cursor_location() else {
             return Ok(frame);
         };
+        let cursor = CGPoint::new(cursor_x, cursor_y);
         let Some((x, y, scale)) = self.cursor_local(target, cursor) else {
             return Ok(frame);
         };
@@ -221,12 +220,6 @@ impl MacosCapture {
             }
         }
     }
-}
-
-fn cursor_point() -> Option<CGPoint> {
-    let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).ok()?;
-    let event = CGEvent::new(source).ok()?;
-    Some(event.location())
 }
 
 fn draw_cursor_arrow(frame: RgbaFrame, x: i32, y: i32, scale: f32) -> RgbaFrame {
