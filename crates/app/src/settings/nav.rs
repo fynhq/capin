@@ -144,7 +144,7 @@ impl SettingsView {
     }
 
     #[cfg(target_os = "macos")]
-    fn macos_drag_area(
+    pub(super) fn macos_drag_area(
         &self,
         id: &'static str,
         area: Div,
