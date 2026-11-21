@@ -177,7 +177,6 @@ impl SettingsSection {
         Self::Recording,
         Self::Shortcuts,
     ];
-
     fn id(self) -> &'static str {
         match self {
             Self::General => "settings-nav-general",
@@ -186,7 +185,6 @@ impl SettingsSection {
             Self::Shortcuts => "settings-nav-shortcuts",
         }
     }
-
     fn title(self, language: Language) -> &'static str {
         t(
             language,
@@ -198,7 +196,6 @@ impl SettingsSection {
             },
         )
     }
-
     fn icon(self) -> &'static [u8] {
         match self {
             Self::General => icons::GENERAL,
@@ -346,6 +343,7 @@ struct Theme {
     card: Rgba,
     card_border: Rgba,
     page: Option<Rgba>,
+    sidebar: Rgba,
     border: Rgba,
     accent: Rgba,
     accent_text: Rgba,
@@ -381,6 +379,7 @@ impl Theme {
             card: palette.card,
             card_border: palette.card_border,
             page: palette.page,
+            sidebar: palette.sidebar,
             border: palette.border,
             accent: rgb(accent_hex),
             accent_text: accent_text_color(accent_hex),
@@ -704,7 +703,9 @@ impl SettingsView {
             sidebar = sidebar.pt(px(layout::TITLEBAR_HEIGHT + 8.0)).child(nav);
         }
 
-        sidebar = sidebar.child(self.sidebar_footer(theme, cx));
+        sidebar = sidebar
+            .child(self.sidebar_footer(theme, cx))
+            .bg(theme.sidebar);
         if layout::SIDEBAR_DIVIDER {
             sidebar.border_r_1().border_color(theme.border)
         } else {
@@ -882,6 +883,7 @@ impl SettingsView {
             .flex()
             .flex_col()
             .pt(px(top))
+            .when_some(theme.page, |content, page| content.bg(page))
             .child(top_block)
             .child(
                 div()
@@ -989,7 +991,6 @@ impl Render for SettingsView {
             .size_full()
             .flex()
             .flex_row()
-            .when_some(theme.page, |root, page| root.bg(page))
             .text_color(theme.text)
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
