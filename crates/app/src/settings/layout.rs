@@ -1,0 +1,114 @@
+#[cfg(target_os = "windows")]
+mod platform {
+    pub const WINDOW_WIDTH: f32 = 870.0;
+    pub const WINDOW_HEIGHT: f32 = 640.0;
+    pub const MIN_WIDTH: f32 = 760.0;
+    pub const MIN_HEIGHT: f32 = 560.0;
+    pub const TITLEBAR_HEIGHT: f32 = 34.0;
+    pub const CAPTION_BUTTON_WIDTH: f32 = 34.0;
+    pub const CAPTION_BUTTON_HEIGHT: f32 = 34.0;
+    pub const SIDEBAR_WIDTH: f32 = 180.0;
+    pub const SIDEBAR_PAD: f32 = 12.0;
+    pub const SIDEBAR_DIVIDER: bool = false;
+    pub const NAV_ITEM_HEIGHT: f32 = 36.0;
+    pub const NAV_ITEM_RADIUS: f32 = 4.0;
+    pub const NAV_ITEM_PAD_X: f32 = 12.0;
+    pub const NAV_GAP: f32 = 10.0;
+    pub const NAV_ICON: f32 = 16.0;
+    pub const NAV_FONT: f32 = 14.0;
+    pub const CONTENT_MAX_WIDTH: f32 = 720.0;
+    pub const CONTENT_PAD_X: f32 = 32.0;
+    pub const CONTENT_PAD_TOP: f32 = 6.0;
+    pub const CONTENT_PAD_BOTTOM: f32 = 32.0;
+    pub const CONTENT_GAP: f32 = 24.0;
+    pub const HEADER_GAP: f32 = 16.0;
+    pub const GROUP_GAP: f32 = 28.0;
+    pub const GROUP_HEADER_GAP: f32 = 8.0;
+    pub const PAGE_TITLE: f32 = 28.0;
+    pub const SECTION_TITLE: f32 = 16.0;
+    pub const BODY: f32 = 14.0;
+    pub const CAPTION: f32 = 12.0;
+    pub const CARD_RADIUS: f32 = 4.0;
+    pub const ROW_PAD_X: f32 = 16.0;
+    pub const ROW_PAD_Y: f32 = 14.0;
+    pub const BUTTON_HEIGHT: f32 = 32.0;
+    pub const SEGMENT_HEIGHT: f32 = 24.0;
+    pub const BUTTON_RADIUS: f32 = 4.0;
+    pub const CONTROL_TEXT: f32 = 14.0;
+}
+
+#[cfg(target_os = "macos")]
+mod platform {
+    pub const WINDOW_WIDTH: f32 = 870.0;
+    pub const WINDOW_HEIGHT: f32 = 640.0;
+    pub const MIN_WIDTH: f32 = 710.0;
+    pub const MIN_HEIGHT: f32 = 520.0;
+    pub const TITLEBAR_HEIGHT: f32 = 34.0;
+    pub const SIDEBAR_WIDTH: f32 = 150.0;
+    pub const SIDEBAR_PAD: f32 = 10.0;
+    pub const SIDEBAR_DIVIDER: bool = true;
+    pub const NAV_ITEM_HEIGHT: f32 = 28.0;
+    pub const NAV_ITEM_RADIUS: f32 = 6.0;
+    pub const NAV_ITEM_PAD_X: f32 = 8.0;
+    pub const NAV_GAP: f32 = 8.0;
+    pub const NAV_ICON: f32 = 15.0;
+    pub const NAV_FONT: f32 = 13.0;
+    pub const CONTENT_MAX_WIDTH: f32 = 680.0;
+    pub const CONTENT_PAD_X: f32 = 28.0;
+    pub const CONTENT_PAD_TOP: f32 = 6.0;
+    pub const CONTENT_PAD_BOTTOM: f32 = 24.0;
+    pub const CONTENT_GAP: f32 = 20.0;
+    pub const HEADER_GAP: f32 = 14.0;
+    pub const GROUP_GAP: f32 = 22.0;
+    pub const GROUP_HEADER_GAP: f32 = 6.0;
+    pub const PAGE_TITLE: f32 = 22.0;
+    pub const SECTION_TITLE: f32 = 15.0;
+    pub const BODY: f32 = 13.0;
+    pub const CAPTION: f32 = 11.0;
+    pub const CARD_RADIUS: f32 = 10.0;
+    pub const ROW_PAD_X: f32 = 14.0;
+    pub const ROW_PAD_Y: f32 = 12.0;
+    pub const BUTTON_HEIGHT: f32 = 28.0;
+    pub const SEGMENT_HEIGHT: f32 = 24.0;
+    pub const BUTTON_RADIUS: f32 = 6.0;
+    pub const CONTROL_TEXT: f32 = 13.0;
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+mod platform {
+    pub const WINDOW_WIDTH: f32 = 870.0;
+    pub const WINDOW_HEIGHT: f32 = 640.0;
+    pub const MIN_WIDTH: f32 = 710.0;
+    pub const MIN_HEIGHT: f32 = 520.0;
+    pub const TITLEBAR_HEIGHT: f32 = 0.0;
+    pub const SIDEBAR_WIDTH: f32 = 150.0;
+    pub const SIDEBAR_PAD: f32 = 10.0;
+    pub const SIDEBAR_DIVIDER: bool = true;
+    pub const NAV_ITEM_HEIGHT: f32 = 28.0;
+    pub const NAV_ITEM_RADIUS: f32 = 6.0;
+    pub const NAV_ITEM_PAD_X: f32 = 8.0;
+    pub const NAV_GAP: f32 = 8.0;
+    pub const NAV_ICON: f32 = 15.0;
+    pub const NAV_FONT: f32 = 13.0;
+    pub const CONTENT_MAX_WIDTH: f32 = 680.0;
+    pub const CONTENT_PAD_X: f32 = 28.0;
+    pub const CONTENT_PAD_TOP: f32 = 6.0;
+    pub const CONTENT_PAD_BOTTOM: f32 = 24.0;
+    pub const CONTENT_GAP: f32 = 20.0;
+    pub const HEADER_GAP: f32 = 14.0;
+    pub const GROUP_GAP: f32 = 22.0;
+    pub const GROUP_HEADER_GAP: f32 = 6.0;
+    pub const PAGE_TITLE: f32 = 22.0;
+    pub const SECTION_TITLE: f32 = 15.0;
+    pub const BODY: f32 = 13.0;
+    pub const CAPTION: f32 = 11.0;
+    pub const CARD_RADIUS: f32 = 10.0;
+    pub const ROW_PAD_X: f32 = 14.0;
+    pub const ROW_PAD_Y: f32 = 12.0;
+    pub const BUTTON_HEIGHT: f32 = 28.0;
+    pub const SEGMENT_HEIGHT: f32 = 24.0;
+    pub const BUTTON_RADIUS: f32 = 6.0;
+    pub const CONTROL_TEXT: f32 = 13.0;
+}
+
+pub use platform::*;
