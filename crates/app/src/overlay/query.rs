@@ -31,6 +31,7 @@ impl OverlayView {
             return;
         }
         if self.element_probe.window != Some(window.id) {
+            self.element_probe.retain_cache_for(window.id);
             self.element_probe.window = Some(window.id);
             self.element_probe.cache_point = None;
             self.element_probe.level = 0;

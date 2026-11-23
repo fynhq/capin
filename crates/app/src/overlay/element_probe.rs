@@ -33,4 +33,9 @@ impl ElementProbe {
         self.cache_point = None;
         self.retry.clear();
     }
+
+    pub(super) fn retain_cache_for(&mut self, window: WindowId) {
+        self.cache.retain(|id, _| *id == window);
+        self.retry.retain(|id| *id == window);
+    }
 }

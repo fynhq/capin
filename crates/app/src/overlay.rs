@@ -884,9 +884,9 @@ impl OverlayView {
             .or(self.editing_rect);
 
         let magnifier = (!selected && !self.session.is_dragging())
-            .then(|| self.magnifier_panel(drag_selection, language, cx))
+            .then(|| panels::magnifier_panel(self, drag_selection, language, cx))
             .flatten();
-        let size_tag = self.selection_size_tag(language);
+        let size_tag = panels::selection_size_tag(self, language);
         let window_mode_hint = (!selected && self.window_only).then(|| {
             div()
                 .absolute()
@@ -1033,14 +1033,14 @@ impl OverlayView {
         }
 
         let handles = if selected {
-            self.selection_handles(cx)
+            panels::selection_handles(self, cx)
         } else {
             Vec::new()
         };
-        let info_bar = self.info_bar(cx);
-        let toolbar = self.selection_toolbar(cx);
-        let effects_panel = self.effects_panel(cx);
-        let hints_panel = self.hints_panel(cx);
+        let info_bar = panels::info_bar(self, cx);
+        let toolbar = panels::selection_toolbar(self, cx);
+        let effects_panel = panels::effects_panel(self, cx);
+        let hints_panel = panels::hints_panel(self, cx);
 
         div()
             .relative()
