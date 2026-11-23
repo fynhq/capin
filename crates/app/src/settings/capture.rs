@@ -147,7 +147,7 @@ impl SettingsView {
                                 if row.refresh_pin {
                                     cx.defer(crate::pin::refresh_recognition);
                                 }
-                                this.status = None;
+                                this.status.clear();
                                 cx.notify();
                             }))
                             .child(toggle(theme, row.value, row.id)),
@@ -318,7 +318,7 @@ impl SettingsView {
                 settings_state::update(|settings| settings.capture_double_click = action);
             }
         }
-        self.status = None;
+        self.status.clear();
         cx.notify();
     }
 

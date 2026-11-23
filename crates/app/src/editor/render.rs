@@ -199,7 +199,10 @@ impl Render for EditorView {
         });
 
         let preview_blur_layer = preview_blur.and_then(|(rect, radius)| {
-            let (placed, blur_image) = self.draft_blur_image(rect, radius, cx)?;
+            let selection = self.full_selection();
+            let (placed, blur_image) =
+                self.blur_cache
+                    .draft_image(&self.frame, selection, rect, radius, cx)?;
             Some(
                 div()
                     .absolute()

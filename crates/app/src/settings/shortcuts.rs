@@ -273,7 +273,7 @@ impl SettingsView {
                             .active(move |style| style.opacity(0.88))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.recording_shortcut = Some(slot);
-                                this.status = None;
+                                this.status.clear();
                                 window.focus(&this.focus_handle, cx);
                                 cx.notify();
                             }))
@@ -295,7 +295,7 @@ impl SettingsView {
         let language = self.settings().language;
         if event.keystroke.key == "escape" {
             self.recording_shortcut = None;
-            self.status = None;
+            self.status.clear();
             cx.notify();
             return true;
         }

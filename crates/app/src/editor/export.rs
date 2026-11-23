@@ -35,14 +35,10 @@ impl EditorView {
         let size_changed = new_size != self.image_size;
         let image = image_util::render_image(frame);
         let old_image = std::mem::replace(&mut self.image, image);
-        let old_previews = std::mem::take(&mut self.blur_previews);
-        self.blur_preview_key = None;
+        self.blur_cache.drop_images(cx);
         self.images_released = false;
         cx.defer(move |cx| {
             cx.drop_image(old_image, None);
-            for (_, _, image) in old_previews {
-                cx.drop_image(image, None);
-            }
         });
         if size_changed {
             self.image_size = new_size;

@@ -195,7 +195,7 @@ impl SettingsView {
                         settings_state::update(|settings| settings.language = option);
                         crate::tray::refresh_menu();
                         window.set_window_title(t(option, "settings.title"));
-                        this.status = None;
+                        this.status.clear();
                         cx.notify();
                     })),
             );

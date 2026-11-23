@@ -110,9 +110,9 @@ impl Render for SettingsView {
             self.record_color_picker = None;
         }
         let theme = Theme::for_window(window, self.accent);
-        let status = self.status.clone();
-        let status_serial = self.status_serial;
-        let status_leaving = self.status_leaving;
+        let status = self.status.message().cloned();
+        let status_serial = self.status.serial();
+        let status_leaving = self.status.leaving();
         #[cfg(target_os = "windows")]
         let titlebar = Some(self.titlebar(&theme, window, cx));
         #[cfg(not(target_os = "windows"))]

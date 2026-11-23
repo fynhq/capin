@@ -28,7 +28,10 @@ mod render;
 mod settings_scroll;
 mod shortcuts;
 mod storage_rows;
+mod toast;
 mod window;
+
+use toast::SettingsToast;
 
 thread_local! {
     static PENDING_STATUS: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -295,9 +298,7 @@ pub(crate) struct SettingsView {
     scroll_handle: ScrollHandle,
     accent: Option<u32>,
     last_accent: Option<u32>,
-    status: Option<String>,
-    status_serial: u64,
-    status_leaving: bool,
+    status: SettingsToast,
     recording_shortcut: Option<ShortcutSlot>,
     filename_input: Entity<InputState>,
     filename_subscription: Option<Subscription>,
@@ -331,9 +332,9 @@ impl SettingsView {
             scroll_handle: ScrollHandle::new(),
             accent: system_accent_hex(),
             last_accent: None,
-            status: PENDING_STATUS.with(|slot| slot.borrow_mut().take()),
-            status_serial: 0,
-            status_leaving: false,
+            status: SettingsToast::from_message(
+                PENDING_STATUS.with(|slot| slot.borrow_mut().take()),
+            ),
             recording_shortcut: None,
             filename_input,
             filename_subscription: None,
@@ -379,48 +380,14 @@ impl SettingsView {
         view.start_accent_watch(cx);
         #[cfg(target_os = "macos")]
         view.start_permission_watch(cx);
-        if let Some(status) = view.status.clone() {
+        if let Some(status) = view.status.message().cloned() {
             view.show_status(status, cx);
         }
         view
     }
 
     fn show_status(&mut self, message: String, cx: &mut Context<Self>) {
-        self.status = Some(message);
-        self.status_leaving = false;
-        self.status_serial = self.status_serial.wrapping_add(1);
-        let serial = self.status_serial;
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(2600))
-                .await;
-            let alive = this
-                .update(cx, |this, cx| {
-                    if this.status_serial != serial {
-                        return false;
-                    }
-                    this.status_leaving = true;
-                    cx.notify();
-                    true
-                })
-                .unwrap_or(false);
-            if !alive {
-                return;
-            }
-            cx.background_executor()
-                .timer(Duration::from_millis(150))
-                .await;
-            this.update(cx, |this, cx| {
-                if this.status_serial == serial {
-                    this.status = None;
-                    this.status_leaving = false;
-                    cx.notify();
-                }
-            })
-            .ok();
-        })
-        .detach();
-        cx.notify();
+        self.status.show(message, cx);
     }
 
     fn start_accent_watch(&self, cx: &mut Context<Self>) {

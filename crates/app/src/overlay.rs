@@ -1017,7 +1017,9 @@ impl OverlayView {
             && let Some(rect) = hovered
         {
             layers.push(
-                self.window_label(
+                query::window_label(
+                    &self.chrome,
+                    language,
                     window,
                     rect,
                     hovered_element.and(self.session.hovered_element()),
@@ -1026,7 +1028,8 @@ impl OverlayView {
             );
         }
         if !selected && desktop_hover {
-            layers.push(self.screen_label(language).into_any_element());
+            let size = self.session.monitor_bounds().size;
+            layers.push(query::screen_label(&self.chrome, language, size).into_any_element());
         }
 
         let handles = if selected {

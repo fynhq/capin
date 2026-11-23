@@ -14,9 +14,13 @@ impl EditorView {
                     if rect.is_empty() {
                         continue;
                     }
-                    self.ensure_blur_previews(cx);
+                    let selection = self.full_selection();
+                    let state = &self.state;
+                    self.blur_cache
+                        .ensure(&state.document, &self.frame, selection, cx);
                     let Some((_, preview_rect, blur_image)) = self
-                        .blur_previews
+                        .blur_cache
+                        .previews()
                         .iter()
                         .find(|(id, _, _)| *id == annotation.id)
                     else {

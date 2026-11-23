@@ -180,14 +180,16 @@ impl OverlayView {
         self.color_format = self.color_format.next();
         cx.notify();
     }
+}
 
-    fn color_text(&self, red: u8, green: u8, blue: u8) -> String {
-        match self.color_format {
-            ColorFormat::Hex => format!("#{red:02x}{green:02x}{blue:02x}"),
-            ColorFormat::Rgb => format!("rgb({red}, {green}, {blue})"),
-        }
+fn color_text(format: ColorFormat, red: u8, green: u8, blue: u8) -> String {
+    match format {
+        ColorFormat::Hex => format!("#{red:02x}{green:02x}{blue:02x}"),
+        ColorFormat::Rgb => format!("rgb({red}, {green}, {blue})"),
     }
+}
 
+impl OverlayView {
     pub(super) fn update_magnifier(&mut self, window: &mut Window) {
         if self.selected.is_some() {
             self.clear_magnifier(window);
@@ -256,7 +258,7 @@ impl OverlayView {
         let Some((red, green, blue)) = self.sample_color(point) else {
             return;
         };
-        let text = self.color_text(red, green, blue);
+        let text = color_text(self.color_format, red, green, blue);
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         self.close_overlays(cx);
     }
@@ -266,101 +268,101 @@ impl OverlayView {
         self.session.set_aspect_ratio(self.aspect.ratio());
         cx.notify();
     }
+}
 
-    pub(super) fn window_label(
-        &self,
-        window: &WindowInfo,
-        rect: Bounds<Pixels>,
-        element: Option<PhysicalRect>,
-    ) -> Div {
-        let language = settings_state::get().language;
-        let title = if window.title.is_empty() {
-            t(language, "overlay.untitled")
+pub(super) fn window_label(
+    chrome: &ChromeTheme,
+    language: Language,
+    window: &WindowInfo,
+    rect: Bounds<Pixels>,
+    element: Option<PhysicalRect>,
+) -> Div {
+    let title = if window.title.is_empty() {
+        t(language, "overlay.untitled")
+    } else {
+        window.title.as_str()
+    };
+    let (kind, width, height, icon, icon_color) = match element {
+        Some(element) => (
+            t(language, "overlay.element"),
+            element.size.width,
+            element.size.height,
+            icons::SELECT,
+            rgb(ELEMENT_HOVER),
+        ),
+        None => (
+            t(language, "overlay.window"),
+            window.bounds.size.width,
+            window.bounds.size.height,
+            icons::WINDOW,
+            chrome.icon,
+        ),
+    };
+    let text = format!("{title} · {kind}  {width}x{height}");
+    let top = (f32::from(rect.origin.y) - 26.0).max(0.0);
+
+    div()
+        .absolute()
+        .left(rect.origin.x)
+        .top(px(top))
+        .px_2()
+        .py_1()
+        .bg(chrome.surface)
+        .border_1()
+        .border_color(if element.is_some() {
+            rgba((ELEMENT_HOVER << 8) | 0xCC)
         } else {
-            window.title.as_str()
-        };
-        let (kind, width, height, icon, icon_color) = match element {
-            Some(element) => (
-                t(language, "overlay.element"),
-                element.size.width,
-                element.size.height,
-                icons::SELECT,
-                rgb(ELEMENT_HOVER),
-            ),
-            None => (
-                t(language, "overlay.window"),
-                window.bounds.size.width,
-                window.bounds.size.height,
-                icons::WINDOW,
-                self.chrome.icon,
-            ),
-        };
-        let text = format!("{title} · {kind}  {width}x{height}");
-        let top = (f32::from(rect.origin.y) - 26.0).max(0.0);
+            chrome.border
+        })
+        .shadow(chrome.shadow())
+        .rounded(px(6.0))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .child(icons::icon(icon, 12.0, icon_color))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(chrome.text)
+                        .child(text),
+                ),
+        )
+}
 
-        div()
-            .absolute()
-            .left(rect.origin.x)
-            .top(px(top))
-            .px_2()
-            .py_1()
-            .bg(self.chrome.surface)
-            .border_1()
-            .border_color(if element.is_some() {
-                rgba((ELEMENT_HOVER << 8) | 0xCC)
-            } else {
-                self.chrome.border
-            })
-            .shadow(self.chrome.shadow())
-            .rounded(px(6.0))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(icons::icon(icon, 12.0, icon_color))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(self.chrome.text)
-                            .child(text),
-                    ),
-            )
-    }
-
-    pub(super) fn screen_label(&self, language: Language) -> Div {
-        let width = self.session.monitor_bounds().size.width;
-        let height = self.session.monitor_bounds().size.height;
-        div()
-            .absolute()
-            .left(px(16.0))
-            .top(px(16.0))
-            .px_2()
-            .py_1()
-            .bg(self.chrome.surface)
-            .border_1()
-            .border_color(self.chrome.border)
-            .shadow(self.chrome.shadow())
-            .rounded(px(6.0))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(icons::icon(icons::SCREEN, 12.0, self.chrome.icon))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(self.chrome.text)
-                            .child(format!(
-                                "{} · {}x{}",
-                                t(language, "overlay.screen"),
-                                width,
-                                height
-                            )),
-                    ),
-            )
-    }
+pub(super) fn screen_label(chrome: &ChromeTheme, language: Language, size: PhysicalSize) -> Div {
+    let width = size.width;
+    let height = size.height;
+    div()
+        .absolute()
+        .left(px(16.0))
+        .top(px(16.0))
+        .px_2()
+        .py_1()
+        .bg(chrome.surface)
+        .border_1()
+        .border_color(chrome.border)
+        .shadow(chrome.shadow())
+        .rounded(px(6.0))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .child(icons::icon(icons::SCREEN, 12.0, chrome.icon))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(chrome.text)
+                        .child(format!(
+                            "{} · {}x{}",
+                            t(language, "overlay.screen"),
+                            width,
+                            height
+                        )),
+                ),
+        )
 }

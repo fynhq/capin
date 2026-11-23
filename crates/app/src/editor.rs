@@ -72,6 +72,7 @@ impl Tool {
     }
 }
 
+mod blur_cache;
 mod canvas;
 mod effects;
 mod export;
@@ -81,6 +82,8 @@ mod render_handlers;
 mod text;
 mod toolbar;
 mod view;
+
+use blur_cache::BlurCache;
 
 use canvas::push_preview_rounded_rect;
 
@@ -407,9 +410,7 @@ fn word_range_at(content: &str, index: usize) -> Range<usize> {
 
 pub(crate) struct EditorView {
     image: Arc<RenderImage>,
-    blur_previews: Vec<(core_annotate::AnnotationId, PhysicalRect, Arc<RenderImage>)>,
-    blur_preview_key: Option<(u64, usize, Option<PhysicalRect>)>,
-    draft_blur: Option<(PhysicalRect, u32, Arc<RenderImage>)>,
+    blur_cache: BlurCache,
     images_released: bool,
     frame: Arc<RgbaFrame>,
     region_source: Option<Arc<RenderImage>>,
@@ -481,12 +482,7 @@ impl EditorView {
             }
             this.images_released = true;
             cx.drop_image(this.image.clone(), None);
-            for (_, _, image) in &this.blur_previews {
-                cx.drop_image(image.clone(), None);
-            }
-            if let Some((_, _, image)) = &this.draft_blur {
-                cx.drop_image(image.clone(), None);
-            }
+            this.blur_cache.drop_images_now(cx);
         })
         .detach();
         let mut state = EditorState::base(AnnotationDocument::new(image_size), image_size);
@@ -533,9 +529,7 @@ impl EditorView {
         state.uniform_color = settings.annotation_uniform_color;
         Self {
             image,
-            blur_previews: Vec::new(),
-            blur_preview_key: None,
-            draft_blur: None,
+            blur_cache: BlurCache::default(),
             images_released: false,
             frame,
             region_source: None,

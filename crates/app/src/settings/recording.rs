@@ -54,7 +54,7 @@ impl SettingsView {
                     settings_state::update(|settings| {
                         settings.record_cursor_highlight_color = color
                     });
-                    this.status = None;
+                    this.status.clear();
                     cx.notify();
                 }))
                 .child(
@@ -154,7 +154,7 @@ impl SettingsView {
             fresh: true,
         });
         self.select_menu = None;
-        self.status = None;
+        self.status.clear();
         window.focus(&self.focus_handle, cx);
         cx.notify();
     }
@@ -172,7 +172,7 @@ impl SettingsView {
         };
         let color = rgb & 0x00FF_FFFF;
         settings_state::update(|settings| settings.record_cursor_highlight_color = color);
-        self.status = None;
+        self.status.clear();
         cx.notify();
         true
     }
@@ -276,7 +276,7 @@ impl SettingsView {
                             picker.buffer = format!("{color:06x}");
                             picker.fresh = false;
                         }
-                        this.status = None;
+                        this.status.clear();
                         cx.notify();
                     })),
             );
