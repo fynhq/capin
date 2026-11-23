@@ -557,7 +557,7 @@ impl EditorView {
                 .and_then(|inline| inline.capture)
                 .map(|capture| capture.scale.max(0.1))
                 .unwrap_or(1.0);
-            self.restore_region_image_rect(scale, cx);
+            canvas::restore_region_image_rect(self, scale, cx);
         }
         self.refit_zoomable_view();
         self.reset_view(cx);

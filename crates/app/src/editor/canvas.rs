@@ -45,38 +45,8 @@ pub(super) fn push_preview_rounded_rect(
 }
 
 impl EditorView {
-    pub(super) fn region_capture(&self) -> Option<(CaptureRegion, PhysicalRect)> {
-        let inline = self.inline.as_ref()?;
-        if inline.zoomable {
-            return None;
-        }
-        let capture = inline.capture.as_ref()?;
-        let CaptureTarget::Region(region) = capture.target else {
-            return None;
-        };
-        Some((region, region.rect))
-    }
-
-    pub(super) fn can_adjust_region(&self) -> bool {
-        let has_source = self.region_source.is_some()
-            || self
-                .full_canvas
-                .is_some_and(|full_canvas| full_canvas.adjustable);
-        self.tool == Tool::Select
-            && has_source
-            && self.region_capture().is_some()
-            && self.document.selected().is_none()
-            && self.draft.is_none()
-            && self.move_draft.is_none()
-            && self.resize_draft.is_none()
-            && self.polyline_draft.is_none()
-            && self.text_edit.is_none()
-            && !self.crop_mode
-            && self.region_adjust.draft.is_none()
-    }
-
     pub(super) fn begin_region_drag(&mut self, handle: RegionHandle, cx: &mut Context<Self>) {
-        let Some((_, rect)) = self.region_capture() else {
+        let Some((_, rect)) = region_capture(self) else {
             return;
         };
         self.region_adjust.begin(handle, rect);
@@ -149,11 +119,11 @@ impl EditorView {
         };
         let scale = capture.scale.max(0.1);
         if draft.current == draft.original {
-            self.restore_region_image_rect(scale, cx);
+            restore_region_image_rect(self, scale, cx);
             return;
         }
         let Some(cropped) = image_util::cropped_rgba(&source, draft.current) else {
-            self.restore_region_image_rect(scale, cx);
+            restore_region_image_rect(self, scale, cx);
             return;
         };
         self.push_canvas_snapshot();
@@ -195,56 +165,6 @@ impl EditorView {
         );
     }
 
-    pub(super) fn restore_region_image_rect(&mut self, scale: f32, cx: &mut Context<Self>) {
-        if self.full_canvas.is_some() {
-            return;
-        }
-        let Some((_, rect)) = self.region_capture() else {
-            return;
-        };
-        if let Some(inline) = self.inline.as_mut() {
-            inline.image_rect = Bounds {
-                origin: point(
-                    px(rect.origin.x as f32 / scale),
-                    px(rect.origin.y as f32 / scale),
-                ),
-                size: size(
-                    px(rect.size.width as f32 / scale),
-                    px(rect.size.height as f32 / scale),
-                ),
-            };
-        }
-        cx.notify();
-    }
-
-    pub(super) fn cancel_annotation_state(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.text_edit.is_some() {
-            self.cancel_text(cx);
-            return true;
-        }
-        if self.polyline_draft.is_some() {
-            self.cancel_polyline(cx);
-            return true;
-        }
-        if self.toolbar.close_panels() {
-            cx.notify();
-            return true;
-        }
-        if self.document.selected().is_some() || self.tool != Tool::Select {
-            self.select_annotation(None);
-            self.tool = Tool::Select;
-            self.draft = None;
-            self.cancel_move();
-            self.cancel_resize();
-            self.pan_draft = None;
-            self.selection_hover = SelectionHover::None;
-            self.status = None;
-            cx.notify();
-            return true;
-        }
-        false
-    }
-
     pub(super) fn right_click(&mut self, cx: &mut Context<Self>) {
         cx.stop_propagation();
         if self.text_edit.is_some() {
@@ -263,7 +183,7 @@ impl EditorView {
             }
             return;
         }
-        let _ = self.cancel_annotation_state(cx);
+        let _ = cancel_annotation_state(self, cx);
     }
 
     pub(super) fn region_handles(
@@ -271,7 +191,7 @@ impl EditorView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        if !self.can_adjust_region() {
+        if !can_adjust_region(self) {
             return Vec::new();
         }
         let rect = self
@@ -327,7 +247,7 @@ impl EditorView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        if !self.can_adjust_region() {
+        if !can_adjust_region(self) {
             return Vec::new();
         }
         let Some(rect) = self.inline_selection_rect(window) else {
@@ -639,7 +559,7 @@ impl EditorView {
     }
 
     pub(super) fn region_handle_at(&self, point: PhysicalPoint) -> Option<RegionHandle> {
-        if !self.can_adjust_region() {
+        if !can_adjust_region(self) {
             return None;
         }
         let rect = self.full_selection().unwrap_or_else(|| {
@@ -738,4 +658,88 @@ impl EditorView {
         );
         true
     }
+}
+
+pub(super) fn region_capture(view: &EditorView) -> Option<(CaptureRegion, PhysicalRect)> {
+    let inline = view.inline.as_ref()?;
+    if inline.zoomable {
+        return None;
+    }
+    let capture = inline.capture.as_ref()?;
+    let CaptureTarget::Region(region) = capture.target else {
+        return None;
+    };
+    Some((region, region.rect))
+}
+
+pub(super) fn can_adjust_region(view: &EditorView) -> bool {
+    let has_source = view.region_source.is_some()
+        || view
+            .full_canvas
+            .is_some_and(|full_canvas| full_canvas.adjustable);
+    view.tool == Tool::Select
+        && has_source
+        && region_capture(view).is_some()
+        && view.document.selected().is_none()
+        && view.draft.is_none()
+        && view.move_draft.is_none()
+        && view.resize_draft.is_none()
+        && view.polyline_draft.is_none()
+        && view.text_edit.is_none()
+        && !view.crop_mode
+        && view.region_adjust.draft.is_none()
+}
+
+pub(super) fn restore_region_image_rect(
+    view: &mut EditorView,
+    scale: f32,
+    cx: &mut Context<EditorView>,
+) {
+    if view.full_canvas.is_some() {
+        return;
+    }
+    let Some((_, rect)) = region_capture(view) else {
+        return;
+    };
+    if let Some(inline) = view.inline.as_mut() {
+        inline.image_rect = Bounds {
+            origin: point(
+                px(rect.origin.x as f32 / scale),
+                px(rect.origin.y as f32 / scale),
+            ),
+            size: size(
+                px(rect.size.width as f32 / scale),
+                px(rect.size.height as f32 / scale),
+            ),
+        };
+    }
+    cx.notify();
+}
+
+pub(super) fn cancel_annotation_state(view: &mut EditorView, cx: &mut Context<EditorView>) -> bool {
+    if view.text_edit.is_some() {
+        view.cancel_text(cx);
+        return true;
+    }
+    if view.polyline_draft.is_some() {
+        view.cancel_polyline(cx);
+        return true;
+    }
+    if view.toolbar.close_panels() {
+        cx.notify();
+        return true;
+    }
+    if view.document.selected().is_some() || view.tool != Tool::Select {
+        view.select_annotation(None);
+        view.tool = Tool::Select;
+        view.draft = None;
+        view.cancel_move();
+        view.cancel_resize();
+        view.pan_draft = None;
+        view.selection_hover = SelectionHover::None;
+        view.status = None;
+        cx.notify();
+        return true;
+    }
+    false
 }
