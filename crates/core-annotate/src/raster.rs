@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::sync::Mutex;
 
 use core_types::{
     FrameError, PhysicalPoint, PhysicalRect, PhysicalSize, RgbaFrame, prefers_dark_foreground,
@@ -54,77 +54,208 @@ pub fn rasterize(
             );
             continue;
         }
-        if matches!(annotation.shape, Shape::Text { .. }) {
-            draw_text(&mut pixmap, annotation);
-            continue;
-        }
-        if matches!(annotation.shape, Shape::Number { .. }) {
-            draw_number(&mut pixmap, annotation);
-            continue;
-        }
-        if let Shape::Spotlight(rect) = annotation.shape {
-            draw_spotlight(
-                &mut pixmap,
-                expected,
-                rect,
-                annotation.style.spotlight_intensity,
-                annotation.style.spotlight_radius,
-            );
-            continue;
-        }
+        draw_annotation(&mut pixmap, expected, annotation)?;
+    }
 
-        let color = if matches!(annotation.shape, Shape::HighlighterBox(_)) {
-            highlighter_color(annotation.style.color)
-        } else {
-            annotation.style.color
-        };
-        let (red, green, blue, alpha) = unpack(color);
-        let mut paint = Paint::default();
-        paint.set_color_rgba8(red, green, blue, alpha);
-        if let Some(polygons) = stroke_outline(&annotation.shape, &annotation.style) {
-            for polygon in polygons {
-                let Some(path) = polygon_path(&polygon) else {
-                    continue;
-                };
-                pixmap.as_mut().fill_path(
-                    &path,
-                    &paint,
-                    tiny_skia::FillRule::Winding,
-                    Transform::identity(),
-                    None,
-                );
-            }
-            continue;
-        }
+    let mut pixels = pixmap.take();
+    core_types::unpremultiply_rgba(&mut pixels);
+    Ok(RgbaFrame::from_pixels(
+        expected.width,
+        expected.height,
+        pixels,
+    )?)
+}
 
-        let path = build_path(annotation)?;
-        let mut target = pixmap.as_mut();
-        if fills_shape(annotation) {
-            target.fill_path(
+fn draw_annotation(
+    pixmap: &mut Pixmap,
+    expected: PhysicalSize,
+    annotation: &Annotation,
+) -> Result<(), RasterError> {
+    if matches!(annotation.shape, Shape::Text { .. }) {
+        draw_text(pixmap, annotation);
+        return Ok(());
+    }
+    if matches!(annotation.shape, Shape::Number { .. }) {
+        draw_number(pixmap, annotation);
+        return Ok(());
+    }
+    if let Shape::Spotlight(rect) = annotation.shape {
+        draw_spotlight(
+            pixmap,
+            expected,
+            rect,
+            annotation.style.spotlight_intensity,
+            annotation.style.spotlight_radius,
+        );
+        return Ok(());
+    }
+
+    let color = if matches!(annotation.shape, Shape::HighlighterBox(_)) {
+        highlighter_color(annotation.style.color)
+    } else {
+        annotation.style.color
+    };
+    let (red, green, blue, alpha) = unpack(color);
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(red, green, blue, alpha);
+    if let Some(polygons) = stroke_outline(&annotation.shape, &annotation.style) {
+        for polygon in polygons {
+            let Some(path) = polygon_path(&polygon) else {
+                continue;
+            };
+            pixmap.as_mut().fill_path(
                 &path,
                 &paint,
                 tiny_skia::FillRule::Winding,
                 Transform::identity(),
                 None,
             );
-        } else {
-            let stroke = Stroke {
-                width: annotation.style.stroke_width.max(1.0),
-                line_cap: LineCap::Round,
-                line_join: LineJoin::Round,
-                ..Default::default()
-            };
-            target.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
         }
+        return Ok(());
     }
 
-    let mut pixels = pixmap.take();
-    unpremultiply(&mut pixels);
-    Ok(RgbaFrame::from_pixels(
-        expected.width,
-        expected.height,
-        pixels,
-    )?)
+    let path = build_path(annotation)?;
+    let mut target = pixmap.as_mut();
+    if fills_shape(annotation) {
+        target.fill_path(
+            &path,
+            &paint,
+            tiny_skia::FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    } else {
+        let stroke = Stroke {
+            width: annotation.style.stroke_width.max(1.0),
+            line_cap: LineCap::Round,
+            line_join: LineJoin::Round,
+            ..Default::default()
+        };
+        target.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    }
+    Ok(())
+}
+
+pub struct BlurPreview {
+    pub id: AnnotationId,
+    pub rect: PhysicalRect,
+    pub frame: RgbaFrame,
+}
+
+pub fn blur_frame_region(
+    frame: &RgbaFrame,
+    rect: PhysicalRect,
+    radius: u32,
+) -> Option<(PhysicalRect, RgbaFrame)> {
+    let (x0, y0, x1, y1) = clamped_region(rect, frame.width(), frame.height())?;
+    let region_width = x1 - x0;
+    let region_height = y1 - y0;
+    let packed = frame.packed_pixels();
+    let image_width = frame.width() as usize;
+    let mut pixels = Vec::with_capacity(region_width * region_height * 4);
+    for row in 0..region_height {
+        let start = ((y0 + row) * image_width + x0) * 4;
+        pixels.extend_from_slice(&packed[start..start + region_width * 4]);
+    }
+    premultiply(&mut pixels);
+    blur_region(
+        &mut pixels,
+        region_width as u32,
+        region_height as u32,
+        PhysicalRect::new(0, 0, region_width as u32, region_height as u32),
+        radius,
+    );
+    core_types::unpremultiply_rgba(&mut pixels);
+    let blurred = RgbaFrame::from_pixels(region_width as u32, region_height as u32, pixels).ok()?;
+    Some((
+        PhysicalRect::new(
+            x0 as i32,
+            y0 as i32,
+            region_width as u32,
+            region_height as u32,
+        ),
+        blurred,
+    ))
+}
+
+pub fn blur_previews(
+    document: &AnnotationDocument,
+    frame: &RgbaFrame,
+) -> Result<Vec<BlurPreview>, RasterError> {
+    let expected = document.image_size();
+    let actual = PhysicalSize::new(frame.width(), frame.height());
+    if expected != actual {
+        return Err(RasterError::SizeMismatch { expected, actual });
+    }
+    let mut remaining = document
+        .objects()
+        .iter()
+        .filter(|annotation| matches!(annotation.shape, Shape::Blur(_)))
+        .count();
+    if remaining == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut pixels = frame.packed_pixels().into_owned();
+    premultiply(&mut pixels);
+    let size = IntSize::from_wh(expected.width, expected.height).ok_or(RasterError::Pixmap)?;
+    let mut pixmap = Pixmap::from_vec(pixels, size).ok_or(RasterError::Pixmap)?;
+
+    let mut previews = Vec::new();
+    for annotation in document.objects() {
+        if let Shape::Blur(rect) = &annotation.shape {
+            blur_region(
+                pixmap.data_mut(),
+                expected.width,
+                expected.height,
+                *rect,
+                annotation.style.blur_radius,
+            );
+            remaining -= 1;
+            if let Some(preview) =
+                extract_blur_preview(pixmap.data(), expected, annotation.id, *rect)?
+            {
+                previews.push(preview);
+            }
+            if remaining == 0 {
+                break;
+            }
+            continue;
+        }
+        draw_annotation(&mut pixmap, expected, annotation)?;
+    }
+    Ok(previews)
+}
+
+fn extract_blur_preview(
+    data: &[u8],
+    expected: PhysicalSize,
+    id: AnnotationId,
+    rect: PhysicalRect,
+) -> Result<Option<BlurPreview>, RasterError> {
+    let Some((x0, y0, x1, y1)) = clamped_region(rect, expected.width, expected.height) else {
+        return Ok(None);
+    };
+    let region_width = x1 - x0;
+    let region_height = y1 - y0;
+    let image_width = expected.width as usize;
+    let mut pixels = Vec::with_capacity(region_width * region_height * 4);
+    for row in 0..region_height {
+        let start = ((y0 + row) * image_width + x0) * 4;
+        pixels.extend_from_slice(&data[start..start + region_width * 4]);
+    }
+    core_types::unpremultiply_rgba(&mut pixels);
+    let frame = RgbaFrame::from_pixels(region_width as u32, region_height as u32, pixels)?;
+    Ok(Some(BlurPreview {
+        id,
+        rect: PhysicalRect::new(
+            x0 as i32,
+            y0 as i32,
+            region_width as u32,
+            region_height as u32,
+        ),
+        frame,
+    }))
 }
 
 fn polygon_path(polygon: &[OutlinePoint]) -> Option<Path> {
@@ -175,12 +306,7 @@ pub fn measure_text_height(text: &str, font_size: f32, width: u32) -> u32 {
         return 0;
     }
     let font_size = font_size.max(1.0);
-    TEXT_ENGINE.with(|engine| {
-        let mut engine = engine.borrow_mut();
-        let engine = engine.get_or_insert_with(|| TextEngine {
-            font_system: FontSystem::new(),
-            swash_cache: SwashCache::new(),
-        });
+    with_text_engine(|engine| {
         if engine.font_system.db_mut().is_empty() {
             return (font_size * 1.3).ceil() as u32;
         }
@@ -215,12 +341,7 @@ fn draw_text(pixmap: &mut Pixmap, annotation: &Annotation) {
         draw_text_background(pixmap, *bounds, annotation.style);
     }
 
-    TEXT_ENGINE.with(|engine| {
-        let mut engine = engine.borrow_mut();
-        let engine = engine.get_or_insert_with(|| TextEngine {
-            font_system: FontSystem::new(),
-            swash_cache: SwashCache::new(),
-        });
+    with_text_engine(|engine| {
         if engine.font_system.db_mut().is_empty() {
             return;
         }
@@ -539,8 +660,21 @@ fn draw_spotlight(
     );
 }
 
-thread_local! {
-    static TEXT_ENGINE: RefCell<Option<TextEngine>> = const { RefCell::new(None) };
+static TEXT_ENGINE: Mutex<Option<TextEngine>> = Mutex::new(None);
+
+fn with_text_engine<R>(action: impl FnOnce(&mut TextEngine) -> R) -> R {
+    let mut guard = TEXT_ENGINE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let engine = guard.get_or_insert_with(|| TextEngine {
+        font_system: FontSystem::new(),
+        swash_cache: SwashCache::new(),
+    });
+    action(engine)
+}
+
+pub fn warmup_text_engine() {
+    with_text_engine(|_| {});
 }
 
 struct TextEngine {
@@ -548,17 +682,28 @@ struct TextEngine {
     swash_cache: SwashCache,
 }
 
-fn blur_region(data: &mut [u8], width: u32, height: u32, rect: PhysicalRect, radius: u32) {
+fn clamped_region(
+    rect: PhysicalRect,
+    width: u32,
+    height: u32,
+) -> Option<(usize, usize, usize, usize)> {
     if rect.is_empty() {
-        return;
+        return None;
     }
     let x0 = rect.origin.x.max(0) as usize;
     let y0 = rect.origin.y.max(0) as usize;
     let x1 = rect.right().clamp(0, i64::from(width)) as usize;
     let y1 = rect.bottom().clamp(0, i64::from(height)) as usize;
     if x1 <= x0 || y1 <= y0 {
-        return;
+        return None;
     }
+    Some((x0, y0, x1, y1))
+}
+
+fn blur_region(data: &mut [u8], width: u32, height: u32, rect: PhysicalRect, radius: u32) {
+    let Some((x0, y0, x1, y1)) = clamped_region(rect, width, height) else {
+        return;
+    };
 
     let image_width = width as usize;
     let region_width = x1 - x0;
@@ -700,17 +845,6 @@ fn premultiply(pixels: &mut [u8]) {
     }
 }
 
-fn unpremultiply(pixels: &mut [u8]) {
-    for pixel in pixels.as_chunks_mut::<4>().0 {
-        let alpha = u16::from(pixel[3]);
-        if alpha > 0 && alpha < 255 {
-            for channel in &mut pixel[..3] {
-                *channel = ((u16::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
-            }
-        }
-    }
-}
-
 #[derive(Debug, Error)]
 pub enum RasterError {
     #[error("frame size mismatch: expected {expected:?}, got {actual:?}")]
@@ -758,6 +892,71 @@ mod tests {
         let document = document(4, 2);
         let output = rasterize(&document, &frame).unwrap();
         assert_eq!(output.pixels(), frame.pixels());
+    }
+
+    #[test]
+    fn blur_previews_match_the_exported_pixels() {
+        let pixels: Vec<u8> = (0..64u32)
+            .flat_map(|y| {
+                (0..64u32).flat_map(move |x| {
+                    let value = if (x / 8 + y / 8) % 2 == 0 { 255 } else { 0 };
+                    [value, value, value, 255]
+                })
+            })
+            .collect();
+        let frame = RgbaFrame::from_pixels(64, 64, pixels).unwrap();
+        let mut document = document(64, 64);
+        document.add(
+            Shape::Rect(PhysicalRect::new(30, 30, 20, 20)),
+            AnnotationStyle {
+                color: 0x0000FFFF,
+                filled: true,
+                ..Default::default()
+            },
+        );
+        document.add(
+            Shape::Rect(PhysicalRect::new(4, 4, 24, 24)),
+            AnnotationStyle {
+                color: 0xFF0000FF,
+                filled: true,
+                ..Default::default()
+            },
+        );
+        let blur = document.add(
+            Shape::Blur(PhysicalRect::new(8, 8, 40, 40)),
+            AnnotationStyle {
+                blur_radius: 16,
+                ..Default::default()
+            },
+        );
+        let thin = document.add(
+            Shape::Blur(PhysicalRect::new(58, 58, 6, 4)),
+            AnnotationStyle {
+                blur_radius: 16,
+                ..Default::default()
+            },
+        );
+
+        let exported = rasterize(&document, &frame).unwrap();
+        let previews = blur_previews(&document, &frame).unwrap();
+        assert_eq!(previews.len(), 2);
+        for preview in &previews {
+            assert!(preview.id == blur || preview.id == thin);
+            for dy in 0..preview.rect.size.height {
+                for dx in 0..preview.rect.size.width {
+                    assert_eq!(
+                        pixel(&preview.frame, dx, dy),
+                        pixel(
+                            &exported,
+                            preview.rect.origin.x as u32 + dx,
+                            preview.rect.origin.y as u32 + dy
+                        ),
+                        "preview pixel ({dx}, {dy}) of {:?} differs from export",
+                        preview.id
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -153,93 +153,6 @@ pub fn magnifier_image(
     Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))
 }
 
-struct FrameView<'a>(&'a RgbaFrame);
-
-impl image::GenericImageView for FrameView<'_> {
-    type Pixel = image::Rgba<u8>;
-
-    fn dimensions(&self) -> (u32, u32) {
-        (self.0.width(), self.0.height())
-    }
-
-    fn get_pixel(&self, x: u32, y: u32) -> Self::Pixel {
-        let [red, green, blue, alpha] = self.0.pixel(x, y).unwrap_or_default();
-        image::Rgba([red, green, blue, alpha])
-    }
-}
-
-struct RenderFrameView<'a> {
-    size: PhysicalSize,
-    bytes: Option<&'a [u8]>,
-}
-
-impl<'a> RenderFrameView<'a> {
-    fn new(image: &'a RenderImage) -> Self {
-        Self {
-            size: image_size(image),
-            bytes: image.as_bytes(0),
-        }
-    }
-}
-
-impl image::GenericImageView for RenderFrameView<'_> {
-    type Pixel = image::Rgba<u8>;
-
-    fn dimensions(&self) -> (u32, u32) {
-        (self.size.width, self.size.height)
-    }
-
-    fn get_pixel(&self, x: u32, y: u32) -> Self::Pixel {
-        if x >= self.size.width || y >= self.size.height {
-            return image::Rgba([0, 0, 0, 0]);
-        }
-        let Some(bytes) = self.bytes else {
-            return image::Rgba([0, 0, 0, 0]);
-        };
-        let offset = (y as usize * self.size.width as usize + x as usize) * 4;
-        let Some([blue, green, red, alpha]) = bytes
-            .get(offset..offset + 4)
-            .map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]])
-        else {
-            return image::Rgba([0, 0, 0, 0]);
-        };
-        image::Rgba([red, green, blue, alpha])
-    }
-}
-
-pub fn blurred_image(frame: &RgbaFrame, radius: u32) -> Arc<RenderImage> {
-    blur_from_view(&FrameView(frame), frame.width(), frame.height(), radius)
-}
-
-pub fn blurred_image_from_render(image: &RenderImage, radius: u32) -> Arc<RenderImage> {
-    let view = RenderFrameView::new(image);
-    blur_from_view(&view, view.size.width, view.size.height, radius)
-}
-
-fn blur_from_view(
-    view: &impl image::GenericImageView<Pixel = image::Rgba<u8>>,
-    width: u32,
-    height: u32,
-    radius: u32,
-) -> Arc<RenderImage> {
-    let small_width = (width / 2).max(1);
-    let small_height = (height / 2).max(1);
-    let small = image::imageops::resize(
-        view,
-        small_width,
-        small_height,
-        image::imageops::FilterType::Triangle,
-    );
-    let sigma = (radius.max(1) as f32 / 2.0).max(0.5);
-    let blurred = image::imageops::blur(&small, sigma);
-    let mut pixels = blurred.into_raw();
-    swap_red_blue_in_place(&mut pixels);
-    let buffer =
-        image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(small_width, small_height, pixels)
-            .expect("blurred image size is valid");
-    Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))
-}
-
 pub fn load_frame(path: &Path) -> Option<RgbaFrame> {
     let image = image::open(path).ok()?.into_rgba8();
     let (width, height) = image.dimensions();
@@ -317,8 +230,8 @@ pub fn copy_png_bytes(bytes: Vec<u8>, frame: &RgbaFrame, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        blurred_image, blurred_image_from_render, cropped_rgba, decode_untrusted_image, encode_png,
-        image_pixel, image_size, is_untrusted_image_format, render_image, render_image_ref,
+        cropped_rgba, decode_untrusted_image, encode_png, image_pixel, image_size,
+        is_untrusted_image_format, render_image, render_image_ref,
     };
     use core_types::{PhysicalRect, PhysicalSize, RgbaFrame};
 
@@ -383,35 +296,5 @@ mod tests {
         let rgba = image.to_rgba8();
         assert_eq!(rgba.dimensions(), (1, 1));
         assert_eq!(rgba.into_raw().as_slice(), expected.as_ref());
-    }
-
-    #[test]
-    fn blurred_image_matches_the_full_copy_pipeline() {
-        let frame = checker_frame(8, 6);
-        let image = render_image_ref(&frame);
-        for radius in [8, 16, 24, 32] {
-            let expected_small = image::imageops::resize(
-                &image::RgbaImage::from_raw(8, 6, frame.pixels().to_vec()).unwrap(),
-                4,
-                3,
-                image::imageops::FilterType::Triangle,
-            );
-            let expected = image::imageops::blur(&expected_small, (radius as f32 / 2.0).max(0.5));
-            let mut expected = expected.into_raw();
-            for pixel in expected.as_chunks_mut::<4>().0 {
-                pixel.swap(0, 2);
-            }
-            let actual = blurred_image(&frame, radius);
-            assert_eq!(
-                actual.as_bytes(0),
-                Some(expected.as_slice()),
-                "radius {radius}"
-            );
-            assert_eq!(
-                blurred_image_from_render(&image, radius).as_bytes(0),
-                actual.as_bytes(0),
-                "render-image radius {radius}"
-            );
-        }
     }
 }

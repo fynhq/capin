@@ -4,8 +4,6 @@ use core_annotate::{AnnotationDocument, AnnotationStyle, Shape, TextAlignment};
 use core_types::{PhysicalPoint, PhysicalRect, PhysicalSize};
 
 use crate::effects::RegionEffects;
-use crate::icons;
-use crate::selection_geometry::ResizeHandle as RegionHandle;
 use crate::settings_state::{self, AnnotationColorTool};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,45 +28,6 @@ impl Tool {
         Self::Number,
         Self::Spotlight,
     ];
-
-    pub(crate) fn id(self) -> &'static str {
-        match self {
-            Self::Select => "editor-tool-select",
-            Self::Rect => "editor-tool-rect",
-            Self::Arrow => "editor-tool-arrow",
-            Self::Highlighter => "editor-tool-highlighter",
-            Self::Blur => "editor-tool-blur",
-            Self::Text => "editor-tool-text",
-            Self::Number => "editor-tool-number",
-            Self::Spotlight => "editor-tool-spotlight",
-        }
-    }
-
-    pub(crate) fn icon(self) -> &'static [u8] {
-        match self {
-            Self::Select => icons::SELECT,
-            Self::Rect => icons::RECT,
-            Self::Arrow => icons::ARROW,
-            Self::Highlighter => icons::HIGHLIGHTER,
-            Self::Blur => icons::BLUR,
-            Self::Text => icons::TEXT,
-            Self::Number => icons::NUMBER,
-            Self::Spotlight => icons::SPOTLIGHT,
-        }
-    }
-
-    pub(crate) fn label_key(self) -> &'static str {
-        match self {
-            Self::Select => "editor.tool.select",
-            Self::Rect => "editor.tool.rect",
-            Self::Arrow => "editor.tool.arrow",
-            Self::Highlighter => "editor.tool.highlighter",
-            Self::Blur => "editor.tool.blur",
-            Self::Text => "editor.tool.text",
-            Self::Number => "editor.tool.number",
-            Self::Spotlight => "editor.tool.spotlight",
-        }
-    }
 
     pub(crate) fn color_tool(self) -> Option<AnnotationColorTool> {
         match self {
@@ -107,7 +66,6 @@ pub(crate) struct MoveDraft {
     pub(crate) start: PhysicalPoint,
     pub(crate) current: PhysicalPoint,
     pub(crate) original: Shape,
-    pub(crate) recorded: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,7 +88,6 @@ pub(crate) struct ResizeDraft {
     pub(crate) start: PhysicalPoint,
     pub(crate) current: PhysicalPoint,
     pub(crate) original: Shape,
-    pub(crate) recorded: bool,
 }
 
 pub(crate) struct CropDraft {
@@ -141,6 +98,18 @@ pub(crate) struct CropDraft {
 pub(crate) struct PolylineDraft {
     pub(crate) points: Vec<PhysicalPoint>,
     pub(crate) current: PhysicalPoint,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RegionHandle {
+    North,
+    South,
+    East,
+    West,
+    NorthEast,
+    NorthWest,
+    SouthEast,
+    SouthWest,
 }
 
 #[derive(Clone, Copy)]
@@ -159,6 +128,8 @@ pub(crate) struct EditorSnapshot {
     pub(crate) frame: std::sync::Arc<core_types::RgbaFrame>,
     pub(crate) image_size: PhysicalSize,
     pub(crate) document: AnnotationDocument,
+    pub(crate) region: Option<core_types::CaptureRegion>,
+    pub(crate) target: Option<core_capture::CaptureTarget>,
 }
 
 pub(crate) enum HistoryEntry {
@@ -395,6 +366,10 @@ pub(crate) struct EditorState {
 impl EditorState {
     #[cfg(test)]
     pub(crate) fn for_test(document: AnnotationDocument, image_size: PhysicalSize) -> Self {
+        Self::base(document, image_size)
+    }
+
+    pub(crate) fn base(document: AnnotationDocument, image_size: PhysicalSize) -> Self {
         Self {
             document,
             image_size,
@@ -847,14 +822,31 @@ impl EditorState {
         draft.current = point;
         let dx = point.x - draft.start.x;
         let dy = point.y - draft.start.y;
-        if dx == 0 && dy == 0 && !draft.recorded {
-            return false;
-        }
         let shape = draft.original.clone().translated(dx, dy);
-        let record = !draft.recorded;
-        draft.recorded = true;
         let id = draft.id;
-        self.edit_document(|document| document.update_shape_live(id, shape, record))
+        self.document.update_shape_live(id, shape, false)
+    }
+
+    pub(crate) fn finish_move(&mut self, point: PhysicalPoint) -> bool {
+        let Some(draft) = self.move_draft.take() else {
+            return false;
+        };
+        let shape = draft
+            .original
+            .clone()
+            .translated(point.x - draft.start.x, point.y - draft.start.y);
+        self.edit_document(|document| {
+            document.commit_shape_gesture(draft.id, draft.original, shape)
+        });
+        self.status = None;
+        true
+    }
+
+    pub(crate) fn cancel_move(&mut self) {
+        if let Some(draft) = self.move_draft.take() {
+            self.document
+                .update_shape_live(draft.id, draft.original, false);
+        }
     }
 
     pub(crate) fn update_resize(&mut self, point: PhysicalPoint) -> bool {
@@ -865,14 +857,16 @@ impl EditorState {
             return false;
         }
         draft.current = point;
-        if point == draft.start && !draft.recorded {
-            return false;
-        }
         let shape = resize_shape(&draft.original, draft.handle, draft.start, point, 4);
-        let record = !draft.recorded;
-        draft.recorded = true;
         let id = draft.id;
-        self.edit_document(|document| document.update_shape_live(id, shape, record))
+        self.document.update_shape_live(id, shape, false)
+    }
+
+    pub(crate) fn cancel_resize(&mut self) {
+        if let Some(draft) = self.resize_draft.take() {
+            self.document
+                .update_shape_live(draft.id, draft.original, false);
+        }
     }
 
     pub(crate) fn preview_shape(&self) -> Option<(Shape, AnnotationStyle)> {
@@ -1043,6 +1037,14 @@ pub(crate) fn closed_shape_contains(shape: &Shape, point: PhysicalPoint, inset: 
     }
 }
 
+pub(crate) fn fit_ui_scale(image_width: u32, view_width: f32) -> f32 {
+    if view_width > 0.0 {
+        (image_width as f32 / view_width).clamp(0.25, 32.0)
+    } else {
+        1.0
+    }
+}
+
 pub(crate) fn resize_shape(
     original: &Shape,
     handle: ResizeHandle,
@@ -1202,11 +1204,13 @@ impl EditorState {
     }
 
     pub(crate) fn finish_resize(&mut self, point: PhysicalPoint) -> bool {
-        if self.resize_draft.is_none() {
+        let Some(draft) = self.resize_draft.take() else {
             return false;
-        }
-        self.update_resize(point);
-        self.resize_draft = None;
+        };
+        let shape = resize_shape(&draft.original, draft.handle, draft.start, point, 4);
+        self.edit_document(|document| {
+            document.commit_shape_gesture(draft.id, draft.original, shape)
+        });
         self.status = None;
         true
     }

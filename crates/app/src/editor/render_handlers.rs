@@ -5,7 +5,6 @@ impl EditorView {
         &mut self,
         objects: &[core_annotate::Annotation],
         scale: f32,
-        image_rect: Bounds<Pixels>,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut object_layers: Vec<AnyElement> = Vec::with_capacity(objects.len());
@@ -15,11 +14,18 @@ impl EditorView {
                     if rect.is_empty() {
                         continue;
                     }
-                    let left = rect.origin.x as f32 * scale;
-                    let top = rect.origin.y as f32 * scale;
-                    let width = px(rect.size.width as f32 * scale);
-                    let height = px(rect.size.height as f32 * scale);
-                    let blur_image = self.blur_image(annotation.style.blur_radius, cx);
+                    self.ensure_blur_previews(cx);
+                    let Some((_, preview_rect, blur_image)) = self
+                        .blur_previews
+                        .iter()
+                        .find(|(id, _, _)| *id == annotation.id)
+                    else {
+                        continue;
+                    };
+                    let left = preview_rect.origin.x as f32 * scale;
+                    let top = preview_rect.origin.y as f32 * scale;
+                    let width = px(preview_rect.size.width as f32 * scale);
+                    let height = px(preview_rect.size.height as f32 * scale);
                     object_layers.push(
                         div()
                             .absolute()
@@ -27,14 +33,10 @@ impl EditorView {
                             .top(px(top))
                             .w(width)
                             .h(height)
-                            .overflow_hidden()
                             .child(
-                                img(blur_image)
-                                    .absolute()
-                                    .left(px(-left))
-                                    .top(px(-top))
-                                    .w(image_rect.size.width)
-                                    .h(image_rect.size.height)
+                                img(blur_image.clone())
+                                    .w(width)
+                                    .h(height)
                                     .object_fit(ObjectFit::Fill),
                             )
                             .into_any_element(),
@@ -48,7 +50,7 @@ impl EditorView {
                         TextAlignment::Center => TextAlign::Center,
                         TextAlignment::Right => TextAlign::Right,
                     };
-                    let font_size = (annotation.style.font_size * scale).max(8.0);
+                    let font_size = annotation.style.font_size.max(1.0) * scale;
                     let mut layer = div()
                         .absolute()
                         .left(px(bounds.origin.x as f32 * scale))
@@ -71,8 +73,10 @@ impl EditorView {
                         } else {
                             rgb(0xFFFFFF)
                         };
-                        let offset =
-                            ((annotation.style.stroke_width * 0.6 * scale).max(1.0) as i32).min(3);
+                        let offset = (((annotation.style.stroke_width * 0.6).max(1.0).round()
+                            as f32)
+                            * scale)
+                            .max(1.0) as i32;
                         for (dx, dy) in [
                             (-offset, 0),
                             (offset, 0),
@@ -129,8 +133,7 @@ impl EditorView {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_size(px((height * 0.54).max(8.0)))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(px((bounds.size.height as f32 * 0.54).max(10.0) * scale))
                             .text_color(foreground)
                             .child(value.to_string())
                             .into_any_element(),
@@ -182,8 +185,8 @@ impl EditorView {
         if self.region_drag.is_some() {
             self.finish_region_drag(cx);
         }
-        self.move_draft = None;
-        self.resize_draft = None;
+        self.cancel_move();
+        self.cancel_resize();
         if self
             .full_selection()
             .is_some_and(|selection| !selection.contains(display_point))
@@ -209,9 +212,8 @@ impl EditorView {
                 start: point,
                 current: point,
                 original: annotation.shape,
-                recorded: false,
             });
-            self.move_draft = None;
+            self.cancel_move();
             self.status = None;
             cx.notify();
             return;
@@ -253,7 +255,7 @@ impl EditorView {
                 self.document.objects().len()
             );
             self.draft = None;
-            self.resize_draft = None;
+            self.cancel_resize();
             if self.document.selected() != Some(id) {
                 self.select_annotation(Some(id));
             }
@@ -263,7 +265,6 @@ impl EditorView {
                     start: point,
                     current: point,
                     original,
-                    recorded: false,
                 });
             }
             self.status = None;
@@ -292,8 +293,8 @@ impl EditorView {
             return;
         }
         if self.tool == Tool::Arrow && self.arrow_polyline {
-            self.resize_draft = None;
-            self.move_draft = None;
+            self.cancel_resize();
+            self.cancel_move();
             if event.click_count >= 2 {
                 if let Some(draft) = &mut self.polyline_draft {
                     draft.current = point;
@@ -320,7 +321,7 @@ impl EditorView {
         }
         if self.tool == Tool::Select {
             let selected = hit;
-            self.resize_draft = None;
+            self.cancel_resize();
             self.select_annotation(selected);
             self.move_draft = selected.and_then(|id| {
                 let original = self.document.object(id)?.shape.clone();
@@ -329,15 +330,14 @@ impl EditorView {
                     start: point,
                     current: point,
                     original,
-                    recorded: false,
                 })
             });
             self.status = None;
             cx.notify();
             return;
         }
-        self.resize_draft = None;
-        self.move_draft = None;
+        self.cancel_resize();
+        self.cancel_move();
         if self.tool == Tool::Number {
             let side = ((self.number_size as f32 * self.ui_scale).round() as u32).max(8);
             let max_left = (self.image_size.width.saturating_sub(side)) as i32;
@@ -643,9 +643,13 @@ impl EditorView {
             return;
         }
         if command && key == "d" {
-            if let Some(id) = self.document.selected()
-                && let Some(pasted) = self.document.duplicate(id, 16, 16)
+            if let Some(annotation) = self
+                .document
+                .selected()
+                .and_then(|id| self.document.object(id))
+                .cloned()
             {
+                let pasted = self.state.paste_annotation(&annotation, 16, 16);
                 self.select_annotation(Some(pasted));
                 self.tool = Tool::Select;
                 self.show_status(

@@ -332,6 +332,42 @@ impl AnnotationDocument {
         true
     }
 
+    pub fn commit_shape_gesture(
+        &mut self,
+        id: AnnotationId,
+        original: Shape,
+        shape: Shape,
+    ) -> bool {
+        let Some(index) = self
+            .objects
+            .iter()
+            .position(|annotation| annotation.id == id)
+        else {
+            return false;
+        };
+        if original == shape {
+            self.objects[index].shape = original;
+            return false;
+        }
+        let mut snapshot = self.snapshot();
+        if let Some(object) = snapshot
+            .objects
+            .iter_mut()
+            .find(|annotation| annotation.id == id)
+        {
+            object.shape = original;
+        }
+        self.history_serial = self.history_serial.wrapping_add(1);
+        self.undo.push(snapshot);
+        if self.undo.len() > HISTORY_LIMIT {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+        self.objects[index].shape = shape;
+        self.selected = Some(id);
+        true
+    }
+
     pub fn update_shape(&mut self, id: AnnotationId, shape: Shape, style: AnnotationStyle) -> bool {
         let Some(index) = self
             .objects
@@ -655,6 +691,54 @@ mod tests {
             PhysicalPoint::new(10, 10)
         );
         assert!(doc.can_undo(), "the initial add remains undoable");
+    }
+
+    #[test]
+    fn committed_gesture_records_the_pre_gesture_state_once() {
+        let mut doc = document();
+        let id = doc.add(
+            Shape::Rect(PhysicalRect::new(10, 10, 50, 50)),
+            AnnotationStyle::default(),
+        );
+        let original = doc.object(id).unwrap().shape.clone();
+        let serial = doc.history_serial();
+        for step in 1..=4 {
+            let shape = original.clone().translated(step, step * 2);
+            assert!(doc.update_shape_live(id, shape, false));
+        }
+        assert_eq!(doc.history_serial(), serial, "live updates must not record");
+        let final_shape = original.clone().translated(4, 8);
+        assert!(doc.commit_shape_gesture(id, original, final_shape));
+        assert!(doc.undo());
+        assert_eq!(
+            doc.object(id).unwrap().bounds().origin,
+            PhysicalPoint::new(10, 10)
+        );
+        assert!(doc.can_undo(), "the initial add remains undoable");
+    }
+
+    #[test]
+    fn net_zero_gesture_keeps_history_and_redo() {
+        let mut doc = document();
+        let id = doc.add(
+            Shape::Rect(PhysicalRect::new(10, 10, 50, 50)),
+            AnnotationStyle::default(),
+        );
+        let original = doc.object(id).unwrap().shape.clone();
+        doc.add(
+            Shape::Rect(PhysicalRect::new(80, 80, 10, 10)),
+            AnnotationStyle::default(),
+        );
+        assert!(doc.undo());
+        assert!(doc.can_redo());
+        let moved = original.clone().translated(9, 9);
+        assert!(doc.update_shape_live(id, moved, false));
+        assert!(!doc.commit_shape_gesture(id, original.clone(), original));
+        assert_eq!(
+            doc.object(id).unwrap().bounds().origin,
+            PhysicalPoint::new(10, 10)
+        );
+        assert!(doc.can_redo(), "a net-zero gesture must not clear redo");
     }
 
     #[test]

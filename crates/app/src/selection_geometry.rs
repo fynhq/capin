@@ -1,19 +1,9 @@
 use core_types::{PhysicalPoint, PhysicalRect, PhysicalSize};
 use gpui_kit::*;
 
-pub(crate) const MIN_REGION_SIZE: i32 = 2;
+pub(crate) use crate::editor_state::RegionHandle as ResizeHandle;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ResizeHandle {
-    North,
-    South,
-    East,
-    West,
-    NorthEast,
-    NorthWest,
-    SouthEast,
-    SouthWest,
-}
+pub(crate) const MIN_REGION_SIZE: i32 = 2;
 
 pub(crate) fn region_handle_cursor(handle: ResizeHandle) -> CursorStyle {
     match handle {

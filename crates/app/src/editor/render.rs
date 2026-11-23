@@ -29,7 +29,7 @@ impl Render for EditorView {
         let status_serial = self.status_serial;
         let accent_hex = self.accent_hex;
 
-        let object_layers = self.object_layers(&objects, scale, image_rect, cx);
+        let object_layers = self.object_layers(&objects, scale, cx);
 
         let overlay_canvas = canvas(
             |_, _, _| (),
@@ -49,7 +49,7 @@ impl Render for EditorView {
         let text_overlay = self.text_edit.as_ref().map(|edit| {
             let left = edit.origin.x as f32 * scale;
             let top = edit.origin.y as f32 * scale;
-            let font_size = (edit.style.font_size * scale).max(8.0);
+            let font_size = edit.style.font_size.max(1.0) * scale;
             let width = (edit.bounds.size.width as f32 * scale).max(24.0);
             let line_height = font_size * 1.3;
             let color = edit.style.color;
@@ -198,29 +198,25 @@ impl Render for EditorView {
                 .into_any_element()
         });
 
-        let preview_blur_layer = preview_blur.map(|(rect, radius)| {
-            let left = rect.origin.x as f32 * scale;
-            let top = rect.origin.y as f32 * scale;
-            let blur_image = self.blur_image(radius, cx);
-            div()
-                .absolute()
-                .left(px(left))
-                .top(px(top))
-                .w(px(rect.size.width as f32 * scale))
-                .h(px(rect.size.height as f32 * scale))
-                .overflow_hidden()
-                .border_1()
-                .border_color(rgba((accent_hex << 8) | 0xCC))
-                .child(
-                    img(blur_image)
-                        .absolute()
-                        .left(px(-left))
-                        .top(px(-top))
-                        .w(image_rect.size.width)
-                        .h(image_rect.size.height)
-                        .object_fit(ObjectFit::Fill),
-                )
-                .into_any_element()
+        let preview_blur_layer = preview_blur.and_then(|(rect, radius)| {
+            let (placed, blur_image) = self.draft_blur_image(rect, radius, cx)?;
+            Some(
+                div()
+                    .absolute()
+                    .left(px(placed.origin.x as f32 * scale))
+                    .top(px(placed.origin.y as f32 * scale))
+                    .w(px(placed.size.width as f32 * scale))
+                    .h(px(placed.size.height as f32 * scale))
+                    .border_1()
+                    .border_color(rgba((accent_hex << 8) | 0xCC))
+                    .child(
+                        img(blur_image)
+                            .w(px(placed.size.width as f32 * scale))
+                            .h(px(placed.size.height as f32 * scale))
+                            .object_fit(ObjectFit::Fill),
+                    )
+                    .into_any_element(),
+            )
         });
 
         let effects_active = self.region_effects_active();
@@ -483,15 +479,12 @@ impl Render for EditorView {
                 let hover_reset = this.selection_hover != SelectionHover::None;
                 this.selection_hover = SelectionHover::None;
                 let mut changed = hover_reset;
-                if this.move_draft.take().is_some() {
+                if this.move_draft.is_some() {
+                    this.cancel_move();
                     changed = true;
                 }
                 if this.resize_draft.is_some() {
-                    let point = this.resize_draft.as_ref().map(|resize| resize.current);
-                    if let Some(point) = point {
-                        this.update_resize(point);
-                    }
-                    this.resize_draft = None;
+                    this.cancel_resize();
                     changed = true;
                 }
                 if this.draft.take().is_some() || this.pan_draft.take().is_some() {

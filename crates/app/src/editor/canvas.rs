@@ -129,6 +129,7 @@ impl EditorView {
             let Some(cropped) = image_util::cropped_rgba(&self.image, draft.current) else {
                 return;
             };
+            self.push_canvas_snapshot();
             self.frame = Arc::new(cropped);
             if let Some(inline) = self.inline.as_mut()
                 && let Some(capture) = inline.capture.as_mut()
@@ -161,6 +162,7 @@ impl EditorView {
             self.restore_region_image_rect(scale, cx);
             return;
         };
+        self.push_canvas_snapshot();
         let dx = draft.current.origin.x - draft.original.origin.x;
         let dy = draft.current.origin.y - draft.original.origin.y;
         let new_size = PhysicalSize::new(cropped.width(), cropped.height());
@@ -169,7 +171,6 @@ impl EditorView {
         self.image_size = new_size;
         self.refresh_frame_images(cx);
         self.document = document;
-        self.state.clear_history();
         self.text_edit = None;
         self.draft = None;
         self.move_draft = None;
@@ -242,8 +243,8 @@ impl EditorView {
             self.select_annotation(None);
             self.tool = Tool::Select;
             self.draft = None;
-            self.move_draft = None;
-            self.resize_draft = None;
+            self.cancel_move();
+            self.cancel_resize();
             self.pan_draft = None;
             self.selection_hover = SelectionHover::None;
             self.status = None;
@@ -526,8 +527,8 @@ impl EditorView {
         self.crop_draft = None;
         self.text_edit = None;
         self.draft = None;
-        self.move_draft = None;
-        self.resize_draft = None;
+        self.cancel_move();
+        self.cancel_resize();
         if self.crop_mode {
             self.document.select(None);
             self.selection_hover = SelectionHover::None;

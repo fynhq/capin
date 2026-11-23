@@ -1,14 +1,5 @@
 use super::*;
 
-fn blur_image_index(radius: u32) -> usize {
-    BLUR_RADII
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, candidate)| candidate.abs_diff(radius))
-        .map(|(index, _)| index)
-        .unwrap_or(0)
-}
-
 impl EditorView {
     pub(super) fn image_scale(&self, window: &Window) -> f32 {
         (f32::from(self.image_view_rect(window).size.width) / self.image_size.width.max(1) as f32)
@@ -488,7 +479,7 @@ impl EditorView {
         };
         inline.image_rect = fit_frame_rect(self.image_size, area);
         let width = f32::from(inline.image_rect.size.width).max(1.0);
-        self.ui_scale = (self.image_size.width as f32 / width).clamp(0.25, 32.0);
+        self.ui_scale = fit_ui_scale(self.image_size.width, width);
         self.inline = Some(inline);
     }
 
@@ -500,23 +491,23 @@ impl EditorView {
     }
 
     pub(super) fn push_canvas_snapshot(&mut self) {
-        let snapshot = EditorSnapshot {
-            frame: Arc::clone(&self.frame),
-            image_size: self.image_size,
-            document: self.document.clone(),
-        };
+        let snapshot = self.editor_snapshot();
         self.state.record_canvas_snapshot(snapshot);
     }
 
     pub(super) fn refresh_frame_images(&mut self, cx: &mut Context<Self>) {
         let image = image_util::render_image_ref(&self.frame);
         let old_image = std::mem::replace(&mut self.image, image);
-        let old_blur_images =
-            std::mem::replace(&mut self.blur_images, std::array::from_fn(|_| None));
+        let old_previews = std::mem::take(&mut self.blur_previews);
+        let old_draft = self.draft_blur.take();
+        self.blur_preview_key = None;
         self.images_released = false;
-        let mut dropped = Vec::with_capacity(1 + old_blur_images.len());
+        let mut dropped = Vec::with_capacity(2 + old_previews.len());
         dropped.push(old_image);
-        dropped.extend(old_blur_images.into_iter().flatten());
+        dropped.extend(old_previews.into_iter().map(|(_, _, image)| image));
+        if let Some((_, _, image)) = old_draft {
+            dropped.push(image);
+        }
         cx.defer(move |cx| {
             for image in dropped {
                 cx.drop_image(image, None);
@@ -524,18 +515,85 @@ impl EditorView {
         });
     }
 
-    pub(super) fn blur_image(&mut self, radius: u32, _cx: &mut Context<Self>) -> Arc<RenderImage> {
-        let index = blur_image_index(radius);
-        if let Some(image) = &self.blur_images[index] {
-            return image.clone();
+    pub(super) fn draft_blur_image(
+        &mut self,
+        rect: PhysicalRect,
+        radius: u32,
+        cx: &mut Context<Self>,
+    ) -> Option<(PhysicalRect, Arc<RenderImage>)> {
+        if let Some((cached_rect, cached_radius, image)) = &self.draft_blur
+            && *cached_rect == rect
+            && *cached_radius == radius
+        {
+            return Some((*cached_rect, image.clone()));
         }
-        let image = if self.full_canvas.is_some() {
-            image_util::blurred_image_from_render(&self.image, radius)
-        } else {
-            image_util::blurred_image(&self.frame, radius)
-        };
-        self.blur_images[index] = Some(image.clone());
-        image
+        let offset = self
+            .full_selection()
+            .map(|selection| selection.origin)
+            .unwrap_or(PhysicalPoint::new(0, 0));
+        let local = PhysicalRect::new(
+            rect.origin.x - offset.x,
+            rect.origin.y - offset.y,
+            rect.size.width,
+            rect.size.height,
+        );
+        let (clamped, blurred) = core_annotate::blur_frame_region(&self.frame, local, radius)?;
+        let placed = PhysicalRect::new(
+            clamped.origin.x + offset.x,
+            clamped.origin.y + offset.y,
+            clamped.size.width,
+            clamped.size.height,
+        );
+        let image = image_util::render_image(blurred);
+        let old = self.draft_blur.replace((placed, radius, image.clone()));
+        if let Some((_, _, old_image)) = old {
+            cx.defer(move |cx| {
+                cx.drop_image(old_image, None);
+            });
+        }
+        Some((placed, image))
+    }
+
+    pub(super) fn ensure_blur_previews(&mut self, cx: &mut Context<Self>) {
+        let selection = self.full_selection();
+        let key = (
+            self.document.history_serial(),
+            Arc::as_ptr(&self.frame) as usize,
+            selection,
+        );
+        if self.blur_preview_key == Some(key) {
+            return;
+        }
+        self.blur_preview_key = Some(key);
+        let document = self.action_document();
+        let offset = selection
+            .map(|selection| selection.origin)
+            .unwrap_or(PhysicalPoint::new(0, 0));
+        let old_previews = std::mem::take(&mut self.blur_previews);
+        match core_annotate::blur_previews(&document, &self.frame) {
+            Ok(previews) => {
+                self.blur_previews = previews
+                    .into_iter()
+                    .map(|preview| {
+                        let rect = PhysicalRect::new(
+                            preview.rect.origin.x + offset.x,
+                            preview.rect.origin.y + offset.y,
+                            preview.rect.size.width,
+                            preview.rect.size.height,
+                        );
+                        (preview.id, rect, image_util::render_image(preview.frame))
+                    })
+                    .collect();
+            }
+            Err(error) => {
+                crate::logging::log_warn!("editor", "failed to rasterize blur previews: {error}");
+            }
+        }
+        cx.defer(move |cx| {
+            for (_, _, image) in old_previews {
+                cx.drop_image(image, None);
+            }
+        });
     }
 
     pub(crate) fn release_images(&mut self, cx: &mut Context<Self>) {
@@ -544,7 +602,10 @@ impl EditorView {
         }
         self.images_released = true;
         cx.drop_image(self.image.clone(), None);
-        for image in self.blur_images.iter().flatten() {
+        for (_, _, image) in &self.blur_previews {
+            cx.drop_image(image.clone(), None);
+        }
+        if let Some((_, _, image)) = &self.draft_blur {
             cx.drop_image(image.clone(), None);
         }
     }
@@ -566,6 +627,16 @@ impl EditorView {
         self.frame = snapshot.frame;
         self.image_size = snapshot.image_size;
         self.document = snapshot.document;
+        if let Some(inline) = self.inline.as_mut()
+            && let Some(capture) = inline.capture.as_mut()
+        {
+            if let Some(region) = snapshot.region {
+                capture.region = region;
+            }
+            if let Some(target) = snapshot.target {
+                capture.target = target;
+            }
+        }
         self.refresh_frame_images(cx);
         self.text_edit = None;
         self.draft = None;
@@ -574,15 +645,26 @@ impl EditorView {
         self.pan_draft = None;
         self.crop_mode = false;
         self.crop_draft = None;
+        if self.full_canvas.is_none() {
+            let scale = self
+                .inline
+                .and_then(|inline| inline.capture)
+                .map(|capture| capture.scale.max(0.1))
+                .unwrap_or(1.0);
+            self.restore_region_image_rect(scale, cx);
+        }
         self.refit_zoomable_view();
         self.reset_view(cx);
     }
 
     pub(super) fn editor_snapshot(&self) -> EditorSnapshot {
+        let capture = self.inline.and_then(|inline| inline.capture);
         EditorSnapshot {
             frame: Arc::clone(&self.frame),
             image_size: self.image_size,
             document: self.document.clone(),
+            region: capture.map(|capture| capture.region),
+            target: capture.map(|capture| capture.target),
         }
     }
 

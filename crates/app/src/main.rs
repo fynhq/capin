@@ -77,6 +77,9 @@ fn main() {
                 return;
             }
             hotkey::install(cx);
+            cx.background_executor()
+                .spawn(async { core_annotate::warmup_text_engine() })
+                .detach();
             pin::restore(cx);
             tray::refresh_menu();
 

@@ -16,8 +16,8 @@ use crate::chrome_theme::ChromeTheme;
 use crate::editor_state::{
     BAND_HALF, CropDraft, Draft, EditorSnapshot, EditorState, FullCanvas, HANDLE_HIT, HistoryStep,
     MoveDraft, PolylineDraft, REGION_HANDLE_SIZE, RegionAdjustDraft, ResizeDraft, ResizeHandle,
-    SELECTION_HANDLE_HALF, TextEdit, annotation_handle_at, distance, finalize_shape, handle_points,
-    normalized_rect,
+    SELECTION_HANDLE_HALF, TextEdit, annotation_handle_at, distance, finalize_shape, fit_ui_scale,
+    handle_points, normalized_rect,
 };
 use crate::effects::RegionEffects;
 use crate::logging::{log_error, log_info};
@@ -30,6 +30,47 @@ use crate::ui::tooltip_view;
 use crate::{i18n::t, icons, image_util, settings_state};
 
 pub(crate) use crate::editor_state::Tool;
+
+impl Tool {
+    pub(crate) fn id(self) -> &'static str {
+        match self {
+            Self::Select => "editor-tool-select",
+            Self::Rect => "editor-tool-rect",
+            Self::Arrow => "editor-tool-arrow",
+            Self::Highlighter => "editor-tool-highlighter",
+            Self::Blur => "editor-tool-blur",
+            Self::Text => "editor-tool-text",
+            Self::Number => "editor-tool-number",
+            Self::Spotlight => "editor-tool-spotlight",
+        }
+    }
+
+    pub(crate) fn icon(self) -> &'static [u8] {
+        match self {
+            Self::Select => icons::SELECT,
+            Self::Rect => icons::RECT,
+            Self::Arrow => icons::ARROW,
+            Self::Highlighter => icons::HIGHLIGHTER,
+            Self::Blur => icons::BLUR,
+            Self::Text => icons::TEXT,
+            Self::Number => icons::NUMBER,
+            Self::Spotlight => icons::SPOTLIGHT,
+        }
+    }
+
+    pub(crate) fn label_key(self) -> &'static str {
+        match self {
+            Self::Select => "editor.tool.select",
+            Self::Rect => "editor.tool.rect",
+            Self::Arrow => "editor.tool.arrow",
+            Self::Highlighter => "editor.tool.highlighter",
+            Self::Blur => "editor.tool.blur",
+            Self::Text => "editor.tool.text",
+            Self::Number => "editor.tool.number",
+            Self::Spotlight => "editor.tool.spotlight",
+        }
+    }
+}
 
 mod canvas;
 mod effects;
@@ -366,7 +407,9 @@ fn word_range_at(content: &str, index: usize) -> Range<usize> {
 
 pub(crate) struct EditorView {
     image: Arc<RenderImage>,
-    blur_images: [Option<Arc<RenderImage>>; BLUR_RADII.len()],
+    blur_previews: Vec<(core_annotate::AnnotationId, PhysicalRect, Arc<RenderImage>)>,
+    blur_preview_key: Option<(u64, usize, Option<PhysicalRect>)>,
+    draft_blur: Option<(PhysicalRect, u32, Arc<RenderImage>)>,
     images_released: bool,
     frame: Arc<RgbaFrame>,
     region_source: Option<Arc<RenderImage>>,
@@ -409,8 +452,6 @@ impl EditorView {
         pin_target: Option<u64>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let blur_images: [Option<Arc<RenderImage>>; BLUR_RADII.len()] =
-            std::array::from_fn(|_| None);
         let accent_hex =
             system_accent_hex().unwrap_or_else(|| crate::theme::fallback_accent(false));
         let settings = settings_state::get();
@@ -440,14 +481,61 @@ impl EditorView {
             }
             this.images_released = true;
             cx.drop_image(this.image.clone(), None);
-            for image in this.blur_images.iter().flatten() {
+            for (_, _, image) in &this.blur_previews {
+                cx.drop_image(image.clone(), None);
+            }
+            if let Some((_, _, image)) = &this.draft_blur {
                 cx.drop_image(image.clone(), None);
             }
         })
         .detach();
+        let mut state = EditorState::base(AnnotationDocument::new(image_size), image_size);
+        state.style = AnnotationStyle {
+            color: style_color,
+            stroke_width: rect_stroke_width,
+            font_size,
+            corner_radius,
+            highlighter_radius,
+            blur_radius,
+            filled: false,
+            arrow_start,
+            arrow_end,
+            text_background,
+            text_outline,
+            text_alignment,
+            spotlight_intensity,
+            spotlight_radius,
+        };
+        state.font_size = font_size;
+        state.arrow_start = arrow_start;
+        state.arrow_end = arrow_end;
+        state.arrow_polyline = arrow_polyline;
+        state.text_background = text_background;
+        state.text_outline = text_outline;
+        state.text_alignment = text_alignment;
+        state.corner_radius = corner_radius;
+        state.highlighter_radius = highlighter_radius;
+        state.number_size = number_size;
+        state.spotlight_radius = spotlight_radius;
+        state.rect_stroke_width = rect_stroke_width;
+        state.arrow_stroke_width = arrow_stroke_width;
+        state.blur_radius = blur_radius;
+        state.rect_filled = rect_filled;
+        state.ellipse_filled = ellipse_filled;
+        state.shape_ellipse = shape_ellipse;
+        state.spotlight_intensity = spotlight_intensity;
+        state.active_color_tool = active_color_tool;
+        state.palette = if settings.annotation_uniform_color {
+            [settings.annotation_color; crate::settings_state::ANNOTATION_COLOR_TOOL_COUNT]
+        } else {
+            settings.annotation_colors
+        };
+        state.uniform_color = settings.annotation_uniform_color;
         Self {
             image,
-            blur_images,
+            blur_previews: Vec::new(),
+            blur_preview_key: None,
+            draft_blur: None,
             images_released: false,
             frame,
             region_source: None,
@@ -465,75 +553,7 @@ impl EditorView {
             appearance_subscription: None,
             focus_handle: cx.focus_handle(),
             inline: None,
-            state: EditorState {
-                document: AnnotationDocument::new(image_size),
-                image_size,
-                tool: Tool::Select,
-                style: AnnotationStyle {
-                    color: style_color,
-                    stroke_width: rect_stroke_width,
-                    font_size,
-                    corner_radius,
-                    highlighter_radius,
-                    blur_radius,
-                    filled: false,
-                    arrow_start,
-                    arrow_end,
-                    text_background,
-                    text_outline,
-                    text_alignment,
-                    spotlight_intensity,
-                    spotlight_radius,
-                },
-                font_size,
-                arrow_start,
-                arrow_end,
-                arrow_polyline,
-                text_background,
-                text_outline,
-                text_alignment,
-                ui_scale: 1.0,
-                corner_radius,
-                highlighter_radius,
-                number_size,
-                spotlight_radius,
-                rect_stroke_width,
-                arrow_stroke_width,
-                blur_radius,
-                rect_filled,
-                ellipse_filled,
-                shape_ellipse,
-                spotlight_intensity,
-                active_color_tool,
-                palette: if settings.annotation_uniform_color {
-                    [settings.annotation_color; crate::settings_state::ANNOTATION_COLOR_TOOL_COUNT]
-                } else {
-                    settings.annotation_colors
-                },
-                uniform_color: settings.annotation_uniform_color,
-                draft: None,
-                move_draft: None,
-                resize_draft: None,
-                crop_mode: false,
-                crop_draft: None,
-                polyline_draft: None,
-                undo: Vec::new(),
-                redo: Vec::new(),
-                annotation_clipboard: None,
-                custom_color_open: false,
-                custom_color_buffer: String::new(),
-                custom_color_fresh: false,
-                text_edit: None,
-                effects: RegionEffects::default(),
-                effects_open: false,
-                more_open: false,
-                toolbar_hidden: false,
-                hints_visible: false,
-                status: None,
-                status_serial: 0,
-                region_drag: None,
-                full_canvas: None,
-            },
+            state,
         }
     }
 
@@ -572,11 +592,7 @@ impl EditorView {
             }
         };
         view.full_canvas = full_setting;
-        view.ui_scale = if image_rect.size.width > px(0.0) {
-            (view.image_size.width as f32 / f32::from(image_rect.size.width)).clamp(0.25, 32.0)
-        } else {
-            1.0
-        };
+        view.ui_scale = fit_ui_scale(view.image_size.width, f32::from(image_rect.size.width));
         view.style.corner_radius = view.corner_radius * view.ui_scale;
         view.style.highlighter_radius = view.highlighter_radius * view.ui_scale;
         view.style.spotlight_radius = view.spotlight_radius * view.ui_scale;
@@ -945,7 +961,15 @@ fn finish_pointer_gestures(
         view.finish_region_drag(cx);
         changed = true;
     }
-    if view.move_draft.take().is_some() {
+    if view.move_draft.is_some() {
+        let point = view
+            .to_image_point(event.position, window)
+            .or_else(|| view.move_draft.as_ref().map(|draft| draft.current));
+        if let Some(point) = point {
+            view.state.finish_move(point);
+        } else {
+            view.state.cancel_move();
+        }
         view.status = None;
         changed = true;
     }
@@ -953,7 +977,7 @@ fn finish_pointer_gestures(
         if let Some(point) = view.resize_draft.as_ref().map(|draft| draft.current) {
             view.finish_resize(point, cx);
         } else {
-            view.resize_draft = None;
+            view.state.cancel_resize();
         }
         changed = true;
     }

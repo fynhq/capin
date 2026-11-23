@@ -127,7 +127,6 @@ fn a_move_gesture_records_one_undo_step() {
         start: PhysicalPoint::new(10, 10),
         current: PhysicalPoint::new(10, 10),
         original,
-        recorded: false,
     });
 
     assert!(!state.update_move(PhysicalPoint::new(10, 10)));
@@ -136,13 +135,88 @@ fn a_move_gesture_records_one_undo_step() {
         state.document.object(id).unwrap().shape.bounds().origin,
         PhysicalPoint::new(14, 18)
     );
-    assert!(state.document.can_undo());
+    assert!(!state.document.can_undo());
 
     assert!(state.update_move(PhysicalPoint::new(20, 20)));
+    assert!(state.finish_move(PhysicalPoint::new(20, 20)));
+    assert!(state.move_draft.is_none());
+    assert!(state.document.can_undo());
     assert!(state.document.undo());
     assert_eq!(
         state.document.object(id).unwrap().shape.bounds().origin,
         PhysicalPoint::new(10, 10)
+    );
+}
+
+#[test]
+fn a_move_back_to_the_origin_records_nothing_and_keeps_redo() {
+    let mut state = state();
+    let original = rect(10, 10, 20, 20);
+    let id = state
+        .document
+        .add(original.clone(), AnnotationStyle::default());
+    state
+        .document
+        .add(rect(40, 40, 10, 10), AnnotationStyle::default());
+    assert!(state.document.undo());
+    assert!(state.document.can_redo());
+
+    state.move_draft = Some(MoveDraft {
+        id,
+        start: PhysicalPoint::new(10, 10),
+        current: PhysicalPoint::new(10, 10),
+        original,
+    });
+    assert!(state.update_move(PhysicalPoint::new(30, 30)));
+    assert!(state.finish_move(PhysicalPoint::new(10, 10)));
+    assert_eq!(
+        state.document.object(id).unwrap().shape.bounds().origin,
+        PhysicalPoint::new(10, 10)
+    );
+    assert!(state.document.can_redo());
+}
+
+#[test]
+fn cancel_move_reverts_the_shape_without_history() {
+    let mut state = state();
+    let original = rect(10, 10, 20, 20);
+    let id = state
+        .document
+        .add(original.clone(), AnnotationStyle::default());
+    state.move_draft = Some(MoveDraft {
+        id,
+        start: PhysicalPoint::new(10, 10),
+        current: PhysicalPoint::new(10, 10),
+        original,
+    });
+    assert!(state.update_move(PhysicalPoint::new(30, 30)));
+    state.cancel_move();
+    assert!(state.move_draft.is_none());
+    assert_eq!(
+        state.document.object(id).unwrap().shape.bounds().origin,
+        PhysicalPoint::new(10, 10)
+    );
+    assert!(!state.document.can_undo());
+}
+
+#[test]
+fn finish_move_applies_the_release_point() {
+    let mut state = state();
+    let original = rect(10, 10, 20, 20);
+    let id = state
+        .document
+        .add(original.clone(), AnnotationStyle::default());
+    state.move_draft = Some(MoveDraft {
+        id,
+        start: PhysicalPoint::new(10, 10),
+        current: PhysicalPoint::new(10, 10),
+        original,
+    });
+    assert!(state.update_move(PhysicalPoint::new(14, 14)));
+    assert!(state.finish_move(PhysicalPoint::new(26, 30)));
+    assert_eq!(
+        state.document.object(id).unwrap().shape.bounds().origin,
+        PhysicalPoint::new(26, 30)
     );
 }
 
@@ -162,7 +236,6 @@ fn resizing_a_number_keeps_it_square() {
         start: PhysicalPoint::new(42, 42),
         current: PhysicalPoint::new(42, 42),
         original,
-        recorded: false,
     });
 
     assert!(state.update_resize(PhysicalPoint::new(62, 52)));
@@ -394,7 +467,6 @@ fn finish_resize_commits_and_clears_the_draft() {
         start: PhysicalPoint::new(42, 42),
         current: PhysicalPoint::new(42, 42),
         original,
-        recorded: false,
     });
 
     assert!(state.finish_resize(PhysicalPoint::new(62, 52)));
@@ -404,6 +476,35 @@ fn finish_resize_commits_and_clears_the_draft() {
     };
     assert_eq!(bounds.size.width, bounds.size.height);
     assert_eq!(bounds.size.width, 52);
+    assert!(state.document.can_undo());
+    assert!(state.document.undo());
+    let Shape::Number { bounds, .. } = &state.document.object(id).unwrap().shape else {
+        panic!("expected a number shape");
+    };
+    assert_eq!(bounds.size.width, 32);
+}
+
+#[test]
+fn a_resize_back_to_the_origin_records_nothing() {
+    let mut state = state();
+    let original = rect(10, 10, 32, 32);
+    let id = state
+        .document
+        .add(original.clone(), AnnotationStyle::default());
+    state.resize_draft = Some(ResizeDraft {
+        id,
+        handle: ResizeHandle::Se,
+        start: PhysicalPoint::new(42, 42),
+        current: PhysicalPoint::new(42, 42),
+        original,
+    });
+    assert!(state.update_resize(PhysicalPoint::new(62, 62)));
+    assert!(state.finish_resize(PhysicalPoint::new(42, 42)));
+    assert_eq!(
+        state.document.object(id).unwrap().shape.bounds().size,
+        PhysicalSize::new(32, 32)
+    );
+    assert!(!state.document.can_undo());
 }
 
 #[test]
@@ -430,6 +531,8 @@ fn snapshot_with(tag: u8, document: AnnotationDocument) -> EditorSnapshot {
         frame: std::sync::Arc::new(frame),
         image_size: document.image_size(),
         document,
+        region: None,
+        target: None,
     }
 }
 

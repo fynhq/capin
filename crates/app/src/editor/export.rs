@@ -35,12 +35,12 @@ impl EditorView {
         let size_changed = new_size != self.image_size;
         let image = image_util::render_image(frame);
         let old_image = std::mem::replace(&mut self.image, image);
-        let old_blur_images =
-            std::mem::replace(&mut self.blur_images, std::array::from_fn(|_| None));
+        let old_previews = std::mem::take(&mut self.blur_previews);
+        self.blur_preview_key = None;
         self.images_released = false;
         cx.defer(move |cx| {
             cx.drop_image(old_image, None);
-            for image in old_blur_images.into_iter().flatten() {
+            for (_, _, image) in old_previews {
                 cx.drop_image(image, None);
             }
         });
@@ -92,11 +92,9 @@ impl EditorView {
                     CaptureTarget::Monitor(monitor)
                 };
             }
-            if let Some(inline) = &self.inline
-                && f32::from(inline.image_rect.size.width) > 0.0
-            {
-                self.ui_scale = (new_size.width as f32 / f32::from(inline.image_rect.size.width))
-                    .clamp(0.25, 8.0);
+            if let Some(inline) = &self.inline {
+                self.ui_scale =
+                    fit_ui_scale(new_size.width, f32::from(inline.image_rect.size.width));
             }
         }
         if let Some(selection) = self.full_selection()
