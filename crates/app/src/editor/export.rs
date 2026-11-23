@@ -2,8 +2,6 @@ use std::time::Instant;
 
 use super::*;
 
-use crate::logging::log_debug;
-
 impl EditorView {
     pub(super) fn refresh_full_canvas(&mut self, cx: &mut Context<Self>) {
         let Some(capture) = self.inline.and_then(|inline| inline.capture) else {
@@ -228,72 +226,12 @@ impl EditorView {
         });
     }
 
-    pub(super) fn render_export(
-        &self,
-        with_pin_output: bool,
-    ) -> Result<RenderedExport, core_annotate::RasterError> {
-        let started = Instant::now();
-        let document = self.action_document();
-        let raw = rasterize(&document, &self.frame)?;
-        let scale = self.region_effects_scale();
-        let pin_effects = self.pin_effects();
-        let pin_padding = pin_effects.padding(scale);
-        let effects_active = self.region_effects_active();
-        let (output, pin_output) = if with_pin_output {
-            let copy = if effects_active {
-                self.effects.apply(raw.clone(), scale)
-            } else {
-                raw.clone()
-            };
-            let pin = if pin_effects.active() {
-                pin_effects.apply(raw, scale)
-            } else {
-                raw
-            };
-            (copy, Some(pin))
-        } else {
-            let copy = if effects_active {
-                self.effects.apply(raw, scale)
-            } else {
-                raw
-            };
-            (copy, None)
-        };
-        let hash = crate::capture_history::hash_frame(&output);
-        let record_history = self.pin_target.is_none();
-        let pin_shadow = (record_history && self.region_pin() && !self.effects.shadow).then_some(
-            crate::capture_history::HistoryPinShadow {
-                corner_radius: self.effects.corner_radius,
-                scale,
-            },
-        );
-        log_debug!(
-            "editor",
-            "render_export with_pin={with_pin_output} duration_ms={} size={}x{}",
-            started.elapsed().as_millis(),
-            output.width(),
-            output.height()
-        );
-        Ok(RenderedExport {
-            document,
-            output,
-            pin_output,
-            hash,
-            record_history,
-            pin_shadow,
-            scale,
-            pin_padding,
-            stored_effects: self.stored_region_effects(),
-            pin_shadow_always: self.region_pin(),
-        })
-    }
-
     pub(crate) fn pin(&mut self, cx: &mut Context<Self>) {
         self.commit_text(cx);
         let inline_host = self.inline;
         let selection_bounds = self.full_selection_screen_bounds();
-        let native_shadow = self.pin_native_shadow();
-        let rendered = match self.render_export(true) {
+        let native_shadow = export_pipeline::pin_native_shadow(self);
+        let rendered = match export_pipeline::render_export(self, true) {
             Ok(rendered) => rendered,
             Err(error) => {
                 let language = settings_state::get().language;
@@ -387,14 +325,14 @@ impl EditorView {
         let started = Instant::now();
         self.commit_text(cx);
         let language = settings_state::get().language;
-        let native_shadow = self.pin_native_shadow();
+        let native_shadow = export_pipeline::pin_native_shadow(self);
         let copy = matches!(action, ExportAction::Copy);
         let pin_update = (!copy).then_some(self.pin_target).flatten();
         let mut messages = Vec::new();
         let mut copy_ok = false;
         let mut save_ok = false;
         let mut pin_ok = false;
-        match self.render_export(pin_update.is_some()) {
+        match export_pipeline::render_export(self, pin_update.is_some()) {
             Ok(rendered) => {
                 let RenderedExport {
                     document,

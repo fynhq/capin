@@ -74,8 +74,8 @@ impl Tool {
 
 mod blur_cache;
 mod canvas;
-mod effects;
 mod export;
+mod export_pipeline;
 mod panels;
 mod render;
 mod render_handlers;

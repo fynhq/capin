@@ -222,7 +222,7 @@ impl Render for EditorView {
             )
         });
 
-        let effects_active = self.region_effects_active();
+        let effects_active = export_pipeline::region_effects_active(self);
         let inline = self.inline.is_some();
         let image_cursor = if self.move_draft.is_some() {
             crate::ui::closed_hand_cursor()
@@ -510,7 +510,7 @@ impl Render for EditorView {
         let region_bands = self.region_edge_bands(window, cx);
         let region_handles = self.region_handles(window, cx);
         let selection_layer = self.selection_layer(window);
-        let (toolbar, options_panel, more_panel) = self.toolbar(window, cx);
+        let (toolbar, options_panel, more_panel) = toolbar::toolbar(self, window, cx);
         let info_bar = if inline {
             self.info_bar(window, cx)
         } else {

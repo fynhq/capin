@@ -277,7 +277,7 @@ impl EditorView {
         let rect = self
             .inline_selection_rect(window)
             .unwrap_or_else(|| self.image_view_rect(window));
-        let radius = if self.region_effects_active() {
+        let radius = if export_pipeline::region_effects_active(self) {
             self.effects.corner_radius as f32
         } else {
             0.0
