@@ -53,7 +53,7 @@ fn capture_monitor_checked(
 ) -> Result<RgbaFrame, CaptureError> {
     let mut backend = platform_capture::platform_backend();
     let mut frame = capture_monitor(&mut *backend, monitor.id, with_cursor)?;
-    if !frame_matches_monitor(&frame, monitor) {
+    if !frame_matches_monitor(&frame, monitor.bounds) {
         crate::logging::log_error!(
             "overlay",
             "monitor {} frame {}x{} does not match {:?}; retrying",
@@ -64,7 +64,7 @@ fn capture_monitor_checked(
         );
         frame = capture_monitor(&mut *backend, monitor.id, with_cursor)?;
     }
-    if !frame_matches_monitor(&frame, monitor) {
+    if !frame_matches_monitor(&frame, monitor.bounds) {
         return Err(CaptureError::Platform {
             operation: "overlay capture",
             message: format!(
@@ -79,7 +79,7 @@ fn capture_monitor_checked(
     Ok(frame)
 }
 
-pub(super) fn frame_matches_monitor(frame: &RgbaFrame, monitor: &MonitorInfo) -> bool {
-    frame.width().abs_diff(monitor.bounds.size.width) <= 1
-        && frame.height().abs_diff(monitor.bounds.size.height) <= 1
+pub(super) fn frame_matches_monitor(frame: &RgbaFrame, bounds: core_types::PhysicalRect) -> bool {
+    frame.width().abs_diff(bounds.size.width) <= 1
+        && frame.height().abs_diff(bounds.size.height) <= 1
 }

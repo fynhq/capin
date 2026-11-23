@@ -1,5 +1,4 @@
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -36,13 +35,14 @@ use crate::{
 mod actions;
 mod capture;
 mod edit;
+mod element_probe;
 mod element_scroll;
 mod panels;
 mod query;
 mod refresh;
 mod registry;
 
-use element_scroll::ElementScroll;
+use element_probe::ElementProbe;
 
 const DIM: u32 = 0x00000066;
 const ELEMENT_HOVER: u32 = 0xffb020;
@@ -589,15 +589,7 @@ struct OverlayView {
     notice: Option<String>,
     notice_serial: u64,
     notice_leaving: bool,
-    element_cache: HashMap<WindowId, Vec<PhysicalRect>>,
-    element_cache_point: Option<PhysicalPoint>,
-    element_retry: HashSet<WindowId>,
-    element_window: Option<WindowId>,
-    element_pending: Option<WindowId>,
-    element_pending_point: Option<PhysicalPoint>,
-    element_candidates: Vec<PhysicalRect>,
-    element_level: usize,
-    element_scroll: ElementScroll,
+    element_probe: ElementProbe,
     screen_targeting: bool,
     focus_handle: FocusHandle,
     editor: Option<Entity<EditorView>>,
@@ -655,15 +647,7 @@ impl OverlayView {
             notice: None,
             notice_serial: 0,
             notice_leaving: false,
-            element_cache: HashMap::new(),
-            element_cache_point: None,
-            element_retry: HashSet::new(),
-            element_window: None,
-            element_pending: None,
-            element_pending_point: None,
-            element_candidates: Vec::new(),
-            element_level: 0,
-            element_scroll: ElementScroll::default(),
+            element_probe: ElementProbe::default(),
             screen_targeting: false,
             focus_handle: cx.focus_handle(),
             editor: None,
@@ -1240,7 +1224,7 @@ impl OverlayView {
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 let point = this.to_physical(event.position);
                 if this.cursor != Some(point) {
-                    this.element_scroll.reset();
+                    this.element_probe.scroll.reset();
                 }
                 this.cursor = Some(point);
                 this.set_window_only(control_down(&event.modifiers), cx);
@@ -1299,7 +1283,8 @@ impl OverlayView {
                     return;
                 }
                 let Some(direction) =
-                    this.element_scroll
+                    this.element_probe
+                        .scroll
                         .step(Instant::now(), event.delta, event.touch_phase)
                 else {
                     return;
@@ -1377,12 +1362,7 @@ impl OverlayView {
                 this.clear_magnifier(window);
                 this.cursor_style = CursorStyle::Crosshair;
                 this.ctrl_click_primary = false;
-                this.element_window = None;
-                this.element_pending = None;
-                this.element_pending_point = None;
-                this.element_candidates.clear();
-                this.element_level = 0;
-                this.element_scroll.reset();
+                this.element_probe.clear_hover();
                 this.screen_targeting = false;
                 this.session.pointer_left();
                 cx.notify();

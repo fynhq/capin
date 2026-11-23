@@ -17,68 +17,63 @@ impl OverlayView {
             return;
         }
         let Some(window) = self.session.window_under_pointer().cloned() else {
-            self.element_window = None;
-            self.element_pending = None;
-            self.element_pending_point = None;
-            self.element_candidates.clear();
-            self.element_level = 0;
-            self.element_scroll.reset();
+            self.element_probe.clear_hover();
             self.screen_targeting = false;
             self.session.set_screen_targeting(false);
             self.session.set_hovered_element(None);
             return;
         };
         if self.window_only {
-            self.element_window = None;
-            self.element_pending = None;
-            self.element_pending_point = None;
-            self.element_candidates.clear();
-            self.element_level = 0;
-            self.element_scroll.reset();
+            self.element_probe.clear_hover();
             self.screen_targeting = false;
             self.session.set_screen_targeting(false);
             self.session.set_hovered_element(None);
             return;
         }
-        if self.element_window != Some(window.id) {
-            self.element_window = Some(window.id);
-            self.element_cache_point = None;
-            self.element_level = 0;
-            self.element_candidates.clear();
-            self.element_scroll.reset();
+        if self.element_probe.window != Some(window.id) {
+            self.element_probe.window = Some(window.id);
+            self.element_probe.cache_point = None;
+            self.element_probe.level = 0;
+            self.element_probe.candidates.clear();
+            self.element_probe.scroll.reset();
             self.session.set_hovered_element(None);
         }
         let cached_for_point = {
             #[cfg(target_os = "macos")]
             {
-                self.element_cache.contains_key(&window.id)
-                    && self.element_cache_point == Some(point)
+                self.element_probe.cache.contains_key(&window.id)
+                    && self.element_probe.cache_point == Some(point)
             }
             #[cfg(not(target_os = "macos"))]
             {
-                self.element_cache.contains_key(&window.id)
+                self.element_probe.cache.contains_key(&window.id)
             }
         };
         if !cached_for_point {
-            if self.element_pending.is_none() {
+            if self.element_probe.pending.is_none() {
                 self.query_elements(window.id, point, cx);
             }
             self.session.set_hovered_element(None);
             return;
         }
-        let Some(cached) = self.element_cache.get(&window.id) else {
+        let Some(cached) = self.element_probe.cache.get(&window.id) else {
             self.session.set_hovered_element(None);
             return;
         };
 
         let candidates = core_capture::element_candidates(cached, window.bounds, point);
-        if self.element_level > candidates.len() {
-            self.element_level = candidates.len();
+        if self.element_probe.level > candidates.len() {
+            self.element_probe.level = candidates.len();
         }
-        self.element_candidates = candidates;
+        self.element_probe.candidates = candidates;
         self.session.set_screen_targeting(self.screen_targeting);
         let selected = (!self.screen_targeting)
-            .then(|| self.element_candidates.get(self.element_level).copied())
+            .then(|| {
+                self.element_probe
+                    .candidates
+                    .get(self.element_probe.level)
+                    .copied()
+            })
             .flatten();
         self.session.set_hovered_element(selected);
     }
@@ -89,8 +84,8 @@ impl OverlayView {
         point: PhysicalPoint,
         cx: &mut Context<Self>,
     ) {
-        self.element_pending = Some(window_id);
-        self.element_pending_point = Some(point);
+        self.element_probe.pending = Some(window_id);
+        self.element_probe.pending_point = Some(point);
         cx.spawn(async move |this, cx| {
             let elements = cx
                 .background_executor()
@@ -99,20 +94,20 @@ impl OverlayView {
             let empty = elements.is_empty();
             let applied = this
                 .update(cx, |this, cx| {
-                    if this.element_pending != Some(window_id)
-                        || this.element_pending_point != Some(point)
+                    if this.element_probe.pending != Some(window_id)
+                        || this.element_probe.pending_point != Some(point)
                     {
                         return false;
                     }
-                    this.element_pending = None;
-                    this.element_pending_point = None;
+                    this.element_probe.pending = None;
+                    this.element_probe.pending_point = None;
                     if empty && !platform_window::accessibility_trusted() {
                         return false;
                     }
-                    this.element_cache.insert(window_id, elements);
+                    this.element_probe.cache.insert(window_id, elements);
                     #[cfg(target_os = "macos")]
                     {
-                        this.element_cache_point = Some(point);
+                        this.element_probe.cache_point = Some(point);
                     }
                     if let Some(point) = this.cursor {
                         this.refresh_auto_target(point, cx);
@@ -128,7 +123,7 @@ impl OverlayView {
                 .timer(Duration::from_millis(150))
                 .await;
             let retry = this
-                .update(cx, |this, _| this.element_retry.insert(window_id))
+                .update(cx, |this, _| this.element_probe.retry.insert(window_id))
                 .unwrap_or(false);
             if !retry {
                 return;
@@ -138,15 +133,19 @@ impl OverlayView {
                 .spawn(async move { platform_capture::ui_elements_at(window_id, point) })
                 .await;
             this.update(cx, |this, cx| {
-                if this
-                    .element_cache
-                    .get(&window_id)
-                    .is_some_and(Vec::is_empty)
+                let still_current = this.element_probe.pending.is_none()
+                    && this.element_probe.cache_point.unwrap_or(point) == point;
+                if still_current
+                    && this
+                        .element_probe
+                        .cache
+                        .get(&window_id)
+                        .is_some_and(Vec::is_empty)
                 {
-                    this.element_cache.insert(window_id, elements);
+                    this.element_probe.cache.insert(window_id, elements);
                     #[cfg(target_os = "macos")]
                     {
-                        this.element_cache_point = Some(point);
+                        this.element_probe.cache_point = Some(point);
                     }
                     if let Some(point) = this.cursor {
                         this.refresh_auto_target(point, cx);
@@ -165,12 +164,7 @@ impl OverlayView {
             return;
         }
         self.window_only = enabled;
-        self.element_window = None;
-        self.element_pending = None;
-        self.element_pending_point = None;
-        self.element_candidates.clear();
-        self.element_level = 0;
-        self.element_scroll.reset();
+        self.element_probe.clear_hover();
         self.screen_targeting = false;
         self.session.set_screen_targeting(false);
         self.session.set_hovered_element(None);

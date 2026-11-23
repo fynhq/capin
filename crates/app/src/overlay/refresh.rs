@@ -21,7 +21,7 @@ impl OverlayView {
         self.last_refresh = Some(Instant::now());
         let mut backend = platform_backend();
         let monitor = self.session.monitor();
-        let frame = match self.refresh_capture(&mut *backend, monitor) {
+        let mut frame = match self.refresh_capture(&mut *backend, monitor) {
             Ok(Some(frame)) => frame,
             Ok(None) => return,
             Err(error) => {
@@ -29,6 +29,28 @@ impl OverlayView {
                 return;
             }
         };
+        let monitor_bounds = self.session.monitor_bounds();
+        if !super::capture::frame_matches_monitor(&frame, monitor_bounds) {
+            crate::logging::log_warn!(
+                "overlay",
+                "refreshed frame {}x{} does not match {:?}; retrying",
+                frame.width(),
+                frame.height(),
+                monitor_bounds
+            );
+            match backend.capture(CaptureTarget::Monitor(monitor)) {
+                Ok(retry) if super::capture::frame_matches_monitor(&retry, monitor_bounds) => {
+                    frame = retry;
+                }
+                _ => {
+                    self.set_notice(
+                        "refreshed frame does not match the monitor size".to_owned(),
+                        cx,
+                    );
+                    return;
+                }
+            }
+        }
         self.image_size = PhysicalSize::new(frame.width(), frame.height());
         let image = image_util::render_image(frame);
         let old_image = std::mem::replace(&mut self.image, image);
@@ -40,17 +62,8 @@ impl OverlayView {
         {
             crate::logging::log_warn!("overlay", "failed to release magnifier frame: {error}");
         }
-        self.element_cache.clear();
-        self.element_cache_point = None;
-        self.element_retry.clear();
-        self.element_window = None;
-        self.element_pending = None;
-        self.element_pending_point = None;
-        self.element_candidates.clear();
-        self.element_level = 0;
-        self.element_scroll.reset();
+        self.element_probe.reset();
         self.screen_targeting = false;
-        let monitor_bounds = self.session.monitor_bounds();
         let mut excluded = live_overlay_window_ids_excluding(cx, Some(cx.entity().entity_id()));
         if let Some(id) = self.native_id {
             excluded.push(WindowId::from_raw(id));

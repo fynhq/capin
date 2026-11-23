@@ -276,14 +276,6 @@ impl ScrollView {
         view
     }
 
-    fn capture_frame(&mut self, cx: &mut Context<Self>) {
-        let mut backend = platform_backend();
-        let captured = backend
-            .capture(CaptureTarget::Region(self.region))
-            .map_err(|error| error.to_string());
-        self.apply_capture(captured, cx);
-    }
-
     fn apply_capture(&mut self, captured: Result<RgbaFrame, String>, cx: &mut Context<Self>) {
         match captured {
             Ok(frame) => self.worker.push(frame),
@@ -341,13 +333,23 @@ impl ScrollView {
         self.finishing = true;
         let was_running = self.running;
         self.running = false;
-        if was_running {
-            self.capture_frame(cx);
-        }
-        self.worker.finish();
+        let region = self.region;
         let handles = cx.windows();
         let monitor = self.region.monitor;
         cx.spawn(async move |this, cx| {
+            if was_running {
+                let captured = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let mut backend = platform_backend();
+                        backend
+                            .capture(CaptureTarget::Region(region))
+                            .map_err(|error| error.to_string())
+                    })
+                    .await;
+                let _ = this.update(cx, |this, cx| this.apply_capture(captured, cx));
+            }
+            let _ = this.update(cx, |this, _| this.worker.finish());
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
                 let finished = this
@@ -378,6 +380,7 @@ impl ScrollView {
                         }
                     });
                 } else if !this.worker_failed {
+                    this.finishing = false;
                     this.status = t(this.language, "scroll.finish_timeout").to_owned();
                     cx.notify();
                 }

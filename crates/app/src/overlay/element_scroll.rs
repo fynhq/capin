@@ -25,26 +25,29 @@ impl OverlayView {
         if !self.screen_targeting && self.session.window_under_pointer().is_none() {
             return;
         }
-        let max = self.element_candidates.len();
+        let max = self.element_probe.candidates.len();
         if self.screen_targeting {
             if delta < 0.0 {
                 self.screen_targeting = false;
-                self.element_level = max;
+                self.element_probe.level = max;
             }
         } else if delta > 0.0 {
-            if self.element_level < max {
-                self.element_level += 1;
+            if self.element_probe.level < max {
+                self.element_probe.level += 1;
             } else {
                 self.screen_targeting = true;
             }
         } else {
-            self.element_level = self.element_level.saturating_sub(1);
+            self.element_probe.level = self.element_probe.level.saturating_sub(1);
         }
         self.session.set_screen_targeting(self.screen_targeting);
         let selected = if self.screen_targeting {
             None
         } else {
-            self.element_candidates.get(self.element_level).copied()
+            self.element_probe
+                .candidates
+                .get(self.element_probe.level)
+                .copied()
         };
         self.session.set_hovered_element(selected);
     }
