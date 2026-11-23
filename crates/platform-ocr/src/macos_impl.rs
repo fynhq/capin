@@ -1,9 +1,15 @@
+use std::ptr::NonNull;
 use std::sync::Arc;
 
 use core_types::{PhysicalRect, RgbaFrame};
-use image::ImageEncoder;
+use objc2::rc::Retained;
 use objc2::{AnyThread, ClassType};
-use objc2_foundation::{NSArray, NSData, NSDictionary, NSRange};
+use objc2_core_video::{
+    CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
+    CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+    kCVPixelFormatType_32BGRA,
+};
+use objc2_foundation::{NSArray, NSDictionary, NSRange};
 use objc2_vision::{
     VNImageRequestHandler, VNRecognizeTextRequest, VNRecognizedText, VNRequest,
     VNRequestTextRecognitionLevel,
@@ -12,25 +18,66 @@ use objc2_vision::{
 use crate::{OcrChar, OcrError, OcrLine, build_line};
 
 const MAX_VISION_CHARS: usize = 1024;
+const MIN_LINE_CONFIDENCE: f32 = 0.5;
+
+fn pixel_buffer(frame: &RgbaFrame) -> Result<Retained<CVPixelBuffer>, OcrError> {
+    let width = frame.width() as usize;
+    let height = frame.height() as usize;
+    let mut out: *mut CVPixelBuffer = std::ptr::null_mut();
+    // SAFETY: the output pointer is valid for the call; the returned buffer is +1 retained.
+    let status = unsafe {
+        CVPixelBufferCreate(
+            None,
+            width,
+            height,
+            kCVPixelFormatType_32BGRA,
+            None,
+            NonNull::from(&mut out),
+        )
+    };
+    if status != 0 || out.is_null() {
+        return Err(OcrError::Platform(format!(
+            "CVPixelBufferCreate failed with status {status}"
+        )));
+    }
+    // SAFETY: creation transferred ownership of the buffer to us.
+    let buffer = unsafe { Retained::from_raw(out) }
+        .ok_or_else(|| OcrError::Platform("invalid pixel buffer".to_owned()))?;
+    // SAFETY: the buffer is exclusively owned and unlocked during the copy.
+    unsafe {
+        if CVPixelBufferLockBaseAddress(&buffer, CVPixelBufferLockFlags::empty()) != 0 {
+            return Err(OcrError::Platform(
+                "failed to lock the pixel buffer".to_owned(),
+            ));
+        }
+        let row_bytes = CVPixelBufferGetBytesPerRow(&buffer);
+        let base = CVPixelBufferGetBaseAddress(&buffer) as *mut u8;
+        let packed = frame.packed_pixels();
+        for y in 0..height {
+            let target = base.add(y * row_bytes);
+            for x in 0..width {
+                let source = &packed[(y * width + x) * 4..(y * width + x) * 4 + 4];
+                *target.add(x * 4) = source[2];
+                *target.add(x * 4 + 1) = source[1];
+                *target.add(x * 4 + 2) = source[0];
+                *target.add(x * 4 + 3) = source[3];
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(&buffer, CVPixelBufferLockFlags::empty());
+    }
+    Ok(buffer)
+}
 
 pub(super) fn recognize_text(frame: Arc<RgbaFrame>) -> Result<Vec<OcrLine>, OcrError> {
-    let mut png = Vec::new();
-    image::codecs::png::PngEncoder::new(&mut png)
-        .write_image(
-            &frame.packed_pixels(),
-            frame.width(),
-            frame.height(),
-            image::ExtendedColorType::Rgba8,
-        )
-        .map_err(|error| OcrError::Platform(error.to_string()))?;
-
-    let data = NSData::with_bytes(&png);
+    let buffer = pixel_buffer(&frame)?;
     let options = NSDictionary::new();
-    let handler = VNImageRequestHandler::initWithData_options(
-        VNImageRequestHandler::alloc(),
-        &data,
-        &options,
-    );
+    let handler = unsafe {
+        VNImageRequestHandler::initWithCVPixelBuffer_options(
+            VNImageRequestHandler::alloc(),
+            &buffer,
+            &options,
+        )
+    };
 
     let request = VNRecognizeTextRequest::new();
     request.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
@@ -49,8 +96,12 @@ pub(super) fn recognize_text(frame: Arc<RgbaFrame>) -> Result<Vec<OcrLine>, OcrE
             let Some(candidate) = observation.topCandidates(1).iter().next() else {
                 continue;
             };
-            // SAFETY: the observation is a live result returned by Vision.
+            // SAFETY: both accessors read from a live result returned by Vision.
+            let confidence = unsafe { observation.confidence() };
             let bounds = unsafe { observation.boundingBox() };
+            if confidence < MIN_LINE_CONFIDENCE {
+                continue;
+            }
             if bounds.size.width <= 0.0 || bounds.size.height <= 0.0 {
                 continue;
             }

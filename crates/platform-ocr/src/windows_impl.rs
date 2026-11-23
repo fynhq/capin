@@ -58,9 +58,15 @@ pub(super) fn recognize_text(frame: Arc<RgbaFrame>) -> Result<Vec<OcrLine>, OcrE
     worker
         .send(OcrJob { frame, reply })
         .map_err(|_| OcrError::Platform("the OCR worker is unavailable".to_owned()))?;
-    response
-        .recv()
-        .map_err(|_| OcrError::Platform("the OCR worker stopped unexpectedly".to_owned()))?
+    match response.recv_timeout(std::time::Duration::from_secs(30)) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(OcrError::Platform(
+            "the OCR worker did not respond in time".to_owned(),
+        )),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(OcrError::Platform(
+            "the OCR worker stopped unexpectedly".to_owned(),
+        )),
+    }
 }
 
 fn recognize_on_thread(frame: Arc<RgbaFrame>) -> Result<Vec<OcrLine>, OcrError> {
