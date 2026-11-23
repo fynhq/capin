@@ -1,6 +1,9 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+
+pub(super) const MAX_PERSISTED_PINS: usize = 50;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct PersistedPin {
@@ -26,10 +29,15 @@ pub(super) struct PersistedPin {
 
 pub(super) fn load(directory: &Path) -> Vec<PersistedPin> {
     let path = directory.join("pins.json");
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Ok(text) = std::fs::read_to_string(&path) else {
         return Vec::new();
     };
     let Ok(mut entries) = serde_json::from_str::<Vec<PersistedPin>>(&text) else {
+        crate::logging::log_warn!("pin", "pin manifest is corrupt; keeping a backup copy");
+        let backup = directory.join("pins.json.corrupt");
+        if let Err(error) = std::fs::rename(&path, &backup) {
+            crate::logging::log_error!("pin", "failed to back up the corrupt manifest: {error}");
+        }
         return Vec::new();
     };
     sort_restore_entries(&mut entries);
@@ -55,6 +63,42 @@ pub(super) fn sort_restore_entries(entries: &mut [PersistedPin]) {
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.id));
 }
 
+fn image_name(entry: &PersistedPin) -> Option<String> {
+    entry
+        .image
+        .as_deref()
+        .and_then(|name| Path::new(name).file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+}
+
+pub(super) fn enforce_limit(directory: &Path, entries: &mut Vec<PersistedPin>) {
+    entries.sort_by_key(|entry| entry.id);
+    entries.dedup_by_key(|entry| entry.id);
+    let removed: Vec<PersistedPin> = if entries.len() > MAX_PERSISTED_PINS {
+        let excess = entries.len() - MAX_PERSISTED_PINS;
+        entries.drain(..excess).collect()
+    } else {
+        Vec::new()
+    };
+    let kept: HashSet<String> = entries.iter().filter_map(image_name).collect();
+    for entry in &removed {
+        if let Some(name) = image_name(entry)
+            && !kept.contains(&name)
+        {
+            let _ = std::fs::remove_file(directory.join(name));
+        }
+    }
+    let Ok(read) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for file in read.flatten() {
+        let name = file.file_name().to_string_lossy().into_owned();
+        if name.starts_with("pin-") && name.ends_with(".png") && !kept.contains(&name) {
+            let _ = std::fs::remove_file(file.path());
+        }
+    }
+}
+
 pub(super) fn is_usable(entry: &PersistedPin, directory: &Path) -> bool {
     if !entry.x.is_finite()
         || !entry.y.is_finite()
@@ -78,7 +122,10 @@ pub(super) fn is_usable(entry: &PersistedPin, directory: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{PersistedPin, is_usable, load, save, sort_restore_entries};
+    use super::{
+        MAX_PERSISTED_PINS, PersistedPin, enforce_limit, is_usable, load, save,
+        sort_restore_entries,
+    };
 
     fn entry(id: u64) -> PersistedPin {
         PersistedPin {
@@ -145,6 +192,83 @@ mod tests {
         invalid.width = 0.0;
         assert!(!is_usable(&invalid, &directory));
         assert!(is_usable(&entry(3), &directory));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn corrupt_manifest_is_backed_up_and_loads_empty() {
+        let directory = temp_dir();
+        let path = directory.join("pins.json");
+        std::fs::write(&path, b"{not json").unwrap();
+        assert!(load(&directory).is_empty());
+        assert!(!path.exists());
+        assert_eq!(
+            std::fs::read(directory.join("pins.json.corrupt")).unwrap(),
+            b"{not json"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    fn image_entry(id: u64) -> PersistedPin {
+        let mut entry = entry(id);
+        entry.kind = "image".to_owned();
+        entry.text = None;
+        entry.image = Some(format!("pin-{id}.png"));
+        entry
+    }
+
+    #[test]
+    fn limit_evicts_oldest_pins_and_their_files() {
+        let directory = temp_dir();
+        let total = MAX_PERSISTED_PINS + 5;
+        let mut entries = Vec::new();
+        for id in 1..=total as u64 {
+            std::fs::write(directory.join(format!("pin-{id}.png")), b"png").unwrap();
+            entries.push(image_entry(id));
+        }
+        enforce_limit(&directory, &mut entries);
+        assert_eq!(entries.len(), MAX_PERSISTED_PINS);
+        assert_eq!(entries[0].id, 6);
+        for id in 1..=5 {
+            assert!(!directory.join(format!("pin-{id}.png")).exists());
+        }
+        for id in 6..=total as u64 {
+            assert!(directory.join(format!("pin-{id}.png")).exists());
+        }
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn orphan_sweep_keeps_referenced_and_unrelated_files() {
+        let directory = temp_dir();
+        std::fs::write(directory.join("pin-1.png"), b"png").unwrap();
+        std::fs::write(directory.join("pin-999.png"), b"png").unwrap();
+        std::fs::write(directory.join("notes.txt"), b"keep").unwrap();
+        std::fs::write(directory.join("pins.json"), b"[]").unwrap();
+        let mut entries = vec![image_entry(1)];
+        enforce_limit(&directory, &mut entries);
+        assert!(directory.join("pin-1.png").exists());
+        assert!(!directory.join("pin-999.png").exists());
+        assert!(directory.join("notes.txt").exists());
+        assert!(directory.join("pins.json").exists());
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn evicted_entry_sharing_a_file_keeps_the_file() {
+        let directory = temp_dir();
+        std::fs::write(directory.join("pin-shared.png"), b"png").unwrap();
+        let mut oldest = image_entry(1);
+        oldest.image = Some("pin-shared.png".to_owned());
+        let mut newest = image_entry(2);
+        newest.image = Some("pin-shared.png".to_owned());
+        let mut entries = vec![oldest, newest];
+        for id in 3..=(MAX_PERSISTED_PINS as u64 + 1) {
+            entries.push(image_entry(id));
+        }
+        enforce_limit(&directory, &mut entries);
+        assert_eq!(entries.len(), MAX_PERSISTED_PINS);
+        assert!(directory.join("pin-shared.png").exists());
         let _ = std::fs::remove_dir_all(directory);
     }
 }

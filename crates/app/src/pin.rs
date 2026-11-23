@@ -373,10 +373,9 @@ fn open_pin_inner(
             PINS.with(|pins| {
                 pins.borrow_mut().insert(id, state);
             });
-            PIN_CLIPBOARD.with(|slot| slot.set(clipboard_image_signature(cx)));
-            PIN_CLIPBOARD_TEXT.with(|slot| slot.set(clipboard_text_signature(cx)));
             view_for_release.update(cx, |view, _| view.release_frame_if_persisted());
             if persist {
+                refresh_clipboard_signatures(cx);
                 save_manifest();
             }
             Some(id)
@@ -389,6 +388,11 @@ fn open_pin_inner(
             None
         }
     }
+}
+
+pub(crate) fn refresh_clipboard_signatures(cx: &mut App) {
+    PIN_CLIPBOARD.with(|slot| slot.set(clipboard_image_signature(cx)));
+    PIN_CLIPBOARD_TEXT.with(|slot| slot.set(clipboard_text_signature(cx)));
 }
 
 struct PinTheme {

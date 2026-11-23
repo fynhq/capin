@@ -171,7 +171,7 @@ fn pin_image(image: crate::capture_history::HistoryImage, cx: &mut App) {
             && crate::capture_history::contains(hash)
             && let Some(history_image) = crate::capture_history::cycle(hash)
         {
-            let history_hash = crate::capture_history::hash_frame(&history_image.frame);
+            let history_hash = history_image.hash;
             LAST_PIN_TRIGGER.with(|slot| slot.set(Some(history_hash)));
             if !flash_existing_pin(history_hash, cx) {
                 open_history_pin(history_image, cx);

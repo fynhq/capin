@@ -29,7 +29,8 @@ pub fn acquire_single_instance() -> bool {
         .truncate(false)
         .open(path)
     else {
-        return true;
+        crate::logging::log_error!("storage", "failed to open the instance lock file");
+        return false;
     };
     if file.try_lock().is_err() {
         return false;

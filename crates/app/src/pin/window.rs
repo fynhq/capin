@@ -95,6 +95,7 @@ pub(crate) fn restore(cx: &mut App) {
         }
     }
     DEFERRED_PINS.with(|pins| *pins.borrow_mut() = deferred);
+    crate::pin::refresh_clipboard_signatures(cx);
     save_manifest();
 }
 
@@ -447,6 +448,11 @@ pub(super) fn save_manifest() {
         entries
     });
     entries.extend(DEFERRED_PINS.with(|pins| pins.borrow().clone()));
+    manifest::enforce_limit(&directory, &mut entries);
+    DEFERRED_PINS.with(|pins| {
+        pins.borrow_mut()
+            .retain(|entry| entries.iter().any(|kept| kept.id == entry.id));
+    });
     let count = entries.len();
     manifest::save(&directory, entries);
     log_debug!(

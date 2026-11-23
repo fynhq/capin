@@ -262,6 +262,7 @@ mod imp {
             log_error!("record", "timed out while finalizing the recording");
         }
         crate::pin::flush_manifest();
+        crate::settings_state::flush();
         crate::storage::release_single_instance();
         match relaunch() {
             Ok(()) => {
