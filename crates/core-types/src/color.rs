@@ -2,6 +2,10 @@ pub const fn abgr_to_rgb(abgr: u32) -> u32 {
     ((abgr & 0xFF) << 16) | (abgr & 0xFF00) | ((abgr >> 16) & 0xFF)
 }
 
+pub fn luma8(red: u8, green: u8, blue: u8) -> u8 {
+    ((u32::from(red) * 299 + u32::from(green) * 587 + u32::from(blue) * 114) / 1000) as u8
+}
+
 pub fn relative_luminance(hex: u32) -> f64 {
     fn linearize(channel: u8) -> f64 {
         let channel = f64::from(channel) / 255.0;
@@ -33,6 +37,15 @@ mod tests {
     fn accent_menu_abgr_is_swizzled_to_rgb() {
         assert_eq!(abgr_to_rgb(0xFF15_7286), 0x86_7215);
         assert_eq!(abgr_to_rgb(0xFF00_0000), 0x00_0000);
+    }
+
+    #[test]
+    fn luma8_matches_the_perceptual_weights() {
+        assert_eq!(luma8(255, 255, 255), 255);
+        assert_eq!(luma8(0, 0, 0), 0);
+        assert_eq!(luma8(255, 0, 0), 76);
+        assert_eq!(luma8(0, 255, 0), 149);
+        assert_eq!(luma8(0, 0, 255), 29);
     }
 
     #[test]

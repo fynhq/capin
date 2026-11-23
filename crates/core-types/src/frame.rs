@@ -163,6 +163,19 @@ pub fn swap_red_blue_in_place(pixels: &mut [u8]) {
     }
 }
 
+pub fn unpremultiply_rgba(pixels: &mut [u8]) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        let alpha = u16::from(pixel[3]);
+        if alpha == 0 {
+            pixel.fill(0);
+        } else if alpha < 255 {
+            for channel in &mut pixel[..3] {
+                *channel = ((u16::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,5 +313,14 @@ mod tests {
         let mut pixels = vec![1, 2, 3, 4, 5, 6, 7, 8];
         super::swap_red_blue_in_place(&mut pixels);
         assert_eq!(pixels, vec![3, 2, 1, 4, 7, 6, 5, 8]);
+    }
+
+    #[test]
+    fn unpremultiply_restores_straight_alpha_and_zeroes_transparent_pixels() {
+        let mut pixels = vec![128, 64, 32, 128, 10, 20, 30, 0, 200, 100, 50, 255];
+        super::unpremultiply_rgba(&mut pixels);
+        assert_eq!(&pixels[0..4], &[255, 128, 64, 128]);
+        assert_eq!(&pixels[4..8], &[0, 0, 0, 0]);
+        assert_eq!(&pixels[8..12], &[200, 100, 50, 255]);
     }
 }
