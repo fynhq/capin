@@ -130,17 +130,18 @@ fn a_move_gesture_records_one_undo_step() {
     });
 
     assert!(!state.update_move(PhysicalPoint::new(10, 10)));
+    let serial = state.document.history_serial();
     assert!(state.update_move(PhysicalPoint::new(14, 18)));
     assert_eq!(
         state.document.object(id).unwrap().shape.bounds().origin,
         PhysicalPoint::new(14, 18)
     );
-    assert!(!state.document.can_undo());
+    assert_eq!(state.document.history_serial(), serial);
 
     assert!(state.update_move(PhysicalPoint::new(20, 20)));
     assert!(state.finish_move(PhysicalPoint::new(20, 20)));
     assert!(state.move_draft.is_none());
-    assert!(state.document.can_undo());
+    assert_ne!(state.document.history_serial(), serial);
     assert!(state.document.undo());
     assert_eq!(
         state.document.object(id).unwrap().shape.bounds().origin,
@@ -190,13 +191,14 @@ fn cancel_move_reverts_the_shape_without_history() {
         original,
     });
     assert!(state.update_move(PhysicalPoint::new(30, 30)));
+    let serial = state.document.history_serial();
     state.cancel_move();
     assert!(state.move_draft.is_none());
     assert_eq!(
         state.document.object(id).unwrap().shape.bounds().origin,
         PhysicalPoint::new(10, 10)
     );
-    assert!(!state.document.can_undo());
+    assert_eq!(state.document.history_serial(), serial);
 }
 
 #[test]
@@ -499,12 +501,13 @@ fn a_resize_back_to_the_origin_records_nothing() {
         original,
     });
     assert!(state.update_resize(PhysicalPoint::new(62, 62)));
+    let serial = state.document.history_serial();
     assert!(state.finish_resize(PhysicalPoint::new(42, 42)));
     assert_eq!(
         state.document.object(id).unwrap().shape.bounds().size,
         PhysicalSize::new(32, 32)
     );
-    assert!(!state.document.can_undo());
+    assert_eq!(state.document.history_serial(), serial);
 }
 
 #[test]
