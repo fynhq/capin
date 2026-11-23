@@ -134,9 +134,8 @@ pub fn paint_rounded_mask(
         let right = left + f32::from(bounds.size.width);
         let bottom = top + f32::from(bounds.size.height);
         if right > left && bottom > top {
-            let mut builder = PathBuilder::fill().with_style(PathStyle::Fill(
-                FillOptions::default().with_fill_rule(FillRule::EvenOdd),
-            ));
+            let mut builder =
+                PathBuilder::fill().with_style(PathStyle::Fill(FillOptions::default()));
             builder.move_to(point(px(left), px(top)));
             builder.line_to(point(px(right), px(top)));
             builder.line_to(point(px(right), px(bottom)));
@@ -166,9 +165,7 @@ pub fn paint_rounded_mask(
             px((hole_height - width * 2.0).max(0.0)),
         ),
     };
-    let mut builder = PathBuilder::fill().with_style(PathStyle::Fill(
-        FillOptions::default().with_fill_rule(FillRule::EvenOdd),
-    ));
+    let mut builder = PathBuilder::fill().with_style(PathStyle::Fill(FillOptions::default()));
     push_rounded_rect(&mut builder, hole, radius);
     push_rounded_rect(&mut builder, inner, (radius - width).max(0.0));
     if let Ok(path) = builder.build() {

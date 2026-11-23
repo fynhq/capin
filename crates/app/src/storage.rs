@@ -112,10 +112,10 @@ pub fn render_filename(template: &str, width: u32, height: u32) -> String {
     } else {
         template
     };
-    let now = chrono::Local::now();
+    let now = jiff::ZonedDateTime::now();
     let rendered = template
-        .replace("{date}", &now.format("%Y%m%d").to_string())
-        .replace("{time}", &now.format("%H%M%S").to_string())
+        .replace("{date}", &now.strftime("%Y%m%d").to_string())
+        .replace("{time}", &now.strftime("%H%M%S").to_string())
         .replace("{width}", &width.to_string())
         .replace("{height}", &height.to_string());
     sanitize_file_stem(&rendered)

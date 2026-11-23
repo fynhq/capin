@@ -1,4 +1,4 @@
-use chrono::{Duration, Local, NaiveDate};
+use jiff::{Span, ZonedDateTime, civil::Date};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -43,7 +43,7 @@ impl Level {
 
 struct Logger {
     file: Option<File>,
-    date: NaiveDate,
+    date: Date,
     level: Level,
 }
 
@@ -53,7 +53,7 @@ static INIT: Once = Once::new();
 pub fn init() {
     INIT.call_once(|| {
         let level = Level::from_env();
-        let date = Local::now().date_naive();
+        let date = ZonedDateTime::now().date();
         let directory = log_directory();
         let _ = std::fs::create_dir_all(&directory);
         migrate_legacy_files(&directory, date);
@@ -91,15 +91,15 @@ pub fn write(level: Level, target: &str, message: &str) {
         return;
     }
 
-    let now = Local::now();
-    let date = now.date_naive();
+    let now = ZonedDateTime::now();
+    let date = now.date();
     if date != logger.date {
         roll_over(&mut logger, date);
     }
 
     let line = format!(
         "{} {:<5} {}: {}\n",
-        now.format("%Y-%m-%dT%H:%M:%S%.3f%:z"),
+        now.strftime("%Y-%m-%dT%H:%M:%S%.3f%:z"),
         level.label(),
         target,
         message
@@ -120,7 +120,7 @@ pub fn log_directory() -> PathBuf {
 }
 
 pub fn recent_lines(limit: usize) -> Vec<String> {
-    let path = log_directory().join(log_file_name(Local::now().date_naive()));
+    let path = log_directory().join(log_file_name(ZonedDateTime::now().date()));
     let Ok(mut file) = File::open(path) else {
         return Vec::new();
     };
@@ -153,19 +153,19 @@ pub fn recent_lines(limit: usize) -> Vec<String> {
         .collect()
 }
 
-fn log_file_name(date: NaiveDate) -> String {
-    format!("{LOG_PREFIX}{}{LOG_SUFFIX}", date.format("%Y-%m-%d"))
+fn log_file_name(date: Date) -> String {
+    format!("{LOG_PREFIX}{}{LOG_SUFFIX}", date.strftime("%Y-%m-%d"))
 }
 
-fn log_file_date(name: &str) -> Option<NaiveDate> {
-    NaiveDate::parse_from_str(
-        name.strip_prefix(LOG_PREFIX)?.strip_suffix(LOG_SUFFIX)?,
+fn log_file_date(name: &str) -> Option<Date> {
+    Date::strptime(
         "%Y-%m-%d",
+        name.strip_prefix(LOG_PREFIX)?.strip_suffix(LOG_SUFFIX)?,
     )
     .ok()
 }
 
-fn open_log_file(directory: &Path, date: NaiveDate) -> Option<File> {
+fn open_log_file(directory: &Path, date: Date) -> Option<File> {
     OpenOptions::new()
         .create(true)
         .append(true)
@@ -173,15 +173,15 @@ fn open_log_file(directory: &Path, date: NaiveDate) -> Option<File> {
         .ok()
 }
 
-fn roll_over(logger: &mut Logger, date: NaiveDate) {
+fn roll_over(logger: &mut Logger, date: Date) {
     let directory = log_directory();
     prune_old_files(&directory, date);
     logger.file = open_log_file(&directory, date);
     logger.date = date;
 }
 
-fn prune_old_files(directory: &Path, today: NaiveDate) {
-    let oldest_kept = today - Duration::days(KEEP_DAYS - 1);
+fn prune_old_files(directory: &Path, today: Date) {
+    let oldest_kept = today.saturating_sub(Span::new().days(KEEP_DAYS - 1));
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
@@ -196,7 +196,7 @@ fn prune_old_files(directory: &Path, today: NaiveDate) {
     }
 }
 
-fn migrate_legacy_files(directory: &Path, today: NaiveDate) {
+fn migrate_legacy_files(directory: &Path, today: Date) {
     let legacy = directory.join("capin.log");
     if legacy.exists() {
         let current = directory.join(log_file_name(today));
@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn daily_file_names_round_trip() {
-        let date = NaiveDate::from_ymd_opt(2026, 11, 9).unwrap();
+        let date = Date::new(2026, 11, 9).unwrap();
         let name = log_file_name(date);
         assert_eq!(name, "capin-2026-11-09.log");
         assert_eq!(log_file_date(&name), Some(date));
@@ -274,9 +274,9 @@ mod tests {
     #[test]
     fn prune_keeps_seven_calendar_days() {
         let directory = temp_directory("prune");
-        let today = NaiveDate::from_ymd_opt(2026, 11, 9).unwrap();
+        let today = Date::new(2026, 11, 9).unwrap();
         for offset in 0..=KEEP_DAYS {
-            let date = today - Duration::days(offset);
+            let date = today.saturating_sub(Span::new().days(offset));
             std::fs::write(directory.join(log_file_name(date)), b"x").unwrap();
         }
         std::fs::write(directory.join("notes.txt"), b"x").unwrap();
@@ -284,10 +284,10 @@ mod tests {
         prune_old_files(&directory, today);
 
         for offset in 0..KEEP_DAYS {
-            let date = today - Duration::days(offset);
+            let date = today.saturating_sub(Span::new().days(offset));
             assert!(directory.join(log_file_name(date)).exists());
         }
-        let pruned = today - Duration::days(KEEP_DAYS);
+        let pruned = today.saturating_sub(Span::new().days(KEEP_DAYS));
         assert!(!directory.join(log_file_name(pruned)).exists());
         assert!(directory.join("notes.txt").exists());
         let _ = std::fs::remove_dir_all(&directory);
@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn legacy_rotation_is_folded_into_today() {
         let directory = temp_directory("legacy");
-        let today = NaiveDate::from_ymd_opt(2026, 11, 9).unwrap();
+        let today = Date::new(2026, 11, 9).unwrap();
         std::fs::write(directory.join("capin.log"), b"legacy").unwrap();
         for index in 1..=3 {
             std::fs::write(directory.join(format!("capin.{index}.log")), b"old").unwrap();

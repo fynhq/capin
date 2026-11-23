@@ -3,9 +3,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-# Baseline reviewed 2026-11-20. Remove an ignore only after the upstream fix is adopted.
+# Baseline reviewed 2026-11-23. Remove an ignore only after the upstream fix is adopted.
 ignored=(
-    RUSTSEC-2026-0543 # chrono: no fixed release; direct and transitive via gpui
+    RUSTSEC-2026-0543 # chrono: no fixed release; transitive via gpui only
     RUSTSEC-2024-0384 # instant: no fixed release; transitive via gpui-base
     RUSTSEC-2024-0436 # paste: build-time proc macro; no fixed release
     RUSTSEC-2024-0370 # proc-macro-error: build-only; no fixed release
