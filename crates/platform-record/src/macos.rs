@@ -22,7 +22,7 @@ use objc2_av_foundation::{
 };
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess};
-use objc2_core_media::{CMSampleBuffer, CMSampleBufferGetPresentationTimeStamp, CMTime};
+use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
     CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
@@ -483,7 +483,7 @@ define_class!(
             if timeline.next_index() == 0 {
                 ivars.flags.restart_started();
             }
-            let pts = unsafe { CMSampleBufferGetPresentationTimeStamp(sample_buffer) };
+            let pts = unsafe { sample_buffer.presentation_time_stamp() };
             let elapsed = if pts.flags.0 & 1 != 0 && pts.timescale > 0 {
                 let nanos =
                     (i128::from(pts.value) * 1_000_000_000 / i128::from(pts.timescale)) as i64;

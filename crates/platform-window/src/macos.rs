@@ -8,7 +8,6 @@ use core_graphics::display::CGDisplay;
 use core_graphics::event::CGEvent;
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
-use foreign_types_shared::ForeignType;
 use objc2::rc::Retained;
 use objc2::{ClassType, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
@@ -330,7 +329,6 @@ unsafe extern "C" {
     fn AXIsProcessTrusted() -> bool;
     fn AXIsProcessTrustedWithOptions(options: core_foundation::dictionary::CFDictionaryRef)
     -> bool;
-    fn CGEventSetLocation(event: core_graphics::sys::CGEventRef, location: CGPoint);
 }
 
 thread_local! {

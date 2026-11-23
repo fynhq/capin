@@ -1439,10 +1439,10 @@ mod tests {
     #[test]
     fn frame_size_must_match_the_monitor() {
         let target = monitor(1920, 1080);
-        assert!(frame_matches_monitor(&frame(1920, 1080), &target));
-        assert!(frame_matches_monitor(&frame(1921, 1079), &target));
-        assert!(!frame_matches_monitor(&frame(1920, 1200), &target));
-        assert!(!frame_matches_monitor(&frame(2560, 1440), &target));
+        assert!(frame_matches_monitor(&frame(1920, 1080), target.bounds));
+        assert!(frame_matches_monitor(&frame(1921, 1079), target.bounds));
+        assert!(!frame_matches_monitor(&frame(1920, 1200), target.bounds));
+        assert!(!frame_matches_monitor(&frame(2560, 1440), target.bounds));
     }
 
     #[test]
