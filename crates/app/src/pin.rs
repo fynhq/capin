@@ -30,7 +30,13 @@ mod pin_display;
 mod pin_help;
 mod pin_qr;
 mod pin_view;
+mod toast;
 mod window;
+
+use toast::PinToast;
+
+const NOTICE_TOAST: usize = 0;
+const HUD_TOAST: usize = 1;
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub(crate) use gallery::pin_last;
@@ -440,12 +446,7 @@ struct PinView {
     zoom_target: f32,
     zoom_serial: u64,
     zoom_center: Option<(f32, f32)>,
-    notice: Option<String>,
-    notice_serial: u64,
-    notice_leaving: bool,
-    hud: Option<String>,
-    hud_serial: u64,
-    hud_leaving: bool,
+    toasts: [PinToast; 2],
     ocr: Option<platform_ocr::OcrOutput>,
     ocr_path: Option<PathBuf>,
     selection: Option<(usize, usize)>,
@@ -482,12 +483,10 @@ impl PinView {
             zoom_serial: 0,
             zoom_center: None,
             ocr_path,
-            notice: None,
-            notice_serial: 0,
-            notice_leaving: false,
-            hud: None,
-            hud_serial: 0,
-            hud_leaving: false,
+            toasts: [
+                PinToast::new(Duration::from_millis(2200)),
+                PinToast::new(Duration::from_millis(900)),
+            ],
             ocr: None,
             selection: None,
             selecting: false,
@@ -1067,21 +1066,21 @@ impl PinView {
         cx.notify();
     }
 
-    fn show_notice(&mut self, message: String, cx: &mut Context<Self>) {
-        self.notice = Some(message);
-        self.notice_leaving = false;
-        self.notice_serial = self.notice_serial.wrapping_add(1);
-        let serial = self.notice_serial;
+    fn show_toast(&mut self, slot: usize, message: String, cx: &mut Context<Self>) {
+        let toast = &mut self.toasts[slot];
+        toast.message = Some(message);
+        toast.leaving = false;
+        toast.serial = toast.serial.wrapping_add(1);
+        let serial = toast.serial;
+        let linger = toast.linger;
         cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(2200))
-                .await;
+            cx.background_executor().timer(linger).await;
             let alive = this
                 .update(cx, |this, cx| {
-                    if this.notice_serial != serial {
+                    if this.toasts[slot].serial != serial {
                         return false;
                     }
-                    this.notice_leaving = true;
+                    this.toasts[slot].leaving = true;
                     cx.notify();
                     true
                 })
@@ -1093,9 +1092,9 @@ impl PinView {
                 .timer(Duration::from_millis(150))
                 .await;
             this.update(cx, |this, cx| {
-                if this.notice_serial == serial {
-                    this.notice = None;
-                    this.notice_leaving = false;
+                if this.toasts[slot].serial == serial {
+                    this.toasts[slot].message = None;
+                    this.toasts[slot].leaving = false;
                     cx.notify();
                 }
             })
@@ -1105,42 +1104,12 @@ impl PinView {
         cx.notify();
     }
 
+    fn show_notice(&mut self, message: String, cx: &mut Context<Self>) {
+        self.show_toast(NOTICE_TOAST, message, cx);
+    }
+
     fn show_hud(&mut self, message: String, cx: &mut Context<Self>) {
-        self.hud = Some(message);
-        self.hud_leaving = false;
-        self.hud_serial = self.hud_serial.wrapping_add(1);
-        let serial = self.hud_serial;
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(900))
-                .await;
-            let alive = this
-                .update(cx, |this, cx| {
-                    if this.hud_serial != serial {
-                        return false;
-                    }
-                    this.hud_leaving = true;
-                    cx.notify();
-                    true
-                })
-                .unwrap_or(false);
-            if !alive {
-                return;
-            }
-            cx.background_executor()
-                .timer(Duration::from_millis(150))
-                .await;
-            this.update(cx, |this, cx| {
-                if this.hud_serial == serial {
-                    this.hud = None;
-                    this.hud_leaving = false;
-                    cx.notify();
-                }
-            })
-            .ok();
-        })
-        .detach();
-        cx.notify();
+        self.show_toast(HUD_TOAST, message, cx);
     }
 
     fn copy_content(&mut self, cx: &mut Context<Self>) {

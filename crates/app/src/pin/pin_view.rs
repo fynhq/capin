@@ -98,12 +98,12 @@ impl PinView {
 impl Render for PinView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = PinTheme::for_window(window, self.accent_hex);
-        let notice = self.notice.clone();
-        let notice_serial = self.notice_serial;
-        let notice_leaving = self.notice_leaving;
-        let hud = self.hud.clone();
-        let hud_serial = self.hud_serial;
-        let hud_leaving = self.hud_leaving;
+        let notice = self.toasts[NOTICE_TOAST].message.clone();
+        let notice_serial = self.toasts[NOTICE_TOAST].serial;
+        let notice_leaving = self.toasts[NOTICE_TOAST].leaving;
+        let hud = self.toasts[HUD_TOAST].message.clone();
+        let hud_serial = self.toasts[HUD_TOAST].serial;
+        let hud_leaving = self.toasts[HUD_TOAST].leaving;
         let body = self
             .body(&theme, window.viewport_size())
             .opacity(self.values.borrow().opacity);
