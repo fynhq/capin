@@ -1206,6 +1206,16 @@ impl OverlayView {
                     this.close_overlays(cx);
                     return;
                 }
+                if key == "tab" {
+                    let direction = if event.keystroke.modifiers.shift {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    this.adjust_auto_target(direction);
+                    cx.notify();
+                    return;
+                }
                 if key.eq_ignore_ascii_case("r") {
                     this.cycle_aspect(cx);
                 } else if key.eq_ignore_ascii_case("c") {

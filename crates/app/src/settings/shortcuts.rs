@@ -54,7 +54,7 @@ impl SettingsView {
                             theme,
                             t(language, "shortcuts.adjust_target"),
                             t(language, "shortcuts.adjust_target_desc"),
-                            t(language, "shortcuts.value.wheel"),
+                            t(language, "shortcuts.value.wheel_tab"),
                             Some(icons::SCROLL),
                         ),
                         info_row(
