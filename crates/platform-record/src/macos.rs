@@ -22,7 +22,7 @@ use objc2_av_foundation::{
 };
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess};
-use objc2_core_media::{CMSampleBuffer, CMTime};
+use objc2_core_media::{CMSampleBuffer, CMSampleBufferGetPresentationTimeStamp, CMTime};
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
     CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
@@ -53,6 +53,7 @@ pub(crate) fn start(
     let content = sck::shareable_content()?;
     let plan = build_plan(&content, &config, &excluded_windows)?;
     let (tx, rx) = sync_channel::<EncodedFrame>(FRAME_QUEUE);
+    let (recycle_tx, recycle_rx) = sync_channel::<Vec<u8>>(FRAME_QUEUE);
     let (width, height) = (plan.width, plan.height);
     let encoder_flags = Arc::clone(&flags);
     let encoder_temp = temp.clone();
@@ -67,6 +68,7 @@ pub(crate) fn start(
                 width,
                 height,
                 encoder_flags,
+                recycle_tx,
             )
         })
         .map_err(|error| error.to_string())?;
@@ -98,6 +100,7 @@ struct SessionPlan {
     source_rect: Option<CGRect>,
     single_window: bool,
     cursor_space: CursorSpace,
+    window: Option<Retained<SCWindow>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -187,6 +190,7 @@ fn build_plan(
                 height,
                 source_rect: None,
                 single_window: false,
+                window: None,
                 cursor_space: CursorSpace::Screen {
                     frame_x: frame.origin.x,
                     frame_y: frame.origin.y,
@@ -229,6 +233,7 @@ fn build_plan(
                 height,
                 source_rect: Some(source_rect),
                 single_window: false,
+                window: None,
                 cursor_space: CursorSpace::Screen {
                     frame_x: frame.origin.x,
                     frame_y: frame.origin.y,
@@ -254,6 +259,7 @@ fn build_plan(
                 height,
                 source_rect: None,
                 single_window: true,
+                window: Some(window),
                 cursor_space: CursorSpace::Window {
                     origin_x: frame.origin.x,
                     origin_y: frame.origin.y,
@@ -340,6 +346,8 @@ fn capture_session(
         Arc::clone(&flags),
         config.cursor_highlight,
         plan.cursor_space,
+        plan.window,
+        recycle_rx,
     );
     let output_protocol: &ProtocolObject<dyn SCStreamOutput> = ProtocolObject::from_ref(&*output);
     let queue = DispatchQueue::new("io.github.fynhq.capin.record", None);
@@ -434,8 +442,11 @@ struct OutputIvars {
     tx: SyncSender<EncodedFrame>,
     flags: Arc<Flags>,
     timeline: Mutex<FrameTimeline>,
+    first_pts: Mutex<Option<i64>>,
     cursor_highlight: Option<CursorHighlight>,
     cursor_space: CursorSpace,
+    window: Mutex<Option<Retained<SCWindow>>>,
+    recycle: Mutex<std::sync::mpsc::Receiver<Vec<u8>>>,
 }
 
 define_class!(
@@ -471,19 +482,48 @@ define_class!(
             if timeline.next_index() == 0 {
                 ivars.flags.restart_started();
             }
-            let elapsed = ivars.flags.elapsed_active();
+            let pts = unsafe { CMSampleBufferGetPresentationTimeStamp(sample_buffer) };
+            let elapsed = if pts.flags & 1 != 0 && pts.timescale > 0 {
+                let nanos =
+                    (i128::from(pts.value) * 1_000_000_000 / i128::from(pts.timescale)) as i64;
+                let mut first = ivars
+                    .first_pts
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let base = *first.get_or_insert(nanos);
+                Duration::from_nanos((nanos - base).max(0) as u64)
+                    .saturating_sub(ivars.flags.paused_duration())
+            } else {
+                ivars.flags.elapsed_active()
+            };
             let FrameDecision::Encode { index, .. } = timeline.submit(elapsed) else {
                 return;
             };
             drop(timeline);
 
-            let (mut data, width, height) = copy_bgra(&buffer);
+            let reuse = ivars
+                .recycle
+                .lock()
+                .ok()
+                .and_then(|recycle| recycle.try_recv().ok())
+                .unwrap_or_default();
+            let (mut data, width, height) = copy_bgra(&buffer, reuse);
             if data.is_empty() {
                 return;
             }
+            let mut cursor_space = ivars.cursor_space;
+            if let CursorSpace::Window {
+                origin_x, origin_y, ..
+            } = &mut cursor_space
+                && let Ok(guard) = ivars.window.lock()
+                && let Some(window) = guard.as_ref()
+            {
+                let frame = unsafe { window.frame() };
+                *origin_x = frame.origin.x;
+                *origin_y = frame.origin.y;
+            }
             if let Some(highlight) = ivars.cursor_highlight
-                && let Some((cursor_x, cursor_y)) =
-                    ivars.cursor_space.cursor_in_frame(width, height)
+                && let Some((cursor_x, cursor_y)) = cursor_space.cursor_in_frame(width, height)
             {
                 paint_cursor_highlight_bgra(
                     &mut data,
@@ -491,7 +531,7 @@ define_class!(
                     height as u32,
                     cursor_x,
                     cursor_y,
-                    CURSOR_HIGHLIGHT_RADIUS * ivars.cursor_space.dpi(),
+                    CURSOR_HIGHLIGHT_RADIUS * cursor_space.dpi(),
                     highlight.color,
                     CURSOR_HIGHLIGHT_ALPHA,
                 );
@@ -513,13 +553,18 @@ impl ScreenOutput {
         flags: Arc<Flags>,
         cursor_highlight: Option<CursorHighlight>,
         cursor_space: CursorSpace,
+        window: Option<Retained<SCWindow>>,
+        recycle: std::sync::mpsc::Receiver<Vec<u8>>,
     ) -> Retained<Self> {
         let this = Self::alloc().set_ivars(OutputIvars {
             tx,
             flags,
             timeline: Mutex::new(FrameTimeline::new()),
+            first_pts: Mutex::new(None),
             cursor_highlight,
             cursor_space,
+            window: Mutex::new(window),
+            recycle: Mutex::new(recycle),
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -532,7 +577,7 @@ struct EncodedFrame {
     pts_millis: i64,
 }
 
-fn copy_bgra(buffer: &CVPixelBuffer) -> (Vec<u8>, usize, usize) {
+fn copy_bgra(buffer: &CVPixelBuffer, mut reuse: Vec<u8>) -> (Vec<u8>, usize, usize) {
     unsafe {
         if CVPixelBufferLockBaseAddress(buffer, CVPixelBufferLockFlags::empty()) != 0 {
             return (Vec::new(), 0, 0);
@@ -545,18 +590,21 @@ fn copy_bgra(buffer: &CVPixelBuffer) -> (Vec<u8>, usize, usize) {
             CVPixelBufferUnlockBaseAddress(buffer, CVPixelBufferLockFlags::empty());
             return (Vec::new(), 0, 0);
         }
-        let mut data = vec![0u8; width * height * 4];
+        reuse.clear();
+        reuse.resize(width * height * 4, 0);
         for y in 0..height {
             std::ptr::copy_nonoverlapping(
                 base.add(y * row_bytes),
-                data.as_mut_ptr().add(y * width * 4),
+                reuse.as_mut_ptr().add(y * width * 4),
                 width * 4,
             );
         }
         CVPixelBufferUnlockBaseAddress(buffer, CVPixelBufferLockFlags::empty());
-        (data, width, height)
+        (reuse, width, height)
     }
 }
+
+const NO_FRAMES_ERROR: &str = "no frames were captured before the recording stopped";
 
 fn encode_loop(
     temp: &Path,
@@ -565,6 +613,7 @@ fn encode_loop(
     width: usize,
     height: usize,
     flags: Arc<Flags>,
+    recycle_tx: SyncSender<Vec<u8>>,
 ) -> Result<(), String> {
     let result = (|| {
         let mut writer: Option<Writer> = None;
@@ -575,20 +624,24 @@ fn encode_loop(
             if let Some(writer) = writer.as_mut() {
                 writer.append(&frame)?;
             }
+            let _ = recycle_tx.try_send(frame.data);
         }
         let final_pts = flags.elapsed_active().as_millis() as i64;
         let Some(writer) = writer else {
-            return Err("no frames were captured before the recording stopped".to_owned());
+            return Err(NO_FRAMES_ERROR.to_owned());
         };
         writer.finish(final_pts)?;
-        crate::mp4::inject_metadata(temp)
-            .map_err(|error| format!("failed to finalize the recording: {error}"))?;
+        if let Err(error) = crate::mp4::inject_metadata(temp) {
+            flags.warn(format!("recording metadata skipped: {error}"));
+        }
         std::fs::rename(temp, final_output)
             .map_err(|error| format!("failed to publish the recording: {error}"))
     })();
     if let Err(error) = &result {
         let _ = std::fs::remove_file(temp);
-        flags.fail(error.clone());
+        if error != NO_FRAMES_ERROR {
+            flags.fail(error.clone());
+        }
     }
     result
 }

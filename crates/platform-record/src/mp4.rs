@@ -397,6 +397,23 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
+    #[test]
+    fn rejects_non_trailing_moov_without_touching_the_file() {
+        let path = temp_path("non-trailing");
+        let moov = make_box(
+            b"moov",
+            &make_box(b"udta", &make_meta(&update_ilst(&[]).unwrap())),
+        );
+        let mut file = make_box(b"ftyp", b"isom");
+        file.extend_from_slice(&moov);
+        file.extend_from_slice(&make_box(b"mdat", &[7u8; 32]));
+        fs::write(&path, &file).unwrap();
+
+        assert!(inject_metadata(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), file);
+        let _ = fs::remove_file(&path);
+    }
+
     fn xtra_value(moov: &[u8], name: &str) -> Option<String> {
         let udta = child(moov, b"udta")?;
         let udta = &moov[udta.payload_range()];

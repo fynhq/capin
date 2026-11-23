@@ -31,6 +31,7 @@ pub(crate) struct Flags {
     paused: AtomicBool,
     finished: AtomicBool,
     error: Mutex<Option<String>>,
+    warning: Mutex<Option<String>>,
     started: Mutex<Option<Instant>>,
     paused_since: Mutex<Option<Instant>>,
     paused_total: Mutex<Duration>,
@@ -44,6 +45,7 @@ impl Flags {
             paused: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             error: Mutex::new(None),
+            warning: Mutex::new(None),
             started: Mutex::new(None),
             paused_since: Mutex::new(None),
             paused_total: Mutex::new(Duration::ZERO),
@@ -125,6 +127,14 @@ impl Flags {
             *slot = Some(message.into());
         }
         self.finished.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn warn(&self, message: impl Into<String>) {
+        if let Ok(mut slot) = self.warning.lock()
+            && slot.is_none()
+        {
+            *slot = Some(message.into());
+        }
     }
 
     pub(crate) fn finish(&self) {
@@ -259,6 +269,10 @@ impl Recorder {
 
     pub fn error(&self) -> Option<String> {
         self.flags.error.lock().ok().and_then(|slot| slot.clone())
+    }
+
+    pub fn warning(&self) -> Option<String> {
+        self.flags.warning.lock().ok().and_then(|slot| slot.clone())
     }
 
     pub fn elapsed_active(&self) -> Duration {

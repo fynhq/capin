@@ -385,7 +385,16 @@ impl GraphicsCaptureApiHandler for Recorder {
             return Ok(());
         }
 
-        let raw_ticks = frame.timestamp()?.Duration;
+        let raw_ticks = match frame.timestamp() {
+            Ok(timestamp) => timestamp.Duration,
+            Err(error) => {
+                self.flags
+                    .shared
+                    .fail(format!("frame timestamp unavailable: {error}"));
+                capture_control.stop();
+                return Ok(());
+            }
+        };
         let paused_ticks = (self.flags.shared.paused_duration().as_nanos() / 100) as i64;
         let adjusted = raw_ticks.saturating_sub(paused_ticks).max(0);
         let adjusted = Duration::from_nanos((adjusted as u64).saturating_mul(100));
@@ -430,7 +439,16 @@ impl GraphicsCaptureApiHandler for Recorder {
             self.frame_back.resize(frame_len, 0);
         }
 
-        let buffer = frame.buffer_crop(x0, y0, x1, y1)?;
+        let buffer = match frame.buffer_crop(x0, y0, x1, y1) {
+            Ok(buffer) => buffer,
+            Err(error) => {
+                self.flags
+                    .shared
+                    .fail(format!("frame crop failed: {error}"));
+                capture_control.stop();
+                return Ok(());
+            }
+        };
         let mut packed = std::mem::take(&mut self.packed);
         let data = buffer.as_nopadding_buffer(&mut packed);
         if data.len() < frame_len {
@@ -488,8 +506,12 @@ impl GraphicsCaptureApiHandler for Recorder {
         }
 
         let pts = (index as i64).saturating_mul(self.frame_ticks);
-        if let Some(encoder) = self.encoder.as_mut() {
-            encoder.send_frame_buffer(&self.frame_back, pts)?;
+        if let Some(encoder) = self.encoder.as_mut()
+            && let Err(error) = encoder.send_frame_buffer(&self.frame_back, pts)
+        {
+            self.flags.shared.fail(error.to_string());
+            capture_control.stop();
+            return Ok(());
         }
         self.last_pts = pts;
         std::mem::swap(&mut self.frame_front, &mut self.frame_back);
@@ -538,9 +560,7 @@ impl Drop for Recorder {
         if let Err(error) = crate::mp4::inject_metadata(&self.flags.output) {
             self.flags
                 .shared
-                .fail(format!("failed to finalize the recording: {error}"));
-            let _ = std::fs::remove_file(&self.flags.output);
-            return;
+                .warn(format!("recording metadata skipped: {error}"));
         }
 
         if let Err(error) = std::fs::rename(&self.flags.output, &self.flags.final_output) {

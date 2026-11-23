@@ -277,11 +277,16 @@ impl RecordBar {
                 let _ = std::fs::remove_file(&self.output);
                 format!("{}{}", t(self.language, "record.failed"), error)
             }
-            None => format!(
-                "{} {}",
-                t(self.language, "record.saved"),
-                self.output.display()
-            ),
+            None => {
+                if let Some(warning) = recorder.warning() {
+                    crate::logging::log_warn!("record", "{warning}");
+                }
+                format!(
+                    "{} {}",
+                    t(self.language, "record.saved"),
+                    self.output.display()
+                )
+            }
         });
     }
 

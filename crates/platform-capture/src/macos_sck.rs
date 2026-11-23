@@ -111,6 +111,7 @@ fn capture_stream(filter: &SCContentFilter, config: &SCStreamConfiguration) -> R
     unsafe { stream.startCaptureWithCompletionHandler(Some(&start_block)) };
     match start_rx.recv_timeout(Duration::from_secs(10)) {
         Ok(Some(error)) => {
+            stop_stream(&stream);
             return Err(CaptureError::Platform {
                 operation: "SCStream.startCapture",
                 message: error,
@@ -118,6 +119,7 @@ fn capture_stream(filter: &SCContentFilter, config: &SCStreamConfiguration) -> R
         }
         Ok(None) => {}
         Err(_) => {
+            stop_stream(&stream);
             return Err(CaptureError::Platform {
                 operation: "SCStream.startCapture",
                 message: "the stream did not start in time".to_owned(),
@@ -132,16 +134,20 @@ fn capture_stream(filter: &SCContentFilter, config: &SCStreamConfiguration) -> R
             message: "no frame arrived in time".to_owned(),
         });
 
+    stop_stream(&stream);
+    let _ = unsafe {
+        stream.removeStreamOutput_type_error(output_protocol, SCStreamOutputType::Screen)
+    };
+    frame
+}
+
+fn stop_stream(stream: &SCStream) {
     let (stop_tx, stop_rx) = channel::<()>();
     let stop_block = RcBlock::new(move |_error: *mut NSError| {
         let _ = stop_tx.send(());
     });
     unsafe { stream.stopCaptureWithCompletionHandler(Some(&stop_block)) };
     let _ = stop_rx.recv_timeout(Duration::from_secs(5));
-    let _ = unsafe {
-        stream.removeStreamOutput_type_error(output_protocol, SCStreamOutputType::Screen)
-    };
-    frame
 }
 
 struct OutputIvars {
