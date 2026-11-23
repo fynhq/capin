@@ -121,7 +121,7 @@ pub(super) fn toolbar(
             true,
             muted,
             cx,
-            |this, cx| this.start_scroll_capture(cx),
+            export::start_scroll_capture,
         ));
     }
     if capture_actions_enabled {
@@ -132,7 +132,7 @@ pub(super) fn toolbar(
             true,
             muted,
             cx,
-            |this, cx| this.start_recording(cx),
+            export::start_recording,
         ));
     }
 

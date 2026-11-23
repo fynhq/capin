@@ -182,50 +182,6 @@ impl EditorView {
         );
     }
 
-    pub(super) fn start_scroll_capture(&mut self, cx: &mut Context<Self>) {
-        let Some(capture) = self.inline.and_then(|inline| inline.capture) else {
-            return;
-        };
-        if !crate::scroll::supports_target(capture.target) {
-            let language = settings_state::get().language;
-            self.show_status(t(language, "scroll.region_only").to_owned(), cx);
-            return;
-        }
-        self.commit_text(cx);
-        let document = self.action_document();
-        let first_frame = match rasterize(&document, &self.frame) {
-            Ok(frame) => frame,
-            Err(error) => {
-                self.show_status(
-                    format!(
-                        "{}{}",
-                        t(settings_state::get().language, "editor.export_failed"),
-                        error
-                    ),
-                    cx,
-                );
-                return;
-            }
-        };
-        let handles = cx.windows();
-        cx.defer(move |cx| {
-            crate::windows::close_capture_auxiliary(cx, handles);
-            crate::scroll::open_session(capture.region, first_frame, cx);
-        });
-    }
-
-    pub(super) fn start_recording(&mut self, cx: &mut Context<Self>) {
-        let Some(capture) = self.inline.and_then(|inline| inline.capture) else {
-            return;
-        };
-        self.commit_text(cx);
-        let handles = cx.windows();
-        cx.defer(move |cx| {
-            crate::windows::close_capture_auxiliary(cx, handles);
-            crate::record::start(capture.target, cx);
-        });
-    }
-
     pub(crate) fn pin(&mut self, cx: &mut Context<Self>) {
         self.commit_text(cx);
         let inline_host = self.inline;
@@ -322,34 +278,50 @@ impl EditorView {
     }
 
     pub(super) fn export(&mut self, action: ExportAction, cx: &mut Context<Self>) {
-        let started = Instant::now();
         self.commit_text(cx);
+        let copy = matches!(action, ExportAction::Copy);
+        if !copy && self.pin_target.is_some() {
+            self.export_pin_update(cx);
+            return;
+        }
+        if self.export_in_flight {
+            return;
+        }
+        self.export_in_flight = true;
+        let started = Instant::now();
         let language = settings_state::get().language;
         let native_shadow = export_pipeline::pin_native_shadow(self);
-        let copy = matches!(action, ExportAction::Copy);
-        let pin_update = (!copy).then_some(self.pin_target).flatten();
-        let mut messages = Vec::new();
-        let mut copy_ok = false;
-        let mut save_ok = false;
-        let mut pin_ok = false;
-        match export_pipeline::render_export(self, pin_update.is_some()) {
-            Ok(rendered) => {
-                let RenderedExport {
-                    document,
-                    output,
-                    pin_output,
-                    hash,
-                    record_history,
-                    pin_shadow,
-                    scale,
-                    pin_padding,
-                    stored_effects,
-                    pin_shadow_always,
-                } = rendered;
-                if copy {
-                    match image_util::encode_png(&output) {
-                        Ok(bytes) => {
-                            copy_ok = true;
+        let inputs = export_pipeline::export_inputs(self);
+        cx.spawn(async move |this, cx| {
+            let rendered = cx
+                .background_executor()
+                .spawn(async move {
+                    let rendered = export_pipeline::render_inputs(&inputs, false)
+                        .map_err(|error| error.to_string())?;
+                    if copy {
+                        let bytes = image_util::encode_png(&rendered.output)
+                            .map_err(|error| error.to_string())?;
+                        Ok::<_, String>((rendered, Some(bytes), None))
+                    } else {
+                        let path = crate::storage::save_png(&rendered.output)
+                            .map_err(|error| error.to_string())?;
+                        Ok((rendered, None, Some(path)))
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.export_in_flight = false;
+                let (copy_ok, save_ok, message) = match rendered {
+                    Ok((rendered, bytes, path)) => {
+                        let RenderedExport {
+                            output,
+                            hash,
+                            record_history,
+                            pin_shadow,
+                            scale,
+                            ..
+                        } = rendered;
+                        if let Some(bytes) = bytes {
                             if record_history {
                                 crate::capture_history::record_png_bytes(
                                     &bytes,
@@ -360,16 +332,8 @@ impl EditorView {
                                 );
                             }
                             image_util::copy_png_bytes(bytes, &output, cx);
-                            messages.push(t(language, "editor.copied").to_owned());
-                        }
-                        Err(error) => {
-                            messages.push(format!("{}{}", t(language, "editor.copy_failed"), error))
-                        }
-                    }
-                } else if self.pin_target.is_none() {
-                    match crate::storage::save_png(&output) {
-                        Ok(path) => {
-                            save_ok = true;
+                            (true, false, t(language, "editor.copied").to_owned())
+                        } else if let Some(path) = path {
                             if record_history {
                                 crate::capture_history::record_png_file(
                                     &path,
@@ -379,19 +343,60 @@ impl EditorView {
                                     native_shadow,
                                 );
                             }
-                            messages.push(format!(
-                                "{} {}",
-                                t(language, "editor.saved"),
-                                path.display()
-                            ));
+                            (
+                                false,
+                                true,
+                                format!("{} {}", t(language, "editor.saved"), path.display()),
+                            )
+                        } else {
+                            (false, false, String::new())
                         }
-                        Err(error) => messages.push(format!(
-                            "{} {}",
-                            t(language, "editor.save_failed"),
-                            error
-                        )),
                     }
-                } else if let Some(pin_id) = self.pin_target {
+                    Err(error) => {
+                        let key = if copy {
+                            "editor.copy_failed"
+                        } else {
+                            "editor.save_failed"
+                        };
+                        (false, false, format!("{}{}", t(language, key), error))
+                    }
+                };
+                this.show_status(message, cx);
+                let close = copy_ok || save_ok;
+                log_info!(
+                    "editor",
+                    "export finished: action={action:?} duration_ms={} copy_ok={copy_ok} save_ok={save_ok} close={close}",
+                    started.elapsed().as_millis()
+                );
+                if close && this.inline.is_some() {
+                    this.release_images(cx);
+                    let handles = cx.windows();
+                    cx.defer(move |cx| crate::windows::close_capture_auxiliary(cx, handles));
+                } else {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn export_pin_update(&mut self, cx: &mut Context<Self>) {
+        let started = Instant::now();
+        let language = settings_state::get().language;
+        let mut messages = Vec::new();
+        let mut pin_ok = false;
+        match export_pipeline::render_export(self, true) {
+            Ok(RenderedExport {
+                document,
+                output,
+                pin_output,
+                scale,
+                pin_padding,
+                stored_effects,
+                pin_shadow_always,
+                ..
+            }) => {
+                if let Some(pin_id) = self.pin_target {
                     let edit_state = crate::pin::PinEditState::new(
                         self.frame.clone(),
                         document,
@@ -417,19 +422,12 @@ impl EditorView {
             }
         }
         self.show_status(messages.join(" · "), cx);
-        let close = if copy {
-            copy_ok
-        } else if self.pin_target.is_some() {
-            pin_ok
-        } else {
-            save_ok
-        };
         log_info!(
             "editor",
-            "export finished: action={action:?} duration_ms={} copy_ok={copy_ok} save_ok={save_ok} close={close}",
+            "export finished: action=PinUpdate duration_ms={} pin_ok={pin_ok}",
             started.elapsed().as_millis()
         );
-        if close && self.inline.is_some() {
+        if pin_ok && self.inline.is_some() {
             self.release_images(cx);
             let handles = cx.windows();
             cx.defer(move |cx| crate::windows::close_capture_auxiliary(cx, handles));
@@ -437,4 +435,48 @@ impl EditorView {
             cx.notify();
         }
     }
+}
+
+pub(super) fn start_scroll_capture(view: &mut EditorView, cx: &mut Context<EditorView>) {
+    let Some(capture) = view.inline.and_then(|inline| inline.capture) else {
+        return;
+    };
+    if !crate::scroll::supports_target(capture.target) {
+        let language = settings_state::get().language;
+        view.show_status(t(language, "scroll.region_only").to_owned(), cx);
+        return;
+    }
+    view.commit_text(cx);
+    let document = view.action_document();
+    let first_frame = match rasterize(&document, &view.frame) {
+        Ok(frame) => frame,
+        Err(error) => {
+            view.show_status(
+                format!(
+                    "{}{}",
+                    t(settings_state::get().language, "editor.export_failed"),
+                    error
+                ),
+                cx,
+            );
+            return;
+        }
+    };
+    let handles = cx.windows();
+    cx.defer(move |cx| {
+        crate::windows::close_capture_auxiliary(cx, handles);
+        crate::scroll::open_session(capture.region, first_frame, cx);
+    });
+}
+
+pub(super) fn start_recording(view: &mut EditorView, cx: &mut Context<EditorView>) {
+    let Some(capture) = view.inline.and_then(|inline| inline.capture) else {
+        return;
+    };
+    view.commit_text(cx);
+    let handles = cx.windows();
+    cx.defer(move |cx| {
+        crate::windows::close_capture_auxiliary(cx, handles);
+        crate::record::start(capture.target, cx);
+    });
 }

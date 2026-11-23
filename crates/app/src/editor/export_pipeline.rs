@@ -54,20 +54,45 @@ pub(super) fn region_effects_scale(view: &EditorView) -> f32 {
         .max(0.1)
 }
 
-pub(super) fn render_export(
-    view: &EditorView,
+pub(super) struct ExportInputs {
+    pub(super) document: AnnotationDocument,
+    pub(super) frame: Arc<RgbaFrame>,
+    pub(super) effects: RegionEffects,
+    pub(super) effects_active: bool,
+    pub(super) pin_effects: RegionEffects,
+    pub(super) scale: f32,
+    pub(super) record_history: bool,
+    pub(super) pin_shadow_always: bool,
+    pub(super) region_pin: bool,
+}
+
+pub(super) fn export_inputs(view: &EditorView) -> ExportInputs {
+    ExportInputs {
+        document: view.action_document(),
+        frame: view.frame.clone(),
+        effects: view.effects,
+        effects_active: region_effects_active(view),
+        pin_effects: pin_effects(view),
+        scale: region_effects_scale(view),
+        record_history: view.pin_target.is_none(),
+        pin_shadow_always: region_pin(view),
+        region_pin: region_pin(view),
+    }
+}
+
+pub(super) fn render_inputs(
+    inputs: &ExportInputs,
     with_pin_output: bool,
 ) -> Result<RenderedExport, core_annotate::RasterError> {
     let started = Instant::now();
-    let document = view.action_document();
-    let raw = rasterize(&document, &view.frame)?;
-    let scale = region_effects_scale(view);
-    let pin_effects = pin_effects(view);
+    let raw = rasterize(&inputs.document, &inputs.frame)?;
+    let scale = inputs.scale;
+    let pin_effects = inputs.pin_effects;
     let pin_padding = pin_effects.padding(scale);
-    let effects_active = region_effects_active(view);
+    let effects_active = inputs.effects_active;
     let (output, pin_output) = if with_pin_output {
         let copy = if effects_active {
-            view.effects.apply(raw.clone(), scale)
+            inputs.effects.apply(raw.clone(), scale)
         } else {
             raw.clone()
         };
@@ -79,20 +104,18 @@ pub(super) fn render_export(
         (copy, Some(pin))
     } else {
         let copy = if effects_active {
-            view.effects.apply(raw, scale)
+            inputs.effects.apply(raw, scale)
         } else {
             raw
         };
         (copy, None)
     };
     let hash = crate::capture_history::hash_frame(&output);
-    let record_history = view.pin_target.is_none();
-    let pin_shadow = (record_history && region_pin(view) && !view.effects.shadow).then_some(
-        crate::capture_history::HistoryPinShadow {
-            corner_radius: view.effects.corner_radius,
+    let pin_shadow = (inputs.record_history && inputs.region_pin && !inputs.effects.shadow)
+        .then_some(crate::capture_history::HistoryPinShadow {
+            corner_radius: inputs.effects.corner_radius,
             scale,
-        },
-    );
+        });
     log_debug!(
         "editor",
         "render_export with_pin={with_pin_output} duration_ms={} size={}x{}",
@@ -101,15 +124,26 @@ pub(super) fn render_export(
         output.height()
     );
     Ok(RenderedExport {
-        document,
+        document: inputs.document.clone(),
         output,
         pin_output,
         hash,
-        record_history,
+        record_history: inputs.record_history,
         pin_shadow,
         scale,
         pin_padding,
-        stored_effects: stored_region_effects(view),
-        pin_shadow_always: region_pin(view),
+        stored_effects: if effects_active {
+            inputs.effects
+        } else {
+            RegionEffects::default()
+        },
+        pin_shadow_always: inputs.pin_shadow_always,
     })
+}
+
+pub(super) fn render_export(
+    view: &EditorView,
+    with_pin_output: bool,
+) -> Result<RenderedExport, core_annotate::RasterError> {
+    render_inputs(&export_inputs(view), with_pin_output)
 }
