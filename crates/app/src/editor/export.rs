@@ -51,7 +51,7 @@ impl EditorView {
             self.crop_mode = false;
             self.crop_draft = None;
             self.polyline_draft = None;
-            self.region_drag = None;
+            self.region_adjust.cancel();
             self.selection_hover = SelectionHover::None;
             self.document.select(None);
             if let Some(inline) = self.inline.as_mut()

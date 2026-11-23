@@ -15,9 +15,9 @@ use platform_window::{
 use crate::chrome_theme::ChromeTheme;
 use crate::editor_state::{
     BAND_HALF, CropDraft, Draft, EditorSnapshot, EditorState, FullCanvas, HANDLE_HIT, HistoryStep,
-    MoveDraft, PolylineDraft, REGION_HANDLE_SIZE, RegionAdjustDraft, ResizeDraft, ResizeHandle,
-    SELECTION_HANDLE_HALF, TextEdit, annotation_handle_at, distance, finalize_shape, fit_ui_scale,
-    handle_points, normalized_rect,
+    MoveDraft, PolylineDraft, REGION_HANDLE_SIZE, ResizeDraft, ResizeHandle, SELECTION_HANDLE_HALF,
+    TextEdit, annotation_handle_at, distance, finalize_shape, fit_ui_scale, handle_points,
+    normalized_rect,
 };
 use crate::effects::RegionEffects;
 use crate::logging::{log_error, log_info};
@@ -951,7 +951,7 @@ fn finish_pointer_gestures(
     cx: &mut Context<EditorView>,
 ) -> bool {
     let mut changed = false;
-    if view.region_drag.is_some() {
+    if view.region_adjust.draft.is_some() {
         view.finish_region_drag(cx);
         changed = true;
     }

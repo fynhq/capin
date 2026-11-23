@@ -150,13 +150,13 @@ impl EditorView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .when(self.more_open, |button| button.bg(chrome.selected))
+                .when(self.toolbar.more_open, |button| button.bg(chrome.selected))
                 .hover(move |style| style.bg(hover))
                 .active(|style| style.opacity(0.85))
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.more_open = !this.more_open;
-                    this.effects_open = false;
-                    this.hints_visible = false;
+                    this.toolbar.more_open = !this.toolbar.more_open;
+                    this.toolbar.effects_open = false;
+                    this.toolbar.hints_visible = false;
                     cx.notify();
                 }))
                 .child(icons::icon(icons::MORE, 18.0, muted))
@@ -188,7 +188,7 @@ impl EditorView {
 
         let bar_rect = self.toolbar_rect(window);
         let options_rect = self.options_rect(window, bar_rect);
-        let options_panel = (!config_children.is_empty() && !self.toolbar_hidden).then(|| {
+        let options_panel = (!config_children.is_empty() && !self.toolbar.hidden).then(|| {
             let top = f32::from(options_rect.origin.y);
             let offset = if top >= f32::from(bar_rect.origin.y) + f32::from(bar_rect.size.height) {
                 4.0
@@ -227,74 +227,76 @@ impl EditorView {
             .into_any_element()
         });
 
-        let more_panel = (self.more_open && !self.toolbar_hidden && !capture_page).then(|| {
-            let more_rect = self.more_rect(window, bar_rect);
-            let mut panel = div()
-                .id("editor-more-panel")
-                .absolute()
-                .left(more_rect.origin.x)
-                .top(more_rect.origin.y)
-                .w(more_rect.size.width)
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .p(px(5.0))
-                .rounded(px(chrome.radius))
-                .bg(chrome.surface_strong)
-                .border_1()
-                .border_color(border)
-                .shadow(chrome.shadow())
-                .occlude()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|_, _, _, cx| cx.stop_propagation()),
-                )
-                .child(self.more_row(
-                    "editor-more-crop",
-                    icons::CROP,
-                    t(language, "editor.crop"),
-                    cx,
-                    |this, cx| this.toggle_crop(cx),
-                ));
-
-            if self.pin_target.is_some() {
-                panel = panel
+        let more_panel =
+            (self.toolbar.more_open && !self.toolbar.hidden && !capture_page).then(|| {
+                let more_rect = self.more_rect(window, bar_rect);
+                let mut panel = div()
+                    .id("editor-more-panel")
+                    .absolute()
+                    .left(more_rect.origin.x)
+                    .top(more_rect.origin.y)
+                    .w(more_rect.size.width)
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .p(px(5.0))
+                    .rounded(px(chrome.radius))
+                    .bg(chrome.surface_strong)
+                    .border_1()
+                    .border_color(border)
+                    .shadow(chrome.shadow())
+                    .occlude()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                    )
                     .child(self.more_row(
-                        "editor-more-rotate",
-                        icons::ROTATE,
-                        t(language, "editor.rotate"),
+                        "editor-more-crop",
+                        icons::CROP,
+                        t(language, "editor.crop"),
                         cx,
-                        |this, cx| this.rotate_canvas(cx),
-                    ))
-                    .child(self.more_row(
-                        "editor-more-flip-horizontal",
-                        icons::FLIP_H,
-                        t(language, "editor.flip_horizontal"),
-                        cx,
-                        |this, cx| this.flip_canvas(true, cx),
-                    ))
-                    .child(self.more_row(
-                        "editor-more-flip-vertical",
-                        icons::FLIP_V,
-                        t(language, "editor.flip_vertical"),
-                        cx,
-                        |this, cx| this.flip_canvas(false, cx),
+                        |this, cx| this.toggle_crop(cx),
                     ));
-            }
-            let top = f32::from(more_rect.origin.y);
-            let offset = if top >= f32::from(bar_rect.origin.y) + f32::from(bar_rect.size.height) {
-                4.0
-            } else {
-                -4.0
-            };
-            crate::ui::enter_slide_fade(
-                panel.h(more_rect.size.height),
-                "editor-more-enter",
-                top,
-                offset,
-                Duration::from_millis(120),
-            )
-        });
+
+                if self.pin_target.is_some() {
+                    panel = panel
+                        .child(self.more_row(
+                            "editor-more-rotate",
+                            icons::ROTATE,
+                            t(language, "editor.rotate"),
+                            cx,
+                            |this, cx| this.rotate_canvas(cx),
+                        ))
+                        .child(self.more_row(
+                            "editor-more-flip-horizontal",
+                            icons::FLIP_H,
+                            t(language, "editor.flip_horizontal"),
+                            cx,
+                            |this, cx| this.flip_canvas(true, cx),
+                        ))
+                        .child(self.more_row(
+                            "editor-more-flip-vertical",
+                            icons::FLIP_V,
+                            t(language, "editor.flip_vertical"),
+                            cx,
+                            |this, cx| this.flip_canvas(false, cx),
+                        ));
+                }
+                let top = f32::from(more_rect.origin.y);
+                let offset =
+                    if top >= f32::from(bar_rect.origin.y) + f32::from(bar_rect.size.height) {
+                        4.0
+                    } else {
+                        -4.0
+                    };
+                crate::ui::enter_slide_fade(
+                    panel.h(more_rect.size.height),
+                    "editor-more-enter",
+                    top,
+                    offset,
+                    Duration::from_millis(120),
+                )
+            });
 
         let more_panel = more_panel.map(|panel| {
             div()
@@ -305,7 +307,7 @@ impl EditorView {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, _, cx| {
-                        this.more_open = false;
+                        this.toolbar.more_open = false;
                         cx.stop_propagation();
                         cx.notify();
                     }),
@@ -314,7 +316,7 @@ impl EditorView {
                 .into_any_element()
         });
 
-        if self.toolbar_hidden {
+        if self.toolbar.hidden {
             return (div().into_any_element(), None, more_panel);
         }
 
@@ -530,7 +532,7 @@ impl EditorView {
                 swatches.push(swatch.into_any_element());
             }
             let custom_label = t(language, "editor.custom_color").to_owned();
-            let custom_active = self.custom_color_open
+            let custom_active = self.toolbar.custom_color_open
                 || !settings_state::ANNOTATION_COLORS
                     .iter()
                     .any(|(color, _, _)| (palette_color & 0xFFFFFF00) == (color & 0xFFFFFF00));
@@ -557,13 +559,13 @@ impl EditorView {
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.commit_text(cx);
-                        if this.custom_color_open {
+                        if this.toolbar.custom_color_open {
                             this.close_custom_color();
                         } else {
                             this.open_custom_color();
-                            this.more_open = false;
-                            this.effects_open = false;
-                            this.hints_visible = false;
+                            this.toolbar.more_open = false;
+                            this.toolbar.effects_open = false;
+                            this.toolbar.hints_visible = false;
                         }
                         this.status = None;
                         cx.notify();

@@ -26,9 +26,9 @@ impl EditorView {
     }
 
     pub(super) fn toggle_effects_panel(&mut self, cx: &mut Context<Self>) {
-        self.effects_open = !self.effects_open;
-        self.more_open = false;
-        self.hints_visible = false;
+        self.toolbar.effects_open = !self.toolbar.effects_open;
+        self.toolbar.more_open = false;
+        self.toolbar.hints_visible = false;
         cx.notify();
     }
 
@@ -48,12 +48,12 @@ impl EditorView {
     }
 
     pub(super) fn dismiss_effects(&mut self, cx: &mut Context<Self>) {
-        self.effects_open = false;
+        self.toolbar.effects_open = false;
         cx.notify();
     }
 
     pub(super) fn dismiss_hints(&mut self, cx: &mut Context<Self>) {
-        self.hints_visible = false;
+        self.toolbar.hints_visible = false;
         cx.notify();
     }
 }
@@ -162,7 +162,7 @@ impl EditorView {
             .hover(|style| style.bg(self.chrome.hover))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.more_open = false;
+                this.toolbar.more_open = false;
                 action(this, cx);
                 cx.notify();
             }))
@@ -226,7 +226,7 @@ impl EditorView {
                 "editor-info-effects",
                 self.chrome,
                 language,
-                self.effects_open,
+                self.toolbar.effects_open,
                 self.effects.active(),
                 cx,
                 Self::toggle_effects_panel,
@@ -249,7 +249,7 @@ impl EditorView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.effects_open {
+        if !self.toolbar.effects_open {
             return None;
         }
         let rect = self.effects_rect(window)?;
@@ -273,7 +273,7 @@ impl EditorView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.hints_visible {
+        if !self.toolbar.hints_visible {
             return None;
         }
         let language = settings_state::get().language;

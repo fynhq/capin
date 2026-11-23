@@ -72,18 +72,14 @@ impl EditorView {
             && self.polyline_draft.is_none()
             && self.text_edit.is_none()
             && !self.crop_mode
-            && self.region_drag.is_none()
+            && self.region_adjust.draft.is_none()
     }
 
     pub(super) fn begin_region_drag(&mut self, handle: RegionHandle, cx: &mut Context<Self>) {
         let Some((_, rect)) = self.region_capture() else {
             return;
         };
-        self.region_drag = Some(RegionAdjustDraft {
-            handle,
-            original: rect,
-            current: rect,
-        });
+        self.region_adjust.begin(handle, rect);
         self.status = None;
         cx.notify();
     }
@@ -92,7 +88,7 @@ impl EditorView {
         let Some(capture) = self.inline.and_then(|inline| inline.capture) else {
             return;
         };
-        let Some(draft) = self.region_drag.as_ref().copied() else {
+        let Some(draft) = self.region_adjust.draft.as_ref().copied() else {
             return;
         };
         let image_size = if self.full_canvas.is_some() {
@@ -109,14 +105,12 @@ impl EditorView {
             (f32::from(position.y) * scale).round() as i32,
         );
         let rect = resize_rect(draft.original, draft.handle, cursor_point, None, image_size);
-        if let Some(draft) = self.region_drag.as_mut() {
-            draft.current = rect;
-        }
+        self.region_adjust.update(rect);
         cx.notify();
     }
 
     pub(super) fn finish_region_drag(&mut self, cx: &mut Context<Self>) {
-        let Some(draft) = self.region_drag.take() else {
+        let Some(draft) = self.region_adjust.take() else {
             return;
         };
         let Some(capture) = self.inline.and_then(|inline| inline.capture) else {
@@ -232,10 +226,7 @@ impl EditorView {
             self.cancel_polyline(cx);
             return true;
         }
-        if self.more_open || self.effects_open || self.hints_visible {
-            self.more_open = false;
-            self.effects_open = false;
-            self.hints_visible = false;
+        if self.toolbar.close_panels() {
             cx.notify();
             return true;
         }
@@ -665,7 +656,11 @@ impl EditorView {
     }
 
     pub(super) fn apply_custom_color(&mut self, cx: &mut Context<Self>) -> bool {
-        let hex = self.custom_color_buffer.trim().trim_start_matches('#');
+        let hex = self
+            .toolbar
+            .custom_color_buffer
+            .trim()
+            .trim_start_matches('#');
         if hex.len() != 6 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
             return false;
         }

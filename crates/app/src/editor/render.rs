@@ -250,14 +250,14 @@ impl Render for EditorView {
                         return;
                     }
                     if this.document.selected().is_some()
-                        || this.more_open
-                        || this.effects_open
-                        || this.hints_visible
+                        || this.toolbar.more_open
+                        || this.toolbar.effects_open
+                        || this.toolbar.hints_visible
                     {
                         this.select_annotation(None);
-                        this.more_open = false;
-                        this.effects_open = false;
-                        this.hints_visible = false;
+                        this.toolbar.more_open = false;
+                        this.toolbar.effects_open = false;
+                        this.toolbar.hints_visible = false;
                         this.selection_hover = SelectionHover::None;
                         cx.notify();
                     }
@@ -400,7 +400,7 @@ impl Render for EditorView {
                 cx.listener(Self::handle_canvas_mouse_down),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                if this.region_drag.is_some() {
+                if this.region_adjust.draft.is_some() {
                     this.update_region_drag(event.position, cx);
                     return;
                 }
@@ -451,7 +451,7 @@ impl Render for EditorView {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseUpEvent, window, cx| {
-                    if this.region_drag.is_some() {
+                    if this.region_adjust.draft.is_some() {
                         this.finish_region_drag(cx);
                         cx.stop_propagation();
                         return;
@@ -500,7 +500,7 @@ impl Render for EditorView {
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseUpEvent, _window, cx| {
-                    if this.region_drag.is_some() {
+                    if this.region_adjust.draft.is_some() {
                         this.update_region_drag(event.position, cx);
                         this.finish_region_drag(cx);
                     }
@@ -565,7 +565,7 @@ impl Render for EditorView {
                 }
             }))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                if this.region_drag.is_some() {
+                if this.region_adjust.draft.is_some() {
                     this.update_region_drag(event.position, cx);
                 }
             }))
@@ -581,7 +581,7 @@ impl Render for EditorView {
                 }),
             )
             .on_mouse_exit(cx.listener(|this, _event: &MouseExitEvent, _window, cx| {
-                if this.region_drag.is_some() {
+                if this.region_adjust.draft.is_some() {
                     this.finish_region_drag(cx);
                 }
             }))
@@ -625,7 +625,7 @@ impl Render for EditorView {
                         self.image_scale(window) * 100.0
                     ))
             }))
-            .children((inline && self.toolbar_hidden).then(|| {
+            .children((inline && self.toolbar.hidden).then(|| {
                 let language = settings_state::get().language;
                 div()
                     .id("editor-toolbar-recall")
@@ -651,7 +651,7 @@ impl Render for EditorView {
                             .cursor_pointer()
                             .hover(|style| style.bg(self.chrome.hover))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.toolbar_hidden = false;
+                                this.toolbar.hidden = false;
                                 cx.notify();
                             }))
                             .child(format!("{} · Space", t(language, "editor.show_toolbar"))),

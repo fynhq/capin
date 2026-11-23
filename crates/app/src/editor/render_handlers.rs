@@ -184,7 +184,7 @@ impl EditorView {
         let Some(display_point) = self.to_display_point(event.position, window) else {
             return;
         };
-        if self.region_drag.is_some() {
+        if self.region_adjust.draft.is_some() {
             self.finish_region_drag(cx);
         }
         self.cancel_move();
@@ -389,7 +389,7 @@ impl EditorView {
     ) {
         let key = event.keystroke.key.as_str();
         let command = event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
-        if self.custom_color_open {
+        if self.toolbar.custom_color_open {
             match key {
                 "escape" => {
                     self.close_custom_color();
@@ -402,11 +402,11 @@ impl EditorView {
                     }
                 }
                 "backspace" | "delete" => {
-                    if self.custom_color_fresh {
-                        self.custom_color_buffer.clear();
-                        self.custom_color_fresh = false;
+                    if self.toolbar.custom_color_fresh {
+                        self.toolbar.custom_color_buffer.clear();
+                        self.toolbar.custom_color_fresh = false;
                     } else {
-                        self.custom_color_buffer.pop();
+                        self.toolbar.custom_color_buffer.pop();
                     }
                     cx.notify();
                     return;
@@ -417,12 +417,14 @@ impl EditorView {
                 && let Some(ch) = event.keystroke.key.chars().next()
                 && ch.is_ascii_hexdigit()
             {
-                if self.custom_color_fresh {
-                    self.custom_color_buffer.clear();
-                    self.custom_color_fresh = false;
+                if self.toolbar.custom_color_fresh {
+                    self.toolbar.custom_color_buffer.clear();
+                    self.toolbar.custom_color_fresh = false;
                 }
-                if self.custom_color_buffer.len() < 6 {
-                    self.custom_color_buffer.push(ch.to_ascii_lowercase());
+                if self.toolbar.custom_color_buffer.len() < 6 {
+                    self.toolbar
+                        .custom_color_buffer
+                        .push(ch.to_ascii_lowercase());
                 }
                 cx.notify();
                 return;
@@ -539,17 +541,19 @@ impl EditorView {
                 return;
             }
         }
-        if key == "escape" && (self.more_open || self.effects_open || self.hints_visible) {
-            self.more_open = false;
-            self.effects_open = false;
-            self.hints_visible = false;
+        if key == "escape"
+            && (self.toolbar.more_open || self.toolbar.effects_open || self.toolbar.hints_visible)
+        {
+            self.toolbar.more_open = false;
+            self.toolbar.effects_open = false;
+            self.toolbar.hints_visible = false;
             cx.notify();
             return;
         }
         if key == "f1" {
-            self.hints_visible = !self.hints_visible;
-            self.more_open = false;
-            self.effects_open = false;
+            self.toolbar.hints_visible = !self.toolbar.hints_visible;
+            self.toolbar.more_open = false;
+            self.toolbar.effects_open = false;
             cx.notify();
             return;
         }
@@ -558,10 +562,10 @@ impl EditorView {
                 if self.inline.is_some_and(|inline| inline.zoomable) {
                     self.space_down = true;
                 } else {
-                    self.toolbar_hidden = !self.toolbar_hidden;
-                    self.more_open = false;
-                    self.effects_open = false;
-                    self.hints_visible = false;
+                    self.toolbar.hidden = !self.toolbar.hidden;
+                    self.toolbar.more_open = false;
+                    self.toolbar.effects_open = false;
+                    self.toolbar.hints_visible = false;
                 }
             } else {
                 self.space_down = true;
@@ -598,8 +602,8 @@ impl EditorView {
             return;
         }
         if key == "escape" {
-            if self.region_drag.is_some() {
-                self.region_drag = None;
+            if self.region_adjust.draft.is_some() {
+                self.region_adjust.cancel();
                 let scale = self
                     .inline
                     .and_then(|inline| inline.capture)

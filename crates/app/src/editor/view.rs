@@ -54,7 +54,8 @@ impl EditorView {
     }
 
     pub(super) fn live_selection_rect(&self) -> Option<PhysicalRect> {
-        self.region_drag
+        self.region_adjust
+            .draft
             .filter(|_| self.full_canvas.is_some())
             .map(|draft| draft.current)
             .or_else(|| self.full_selection())
@@ -151,13 +152,13 @@ impl EditorView {
         let anchor_bottom = anchor_top + f32::from(anchor.size.height);
         let toolbar_top = f32::from(toolbar.origin.y);
         let toolbar_bottom = toolbar_top + f32::from(toolbar.size.height);
-        let options_visible = self.config_tool().is_some() && !self.toolbar_hidden;
+        let options_visible = self.config_tool().is_some() && !self.toolbar.hidden;
         let options = self.options_rect(window, toolbar);
         let options_top = f32::from(options.origin.y);
         let options_bottom = options_top + f32::from(options.size.height);
         let fits = |top: f32| top >= 8.0 && top + INFO_BAR_HEIGHT <= window_height - 8.0;
         let overlaps_toolbar = |top: f32| {
-            !self.toolbar_hidden && top < toolbar_bottom && top + INFO_BAR_HEIGHT > toolbar_top
+            !self.toolbar.hidden && top < toolbar_bottom && top + INFO_BAR_HEIGHT > toolbar_top
         };
         let above = anchor_top - INFO_BAR_HEIGHT - 8.0;
         let below = anchor_bottom + 8.0;
@@ -243,7 +244,7 @@ impl EditorView {
     }
 
     pub(super) fn custom_color_rect(&self, window: &Window) -> Option<Bounds<Pixels>> {
-        if !self.custom_color_open {
+        if !self.toolbar.custom_color_open {
             return None;
         }
         let toolbar = self.toolbar_rect(window);
@@ -279,13 +280,14 @@ impl EditorView {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.custom_color_open || self.toolbar_hidden {
+        if !self.toolbar.custom_color_open || self.toolbar.hidden {
             return None;
         }
         let rect = self.custom_color_rect(window)?;
         let language = settings_state::get().language;
         let palette_color = self.palette_color();
         let preview_rgb = self
+            .toolbar
             .custom_color_buffer
             .trim()
             .trim_start_matches('#')
@@ -315,8 +317,8 @@ impl EditorView {
                     .hover(|style| style.opacity(0.85))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.apply_color((hue_color << 8) | 0xFF);
-                        this.custom_color_buffer = format!("{hue_color:06x}");
-                        this.custom_color_fresh = false;
+                        this.toolbar.custom_color_buffer = format!("{hue_color:06x}");
+                        this.toolbar.custom_color_fresh = false;
                         this.status = None;
                         cx.notify();
                     })),
@@ -379,10 +381,10 @@ impl EditorView {
                                     div().flex().flex_row().items_center().gap(px(1.0)).child(
                                         format!(
                                             "#{}",
-                                            self.custom_color_buffer.to_ascii_uppercase()
+                                            self.toolbar.custom_color_buffer.to_ascii_uppercase()
                                         ),
                                     );
-                                if !self.custom_color_fresh {
+                                if !self.toolbar.custom_color_fresh {
                                     row = row.child(
                                         div()
                                             .w(px(1.0))

@@ -3,6 +3,10 @@ use std::ops::Range;
 use core_annotate::{AnnotationDocument, AnnotationStyle, Shape, TextAlignment};
 use core_types::{PhysicalPoint, PhysicalRect, PhysicalSize};
 
+mod ui_state;
+
+pub(crate) use ui_state::{RegionAdjuster, ToolbarState};
+
 use crate::effects::RegionEffects;
 use crate::settings_state::{self, AnnotationColorTool};
 
@@ -110,13 +114,6 @@ pub(crate) enum RegionHandle {
     NorthWest,
     SouthEast,
     SouthWest,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct RegionAdjustDraft {
-    pub(crate) handle: RegionHandle,
-    pub(crate) original: PhysicalRect,
-    pub(crate) current: PhysicalRect,
 }
 
 #[derive(Clone, Copy)]
@@ -348,18 +345,12 @@ pub(crate) struct EditorState {
     pub(crate) undo: Vec<HistoryEntry>,
     pub(crate) redo: Vec<HistoryEntry>,
     pub(crate) annotation_clipboard: Option<core_annotate::Annotation>,
-    pub(crate) custom_color_open: bool,
-    pub(crate) custom_color_buffer: String,
-    pub(crate) custom_color_fresh: bool,
+    pub(crate) toolbar: ToolbarState,
     pub(crate) text_edit: Option<TextEdit>,
     pub(crate) effects: RegionEffects,
-    pub(crate) effects_open: bool,
-    pub(crate) more_open: bool,
-    pub(crate) toolbar_hidden: bool,
-    pub(crate) hints_visible: bool,
     pub(crate) status: Option<String>,
     pub(crate) status_serial: u64,
-    pub(crate) region_drag: Option<RegionAdjustDraft>,
+    pub(crate) region_adjust: RegionAdjuster,
     pub(crate) full_canvas: Option<FullCanvas>,
 }
 
@@ -407,18 +398,12 @@ impl EditorState {
             undo: Vec::new(),
             redo: Vec::new(),
             annotation_clipboard: None,
-            custom_color_open: false,
-            custom_color_buffer: String::new(),
-            custom_color_fresh: false,
+            toolbar: ToolbarState::default(),
             text_edit: None,
             effects: RegionEffects::default(),
-            effects_open: false,
-            more_open: false,
-            toolbar_hidden: false,
-            hints_visible: false,
             status: None,
             status_serial: 0,
-            region_drag: None,
+            region_adjust: RegionAdjuster::default(),
             full_canvas: None,
         }
     }
@@ -539,14 +524,15 @@ impl EditorState {
     }
 
     pub(crate) fn open_custom_color(&mut self) {
-        self.custom_color_buffer = format!("{:06x}", (self.palette_color() >> 8) & 0x00FF_FFFF);
-        self.custom_color_fresh = true;
-        self.custom_color_open = true;
+        self.toolbar.custom_color_buffer =
+            format!("{:06x}", (self.palette_color() >> 8) & 0x00FF_FFFF);
+        self.toolbar.custom_color_fresh = true;
+        self.toolbar.custom_color_open = true;
     }
 
     pub(crate) fn close_custom_color(&mut self) {
-        self.custom_color_open = false;
-        self.custom_color_fresh = false;
+        self.toolbar.custom_color_open = false;
+        self.toolbar.custom_color_fresh = false;
     }
 
     pub(crate) fn apply_stroke_width(&mut self, width: f32) {
