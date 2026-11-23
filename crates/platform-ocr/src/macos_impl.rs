@@ -13,15 +13,14 @@ use crate::{OcrChar, OcrError, OcrLine, build_line};
 const MAX_VISION_CHARS: usize = 1024;
 
 pub(super) fn recognize_text(frame: Arc<RgbaFrame>) -> Result<Vec<OcrLine>, OcrError> {
-    let image = image::RgbaImage::from_raw(
-        frame.width(),
-        frame.height(),
-        frame.packed_pixels().into_owned(),
-    )
-    .ok_or_else(|| OcrError::Platform("invalid image buffer".to_owned()))?;
     let mut png = Vec::new();
-    image
-        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(
+            &frame.packed_pixels(),
+            frame.width(),
+            frame.height(),
+            image::ExtendedColorType::Rgba8,
+        )
         .map_err(|error| OcrError::Platform(error.to_string()))?;
 
     let data = NSData::with_bytes(&png);

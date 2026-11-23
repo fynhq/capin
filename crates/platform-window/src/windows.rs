@@ -4,25 +4,19 @@ use std::path::PathBuf;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::POINT as ScreenPoint;
-use windows::Win32::Foundation::{COLORREF, GlobalFree, HANDLE, HWND, POINT, RECT};
+use windows::Win32::Foundation::{COLORREF, GlobalFree, HANDLE, HWND, RECT};
 use windows::Win32::Graphics::Dwm::{
     DWM_WINDOW_CORNER_PREFERENCE, DWMNCRENDERINGPOLICY, DWMNCRP_DISABLED, DWMNCRP_ENABLED,
     DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
     DWMWCP_DONOTROUND, DwmSetWindowAttribute,
 };
-use windows::Win32::Graphics::Gdi::{
-    ClientToScreen, GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromWindow,
-};
+use windows::Win32::Graphics::Gdi::{ClientToScreen, MONITOR_DEFAULTTONEAREST, MonitorFromWindow};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
-};
 use windows::Win32::UI::Shell::{
     FOLDERID_Pictures, FOLDERID_Videos, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
 };
@@ -30,11 +24,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetCursorPos, GetWindowLongPtrW, GetWindowRect,
     HWND_TOPMOST, IDC_ARROW, LWA_ALPHA, LoadCursorW, SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetCursor, SetForegroundWindow,
-    SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos,
-    SystemParametersInfoW, WDA_EXCLUDEFROMCAPTURE, WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
-    WS_THICKFRAME, WindowFromPoint,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetCursor, SetLayeredWindowAttributes,
+    SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, SystemParametersInfoW,
+    WDA_EXCLUDEFROMCAPTURE, WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
 };
 use windows::core::GUID;
 
@@ -529,48 +522,4 @@ pub(super) fn enable_native_shadow(window: &impl HasWindowHandle) {
             SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
     }
-}
-
-pub(super) fn scroll_wheel_at(monitor: u64, x: i32, y: i32, notches: i32) -> bool {
-    if notches == 0 {
-        return true;
-    }
-    let mut info = MONITORINFO {
-        cbSize: size_of::<MONITORINFO>() as u32,
-        ..Default::default()
-    };
-    // SAFETY: the monitor handle comes from the same process that enumerated
-    // it; GetMonitorInfoW only writes into the provided structure.
-    if !unsafe { GetMonitorInfoW(HMONITOR(monitor as usize as *mut c_void), &mut info) }.as_bool() {
-        return false;
-    }
-    let screen_x = info.rcMonitor.left + x;
-    let screen_y = info.rcMonitor.top + y;
-    // SAFETY: the point is supplied by the caller and Query APIs do not retain it.
-    let target = unsafe {
-        WindowFromPoint(POINT {
-            x: screen_x,
-            y: screen_y,
-        })
-    };
-    if target.0.is_null() {
-        return false;
-    }
-    // SAFETY: target is a live window handle returned by WindowFromPoint.
-    unsafe {
-        let _ = SetForegroundWindow(target);
-    }
-
-    let input = INPUT {
-        r#type: INPUT_MOUSE,
-        Anonymous: INPUT_0 {
-            mi: MOUSEINPUT {
-                mouseData: notches.saturating_mul(120) as u32,
-                dwFlags: MOUSEEVENTF_WHEEL,
-                ..Default::default()
-            },
-        },
-    };
-    // SAFETY: input is a fully initialized INPUT for a wheel event.
-    unsafe { SendInput(&[input], size_of::<INPUT>() as i32) == 1 }
 }

@@ -112,8 +112,7 @@ fn recognize_with_paddle(image: &image::DynamicImage) -> Option<Result<Vec<OcrLi
     let (source, scale_x, scale_y) = if tiled {
         (std::borrow::Cow::Borrowed(image), 1.0, 1.0)
     } else {
-        let (scaled, scale_x, scale_y) = paddle_source(image);
-        (std::borrow::Cow::Owned(scaled), scale_x, scale_y)
+        paddle_source(image)
     };
     let Ok(engine) = engine.lock() else {
         return None;
@@ -355,17 +354,19 @@ fn paddle_upscale(width: u32, height: u32) -> f32 {
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-fn paddle_source(image: &image::DynamicImage) -> (image::DynamicImage, f32, f32) {
+fn paddle_source(
+    image: &image::DynamicImage,
+) -> (std::borrow::Cow<'_, image::DynamicImage>, f32, f32) {
     let upscale = paddle_upscale(image.width(), image.height());
     if upscale <= 1.0 {
-        return (image.clone(), 1.0, 1.0);
+        return (std::borrow::Cow::Borrowed(image), 1.0, 1.0);
     }
     let width = ((image.width() as f32 * upscale).round() as u32).max(1);
     let height = ((image.height() as f32 * upscale).round() as u32).max(1);
     let resized =
         image::imageops::resize(image, width, height, image::imageops::FilterType::Lanczos3);
     (
-        image::DynamicImage::ImageRgba8(resized),
+        std::borrow::Cow::Owned(image::DynamicImage::ImageRgba8(resized)),
         image.width() as f32 / width as f32,
         image.height() as f32 / height as f32,
     )
@@ -390,9 +391,9 @@ fn mean_rgba_luma(rgba: &image::RgbaImage) -> f32 {
         .as_chunks::<4>()
         .0
         .iter()
-        .map(|p| u64::from(p[0]) * 299 + u64::from(p[1]) * 587 + u64::from(p[2]) * 114)
+        .map(|p| u64::from(core_types::luma8(p[0], p[1], p[2])))
         .sum::<u64>();
-    total as f32 / (pixels as f32 * 1000.0)
+    total as f32 / pixels as f32
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]

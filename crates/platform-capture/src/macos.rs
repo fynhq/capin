@@ -905,7 +905,7 @@ fn image_to_frame(image: &CGImage) -> Result<RgbaFrame> {
         image,
     );
     let mut pixels = context.data().to_vec();
-    unpremultiply(&mut pixels);
+    core_types::unpremultiply_rgba(&mut pixels);
     Ok(RgbaFrame::from_pixels(
         u32::try_from(width).unwrap_or(0),
         u32::try_from(height).unwrap_or(0),
@@ -936,19 +936,6 @@ fn crop(frame: &RgbaFrame, region: PhysicalRect) -> Result<RgbaFrame> {
         region.size.height,
         pixels,
     )?)
-}
-
-fn unpremultiply(pixels: &mut [u8]) {
-    for pixel in pixels.as_chunks_mut::<4>().0 {
-        let alpha = u32::from(pixel[3]);
-        if alpha == 0 {
-            pixel.fill(0);
-        } else if alpha < 255 {
-            for channel in &mut pixel[..3] {
-                *channel = ((u32::from(*channel) * 255) / alpha).min(255) as u8;
-            }
-        }
-    }
 }
 
 fn ensure_permission() -> Result<()> {

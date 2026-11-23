@@ -316,8 +316,13 @@ impl Stitcher {
         let row_bytes = (self.width as usize).saturating_mul(4).max(1);
         let samples = self.samples as usize;
         let overhead = 512 * samples;
-        let rows_by_bytes =
-            self.config.max_bytes.saturating_sub(overhead) / (row_bytes + samples).max(1);
+        let footer_reserve = 256 * row_bytes;
+        let rows_by_bytes = self
+            .config
+            .max_bytes
+            .saturating_sub(overhead)
+            .saturating_sub(footer_reserve)
+            / (row_bytes + samples).max(1);
         self.config
             .max_height
             .min(rows_by_bytes.max(1).min(u32::MAX as usize) as u32)
@@ -664,11 +669,7 @@ fn row_signatures(pixels: &[u8], stride: usize, width: u32, rows: u32, samples: 
                 (sample as u32 * (width - 1) / (samples as u32 - 1)).min(width - 1)
             };
             let index = row_start + x as usize * BYTES_PER_PIXEL;
-            let luminance = (u32::from(pixels[index]) * 299
-                + u32::from(pixels[index + 1]) * 587
-                + u32::from(pixels[index + 2]) * 114)
-                / 1000;
-            *slot = luminance as u8;
+            *slot = core_types::luma8(pixels[index], pixels[index + 1], pixels[index + 2]);
         }
     }
     signatures
@@ -991,7 +992,7 @@ mod tests {
             64,
             StitchConfig {
                 max_height: 10_000,
-                max_bytes: (64 * 4 + 48) * 70 + 512 * 48,
+                max_bytes: (64 * 4 + 48) * 70 + 512 * 48 + 256 * 64 * 4,
                 ..Default::default()
             },
         )
@@ -1017,7 +1018,7 @@ mod tests {
     fn capacity_never_exceeds_the_byte_budget() {
         let width = 32u32;
         let row_bytes = width as usize * 4;
-        let max_bytes = (row_bytes + 32) * 500 + 512 * 32;
+        let max_bytes = (row_bytes + 32) * 500 + 512 * 32 + 256 * row_bytes;
         let mut stitches = Stitcher::new(
             width,
             StitchConfig {

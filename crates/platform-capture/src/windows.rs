@@ -581,7 +581,6 @@ pub struct MonitorStream {
 struct StreamShared {
     request: AtomicBool,
     frame: Mutex<Option<RawFrame>>,
-    last_copy: Mutex<Option<Instant>>,
     error: Mutex<Option<String>>,
 }
 
@@ -605,22 +604,13 @@ impl GraphicsCaptureApiHandler for StreamHandler {
         _capture_control: InternalCaptureControl,
     ) -> std::result::Result<(), Self::Error> {
         let requested = self.shared.request.swap(false, Ordering::AcqRel);
-        let due = self
-            .shared
-            .last_copy
-            .lock()
-            .map(|last| last.is_none_or(|last| last.elapsed() >= Duration::from_millis(200)))
-            .unwrap_or(false);
-        if !requested && !due {
+        if !requested {
             return Ok(());
         }
         match read_frame(frame, None) {
             Ok(raw) => {
                 if let Ok(mut slot) = self.shared.frame.lock() {
                     *slot = Some(raw);
-                }
-                if let Ok(mut last) = self.shared.last_copy.lock() {
-                    *last = Some(Instant::now());
                 }
             }
             Err(error) => {
@@ -639,7 +629,6 @@ impl MonitorStream {
         let shared = Arc::new(StreamShared {
             request: AtomicBool::new(false),
             frame: Mutex::new(None),
-            last_copy: Mutex::new(None),
             error: Mutex::new(None),
         });
         let settings = Settings::new(

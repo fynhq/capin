@@ -422,19 +422,3 @@ pub fn apply(window: &impl HasWindowHandle, style: WindowStyle) -> Result<(), Pl
         Err(PlatformWindowError::UnsupportedPlatform)
     }
 }
-
-pub fn scroll_wheel_at(monitor: u64, x: i32, y: i32, notches: i32) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        windows::scroll_wheel_at(monitor, x, y, notches)
-    }
-    #[cfg(target_os = "macos")]
-    {
-        macos::scroll_wheel_at(monitor, x, y, notches)
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        let _ = (monitor, x, y, notches);
-        false
-    }
-}

@@ -593,10 +593,7 @@ fn decode_qr(frame: &RgbaFrame) -> Vec<String> {
     let mut gray = image::GrayImage::new(frame.width(), frame.height());
     let packed = frame.packed_pixels();
     for (target, source) in gray.pixels_mut().zip(packed.as_ref().as_chunks::<4>().0) {
-        let luminance =
-            (u32::from(source[0]) * 299 + u32::from(source[1]) * 587 + u32::from(source[2]) * 114)
-                / 1000;
-        *target = image::Luma([luminance as u8]);
+        *target = image::Luma([core_types::luma8(source[0], source[1], source[2])]);
     }
 
     const QR_MAX_EDGE: u32 = 2048;
