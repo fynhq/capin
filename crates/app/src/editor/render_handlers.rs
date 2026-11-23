@@ -73,10 +73,8 @@ impl EditorView {
                         } else {
                             rgb(0xFFFFFF)
                         };
-                        let offset = (((annotation.style.stroke_width * 0.6).max(1.0).round()
-                            as f32)
-                            * scale)
-                            .max(1.0) as i32;
+                        let stroke_offset = (annotation.style.stroke_width * 0.6).max(1.0).round();
+                        let offset = (stroke_offset * scale).max(1.0) as i32;
                         for (dx, dy) in [
                             (-offset, 0),
                             (offset, 0),

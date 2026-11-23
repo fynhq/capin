@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use core_types::{PhysicalRect, RgbaFrame};
+use image::ImageEncoder;
 use objc2::{AnyThread, ClassType};
 use objc2_foundation::{NSArray, NSData, NSDictionary, NSRange};
 use objc2_vision::{

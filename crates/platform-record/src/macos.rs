@@ -74,7 +74,7 @@ pub(crate) fn start(
         .map_err(|error| error.to_string())?;
 
     let session_flags = Arc::clone(&flags);
-    let result = capture_session(&config, &plan, session_flags, tx);
+    let result = capture_session(&config, &plan, session_flags, tx, recycle_rx);
     let encoded = match encoder.join() {
         Ok(result) => result,
         Err(_) => Err("the recording encoder thread panicked".to_owned()),
@@ -329,6 +329,7 @@ fn capture_session(
     plan: &SessionPlan,
     flags: Arc<Flags>,
     tx: SyncSender<EncodedFrame>,
+    recycle_rx: std::sync::mpsc::Receiver<Vec<u8>>,
 ) -> Result<(), String> {
     let stream_config = build_stream_config(config, plan);
 
@@ -346,7 +347,7 @@ fn capture_session(
         Arc::clone(&flags),
         config.cursor_highlight,
         plan.cursor_space,
-        plan.window,
+        plan.window.clone(),
         recycle_rx,
     );
     let output_protocol: &ProtocolObject<dyn SCStreamOutput> = ProtocolObject::from_ref(&*output);
@@ -483,7 +484,7 @@ define_class!(
                 ivars.flags.restart_started();
             }
             let pts = unsafe { CMSampleBufferGetPresentationTimeStamp(sample_buffer) };
-            let elapsed = if pts.flags & 1 != 0 && pts.timescale > 0 {
+            let elapsed = if pts.flags.0 & 1 != 0 && pts.timescale > 0 {
                 let nanos =
                     (i128::from(pts.value) * 1_000_000_000 / i128::from(pts.timescale)) as i64;
                 let mut first = ivars
