@@ -288,8 +288,10 @@ fn update_ilst(payload: &[u8]) -> Result<Vec<u8>, String> {
     let mut seen = Vec::new();
     for item in &items {
         if let Some((_, value)) = TAGS.iter().find(|(kind, _)| *kind == item.kind) {
-            rebuilt.extend_from_slice(&make_item(item.kind, value));
-            seen.push(item.kind);
+            if !seen.contains(&item.kind) {
+                rebuilt.extend_from_slice(&make_item(item.kind, value));
+                seen.push(item.kind);
+            }
         } else {
             rebuilt.extend_from_slice(&payload[item.start..item.start + item.size]);
         }
@@ -394,6 +396,39 @@ mod tests {
         let moov = &patched[moov_box.payload_range()];
         assert_eq!(tag_value(moov, TAG_ENCODER).as_deref(), Some(ENCODER));
         assert_eq!(tag_value(moov, TAG_URL).as_deref(), Some(PROJECT_URL));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn duplicate_tags_are_collapsed_during_injection() {
+        let path = temp_path("duplicate-tags");
+        let mut ilst = make_item(TAG_ENCODER, "old-encoder");
+        ilst.extend_from_slice(&make_item(TAG_ENCODER, "older-encoder"));
+        ilst.extend_from_slice(&make_item(TAG_URL, PROJECT_URL));
+        let moov = make_box(
+            b"moov",
+            &make_box(b"udta", &make_meta(&make_box(b"ilst", &ilst))),
+        );
+        let mut file = make_box(b"ftyp", b"isom");
+        file.extend_from_slice(&make_box(b"mdat", &[7u8; 32]));
+        file.extend_from_slice(&moov);
+        fs::write(&path, &file).unwrap();
+
+        inject_metadata(&path).unwrap();
+        let patched = fs::read(&path).unwrap();
+        let boxes = parse_boxes(&patched).unwrap();
+        let moov_box = boxes.last().unwrap();
+        let moov = &patched[moov_box.payload_range()];
+        assert_eq!(tag_value(moov, TAG_ENCODER).as_deref(), Some(ENCODER));
+        let udta = child(moov, b"udta").unwrap();
+        let udta = &moov[udta.payload_range()];
+        let meta = child(udta, b"meta").unwrap();
+        let meta = &udta[meta.payload_range()];
+        let ilst_span = child(meta.get(4..).unwrap(), b"ilst").unwrap();
+        let ilst = &meta[4 + ilst_span.start..4 + ilst_span.start + ilst_span.size];
+        let items = parse_boxes(&ilst[ilst_span.header..]).unwrap();
+        let encoder_count = items.iter().filter(|item| item.kind == TAG_ENCODER).count();
+        assert_eq!(encoder_count, 1);
         let _ = fs::remove_file(&path);
     }
 
