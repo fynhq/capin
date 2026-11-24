@@ -59,6 +59,7 @@ fn main() {
         .with_quit_mode(gpui_kit::QuitMode::Explicit)
         .run(|cx| {
             gpui_kit::init(cx);
+            overlay::init(cx);
             cx.set_reduce_motion(platform_window::reduce_motion());
             platform_window::set_macos_accessory_activation_policy();
             #[cfg(target_os = "macos")]

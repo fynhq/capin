@@ -1,8 +1,8 @@
 use std::time::{Duration, Instant};
 
-use gpui_kit::{ScrollDelta, TouchPhase};
+use gpui_kit::{Context, ScrollDelta, TouchPhase, Window};
 
-use super::OverlayView;
+use super::{NarrowTarget, OverlayView, WidenTarget};
 
 const ELEMENT_SCROLL_STEP: f32 = 64.0;
 const ELEMENT_SCROLL_COOLDOWN: Duration = Duration::from_millis(120);
@@ -18,6 +18,35 @@ pub(super) struct ElementScroll {
 }
 
 impl OverlayView {
+    pub(super) fn on_widen_target(
+        &mut self,
+        _: &WidenTarget,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.adjust_tab_target(1.0, cx);
+    }
+
+    pub(super) fn on_narrow_target(
+        &mut self,
+        _: &NarrowTarget,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.adjust_tab_target(-1.0, cx);
+    }
+
+    fn adjust_tab_target(&mut self, direction: f32, cx: &mut Context<Self>) {
+        if let Some(selected) = self.selected.as_ref() {
+            if selected.edit.is_some() {
+                self.next_edit_field(cx);
+            }
+            return;
+        }
+        self.adjust_auto_target(direction);
+        cx.notify();
+    }
+
     pub(super) fn adjust_auto_target(&mut self, delta: f32) {
         if delta == 0.0 || self.session.has_drag() {
             return;

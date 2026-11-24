@@ -58,8 +58,19 @@ const SELECTION_TOOLBAR_WIDTH: f32 = 560.0;
 const HANDLE_SIZE: f32 = 9.0;
 const REGION_GAP: f32 = 8.0;
 
+const OVERLAY_KEY_CONTEXT: &str = "Overlay";
+
+gpui_kit::actions!([WidenTarget, NarrowTarget]);
+
 thread_local! {
     static RETURN_APP_PID: Cell<Option<i32>> = const { Cell::new(None) };
+}
+
+pub fn init(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("tab", WidenTarget, Some(OVERLAY_KEY_CONTEXT)),
+        KeyBinding::new("shift-tab", NarrowTarget, Some(OVERLAY_KEY_CONTEXT)),
+    ]);
 }
 
 pub fn has_open_overlays() -> bool {
@@ -1047,6 +1058,9 @@ impl OverlayView {
             .size_full()
             .cursor(self.cursor_style)
             .track_focus(&self.focus_handle)
+            .key_context(OVERLAY_KEY_CONTEXT)
+            .on_action(cx.listener(Self::on_widen_target))
+            .on_action(cx.listener(Self::on_narrow_target))
             .on_modifiers_changed(cx.listener(
                 |this, event: &ModifiersChangedEvent, _window, cx| {
                     let shift = event.modifiers.shift;
@@ -1080,10 +1094,6 @@ impl OverlayView {
                             }
                             "enter" => {
                                 this.commit_edit(cx);
-                                return;
-                            }
-                            "tab" => {
-                                this.next_edit_field(cx);
                                 return;
                             }
                             "backspace" | "delete" => {
@@ -1191,16 +1201,6 @@ impl OverlayView {
                     this.screen_targeting = false;
                     this.session.cancel();
                     this.close_overlays(cx);
-                    return;
-                }
-                if key == "tab" {
-                    let direction = if event.keystroke.modifiers.shift {
-                        -1.0
-                    } else {
-                        1.0
-                    };
-                    this.adjust_auto_target(direction);
-                    cx.notify();
                     return;
                 }
                 if key.eq_ignore_ascii_case("r") {
