@@ -44,6 +44,7 @@ objc2-vision = { version = "0.3.2", default-features = false, features = [
     "VNRecognizeTextRequest",
     "VNRequest",
     "VNRequestHandler",
+    "VNTypes",
     "objc2-core-foundation",
     "objc2-core-video",
     "objc2-image-io",
