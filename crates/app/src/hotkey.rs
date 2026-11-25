@@ -8,7 +8,6 @@ mod imp {
     use global_hotkey::hotkey::{Code, HotKey, Modifiers};
     use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
     use gpui_kit::*;
-    use platform_window::ForegroundInfo;
 
     use crate::logging::{log_error, log_info, log_warn};
     use crate::settings_state;
@@ -34,32 +33,8 @@ mod imp {
         static SUSPENDED: Cell<bool> = const { Cell::new(false) };
     }
 
-    fn app_listed(list: &str, name: Option<&str>) -> bool {
-        let Some(name) = name else {
-            return false;
-        };
-        list.split([',', '|', ';'])
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-            .any(|entry| entry.eq_ignore_ascii_case(name))
-    }
-
-    fn yield_wanted() -> bool {
-        let settings = settings_state::get();
-        let fullscreen = settings.yield_hotkeys_fullscreen;
-        let apps = settings.yield_hotkey_apps.as_str();
-        if !fullscreen && apps.trim().is_empty() {
-            return false;
-        }
-        let ForegroundInfo {
-            covers_monitor,
-            process_name,
-        } = platform_window::foreground_info();
-        (fullscreen && covers_monitor) || app_listed(apps, process_name.as_deref())
-    }
-
     fn sync_suspension() {
-        let wanted = SETTINGS_RECORDING.with(Cell::get) || yield_wanted();
+        let wanted = SETTINGS_RECORDING.with(Cell::get);
         if wanted == SUSPENDED.with(Cell::get) {
             return;
         }
@@ -98,10 +73,6 @@ mod imp {
 
     pub fn set_settings_recording(enabled: bool) {
         SETTINGS_RECORDING.with(|recording| recording.set(enabled));
-        sync_suspension();
-    }
-
-    pub fn refresh_yield() {
         sync_suspension();
     }
 
@@ -252,10 +223,7 @@ mod imp {
                     .await;
                 match id {
                     Some(id) => cx.update(|cx| handle_event(id, cx)),
-                    None => cx.update(|cx| {
-                        sync_through_escape(cx);
-                        sync_suspension();
-                    }),
+                    None => cx.update(|cx| sync_through_escape(cx)),
                 }
             }
         })
@@ -501,7 +469,7 @@ mod imp {
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub use imp::{
-    display_hotkey, install, refresh, refresh_yield, registration_error, set_recording_shortcuts,
+    display_hotkey, install, refresh, registration_error, set_recording_shortcuts,
     set_settings_recording, shortcut_from_key,
 };
 
@@ -541,6 +509,3 @@ pub fn set_recording_shortcuts(_enabled: bool) -> bool {
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn set_settings_recording(_enabled: bool) {}
-
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-pub fn refresh_yield() {}

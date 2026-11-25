@@ -210,8 +210,6 @@ pub struct AppSettings {
     pub record_cursor_highlight_color: u32,
     pub capture_hotkey: String,
     pub pin_hotkey: String,
-    pub yield_hotkeys_fullscreen: bool,
-    pub yield_hotkey_apps: String,
     pub repeat_pin: RepeatPinBehavior,
     pub screenshot_dir: Option<PathBuf>,
     pub recording_dir: Option<PathBuf>,
@@ -278,8 +276,6 @@ impl Default for AppSettings {
             record_cursor_highlight_color: RECORD_HIGHLIGHT_COLORS[0],
             capture_hotkey: DEFAULT_CAPTURE_HOTKEY.to_owned(),
             pin_hotkey: DEFAULT_PIN_HOTKEY.to_owned(),
-            yield_hotkeys_fullscreen: false,
-            yield_hotkey_apps: String::new(),
             repeat_pin: RepeatPinBehavior::RestoreHistory,
             screenshot_dir: None,
             recording_dir: None,
@@ -354,16 +350,6 @@ static FIELDS: &[Field] = &[
         key: "pin_hotkey",
         write: |settings, out| out.push_str(&settings.pin_hotkey),
         read: |settings, value| settings.pin_hotkey = value.to_owned(),
-    },
-    Field {
-        key: "yield_hotkeys_fullscreen",
-        write: |settings, out| write_bool(out, settings.yield_hotkeys_fullscreen),
-        read: |settings, value| settings.yield_hotkeys_fullscreen = read_bool_true(value),
-    },
-    Field {
-        key: "yield_hotkey_apps",
-        write: |settings, out| out.push_str(&sanitize_yield_apps(&settings.yield_hotkey_apps)),
-        read: |settings, value| settings.yield_hotkey_apps = sanitize_yield_apps(value),
     },
     Field {
         key: "screenshot_dir",
@@ -641,19 +627,6 @@ static FIELDS: &[Field] = &[
         },
     },
 ];
-
-pub(crate) fn sanitize_yield_apps(value: &str) -> String {
-    value
-        .replace(['\n', '\r'], ",")
-        .split([',', '|', ';'])
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .collect::<Vec<_>>()
-        .join(",")
-        .chars()
-        .take(240)
-        .collect()
-}
 
 fn write_bool(out: &mut String, value: bool) {
     out.push_str(if value { "true" } else { "false" });
@@ -1208,20 +1181,6 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(parse(&serialize(&settings)), settings);
-    }
-
-    #[test]
-    fn yield_options_round_trip_and_sanitize() {
-        let settings = AppSettings {
-            yield_hotkeys_fullscreen: true,
-            yield_hotkey_apps: "game.exe,obs64.exe".to_owned(),
-            ..Default::default()
-        };
-        assert_eq!(parse(&serialize(&settings)), settings);
-        assert_eq!(
-            parse("yield_hotkey_apps=game.exe | obs64.exe;\n").yield_hotkey_apps,
-            "game.exe,obs64.exe"
-        );
     }
 
     #[test]

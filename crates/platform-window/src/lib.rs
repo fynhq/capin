@@ -12,26 +12,6 @@ pub use accent::{system_accent_hex, system_taskbar_uses_light_theme, system_uses
 pub use autostart::{AutostartState, set_autostart};
 pub use error::PlatformWindowError;
 pub use style::WindowStyle;
-#[cfg(target_os = "windows")]
-pub use windows::ForegroundInfo;
-
-#[cfg(not(target_os = "windows"))]
-#[derive(Clone, Debug, Default)]
-pub struct ForegroundInfo {
-    pub covers_monitor: bool,
-    pub process_name: Option<String>,
-}
-
-pub fn foreground_info() -> ForegroundInfo {
-    #[cfg(target_os = "windows")]
-    {
-        windows::foreground_info()
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        ForegroundInfo::default()
-    }
-}
 
 use raw_window_handle::HasWindowHandle;
 

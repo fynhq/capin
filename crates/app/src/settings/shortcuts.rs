@@ -1,35 +1,13 @@
 use super::*;
 
 impl SettingsView {
-    pub(super) fn shortcuts(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> Div {
-        #[cfg(not(target_os = "windows"))]
-        let _ = window;
+    pub(super) fn shortcuts(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let language = self.settings().language;
         let pin_hotkey = crate::hotkey::display_hotkey(&self.settings().pin_hotkey);
-        #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
-        let mut shortcut_rows = vec![
+        let shortcut_rows = vec![
             self.shortcut_row(ShortcutSlot::Capture, theme, cx),
             self.shortcut_row(ShortcutSlot::Pin, theme, cx),
         ];
-        #[cfg(target_os = "windows")]
-        {
-            shortcut_rows.push(self.toggle_row(
-                theme,
-                cx,
-                ToggleRow {
-                    id: "settings-yield-fullscreen",
-                    icon: icons::SHORTCUTS,
-                    title_key: "settings.yield_fullscreen",
-                    description_key: Some("settings.yield_fullscreen_desc"),
-                    value: self.settings().yield_hotkeys_fullscreen,
-                    set: |settings, value| {
-                        settings.yield_hotkeys_fullscreen = value;
-                    },
-                    refresh_pin: false,
-                },
-            ));
-            shortcut_rows.push(yield_apps_row(self, theme, window, cx));
-        }
         let page = div()
             .flex()
             .flex_col()
@@ -375,82 +353,4 @@ impl SettingsView {
         cx.notify();
         true
     }
-}
-
-#[cfg(target_os = "windows")]
-fn yield_apps_row(
-    view: &SettingsView,
-    theme: &Theme,
-    window: &Window,
-    cx: &mut Context<SettingsView>,
-) -> AnyElement {
-    let language = view.settings().language;
-    view.yield_apps_input.update(cx, |state, _| {
-        state.set_editor_style(input_editor_style(theme));
-    });
-    let focused = view
-        .yield_apps_input
-        .read(cx)
-        .presentation()
-        .focus_handle()
-        .is_focused(window);
-    let field = div()
-        .id("settings-yield-apps-field")
-        .w(px(260.0))
-        .h(px(layout::BUTTON_HEIGHT))
-        .flex_shrink_0()
-        .px(px(9.0))
-        .rounded(px(layout::BUTTON_RADIUS))
-        .bg(theme.control)
-        .border_1()
-        .border_color(if focused { theme.accent } else { theme.border })
-        .flex()
-        .items_center()
-        .overflow_hidden()
-        .text_size(px(layout::CONTROL_TEXT))
-        .cursor_text()
-        .child(Input::new(&view.yield_apps_input))
-        .on_mouse_down_out(cx.listener(|_, _: &MouseDownEvent, window, cx| window.blur(cx)))
-        .on_click(cx.listener(|this, _, window, cx| {
-            let focus = this
-                .yield_apps_input
-                .read(cx)
-                .presentation()
-                .focus_handle()
-                .clone();
-            window.focus(&focus, cx);
-        }));
-
-    a11y_row(
-        "settings-row-yield-apps",
-        t(language, "settings.yield_apps"),
-        row_shell()
-            .child(row_label_with_icon(
-                theme,
-                icons::GENERAL,
-                t(language, "settings.yield_apps"),
-                t(language, "settings.yield_apps_desc"),
-            ))
-            .child(field),
-    )
-}
-
-pub(super) fn commit_yield_apps(
-    view: &mut SettingsView,
-    input: &Entity<InputState>,
-    window: &mut Window,
-    cx: &mut Context<SettingsView>,
-) {
-    let raw = input.read(cx).value().to_string();
-    let apps = settings_state::sanitize_yield_apps(&raw);
-    if apps != raw {
-        input.update(cx, |state, cx| {
-            state.set_value(apps.clone(), window, cx);
-        });
-    }
-    if apps == view.settings().yield_hotkey_apps {
-        return;
-    }
-    settings_state::update(|settings| settings.yield_hotkey_apps = apps);
-    crate::hotkey::refresh_yield();
 }
