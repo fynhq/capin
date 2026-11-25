@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use core_capture::CaptureTarget;
-use core_stitch::{AppendReport, StitchConfig, StitchError, Stitcher};
+use core_stitch::{AppendReport, PreviewAnchor, StitchConfig, StitchError, Stitcher};
 use core_types::{CaptureRegion, PhysicalRect, RgbaFrame};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -21,8 +21,8 @@ const BAR_HEIGHT: f32 = 62.0;
 const PREVIEW_WIDTH: f32 = 136.0;
 const PREVIEW_HEIGHT: f32 = 228.0;
 const PREVIEW_GAP: f32 = 12.0;
-const PREVIEW_THUMB_WIDTH: u32 = 240;
-const PREVIEW_THUMB_HEIGHT: u32 = 640;
+const PREVIEW_THUMB_WIDTH: u32 = 272;
+const PREVIEW_THUMB_HEIGHT: u32 = 456;
 const CAPTURE_INTERVAL: Duration = Duration::from_millis(400);
 const SLOW_CAPTURE_INTERVAL: Duration = Duration::from_millis(700);
 const SLOW_CAPTURE_THRESHOLD: Duration = Duration::from_millis(200);
@@ -33,7 +33,9 @@ pub(crate) fn supports_target(target: CaptureTarget) -> bool {
 
 pub fn open_session(region: CaptureRegion, first_frame: RgbaFrame, cx: &mut App) {
     let config = StitchConfig::default();
-    let mut stitcher = match Stitcher::new(first_frame.width(), config) {
+    let frame_width = first_frame.width();
+    let frame_height = first_frame.height();
+    let mut stitcher = match Stitcher::new(frame_width, config) {
         Ok(stitcher) => stitcher,
         Err(error) => {
             log_error!("scroll", "failed to start scroll capture: {error}");
@@ -73,7 +75,17 @@ pub fn open_session(region: CaptureRegion, first_frame: RgbaFrame, cx: &mut App)
         display_id,
         cx,
         move |_window, cx, exclusion_ok| {
-            cx.new(|cx| ScrollView::new(region, stitcher, exclusion_ok, preview, cx))
+            cx.new(|cx| {
+                ScrollView::new(
+                    region,
+                    frame_width,
+                    frame_height,
+                    stitcher,
+                    exclusion_ok,
+                    preview,
+                    cx,
+                )
+            })
         },
     ) {
         Ok(_) => {}
@@ -91,8 +103,9 @@ enum StitchCommand {
 
 enum StitchEvent {
     Appended(AppendReport),
-    Preview(RgbaFrame),
+    Preview { frame: RgbaFrame, total_height: u32 },
     NoOverlap,
+    SizeChanged,
     Failed { message: String, fatal: bool },
     Finished(RgbaFrame),
 }
@@ -149,6 +162,7 @@ fn stitch_loop(
                 let event = match stitcher.push(&frame) {
                     Ok(report) => StitchEvent::Appended(report),
                     Err(StitchError::NoOverlap) => StitchEvent::NoOverlap,
+                    Err(StitchError::WidthMismatch { .. }) => StitchEvent::SizeChanged,
                     Err(error) => StitchEvent::Failed {
                         message: error.to_string(),
                         fatal: matches!(
@@ -180,7 +194,7 @@ fn stitch_loop(
                 report.total_height,
                 report.frames
             ),
-            StitchEvent::Preview(frame) => log_debug!(
+            StitchEvent::Preview { frame, .. } => log_debug!(
                 "stitch",
                 "preview size={}x{}",
                 frame.width(),
@@ -189,6 +203,11 @@ fn stitch_loop(
             StitchEvent::NoOverlap => log_debug!(
                 "stitch",
                 "{operation} duration_ms={} result=no_overlap",
+                started.elapsed().as_millis()
+            ),
+            StitchEvent::SizeChanged => log_debug!(
+                "stitch",
+                "{operation} duration_ms={} result=size_changed",
                 started.elapsed().as_millis()
             ),
             StitchEvent::Failed { message, fatal } => log_debug!(
@@ -205,17 +224,27 @@ fn stitch_loop(
                 frame.height()
             ),
         }
-        let preview = matches!(
-            &event,
-            StitchEvent::Appended(report) if report.appended_rows + report.prepended_rows > 0
-        )
-        .then(|| stitcher.thumbnail(PREVIEW_THUMB_WIDTH, PREVIEW_THUMB_HEIGHT))
-        .flatten();
+        let preview = match &event {
+            StitchEvent::Appended(report) if report.appended_rows + report.prepended_rows > 0 => {
+                let anchor = if report.prepended_rows > 0 {
+                    PreviewAnchor::Top
+                } else {
+                    PreviewAnchor::Bottom
+                };
+                stitcher
+                    .thumbnail_anchored(PREVIEW_THUMB_WIDTH, PREVIEW_THUMB_HEIGHT, anchor)
+                    .map(|frame| StitchEvent::Preview {
+                        frame,
+                        total_height: stitcher.height(),
+                    })
+            }
+            _ => None,
+        };
         let finished = matches!(event, StitchEvent::Finished(_));
         if let Ok(mut events) = events.lock() {
             events.push_back(event);
-            if let Some(frame) = preview {
-                events.push_back(StitchEvent::Preview(frame));
+            if let Some(preview) = preview {
+                events.push_back(preview);
             }
         }
         if finished {
@@ -226,6 +255,8 @@ fn stitch_loop(
 
 struct ScrollView {
     region: CaptureRegion,
+    frame_width: u32,
+    frame_height: u32,
     worker: StitchWorker,
     preview: Option<Entity<ScrollPreview>>,
     finished_frame: Option<RgbaFrame>,
@@ -233,6 +264,7 @@ struct ScrollView {
     language: Language,
     accent_hex: u32,
     running: bool,
+    cancelled: bool,
     missed_frames: u32,
     worker_failed: bool,
     finishing: bool,
@@ -241,6 +273,8 @@ struct ScrollView {
 impl ScrollView {
     fn new(
         region: CaptureRegion,
+        frame_width: u32,
+        frame_height: u32,
         stitcher: Stitcher,
         exclusion_ok: bool,
         preview: Option<Entity<ScrollPreview>>,
@@ -251,6 +285,8 @@ impl ScrollView {
             system_accent_hex().unwrap_or_else(|| crate::theme::fallback_accent(false));
         let view = Self {
             region,
+            frame_width,
+            frame_height,
             worker: StitchWorker::new(stitcher),
             preview,
             finished_frame: None,
@@ -262,6 +298,7 @@ impl ScrollView {
             language,
             accent_hex,
             running: true,
+            cancelled: false,
             missed_frames: 0,
             worker_failed: false,
             finishing: false,
@@ -311,7 +348,16 @@ impl ScrollView {
 
     fn apply_capture(&mut self, captured: Result<RgbaFrame, String>, cx: &mut Context<Self>) {
         match captured {
-            Ok(frame) => self.worker.push(frame),
+            Ok(frame) => {
+                if frame.width() != self.frame_width || frame.height() != self.frame_height {
+                    self.running = false;
+                    self.worker_failed = true;
+                    self.status = t(self.language, "scroll.size_changed").to_owned();
+                    cx.notify();
+                    return;
+                }
+                self.worker.push(frame);
+            }
             Err(error) => {
                 self.missed_frames += 1;
                 self.status = format!("{}{}", t(self.language, "scroll.failed"), error);
@@ -333,9 +379,12 @@ impl ScrollView {
                         report.appended_rows + report.prepended_rows
                     );
                 }
-                StitchEvent::Preview(frame) => {
+                StitchEvent::Preview {
+                    frame,
+                    total_height,
+                } => {
                     if let Some(preview) = &self.preview {
-                        preview.update(cx, |view, cx| view.set_frame(frame, cx));
+                        preview.update(cx, |view, cx| view.set_frame(frame, total_height, cx));
                     }
                 }
                 StitchEvent::NoOverlap => {
@@ -345,6 +394,11 @@ impl ScrollView {
                         t(self.language, "scroll.no_overlap"),
                         self.missed_frames
                     );
+                }
+                StitchEvent::SizeChanged => {
+                    self.running = false;
+                    self.worker_failed = true;
+                    self.status = t(self.language, "scroll.size_changed").to_owned();
                 }
                 StitchEvent::Failed { message, fatal } => {
                     self.missed_frames += 1;
@@ -405,6 +459,9 @@ impl ScrollView {
                     .await;
             }
             let _ = this.update(cx, |this, cx| {
+                if this.cancelled {
+                    return;
+                }
                 let missed_frames = this.missed_frames;
                 if let Some(frame) = this.finished_frame.take() {
                     cx.defer(move |cx| {
@@ -430,6 +487,7 @@ impl ScrollView {
 
     fn cancel(&mut self, cx: &mut Context<Self>) {
         self.running = false;
+        self.cancelled = true;
         let handles = cx.windows();
         cx.defer(move |cx| {
             crate::windows::close_capture_auxiliary(cx, handles);
@@ -473,7 +531,7 @@ impl Render for ScrollView {
 
 struct ScrollPreview {
     image: Option<Arc<RenderImage>>,
-    height: u32,
+    total_height: u32,
     language: Language,
     accent_hex: u32,
 }
@@ -483,14 +541,14 @@ impl ScrollPreview {
         let language = settings_state::get().language;
         Self {
             image: None,
-            height: 0,
+            total_height: 0,
             language,
             accent_hex: system_accent_hex().unwrap_or_else(|| crate::theme::fallback_accent(false)),
         }
     }
 
-    fn set_frame(&mut self, frame: RgbaFrame, cx: &mut Context<Self>) {
-        self.height = frame.height();
+    fn set_frame(&mut self, frame: RgbaFrame, total_height: u32, cx: &mut Context<Self>) {
+        self.total_height = total_height;
         let image = crate::image_util::render_image(frame);
         let old = self.image.replace(image);
         if let Some(old) = old {
@@ -504,10 +562,10 @@ impl Render for ScrollPreview {
     fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let theme = ChromeTheme::for_window(window, Some(self.accent_hex));
         let language = self.language;
-        let caption = if self.height == 0 {
+        let caption = if self.total_height == 0 {
             t(language, "scroll.preview_waiting").to_owned()
         } else {
-            format!("{} px", self.height)
+            format!("{} px", self.total_height)
         };
         div()
             .size_full()
