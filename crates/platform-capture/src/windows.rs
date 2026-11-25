@@ -129,7 +129,7 @@ fn capture_target(target: CaptureTarget, cursor: CursorCaptureSettings) -> Resul
 }
 
 const UIA_TIMEOUT_MS: u32 = 1_500;
-const UIA_MAX_ELEMENTS: i32 = 512;
+const UIA_MAX_ELEMENTS: i32 = 16_384;
 const CHILD_WINDOW_LIMIT: usize = 64;
 
 #[derive(Clone)]
