@@ -173,9 +173,10 @@ fn stitch_loop(
         match &event {
             StitchEvent::Appended(report) => log_debug!(
                 "stitch",
-                "{operation} duration_ms={} appended={} total_height={} frames={}",
+                "{operation} duration_ms={} appended={} prepended={} total_height={} frames={}",
                 started.elapsed().as_millis(),
                 report.appended_rows,
+                report.prepended_rows,
                 report.total_height,
                 report.frames
             ),
@@ -204,9 +205,12 @@ fn stitch_loop(
                 frame.height()
             ),
         }
-        let preview = matches!(&event, StitchEvent::Appended(report) if report.appended_rows > 0)
-            .then(|| stitcher.thumbnail(PREVIEW_THUMB_WIDTH, PREVIEW_THUMB_HEIGHT))
-            .flatten();
+        let preview = matches!(
+            &event,
+            StitchEvent::Appended(report) if report.appended_rows + report.prepended_rows > 0
+        )
+        .then(|| stitcher.thumbnail(PREVIEW_THUMB_WIDTH, PREVIEW_THUMB_HEIGHT))
+        .flatten();
         let finished = matches!(event, StitchEvent::Finished(_));
         if let Ok(mut events) = events.lock() {
             events.push_back(event);
@@ -320,12 +324,13 @@ impl ScrollView {
         let previous = self.status.clone();
         for event in self.worker.drain() {
             match event {
-                StitchEvent::Appended(report) if report.appended_rows == 0 => {}
+                StitchEvent::Appended(report)
+                    if report.appended_rows + report.prepended_rows == 0 => {}
                 StitchEvent::Appended(report) => {
                     self.status = format!(
                         "{} · {} px",
                         t(self.language, "scroll.added"),
-                        report.appended_rows
+                        report.appended_rows + report.prepended_rows
                     );
                 }
                 StitchEvent::Preview(frame) => {
