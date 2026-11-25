@@ -15,6 +15,7 @@ pub struct StitchConfig {
     pub min_overlap_rows: u32,
     pub max_overlap_rows: u32,
     pub sample_columns: u32,
+    pub edge_margin: u32,
     pub tolerance: u32,
     pub max_top_inset_rows: u32,
     pub max_bottom_inset_rows: u32,
@@ -31,6 +32,7 @@ impl Default for StitchConfig {
             min_overlap_rows: 24,
             max_overlap_rows: 0,
             sample_columns: 0,
+            edge_margin: 16,
             tolerance: 20,
             max_top_inset_rows: 256,
             max_bottom_inset_rows: 256,
@@ -85,6 +87,8 @@ pub struct Stitcher {
     previous_top_rows: u32,
     previous_bottom: Vec<u8>,
     previous_bottom_rows: u32,
+    previous_frame: Vec<u8>,
+    previous_frame_rows: u32,
     footer_rows: u32,
     footer_pixels: Vec<u8>,
 }
@@ -111,6 +115,8 @@ impl Stitcher {
             previous_top_rows: 0,
             previous_bottom: Vec::new(),
             previous_bottom_rows: 0,
+            previous_frame: Vec::new(),
+            previous_frame_rows: 0,
             footer_rows: 0,
             footer_pixels: Vec::new(),
         })
@@ -126,6 +132,30 @@ impl Stitcher {
 
     pub fn frames(&self) -> u32 {
         self.frames
+    }
+
+    pub fn thumbnail(&self, max_width: u32, max_height: u32) -> Option<RgbaFrame> {
+        if self.height == 0 || self.width == 0 || max_width == 0 || max_height == 0 {
+            return None;
+        }
+        let scale = (f64::from(max_width) / f64::from(self.width))
+            .min(f64::from(max_height) / f64::from(self.height))
+            .min(1.0);
+        let width = (f64::from(self.width) * scale).round().max(1.0) as u32;
+        let height = (f64::from(self.height) * scale).round().max(1.0) as u32;
+        let mut pixels = vec![0u8; width as usize * height as usize * BYTES_PER_PIXEL];
+        let src_row = self.width as usize * BYTES_PER_PIXEL;
+        for y in 0..height {
+            let source_y = (u64::from(y) * u64::from(self.height) / u64::from(height)) as usize;
+            for x in 0..width {
+                let source_x = (u64::from(x) * u64::from(self.width) / u64::from(width)) as usize;
+                let source = source_y * src_row + source_x * BYTES_PER_PIXEL;
+                let target = (y as usize * width as usize + x as usize) * BYTES_PER_PIXEL;
+                pixels[target..target + BYTES_PER_PIXEL]
+                    .copy_from_slice(&self.pixels[source..source + BYTES_PER_PIXEL]);
+            }
+        }
+        RgbaFrame::from_pixels(width, height, pixels).ok()
     }
 
     pub fn push(&mut self, frame: &RgbaFrame) -> Result<AppendReport, StitchError> {
@@ -145,12 +175,15 @@ impl Stitcher {
             frame.width(),
             frame.height(),
             self.samples,
+            self.edge_margin(),
         );
+        let stable = self.stable_rows(&signatures, frame.height());
         let energies = row_energies(&signatures, frame.height(), self.samples);
         let new = RowSet {
             signatures: &signatures,
             energies: &energies,
             samples: self.samples as usize,
+            stable: Some(&stable),
         };
 
         if self.frames == 0 {
@@ -249,12 +282,15 @@ impl Stitcher {
             frame.width(),
             height,
             self.samples,
+            self.edge_margin(),
         );
+        let stable = self.stable_rows(&signatures, height);
         let energies = row_energies(&signatures, height, self.samples);
         let rows = RowSet {
             signatures: &signatures,
             energies: &energies,
             samples: self.samples as usize,
+            stable: Some(&stable),
         };
         self.height = height;
         self.frames = 1;
@@ -300,6 +336,8 @@ impl Stitcher {
         self.previous_top_rows = 0;
         self.previous_bottom = Vec::new();
         self.previous_bottom_rows = 0;
+        self.previous_frame = Vec::new();
+        self.previous_frame_rows = 0;
         let width = self.width;
         let height = self.height;
         let pixels = std::mem::take(&mut self.pixels);
@@ -370,7 +408,35 @@ impl Stitcher {
         }
     }
 
+    fn edge_margin(&self) -> u32 {
+        self.config
+            .edge_margin
+            .min(self.width / 8)
+            .min(self.width.saturating_sub(2) / 2)
+    }
+
+    fn stable_rows(&self, signatures: &[u8], height: u32) -> Vec<bool> {
+        let mut stable = vec![false; height as usize];
+        if self.previous_frame_rows == 0 {
+            return stable;
+        }
+        let samples = self.samples as usize;
+        let rows = height.min(self.previous_frame_rows);
+        for (row, slot) in stable.iter_mut().enumerate().take(rows as usize) {
+            let start = row * samples;
+            let new_row = &signatures[start..start + samples];
+            let old_row = &self.previous_frame[start..start + samples];
+            if signature_mean(new_row, old_row) <= f64::from(self.config.static_tolerance) {
+                *slot = true;
+            }
+        }
+        stable
+    }
+
     fn remember_bands(&mut self, rows: &RowSet, height: u32) {
+        self.previous_frame.clear();
+        self.previous_frame.extend_from_slice(rows.signatures);
+        self.previous_frame_rows = height;
         let samples = self.samples as usize;
         let top_rows = self.config.max_top_inset_rows.min(height);
         self.previous_top.clear();
@@ -509,6 +575,7 @@ impl Stitcher {
             signatures: previous_signatures,
             energies: &previous_energies,
             samples: self.samples as usize,
+            stable: None,
         };
 
         let anchors: Vec<u32> = (0..max_overlap)
@@ -586,6 +653,7 @@ struct RowSet<'a> {
     signatures: &'a [u8],
     energies: &'a [u16],
     samples: usize,
+    stable: Option<&'a [bool]>,
 }
 
 impl RowSet<'_> {
@@ -596,6 +664,13 @@ impl RowSet<'_> {
 
     fn energy(&self, row: u32) -> u16 {
         self.energies[row as usize]
+    }
+
+    fn is_stable(&self, row: u32) -> bool {
+        self.stable
+            .and_then(|stable| stable.get(row as usize))
+            .copied()
+            .unwrap_or(false)
     }
 }
 
@@ -617,15 +692,22 @@ fn candidate_score(
         for index in (start..anchors.len()).step_by(stride) {
             let row = anchors[index];
             let new_row = window.inset + row - prev_offset;
+            if new.is_stable(new_row) {
+                continue;
+            }
             total += row_total(previous.signature(row), new.signature(new_row));
             compared += 1;
         }
     } else {
         let stride = (window.overlap as usize).div_ceil(max_rows.max(1)).max(1);
         for offset in (0..window.overlap as usize).step_by(stride) {
+            let new_row = window.inset + offset as u32;
+            if new.is_stable(new_row) {
+                continue;
+            }
             total += row_total(
                 previous.signature(prev_offset + offset as u32),
-                new.signature(window.inset + offset as u32),
+                new.signature(new_row),
             );
             compared += 1;
         }
@@ -637,9 +719,13 @@ fn full_row_score(samples: usize, previous: &RowSet, new: &RowSet, window: Overl
     let prev_offset = window.max_overlap - window.overlap;
     let mut total = 0u64;
     for offset in 0..window.overlap {
+        let new_row = window.inset + offset;
+        if new.is_stable(new_row) {
+            continue;
+        }
         total += row_total(
             previous.signature(prev_offset + offset),
-            new.signature(window.inset + offset),
+            new.signature(new_row),
         );
     }
     total as f64 / (window.overlap.max(1) as f64 * samples as f64)
@@ -656,17 +742,28 @@ fn insert_candidate(candidates: &mut Vec<(f64, u32)>, score: f64, overlap: u32) 
     candidates.truncate(MAX_CANDIDATES);
 }
 
-fn row_signatures(pixels: &[u8], stride: usize, width: u32, rows: u32, samples: u32) -> Vec<u8> {
+fn row_signatures(
+    pixels: &[u8],
+    stride: usize,
+    width: u32,
+    rows: u32,
+    samples: u32,
+    margin: u32,
+) -> Vec<u8> {
     let samples = samples as usize;
+    let margin = margin.min(width / 2);
+    let left = margin;
+    let right = width.saturating_sub(margin).max(left + 1);
+    let span = right - left;
     let mut signatures = vec![0u8; rows as usize * samples];
     for row in 0..rows {
         let row_start = row as usize * stride;
         let output = &mut signatures[row as usize * samples..][..samples];
         for (sample, slot) in output.iter_mut().enumerate() {
-            let x = if samples <= 1 {
-                width / 2
+            let x = if samples <= 1 || span <= 1 {
+                left + span / 2
             } else {
-                (sample as u32 * (width - 1) / (samples as u32 - 1)).min(width - 1)
+                (left + sample as u32 * (span - 1) / (samples as u32 - 1)).min(width - 1)
             };
             let index = row_start + x as usize * BYTES_PER_PIXEL;
             *slot = core_types::luma8(pixels[index], pixels[index + 1], pixels[index + 2]);
@@ -1012,6 +1109,17 @@ mod tests {
         assert_eq!(report.appended_rows, 100);
         assert_eq!(stitches.height(), 100);
         assert_eq!(stitches.pixels.as_ptr(), pointer);
+    }
+
+    #[test]
+    fn thumbnail_keeps_the_aspect_ratio() {
+        let frame = patterned_frame(40, 100, 71);
+        let mut stitches = stitcher(40);
+        stitches.push(&frame).unwrap();
+        let thumbnail = stitches.thumbnail(20, 100).expect("thumbnail");
+        assert_eq!(thumbnail.width(), 20);
+        assert_eq!(thumbnail.height(), 50);
+        assert_eq!(&thumbnail.pixels()[..4], &frame.pixels()[..4]);
     }
 
     #[test]

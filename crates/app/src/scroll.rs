@@ -18,6 +18,11 @@ use crate::settings_state;
 
 const BAR_WIDTH: f32 = 460.0;
 const BAR_HEIGHT: f32 = 62.0;
+const PREVIEW_WIDTH: f32 = 136.0;
+const PREVIEW_HEIGHT: f32 = 228.0;
+const PREVIEW_GAP: f32 = 12.0;
+const PREVIEW_THUMB_WIDTH: u32 = 240;
+const PREVIEW_THUMB_HEIGHT: u32 = 640;
 const CAPTURE_INTERVAL: Duration = Duration::from_millis(400);
 const SLOW_CAPTURE_INTERVAL: Duration = Duration::from_millis(700);
 const SLOW_CAPTURE_THRESHOLD: Duration = Duration::from_millis(200);
@@ -53,6 +58,14 @@ pub fn open_session(region: CaptureRegion, first_frame: RgbaFrame, cx: &mut App)
         crate::display::window_bounds_on_monitor(monitor, desktop_bounds)
     });
     let display_id = Some(DisplayId::new(region.monitor.raw()));
+    let preview = crate::control_bar::open(
+        "capin-scroll-preview",
+        preview_bounds(region, monitor.as_ref()),
+        display_id,
+        cx,
+        move |_window, cx, _| cx.new(ScrollPreview::new),
+    )
+    .ok();
 
     match crate::control_bar::open(
         "capin-scroll",
@@ -60,12 +73,12 @@ pub fn open_session(region: CaptureRegion, first_frame: RgbaFrame, cx: &mut App)
         display_id,
         cx,
         move |_window, cx, exclusion_ok| {
-            cx.new(|cx| ScrollView::new(region, stitcher, exclusion_ok, cx))
+            cx.new(|cx| ScrollView::new(region, stitcher, exclusion_ok, preview, cx))
         },
     ) {
         Ok(_) => {}
         Err(error) => {
-            crate::region_outline::close(cx);
+            crate::windows::close_capture_auxiliary(cx, cx.windows());
             log_error!("scroll", "failed to open scroll bar: {error}");
         }
     }
@@ -78,6 +91,7 @@ enum StitchCommand {
 
 enum StitchEvent {
     Appended(AppendReport),
+    Preview(RgbaFrame),
     NoOverlap,
     Failed { message: String, fatal: bool },
     Finished(RgbaFrame),
@@ -165,6 +179,12 @@ fn stitch_loop(
                 report.total_height,
                 report.frames
             ),
+            StitchEvent::Preview(frame) => log_debug!(
+                "stitch",
+                "preview size={}x{}",
+                frame.width(),
+                frame.height()
+            ),
             StitchEvent::NoOverlap => log_debug!(
                 "stitch",
                 "{operation} duration_ms={} result=no_overlap",
@@ -184,9 +204,15 @@ fn stitch_loop(
                 frame.height()
             ),
         }
+        let preview = matches!(&event, StitchEvent::Appended(report) if report.appended_rows > 0)
+            .then(|| stitcher.thumbnail(PREVIEW_THUMB_WIDTH, PREVIEW_THUMB_HEIGHT))
+            .flatten();
         let finished = matches!(event, StitchEvent::Finished(_));
         if let Ok(mut events) = events.lock() {
             events.push_back(event);
+            if let Some(frame) = preview {
+                events.push_back(StitchEvent::Preview(frame));
+            }
         }
         if finished {
             break;
@@ -197,6 +223,7 @@ fn stitch_loop(
 struct ScrollView {
     region: CaptureRegion,
     worker: StitchWorker,
+    preview: Option<Entity<ScrollPreview>>,
     finished_frame: Option<RgbaFrame>,
     status: String,
     language: Language,
@@ -212,6 +239,7 @@ impl ScrollView {
         region: CaptureRegion,
         stitcher: Stitcher,
         exclusion_ok: bool,
+        preview: Option<Entity<ScrollPreview>>,
         cx: &mut Context<Self>,
     ) -> Self {
         let language = settings_state::get().language;
@@ -220,6 +248,7 @@ impl ScrollView {
         let view = Self {
             region,
             worker: StitchWorker::new(stitcher),
+            preview,
             finished_frame: None,
             status: if exclusion_ok {
                 t(language, "scroll.ready").to_owned()
@@ -298,6 +327,11 @@ impl ScrollView {
                         t(self.language, "scroll.added"),
                         report.appended_rows
                     );
+                }
+                StitchEvent::Preview(frame) => {
+                    if let Some(preview) = &self.preview {
+                        preview.update(cx, |view, cx| view.set_frame(frame, cx));
+                    }
                 }
                 StitchEvent::NoOverlap => {
                     self.missed_frames += 1;
@@ -429,6 +463,138 @@ impl Render for ScrollView {
         let badge = crate::control_bar::bar_badge(theme.accent_tint, 8.0)
             .child(crate::icons::icon(crate::icons::SCROLL, 16.0, theme.accent));
         crate::control_bar::bar_shell(&theme, badge, title, status, [finish, cancel])
+    }
+}
+
+struct ScrollPreview {
+    image: Option<Arc<RenderImage>>,
+    height: u32,
+    language: Language,
+    accent_hex: u32,
+}
+
+impl ScrollPreview {
+    fn new(_cx: &mut Context<Self>) -> Self {
+        let language = settings_state::get().language;
+        Self {
+            image: None,
+            height: 0,
+            language,
+            accent_hex: system_accent_hex().unwrap_or_else(|| crate::theme::fallback_accent(false)),
+        }
+    }
+
+    fn set_frame(&mut self, frame: RgbaFrame, cx: &mut Context<Self>) {
+        self.height = frame.height();
+        let image = crate::image_util::render_image(frame);
+        let old = self.image.replace(image);
+        if let Some(old) = old {
+            cx.defer(move |cx| cx.drop_image(old, None));
+        }
+        cx.notify();
+    }
+}
+
+impl Render for ScrollPreview {
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = ChromeTheme::for_window(window, Some(self.accent_hex));
+        let language = self.language;
+        let caption = if self.height == 0 {
+            t(language, "scroll.preview_waiting").to_owned()
+        } else {
+            format!("{} px", self.height)
+        };
+        div()
+            .size_full()
+            .rounded(px(12.0))
+            .bg(theme.surface)
+            .border_1()
+            .border_color(theme.border)
+            .shadow(theme.shadow())
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .p(px(8.0))
+            .gap(px(6.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(crate::icons::icon(crate::icons::SCROLL, 14.0, theme.icon))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child(t(language, "scroll.preview").to_owned()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .w_full()
+                    .rounded(px(6.0))
+                    .bg(theme.canvas)
+                    .overflow_hidden()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(match &self.image {
+                        Some(image) => img(image.clone())
+                            .size_full()
+                            .object_fit(ObjectFit::Contain)
+                            .into_any_element(),
+                        None => div()
+                            .text_size(px(10.0))
+                            .text_color(theme.muted)
+                            .child(caption.clone())
+                            .into_any_element(),
+                    }),
+            )
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(theme.muted)
+                    .text_align(TextAlign::Center)
+                    .child(caption),
+            )
+    }
+}
+
+fn preview_bounds(
+    region: CaptureRegion,
+    monitor: Option<&core_capture::MonitorInfo>,
+) -> Bounds<Pixels> {
+    let span = crate::display::logical_monitor(monitor);
+    let anchor = monitor.map(|monitor| {
+        PhysicalRect::new(
+            monitor.bounds.origin.x + region.rect.origin.x,
+            monitor.bounds.origin.y + region.rect.origin.y,
+            region.rect.size.width,
+            region.rect.size.height,
+        )
+    });
+    let (left, top, width) = anchor.map_or((span.left, span.top, span.right - span.left), |rect| {
+        (
+            rect.origin.x as f32 / span.scale,
+            rect.origin.y as f32 / span.scale,
+            rect.size.width as f32 / span.scale,
+        )
+    });
+    let right = left + width + PREVIEW_GAP;
+    let x = if right + PREVIEW_WIDTH <= span.right - 8.0 {
+        right
+    } else {
+        (left - PREVIEW_WIDTH - PREVIEW_GAP).max(span.left + 8.0)
+    };
+    let max_y = (span.bottom - PREVIEW_HEIGHT - 8.0).max(span.top + 8.0);
+    let y = top.clamp(span.top + 8.0, max_y);
+    Bounds {
+        origin: point(px(x), px(y)),
+        size: size(px(PREVIEW_WIDTH), px(PREVIEW_HEIGHT)),
     }
 }
 
