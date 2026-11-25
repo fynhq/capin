@@ -20,6 +20,7 @@ pub struct OcrLine {
 pub struct OcrOutput {
     pub text: String,
     pub lines: Vec<OcrLine>,
+    pub table: Option<OcrTable>,
     pub qr_codes: Vec<String>,
     pub error: Option<String>,
 }
@@ -46,6 +47,9 @@ pub enum OcrError {
     #[error("{0}")]
     Platform(String),
 }
+
+mod table;
+pub use table::{OcrTable, OcrTableCell};
 
 #[cfg(target_os = "macos")]
 mod macos_impl;
@@ -75,6 +79,23 @@ use macos_impl as platform;
 #[cfg(target_os = "windows")]
 use windows_impl as platform;
 
+pub fn release_idle_engine() -> bool {
+    #[cfg(all(
+        target_os = "windows",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    {
+        windows_impl::release_engine()
+    }
+    #[cfg(not(all(
+        target_os = "windows",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
+    {
+        false
+    }
+}
+
 pub fn recognize(frame: RgbaFrame) -> OcrOutput {
     recognize_with(frame, OcrOptions::default())
 }
@@ -95,16 +116,18 @@ pub fn recognize_shared(frame: Arc<RgbaFrame>, options: OcrOptions) -> OcrOutput
             ..Default::default()
         };
     }
-    match platform::recognize_text(frame) {
+    match platform::recognize_text(Arc::clone(&frame)) {
         Ok(mut lines) => {
             lines.retain(|line| !is_decorative_noise(&line.text));
             for line in &mut lines {
                 normalize_latin_punctuation(line);
             }
             let text = join_ocr_lines(&lines);
+            let table = detect_table(&lines, &frame);
             OcrOutput {
                 text,
                 lines,
+                table,
                 qr_codes,
                 error: None,
             }
@@ -112,11 +135,14 @@ pub fn recognize_shared(frame: Arc<RgbaFrame>, options: OcrOptions) -> OcrOutput
         Err(error) => OcrOutput {
             text: String::new(),
             lines: Vec::new(),
+            table: None,
             qr_codes,
             error: Some(error.to_string()),
         },
     }
 }
+
+use table::detect_table;
 
 fn normalize_latin_punctuation(line: &mut OcrLine) {
     let chars: Vec<char> = line.text.chars().collect();

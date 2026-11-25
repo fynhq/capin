@@ -18,6 +18,7 @@ pub(crate) fn restore(cx: &mut App) {
 
     let mut deferred = Vec::new();
     let mut restored = 0usize;
+    let mut restored_bytes = 0.0f64;
     for entry in entries {
         if restored >= MAX_RESTORED_PINS {
             if manifest::is_usable(&entry, &directory) {
@@ -32,6 +33,13 @@ pub(crate) fn restore(cx: &mut App) {
             || entry.width < 1.0
             || entry.height < 1.0
         {
+            continue;
+        }
+        let estimated = f64::from(entry.width.max(1.0)) * f64::from(entry.height.max(1.0)) * 16.0;
+        if restored > 0 && restored_bytes + estimated > MAX_RESTORE_ESTIMATED_BYTES {
+            if manifest::is_usable(&entry, &directory) {
+                deferred.push(entry);
+            }
             continue;
         }
         let content = match entry.kind.as_str() {
@@ -87,10 +95,12 @@ pub(crate) fn restore(cx: &mut App) {
             false,
             entry.shadow,
             display_id,
+            true,
             cx,
         );
         if let Some(id) = id {
             restored += 1;
+            restored_bytes += estimated;
             set_export_padding(id, entry.export_padding);
         }
     }

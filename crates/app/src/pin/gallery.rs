@@ -323,6 +323,7 @@ fn open_pin_content_with_shadow(
         true,
         native_shadow,
         None,
+        false,
         cx,
     )
 }
@@ -355,6 +356,7 @@ fn open_pin_content_at(
         true,
         native_shadow,
         display_id,
+        false,
         cx,
     )
 }

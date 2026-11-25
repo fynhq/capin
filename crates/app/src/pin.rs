@@ -67,6 +67,7 @@ use pin_clipboard::{clipboard_image_signature, clipboard_text_signature, text_si
 use pin_content::PinContent;
 
 const MAX_RESTORED_PINS: usize = 20;
+const MAX_RESTORE_ESTIMATED_BYTES: f64 = 96.0 * 1024.0 * 1024.0;
 
 const MIN_PIN_ZOOM: f32 = 0.02;
 const MAX_PIN_ZOOM: f32 = 4.0;
@@ -290,6 +291,7 @@ fn open_pin_inner(
     persist: bool,
     native_shadow: bool,
     display_id: Option<DisplayId>,
+    defer_ocr: bool,
     cx: &mut App,
 ) -> Option<u64> {
     let display_id = display_id.or_else(|| cx.primary_display().map(|display| display.id()));
@@ -344,6 +346,7 @@ fn open_pin_inner(
                 display_id,
                 view_values,
                 initial_ocr_path,
+                defer_ocr,
                 cx,
             )
         });
@@ -449,6 +452,7 @@ struct PinView {
     toasts: [PinToast; 2],
     ocr: Option<platform_ocr::OcrOutput>,
     ocr_path: Option<PathBuf>,
+    ocr_deferred: bool,
     selection: Option<(usize, usize)>,
     selecting: bool,
     drag: Option<PinDrag>,
@@ -468,6 +472,7 @@ impl PinView {
         display: Option<DisplayId>,
         values: SharedPinWindowState,
         ocr_path: Option<PathBuf>,
+        defer_ocr: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         let zoom = values.borrow().zoom;
@@ -483,6 +488,7 @@ impl PinView {
             zoom_serial: 0,
             zoom_center: None,
             ocr_path,
+            ocr_deferred: defer_ocr,
             toasts: [
                 PinToast::new(Duration::from_millis(2200)),
                 PinToast::new(Duration::from_millis(900)),
@@ -505,7 +511,9 @@ impl PinView {
             }
         })
         .detach();
-        view.start_ocr(cx);
+        if !defer_ocr {
+            view.start_ocr(cx);
+        }
         view
     }
 
@@ -565,7 +573,14 @@ impl PinView {
         }
     }
 
+    fn wake_ocr(&mut self, cx: &mut Context<Self>) {
+        if self.ocr_deferred {
+            self.start_ocr(cx);
+        }
+    }
+
     fn start_ocr(&mut self, cx: &mut Context<Self>) {
+        self.ocr_deferred = false;
         let settings = settings_state::get();
         if !settings.pin_text_ocr && !settings.pin_qr {
             self.ocr = None;
@@ -703,10 +718,12 @@ impl PinView {
             .map(|line| line.rect.origin.x + line.rect.size.width as i32)
             .max()
             .unwrap_or(0);
+        type PreviousLine<'a> = (&'a platform_ocr::OcrLine, bool, Option<(u16, u16)>);
         let mut text = String::new();
         let mut base = 0usize;
-        let mut previous: Option<(&platform_ocr::OcrLine, bool)> = None;
-        for line in lines {
+        let table = self.ocr.as_ref().and_then(|output| output.table.as_ref());
+        let mut previous: Option<PreviousLine<'_>> = None;
+        for (index, line) in lines.iter().enumerate() {
             let length = line.chars.len();
             if end < base || start >= base + length {
                 base += length;
@@ -715,9 +732,19 @@ impl PinView {
             let from = start.saturating_sub(base).min(length);
             let to = (end.saturating_sub(base) + 1).min(length);
             let full_line = to == length;
+            let cell = table.and_then(|table| table.line_cells.get(index).copied().flatten());
             let separator = match previous {
-                Some((previous_line, true)) if from == 0 => {
-                    platform_ocr::line_join_separator(previous_line, line, block_right)
+                Some((previous_line, true, previous_cell)) if from == 0 => {
+                    match (previous_cell, cell) {
+                        (Some((previous_row, previous_column)), Some((row, column)))
+                            if previous_row == row && previous_column != column =>
+                        {
+                            "\t"
+                        }
+                        (Some((previous_row, _)), Some((row, _))) if row > previous_row => "\n",
+                        (Some(_), Some(_)) => " ",
+                        _ => platform_ocr::line_join_separator(previous_line, line, block_right),
+                    }
                 }
                 Some(_) => "\n",
                 None => "",
@@ -728,7 +755,7 @@ impl PinView {
                     text.push(ch.ch);
                 }
             }
-            previous = Some((line, full_line));
+            previous = Some((line, full_line, cell));
             base += length;
         }
         Some(text.trim_end().to_owned())
@@ -1053,6 +1080,7 @@ impl PinView {
         }
         self.content_generation = self.content_generation.wrapping_add(1);
         self.ocr = None;
+        self.ocr_deferred = false;
         self.selection = None;
         self.selecting = false;
         let window_handle = PINS.with(|pins| pins.borrow().get(&self.id).map(|state| state.window));

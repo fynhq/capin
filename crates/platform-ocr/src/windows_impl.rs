@@ -17,7 +17,39 @@ use crate::{OcrError, OcrLine, build_line, build_line_from_words};
 use paddleocr_rs_onnx::{OcrEngine as PaddleEngine, TextRegion};
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-static PADDLE: OnceLock<Result<Mutex<PaddleEngine>, String>> = OnceLock::new();
+static PADDLE: OnceLock<Mutex<Option<Arc<Mutex<PaddleEngine>>>>> = OnceLock::new();
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+static PADDLE_DET: &[u8] = include_bytes!("../assets/ocr/PP-OCRv6_tiny_det.onnx");
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+static PADDLE_REC: &[u8] = include_bytes!("../assets/ocr/PP-OCRv6_tiny_rec.onnx");
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+static PADDLE_KEYS: &[u8] = include_bytes!("../assets/ocr/ppocrv6_dict.txt");
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn paddle_engine() -> Option<Arc<Mutex<PaddleEngine>>> {
+    let slot = PADDLE.get_or_init(|| Mutex::new(None));
+    let mut slot = slot.lock().ok()?;
+    if let Some(engine) = slot.as_ref() {
+        return Some(engine.clone());
+    }
+    let engine = Arc::new(Mutex::new(
+        PaddleEngine::new(PADDLE_DET, PADDLE_REC, PADDLE_KEYS).ok()?,
+    ));
+    *slot = Some(engine.clone());
+    Some(engine)
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(crate) fn release_engine() -> bool {
+    let Some(slot) = PADDLE.get() else {
+        return false;
+    };
+    let Ok(mut slot) = slot.lock() else {
+        return false;
+    };
+    slot.take().is_some()
+}
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const PADDLE_MIN_CONFIDENCE: f32 = 0.5;
@@ -93,19 +125,7 @@ fn rgba_image(frame: Arc<RgbaFrame>) -> Option<image::RgbaImage> {
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn recognize_with_paddle(image: &image::DynamicImage) -> Option<Result<Vec<OcrLine>, OcrError>> {
-    static DET: &[u8] = include_bytes!("../assets/ocr/PP-OCRv6_tiny_det.onnx");
-    static REC: &[u8] = include_bytes!("../assets/ocr/PP-OCRv6_tiny_rec.onnx");
-    static KEYS: &[u8] = include_bytes!("../assets/ocr/ppocrv6_dict.txt");
-
-    let engine = PADDLE.get_or_init(|| {
-        PaddleEngine::new(DET, REC, KEYS)
-            .map(Mutex::new)
-            .map_err(|error| error.to_string())
-    });
-    let engine = match engine {
-        Ok(engine) => engine,
-        Err(_) => return None,
-    };
+    let engine = paddle_engine()?;
     let inverted;
     let image = if mean_luma(image) < 100.0 {
         inverted = inverted_rgba(image);

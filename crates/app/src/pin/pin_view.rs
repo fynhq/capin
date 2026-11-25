@@ -345,6 +345,7 @@ impl Render for PinView {
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     crate::pin::close_pin_menu(cx);
                     window.focus(&this.focus_handle, cx);
+                    this.wake_ocr(cx);
                     this.hover_text = this.text_index_at(event.position).is_some();
                     if event.click_count >= 2 {
                         this.select_word_at(event.position, cx);
@@ -399,6 +400,7 @@ impl Render for PinView {
                 let mut changed = false;
                 if !this.hover {
                     this.hover = true;
+                    this.wake_ocr(cx);
                     changed = true;
                 }
                 if over_text != this.hover_text {
