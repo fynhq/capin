@@ -1,14 +1,114 @@
 use core_types::RgbaFrame;
 
 use super::{
-    AMBIGUITY_MARGIN, COARSE_ROWS, Direction, EXACT_MATCH_SCORE, EndpointMatch, MAX_CANDIDATES,
-    MIN_ANCHOR_ROWS, REFINE_RADIUS, RowSet, Stitcher, insert_candidate, row_energies, row_total,
+    AMBIGUITY_MARGIN, COARSE_ROWS, DUPLICATE_CHANGED_DIVISOR, DUPLICATE_MEAN, Direction,
+    EXACT_MATCH_SCORE, EndpointMatch, MAX_CANDIDATES, MIN_ANCHOR_ROWS, REFINE_RADIUS, RowSet,
+    Stitcher, insert_candidate, row_energies, row_total,
 };
 
 const CONTAINED_ANCHORS: usize = 8;
 const CONTAINED_MIN_ANCHORS: usize = 3;
 const CONTAINED_SCAN_SAMPLES: usize = 64;
 const CONTAINED_CANDIDATES: usize = 4;
+const BAND_COUNT: u32 = 6;
+const BAND_MEAN_LIMIT: f64 = 8.0;
+const BAND_EXCESS_RATIO: f64 = 0.5;
+const STATIONARY_MEAN: f64 = 4.0;
+const STATIONARY_CHANGED_DIVISOR: usize = 20;
+
+pub(crate) fn bands_consistent(
+    previous: &RowSet,
+    new: &RowSet,
+    previous_offset: u32,
+    new_offset: u32,
+    overlap: u32,
+) -> bool {
+    if overlap == 0 {
+        return false;
+    }
+    for band in 0..BAND_COUNT {
+        let start = overlap * band / BAND_COUNT;
+        let end = overlap * (band + 1) / BAND_COUNT;
+        let mut sum = 0u64;
+        let mut excess = 0u64;
+        let mut signal = 0u64;
+        let mut count = 0u64;
+        for row in start..end {
+            let before = previous.signature(previous_offset + row);
+            let after = new.signature(new_offset + row);
+            for index in 0..before.len() {
+                let delta = before[index].abs_diff(after[index]);
+                sum += u64::from(delta);
+                excess += u64::from(delta.saturating_sub(2));
+                if index > 0 {
+                    signal += u64::from(before[index].abs_diff(before[index - 1]))
+                        .max(u64::from(after[index].abs_diff(after[index - 1])));
+                }
+                count += 1;
+            }
+        }
+        if count == 0 {
+            continue;
+        }
+        let mean = sum as f64 / count as f64;
+        if mean > BAND_MEAN_LIMIT || excess as f64 > (signal as f64).max(1.0) * BAND_EXCESS_RATIO {
+            return false;
+        }
+    }
+    true
+}
+
+impl Stitcher {
+    pub(crate) fn is_duplicate_frame(&self, signatures: &[u8], height: u32) -> bool {
+        if self.previous_frame_rows != height {
+            return false;
+        }
+        let samples = self.samples as usize;
+        let total = height as usize * samples;
+        if total == 0 || signatures.len() < total || self.previous_frame.len() < total {
+            return false;
+        }
+        let mut sum = 0u64;
+        let mut changed = 0usize;
+        for (&current, &previous) in signatures[..total]
+            .iter()
+            .zip(&self.previous_frame[..total])
+        {
+            let delta = current.abs_diff(previous);
+            sum += u64::from(delta);
+            if delta > 3 {
+                changed += 1;
+            }
+        }
+        let mean = sum as f64 / total as f64;
+        mean < DUPLICATE_MEAN && changed <= (total / DUPLICATE_CHANGED_DIVISOR).max(1)
+    }
+
+    pub(crate) fn is_stationary_frame(&self, signatures: &[u8], height: u32) -> bool {
+        if self.previous_frame_rows != height {
+            return false;
+        }
+        let samples = self.samples as usize;
+        let total = height as usize * samples;
+        if total == 0 || signatures.len() < total || self.previous_frame.len() < total {
+            return false;
+        }
+        let mut sum = 0u64;
+        let mut changed = 0usize;
+        for (&current, &previous) in signatures[..total]
+            .iter()
+            .zip(&self.previous_frame[..total])
+        {
+            let delta = current.abs_diff(previous);
+            sum += u64::from(delta);
+            if delta > 3 {
+                changed += 1;
+            }
+        }
+        let mean = sum as f64 / total as f64;
+        mean < STATIONARY_MEAN && changed <= (total / STATIONARY_CHANGED_DIVISOR).max(1)
+    }
+}
 
 impl Stitcher {
     pub(crate) fn resolve_endpoint_matches(
@@ -153,6 +253,15 @@ impl Stitcher {
             }
         }
         if refined.0 > f64::from(self.config.tolerance) {
+            return None;
+        }
+        if !bands_consistent(
+            &previous,
+            new,
+            0,
+            inset + content_height - refined.1,
+            refined.1,
+        ) {
             return None;
         }
         if runner.is_finite()

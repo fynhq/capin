@@ -2,6 +2,9 @@ use core_types::{FrameError, RgbaFrame};
 use thiserror::Error;
 
 mod align;
+mod preview;
+
+pub use preview::PreviewAnchor;
 
 const BYTES_PER_PIXEL: usize = 4;
 const COARSE_ROWS: usize = 16;
@@ -11,6 +14,8 @@ const AMBIGUITY_MARGIN: f64 = 0.5;
 const EXACT_MATCH_SCORE: f64 = 2.0;
 const MAX_CANDIDATES: usize = 5;
 const MIN_ANCHOR_ROWS: u32 = 6;
+const DUPLICATE_MEAN: f64 = 0.6;
+const DUPLICATE_CHANGED_DIVISOR: usize = 10_000;
 
 #[derive(Clone, Debug)]
 pub struct StitchConfig {
@@ -221,10 +226,7 @@ impl Stitcher {
             return Ok(self.report(0, 0, 0, self.height, 0));
         }
 
-        let stable_count = stable.iter().filter(|stable| **stable).count();
-        if self.last_placement.is_some()
-            && stable_count.saturating_mul(50) >= frame.height() as usize * 49
-        {
+        if self.is_duplicate_frame(&signatures, frame.height()) {
             self.frames += 1;
             self.remember_bands(&new, frame.height());
             return Ok(self.report(frame.height(), 0, 0, 0, 0));
@@ -282,6 +284,11 @@ impl Stitcher {
             }
             if let Some(q) = self.find_contained(&new, top_inset, content_height) {
                 self.last_placement = Some(q);
+                self.frames += 1;
+                self.remember_bands(&new, frame.height());
+                return Ok(self.report(content_height, top_inset, footer_rows, 0, 0));
+            }
+            if self.is_stationary_frame(&signatures, frame.height()) {
                 self.frames += 1;
                 self.remember_bands(&new, frame.height());
                 return Ok(self.report(content_height, top_inset, footer_rows, 0, 0));
@@ -721,6 +728,9 @@ impl Stitcher {
         if refined.0 > f64::from(self.config.tolerance) {
             return None;
         }
+        if !align::bands_consistent(&previous, new, max_overlap - refined.1, inset, refined.1) {
+            return None;
+        }
         if runner.is_finite()
             && runner - best_score < AMBIGUITY_MARGIN
             && best_score > EXACT_MATCH_SCORE
@@ -890,6 +900,8 @@ fn signature_mean(left: &[u8], right: &[u8]) -> f64 {
     row_total(left, right) as f64 / left.len().max(1) as f64
 }
 
+#[cfg(test)]
+mod extra_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
