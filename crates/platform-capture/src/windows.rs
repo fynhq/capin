@@ -20,7 +20,7 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::UI::Accessibility::{
     CUIAutomation8, IUIAutomation2, IUIAutomationCacheRequest, TreeScope_Descendants,
-    UIA_BoundingRectanglePropertyId, UIA_IsOffscreenPropertyId,
+    TreeScope_Element, UIA_BoundingRectanglePropertyId,
 };
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, GetDpiForWindow,
@@ -127,7 +127,7 @@ fn capture_target(target: CaptureTarget, cursor: CursorCaptureSettings) -> Resul
     }
 }
 
-const UIA_TIMEOUT_MS: u32 = 500;
+const UIA_TIMEOUT_MS: u32 = 1_500;
 const UIA_MAX_ELEMENTS: i32 = 512;
 const CHILD_WINDOW_LIMIT: usize = 64;
 
@@ -156,8 +156,7 @@ fn automation() -> Option<Automation> {
             let _ = automation.SetTransactionTimeout(UIA_TIMEOUT_MS);
             let cache = automation.CreateCacheRequest().ok()?;
             let _ = cache.AddProperty(UIA_BoundingRectanglePropertyId);
-            let _ = cache.AddProperty(UIA_IsOffscreenPropertyId);
-            let _ = cache.SetTreeScope(TreeScope_Descendants);
+            let _ = cache.SetTreeScope(TreeScope_Element);
             let automation = Automation { automation, cache };
             *slot.borrow_mut() = Some(automation.clone());
             Some(automation)
@@ -204,13 +203,6 @@ fn uia_elements(hwnd: HWND) -> Vec<PhysicalRect> {
             let Ok(element) = elements.GetElement(index) else {
                 continue;
             };
-            let offscreen = element
-                .CachedIsOffscreen()
-                .map(|value| value.as_bool())
-                .unwrap_or(false);
-            if offscreen {
-                continue;
-            }
             let Ok(rect) = element.CachedBoundingRectangle() else {
                 continue;
             };
