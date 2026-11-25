@@ -501,7 +501,7 @@ pub fn open_overlays(cx: &mut App) {
             });
             #[cfg(target_os = "windows")]
             if let Some(stream) = monitor_stream {
-                let _ = view.update(cx, |this, _| this.monitor_stream = Some(stream));
+                view.update(cx, |this, _| this.monitor_stream = Some(stream));
             }
             #[cfg(not(target_os = "windows"))]
             let _ = monitor_stream;
