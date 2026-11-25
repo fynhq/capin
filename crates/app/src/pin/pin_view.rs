@@ -148,87 +148,57 @@ impl Render for PinView {
             .child(body)
             .children(text_layers)
             .children(flash);
-        let qr_bar = self
-            .qr_code()
-            .map(str::to_owned)
-            .filter(|_| self.hover && !self.values.borrow().click_through && self.drag.is_none())
-            .map(|code| {
+        let qr_overlay = self
+            .qr()
+            .filter(|_| {
+                self.hover
+                    && self.hover_qr
+                    && !self.values.borrow().click_through
+                    && self.drag.is_none()
+            })
+            .and_then(|qr| {
+                let (left, top, width, height) = self.qr_display_rect(window.viewport_size())?;
                 let language = settings_state::get().language;
-                let url = pin_qr::qr_url(&code);
-                let menu = theme.menu;
-                let menu_border = theme.menu_border;
-                let menu_hover = theme.menu_hover;
+                let url = pin_qr::qr_url(&qr.content);
                 let accent = theme.accent;
-                let text_color = theme.text;
-                let selection = theme.selection;
-                let mut bar = div()
-                    .id("pin-qr-bar")
+                let dim = width.min(height).max(1.0);
+                let radius = (dim * 0.08).clamp(3.0, 12.0);
+                let open_size = (dim * 0.24).clamp(30.0, 44.0);
+                let copy_size = (dim * 0.16).clamp(20.0, 26.0);
+                let copy_inset = (copy_size * 0.25).clamp(4.0, 6.0);
+                let mut overlay = div()
+                    .id("pin-qr-overlay")
                     .absolute()
-                    .left(px(8.0))
-                    .right(px(8.0))
-                    .bottom(px(8.0))
-                    .h(px(30.0))
-                    .px(px(8.0))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(6.0))
-                    .rounded(px(7.0))
-                    .bg(menu)
-                    .border_1()
-                    .border_color(menu_border)
-                    .shadow(vec![
-                        BoxShadow::new(px(0.0), px(4.0), hsla(0.0, 0.0, 0.0, 0.25))
-                            .blur_radius(px(12.0)),
-                    ])
-                    .cursor(CursorStyle::Arrow)
-                    .occlude()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            window.focus(&this.focus_handle, cx);
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .child(icons::icon(icons::QR, 14.0, accent));
-                let mut label = div()
-                    .id("pin-qr-open")
-                    .flex_1()
-                    .min_w(px(0.0))
+                    .left(px(left))
+                    .top(px(top))
+                    .w(px(width.max(1.0)))
+                    .h(px(height.max(1.0)))
+                    .rounded(px(radius))
                     .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(px(11.0))
-                    .text_color(text_color);
+                    .bg(hsla(0.0, 0.0, 0.0, 0.40))
+                    .cursor(CursorStyle::Arrow);
                 if url.is_some() {
-                    label = label
-                        .cursor_pointer()
-                        .hover(move |style| style.text_color(accent))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let Some(code) = this.qr_code().map(str::to_owned) else {
-                                return;
-                            };
-                            if let Some(url) = pin_qr::qr_url(&code) {
-                                cx.open_url(&url);
-                            }
-                        }));
-                }
-                bar = bar.child(label.child(code.clone()));
-                if url.is_some() {
-                    bar = bar.child(
+                    let open_tooltip = t(language, "pin.qr_open").to_owned();
+                    overlay = overlay.child(
                         div()
-                            .id("pin-qr-open-button")
-                            .h(px(20.0))
-                            .px(px(7.0))
-                            .flex_shrink_0()
-                            .flex()
-                            .items_center()
-                            .rounded(px(5.0))
-                            .bg(menu_hover)
-                            .text_size(px(11.0))
-                            .text_color(accent)
+                            .id("pin-qr-open")
+                            .absolute()
+                            .left(px((width - open_size) / 2.0))
+                            .top(px((height - open_size) / 2.0))
+                            .w(px(open_size))
+                            .h(px(open_size))
+                            .rounded_full()
+                            .bg(accent)
                             .cursor_pointer()
-                            .hover(move |style| style.bg(selection))
+                            .hover(move |style| style.opacity(0.85))
+                            .tooltip(move |_, cx| crate::ui::tooltip_view(open_tooltip.clone(), cx))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    window.focus(&this.focus_handle, cx);
+                                    cx.stop_propagation();
+                                }),
+                            )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let Some(code) = this.qr_code().map(str::to_owned) else {
                                     return;
@@ -236,28 +206,54 @@ impl Render for PinView {
                                 if let Some(url) = pin_qr::qr_url(&code) {
                                     cx.open_url(&url);
                                 }
+                                cx.stop_propagation();
                             }))
-                            .child(t(language, "pin.qr_open")),
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icons::icon(
+                                icons::ARROW_RIGHT,
+                                open_size * 0.5,
+                                rgb(0xFFFFFF),
+                            )),
                     );
                 }
-                bar.child(
-                    div()
-                        .id("pin-qr-copy")
-                        .h(px(20.0))
-                        .px(px(7.0))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .rounded(px(5.0))
-                        .bg(menu_hover)
-                        .text_size(px(11.0))
-                        .text_color(text_color)
-                        .cursor_pointer()
-                        .hover(move |style| style.bg(selection))
-                        .on_click(cx.listener(|this, _, _, cx| this.copy_qr(cx)))
-                        .child(t(language, "pin.qr_copy")),
+                let copy_tooltip = t(language, "pin.qr_copy").to_owned();
+                Some(
+                    overlay
+                        .child(
+                            div()
+                                .id("pin-qr-copy")
+                                .absolute()
+                                .top(px(copy_inset))
+                                .right(px(copy_inset))
+                                .w(px(copy_size))
+                                .h(px(copy_size))
+                                .rounded(px(copy_size * 0.3))
+                                .bg(rgba(0xFFFFFFF2))
+                                .cursor_pointer()
+                                .hover(move |style| style.bg(rgb(0xFFFFFF)))
+                                .tooltip(move |_, cx| {
+                                    crate::ui::tooltip_view(copy_tooltip.clone(), cx)
+                                })
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, window, cx| {
+                                        window.focus(&this.focus_handle, cx);
+                                        cx.stop_propagation();
+                                    }),
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.copy_qr(cx);
+                                    cx.stop_propagation();
+                                }))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(icons::icon(icons::COPY, copy_size * 0.55, rgb(0x1F2328))),
+                        )
+                        .into_any_element(),
                 )
-                .into_any_element()
             });
         let cursor = match &self.content {
             PinContent::Image { .. } if self.drag.is_some() => crate::ui::closed_hand_cursor(),
@@ -399,6 +395,7 @@ impl Render for PinView {
                     return;
                 }
                 let over_text = this.text_index_at(event.position).is_some();
+                let over_qr = this.qr_hit(event.position, window.viewport_size());
                 let mut changed = false;
                 if !this.hover {
                     this.hover = true;
@@ -409,15 +406,22 @@ impl Render for PinView {
                     this.hover_text = over_text;
                     changed = true;
                 }
+                if over_qr != this.hover_qr {
+                    this.hover_qr = over_qr;
+                    changed = true;
+                }
                 if changed {
                     cx.notify();
                 }
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
                     let display = window.display(cx).map(|display| display.id());
                     this.display = display;
+                    let over_qr = this.qr_hit(event.position, window.viewport_size());
+                    let qr_changed = over_qr != this.hover_qr;
+                    this.hover_qr = over_qr;
                     if this.drag.take().is_some() {
                         update_bounds(this.id, window.bounds(), display);
                         cx.notify();
@@ -427,6 +431,9 @@ impl Render for PinView {
                         this.finish_text_selection(cx);
                     } else {
                         update_bounds(this.id, window.bounds(), display);
+                    }
+                    if qr_changed {
+                        cx.notify();
                     }
                 }),
             )
@@ -443,6 +450,10 @@ impl Render for PinView {
                 }
                 if this.hover_text {
                     this.hover_text = false;
+                    changed = true;
+                }
+                if this.hover_qr {
+                    this.hover_qr = false;
                     changed = true;
                 }
                 if this.hover {
@@ -488,7 +499,7 @@ impl Render for PinView {
                 }
             }))
             .child(content)
-            .children(qr_bar);
+            .children(qr_overlay);
 
         root.children(hud.map(|message| {
             let duration = if hud_leaving {

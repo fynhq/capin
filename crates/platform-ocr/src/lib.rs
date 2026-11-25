@@ -21,8 +21,14 @@ pub struct OcrOutput {
     pub text: String,
     pub lines: Vec<OcrLine>,
     pub table: Option<OcrTable>,
-    pub qr_codes: Vec<String>,
+    pub qr_codes: Vec<OcrQrCode>,
     pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OcrQrCode {
+    pub content: String,
+    pub rect: PhysicalRect,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -615,7 +621,7 @@ fn char_weight(ch: char) -> f32 {
     }
 }
 
-fn decode_qr(frame: &RgbaFrame) -> Vec<String> {
+fn decode_qr(frame: &RgbaFrame) -> Vec<OcrQrCode> {
     let mut gray = image::GrayImage::new(frame.width(), frame.height());
     let packed = frame.packed_pixels();
     for (target, source) in gray.pixels_mut().zip(packed.as_ref().as_chunks::<4>().0) {
@@ -636,17 +642,61 @@ fn decode_qr(frame: &RgbaFrame) -> Vec<String> {
         gray
     };
 
+    let scan_width = gray.width();
+    let scan_height = gray.height();
     let mut prepared = rqrr::PreparedImage::prepare(gray);
-    let mut codes = Vec::new();
+    let mut codes: Vec<OcrQrCode> = Vec::new();
     for grid in prepared.detect_grids() {
         if let Ok((_, content)) = grid.decode()
             && !content.is_empty()
-            && !codes.contains(&content)
+            && !codes.iter().any(|code| code.content == content)
         {
-            codes.push(content);
+            codes.push(OcrQrCode {
+                content,
+                rect: qr_rect(
+                    grid.bounds,
+                    scan_width,
+                    scan_height,
+                    frame.width(),
+                    frame.height(),
+                ),
+            });
         }
     }
     codes
+}
+
+fn qr_rect(
+    bounds: [rqrr::Point; 4],
+    scan_width: u32,
+    scan_height: u32,
+    width: u32,
+    height: u32,
+) -> PhysicalRect {
+    let mut left = i32::MAX;
+    let mut top = i32::MAX;
+    let mut right = i32::MIN;
+    let mut bottom = i32::MIN;
+    for point in bounds {
+        left = left.min(point.x);
+        top = top.min(point.y);
+        right = right.max(point.x);
+        bottom = bottom.max(point.y);
+    }
+    let scale_x = width as f32 / scan_width.max(1) as f32;
+    let scale_y = height as f32 / scan_height.max(1) as f32;
+    let to_x = |value: i32| ((value as f32) * scale_x).round().clamp(0.0, width as f32) as i32;
+    let to_y = |value: i32| ((value as f32) * scale_y).round().clamp(0.0, height as f32) as i32;
+    let left = to_x(left);
+    let top = to_y(top);
+    let right = to_x(right);
+    let bottom = to_y(bottom);
+    PhysicalRect::new(
+        left,
+        top,
+        (right - left).max(1) as u32,
+        (bottom - top).max(1) as u32,
+    )
 }
 
 #[cfg(test)]
@@ -822,6 +872,20 @@ mod tests {
     #[test]
     fn blank_frame_has_no_qr_codes() {
         assert!(decode_qr(&blank_frame()).is_empty());
+    }
+
+    #[test]
+    fn qr_bounds_map_back_to_frame_coordinates() {
+        let bounds = [
+            rqrr::Point { x: 30, y: 10 },
+            rqrr::Point { x: 90, y: 14 },
+            rqrr::Point { x: 86, y: 74 },
+            rqrr::Point { x: 26, y: 70 },
+        ];
+        assert_eq!(
+            qr_rect(bounds, 100, 100, 400, 200),
+            PhysicalRect::new(104, 20, 256, 128)
+        );
     }
 
     #[test]

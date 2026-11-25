@@ -457,6 +457,7 @@ struct PinView {
     selecting: bool,
     drag: Option<PinDrag>,
     hover_text: bool,
+    hover_qr: bool,
     hover: bool,
     content_generation: u64,
     flash_alpha: f32,
@@ -498,6 +499,7 @@ impl PinView {
             selecting: false,
             drag: None,
             hover_text: false,
+            hover_qr: false,
             hover: false,
             content_generation: 1,
             flash_alpha: 0.0,
@@ -607,9 +609,11 @@ impl PinView {
                 .background_executor()
                 .spawn(async move { crate::ocr_queue::recognize(source, options) })
                 .await;
-            this.update(cx, |this, cx| {
+            this.update_in(cx, |this, window, cx| {
                 if this.content_generation == generation {
                     this.ocr = Some(output);
+                    this.hover_qr =
+                        this.hover && this.qr_hit(window.mouse_position(), window.viewport_size());
                     this.release_frame_if_persisted();
                     cx.notify();
                 }
@@ -620,14 +624,55 @@ impl PinView {
         self.release_frame_if_persisted();
     }
 
-    fn qr_code(&self) -> Option<&str> {
+    fn qr(&self) -> Option<&platform_ocr::OcrQrCode> {
         if !settings_state::get().pin_qr {
             return None;
         }
-        self.ocr
-            .as_ref()
-            .and_then(|output| output.qr_codes.first())
-            .map(String::as_str)
+        self.ocr.as_ref().and_then(|output| output.qr_codes.first())
+    }
+
+    fn qr_code(&self) -> Option<&str> {
+        self.qr().map(|qr| qr.content.as_str())
+    }
+
+    fn image_layout(&self, zoom: f32, viewport: Size<Pixels>) -> (f32, f32, f32) {
+        let (width, height) = self.content.size(zoom);
+        let viewport_width = f32::from(viewport.width);
+        let viewport_height = f32::from(viewport.height);
+        let fit = if viewport_width <= 0.0 || viewport_height <= 0.0 {
+            1.0
+        } else {
+            (viewport_width / width.max(1.0))
+                .min(viewport_height / height.max(1.0))
+                .min(1.0)
+        };
+        (
+            fit,
+            (viewport_width - width * fit) / 2.0,
+            (viewport_height - height * fit) / 2.0,
+        )
+    }
+
+    fn qr_display_rect(&self, viewport: Size<Pixels>) -> Option<(f32, f32, f32, f32)> {
+        let rect = self.qr()?.rect;
+        let zoom = self.values.borrow().zoom.max(MIN_PIN_ZOOM);
+        let (fit, offset_x, offset_y) = self.image_layout(zoom, viewport);
+        let scale = zoom * fit;
+        Some((
+            offset_x + rect.origin.x as f32 * scale,
+            offset_y + rect.origin.y as f32 * scale,
+            rect.size.width as f32 * scale,
+            rect.size.height as f32 * scale,
+        ))
+    }
+
+    fn qr_hit(&self, position: Point<Pixels>, viewport: Size<Pixels>) -> bool {
+        let Some((left, top, width, height)) = self.qr_display_rect(viewport) else {
+            return false;
+        };
+        let x = f32::from(position.x);
+        let y = f32::from(position.y);
+        x >= left && y >= top && x <= left + width && y <= top + height
     }
 
     fn text_lines(&self) -> Option<&[platform_ocr::OcrLine]> {
