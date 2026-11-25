@@ -92,7 +92,8 @@ pub fn capture_excluded_window_ids() -> Vec<u32> {
 pub use macos::display_backing_scale;
 #[cfg(target_os = "windows")]
 pub use windows::{
-    MonitorStream, cache_monitor_stream, init_process_dpi_awareness, take_monitor_stream,
+    MonitorStream, cache_monitor_stream, init_process_dpi_awareness, seed_monitor_stream,
+    take_monitor_stream,
 };
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]

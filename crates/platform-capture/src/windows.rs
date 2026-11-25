@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -650,8 +650,8 @@ where
     }
 }
 
-const WARM_STREAM_IDLE: Duration = Duration::from_secs(30);
-const WARM_STREAM_CHECK: Duration = Duration::from_secs(15);
+const WARM_STREAM_IDLE: Duration = Duration::from_secs(15);
+const WARM_STREAM_CHECK: Duration = Duration::from_secs(5);
 
 struct WarmStream {
     stream: MonitorStream,
@@ -660,9 +660,14 @@ struct WarmStream {
 
 static WARM_STREAMS: OnceLock<Mutex<HashMap<MonitorId, WarmStream>>> = OnceLock::new();
 static WARM_STREAM_WATCH: OnceLock<()> = OnceLock::new();
+static WARM_STREAM_SEEDING: OnceLock<Mutex<HashSet<MonitorId>>> = OnceLock::new();
 
 fn warm_streams() -> &'static Mutex<HashMap<MonitorId, WarmStream>> {
     WARM_STREAMS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn warm_stream_seeding() -> &'static Mutex<HashSet<MonitorId>> {
+    WARM_STREAM_SEEDING.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
 fn start_warm_stream_watch() {
@@ -714,6 +719,44 @@ pub fn cache_monitor_stream(monitor: MonitorId, stream: MonitorStream) {
         )
     });
     drop(stale);
+}
+
+pub fn seed_monitor_stream(monitor: MonitorId) {
+    let cached = warm_streams()
+        .lock()
+        .map(|streams| streams.contains_key(&monitor))
+        .unwrap_or(true);
+    if cached {
+        return;
+    }
+    let Ok(mut seeding) = warm_stream_seeding().lock() else {
+        return;
+    };
+    if !seeding.insert(monitor) {
+        return;
+    }
+    drop(seeding);
+    let spawned = std::thread::Builder::new()
+        .name("capin-capture-seed".to_owned())
+        .spawn(move || {
+            if let Ok(stream) = MonitorStream::start(monitor) {
+                let cached = warm_streams()
+                    .lock()
+                    .map(|streams| streams.contains_key(&monitor))
+                    .unwrap_or(true);
+                if !cached {
+                    cache_monitor_stream(monitor, stream);
+                }
+            }
+            if let Ok(mut seeding) = warm_stream_seeding().lock() {
+                seeding.remove(&monitor);
+            }
+        });
+    if spawned.is_err()
+        && let Ok(mut seeding) = warm_stream_seeding().lock()
+    {
+        seeding.remove(&monitor);
+    }
 }
 
 pub struct MonitorStream {

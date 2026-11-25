@@ -152,15 +152,7 @@ fn release_texture_views(cx: &mut App, keep: Option<u64>) {
         if keep == Some(view.entity_id().as_u64()) {
             continue;
         }
-        view.update(cx, |this, cx| {
-            cx.drop_image(this.image.clone(), None);
-            if let Some(magnifier) = this.magnifier.take() {
-                cx.drop_image(magnifier.image, None);
-            }
-            if let Some(editor) = this.editor.clone() {
-                editor.update(cx, |editor, cx| editor.release_images(cx));
-            }
-        });
+        view.update(cx, |this, cx| this.release_capture_resources(cx));
     }
 }
 

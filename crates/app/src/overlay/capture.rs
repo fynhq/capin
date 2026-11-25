@@ -92,7 +92,11 @@ fn capture_monitor_with_cache(
         if let Some(frame) = warm_frame {
             return (Ok(frame), stream);
         }
-        (capture_monitor_checked(monitor, with_cursor), stream)
+        let frame = capture_monitor_checked(monitor, with_cursor);
+        if !with_cursor && stream.is_none() && frame.is_ok() {
+            platform_capture::seed_monitor_stream(monitor.id);
+        }
+        (frame, stream)
     }
     #[cfg(not(target_os = "windows"))]
     {
