@@ -91,7 +91,9 @@ pub fn capture_excluded_window_ids() -> Vec<u32> {
 #[cfg(target_os = "macos")]
 pub use macos::display_backing_scale;
 #[cfg(target_os = "windows")]
-pub use windows::{MonitorStream, init_process_dpi_awareness};
+pub use windows::{
+    MonitorStream, cache_monitor_stream, init_process_dpi_awareness, take_monitor_stream,
+};
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 struct UnsupportedCapture;

@@ -1,8 +1,9 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use core_types::{DpiScale, MonitorId, PhysicalRect, RgbaFrame, WindowId};
@@ -633,6 +634,72 @@ where
             })
         }
     }
+}
+
+const WARM_STREAM_IDLE: Duration = Duration::from_secs(30);
+const WARM_STREAM_CHECK: Duration = Duration::from_secs(15);
+
+struct WarmStream {
+    stream: MonitorStream,
+    idle_since: Instant,
+}
+
+static WARM_STREAMS: OnceLock<Mutex<HashMap<MonitorId, WarmStream>>> = OnceLock::new();
+static WARM_STREAM_WATCH: OnceLock<()> = OnceLock::new();
+
+fn warm_streams() -> &'static Mutex<HashMap<MonitorId, WarmStream>> {
+    WARM_STREAMS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn start_warm_stream_watch() {
+    WARM_STREAM_WATCH.get_or_init(|| {
+        let _ = std::thread::Builder::new()
+            .name("capin-capture-warm".to_owned())
+            .spawn(|| {
+                loop {
+                    std::thread::sleep(WARM_STREAM_CHECK);
+                    let expired = {
+                        let Ok(mut streams) = warm_streams().lock() else {
+                            continue;
+                        };
+                        let now = Instant::now();
+                        let ids: Vec<MonitorId> = streams
+                            .iter()
+                            .filter(|(_, cached)| {
+                                now.saturating_duration_since(cached.idle_since) >= WARM_STREAM_IDLE
+                            })
+                            .map(|(id, _)| *id)
+                            .collect();
+                        ids.into_iter()
+                            .filter_map(|id| streams.remove(&id))
+                            .collect::<Vec<_>>()
+                    };
+                    drop(expired);
+                }
+            });
+    });
+}
+
+pub fn take_monitor_stream(monitor: MonitorId) -> Option<MonitorStream> {
+    warm_streams()
+        .lock()
+        .ok()?
+        .remove(&monitor)
+        .map(|cached| cached.stream)
+}
+
+pub fn cache_monitor_stream(monitor: MonitorId, stream: MonitorStream) {
+    start_warm_stream_watch();
+    let stale = warm_streams().lock().ok().and_then(|mut streams| {
+        streams.insert(
+            monitor,
+            WarmStream {
+                stream,
+                idle_since: Instant::now(),
+            },
+        )
+    });
+    drop(stale);
 }
 
 pub struct MonitorStream {

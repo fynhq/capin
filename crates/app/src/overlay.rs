@@ -378,10 +378,15 @@ pub fn open_overlays(cx: &mut App) {
     let capture_cursor = settings_state::get().capture_cursor;
     let results = capture::capture_monitors(unique_monitors, capture_cursor);
 
-    let mut captures: Vec<(MonitorInfo, Arc<RenderImage>, PhysicalSize)> =
-        Vec::with_capacity(results.len());
-    for (monitor, result) in results {
-        let frame = match result {
+    let mut captures: Vec<(
+        MonitorInfo,
+        Arc<RenderImage>,
+        PhysicalSize,
+        Option<capture::CaptureStream>,
+    )> = Vec::with_capacity(results.len());
+    for result in results {
+        let monitor = result.monitor;
+        let frame = match result.frame {
             Ok(frame) => frame,
             Err(error) => {
                 log_error!(
@@ -405,11 +410,16 @@ pub fn open_overlays(cx: &mut App) {
             frame.height()
         );
         let image_size = PhysicalSize::new(frame.width(), frame.height());
-        captures.push((monitor, image_util::render_image(frame), image_size));
+        captures.push((
+            monitor,
+            image_util::render_image(frame),
+            image_size,
+            result.stream,
+        ));
     }
 
     let mut opened = 0usize;
-    for (monitor, image, image_size) in captures {
+    for (monitor, image, image_size, monitor_stream) in captures {
         let window_bounds = logical_bounds(&monitor);
         let expected_size = window_bounds.size;
         let expected_scale = monitor.scale.get();
@@ -489,6 +499,12 @@ pub fn open_overlays(cx: &mut App) {
                     cx,
                 )
             });
+            #[cfg(target_os = "windows")]
+            if let Some(stream) = monitor_stream {
+                let _ = view.update(cx, |this, _| this.monitor_stream = Some(stream));
+            }
+            #[cfg(not(target_os = "windows"))]
+            let _ = monitor_stream;
             let entity_id = view.entity_id().as_u64();
             view.update(cx, |this, _| this.entity_id = entity_id);
             let focus = view.read(cx).focus_handle.clone();
@@ -821,7 +837,9 @@ impl OverlayView {
     fn release_capture_resources(&mut self, cx: &mut Context<Self>) {
         #[cfg(target_os = "windows")]
         {
-            self.monitor_stream.take();
+            if let Some(stream) = self.monitor_stream.take() {
+                platform_capture::cache_monitor_stream(self.session.monitor(), stream);
+            }
         }
         if let Some(magnifier) = self.magnifier.take() {
             cx.drop_image(magnifier.image, None);
@@ -845,6 +863,10 @@ impl OverlayView {
 
 impl Drop for OverlayView {
     fn drop(&mut self) {
+        #[cfg(target_os = "windows")]
+        if let Some(stream) = self.monitor_stream.take() {
+            platform_capture::cache_monitor_stream(self.session.monitor(), stream);
+        }
         registry::clear_focus_if(self.entity_id);
     }
 }
