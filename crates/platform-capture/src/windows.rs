@@ -18,16 +18,19 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
 };
-use windows::Win32::UI::Accessibility::{CUIAutomation, TreeScope_Descendants};
+use windows::Win32::UI::Accessibility::{
+    CUIAutomation8, IUIAutomation2, IUIAutomationCacheRequest, TreeScope_Descendants,
+    UIA_BoundingRectanglePropertyId, UIA_IsOffscreenPropertyId,
+};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, GetDpiForWindow,
     MDT_EFFECTIVE_DPI, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetDesktopWindow, GetShellWindow,
-    GetWindowDisplayAffinity, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, IsIconic, IsWindowVisible, IsZoomed, MONITORINFOF_PRIMARY,
-    WDA_EXCLUDEFROMCAPTURE, WS_CHILD, WS_EX_TOOLWINDOW,
+    EnumChildWindows, EnumWindows, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetDesktopWindow,
+    GetShellWindow, GetWindowDisplayAffinity, GetWindowLongPtrW, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, IsIconic, IsWindowVisible, IsZoomed,
+    MONITORINFOF_PRIMARY, WDA_EXCLUDEFROMCAPTURE, WS_CHILD, WS_EX_TOOLWINDOW,
 };
 use windows::core::BOOL;
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
@@ -124,69 +127,136 @@ fn capture_target(target: CaptureTarget, cursor: CursorCaptureSettings) -> Resul
     }
 }
 
-thread_local! {
-    static AUTOMATION: RefCell<Option<windows::Win32::UI::Accessibility::IUIAutomation>> =
-        const { RefCell::new(None) };
+const UIA_TIMEOUT_MS: u32 = 500;
+const UIA_MAX_ELEMENTS: i32 = 512;
+const CHILD_WINDOW_LIMIT: usize = 64;
+
+#[derive(Clone)]
+struct Automation {
+    automation: IUIAutomation2,
+    cache: IUIAutomationCacheRequest,
 }
 
-fn automation() -> Option<windows::Win32::UI::Accessibility::IUIAutomation> {
+thread_local! {
+    static AUTOMATION: RefCell<Option<Automation>> = const { RefCell::new(None) };
+}
+
+fn automation() -> Option<Automation> {
     AUTOMATION.with(|slot| {
         if let Some(automation) = slot.borrow().as_ref() {
             return Some(automation.clone());
         }
-        // SAFETY: COM initialization is idempotent for the same apartment;
-        // failure usually means the caller already initialized COM with another
-        // model, which UI Automation can still use.
-        let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-        // SAFETY: CUIAutomation is a registered in-process COM class.
-        let automation = unsafe {
-            CoCreateInstance::<_, windows::Win32::UI::Accessibility::IUIAutomation>(
-                &CUIAutomation,
-                None,
-                CLSCTX_INPROC_SERVER,
-            )
+        // SAFETY: COM is initialized on this thread and every created object is owned by the returned Automation.
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let automation =
+                CoCreateInstance::<_, IUIAutomation2>(&CUIAutomation8, None, CLSCTX_INPROC_SERVER)
+                    .ok()?;
+            let _ = automation.SetConnectionTimeout(UIA_TIMEOUT_MS);
+            let _ = automation.SetTransactionTimeout(UIA_TIMEOUT_MS);
+            let cache = automation.CreateCacheRequest().ok()?;
+            let _ = cache.AddProperty(UIA_BoundingRectanglePropertyId);
+            let _ = cache.AddProperty(UIA_IsOffscreenPropertyId);
+            let _ = cache.SetTreeScope(TreeScope_Descendants);
+            let automation = Automation { automation, cache };
+            *slot.borrow_mut() = Some(automation.clone());
+            Some(automation)
         }
-        .ok()?;
-        *slot.borrow_mut() = Some(automation.clone());
-        Some(automation)
     })
 }
 
 pub fn ui_elements(id: WindowId) -> Vec<PhysicalRect> {
     let hwnd = HWND(id.raw() as usize as *mut c_void);
-    let Some(automation) = automation() else {
-        return Vec::new();
-    };
-    // SAFETY: hwnd belongs to a live window that is being captured.
-    let Ok(root) = (unsafe { automation.ElementFromHandle(hwnd) }) else {
-        return Vec::new();
-    };
-    // SAFETY: the condition is a fresh COM object owned by this call.
-    let Ok(condition) = (unsafe { automation.CreateTrueCondition() }) else {
-        return Vec::new();
-    };
-    // SAFETY: FindAll returns a new COM array; the scope only affects traversal.
-    let Ok(elements) = (unsafe { root.FindAll(TreeScope_Descendants, &condition) }) else {
-        return Vec::new();
-    };
-    // SAFETY: the array and its elements are live COM objects for this scope.
-    let length = unsafe { elements.Length() }.unwrap_or(0).clamp(0, 512);
-    let mut result = Vec::with_capacity(length as usize);
-    for index in 0..length {
-        // SAFETY: index is within the reported array length.
-        let Ok(element) = (unsafe { elements.GetElement(index) }) else {
-            continue;
-        };
-        // SAFETY: the element is a live COM object.
-        let Ok(rect) = (unsafe { element.CurrentBoundingRectangle() }) else {
-            continue;
-        };
-        let bounds = physical_rect(rect);
-        if bounds.size.width > 1 && bounds.size.height > 1 {
-            result.push(bounds);
-        }
+    let mut result = uia_elements(hwnd);
+    if result.len() < 2 {
+        result.extend(child_window_rects(hwnd));
+        result.sort_by_key(|rect| {
+            (
+                rect.origin.x,
+                rect.origin.y,
+                rect.size.width,
+                rect.size.height,
+            )
+        });
+        result.dedup();
     }
     result
+}
+
+fn uia_elements(hwnd: HWND) -> Vec<PhysicalRect> {
+    let Some(Automation { automation, cache }) = automation() else {
+        return Vec::new();
+    };
+    // SAFETY: the calls use live COM objects owned here and indices bounded by the reported length.
+    unsafe {
+        let Ok(root) = automation.ElementFromHandle(hwnd) else {
+            return Vec::new();
+        };
+        let Ok(condition) = automation.CreateTrueCondition() else {
+            return Vec::new();
+        };
+        let Ok(elements) = root.FindAllBuildCache(TreeScope_Descendants, &condition, &cache) else {
+            return Vec::new();
+        };
+        let length = elements.Length().unwrap_or(0).clamp(0, UIA_MAX_ELEMENTS);
+        let mut result = Vec::with_capacity(length as usize);
+        for index in 0..length {
+            let Ok(element) = elements.GetElement(index) else {
+                continue;
+            };
+            let offscreen = element
+                .CachedIsOffscreen()
+                .map(|value| value.as_bool())
+                .unwrap_or(false);
+            if offscreen {
+                continue;
+            }
+            let Ok(rect) = element.CachedBoundingRectangle() else {
+                continue;
+            };
+            let bounds = physical_rect(rect);
+            if bounds.size.width > 1 && bounds.size.height > 1 {
+                result.push(bounds);
+            }
+        }
+        result
+    }
+}
+
+fn child_window_rects(hwnd: HWND) -> Vec<PhysicalRect> {
+    let mut rects = Vec::new();
+    // SAFETY: the callback only writes to the Vec borrowed for the duration of the call.
+    unsafe {
+        let _ = EnumChildWindows(
+            Some(hwnd),
+            Some(child_window_callback),
+            LPARAM(&raw mut rects as isize),
+        );
+    }
+    rects
+}
+
+unsafe extern "system" fn child_window_callback(hwnd: HWND, data: LPARAM) -> BOOL {
+    // SAFETY: data points at the Vec borrowed for the duration of EnumChildWindows.
+    let rects = unsafe { &mut *(data.0 as *mut Vec<PhysicalRect>) };
+    if rects.len() >= CHILD_WINDOW_LIMIT {
+        return TRUE;
+    }
+    // SAFETY: hwnd is a live child window supplied by the enumeration.
+    unsafe {
+        if !IsWindowVisible(hwnd).as_bool() {
+            return TRUE;
+        }
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &mut rect).is_err() {
+            return TRUE;
+        }
+        let bounds = physical_rect(rect);
+        if bounds.size.width > 4 && bounds.size.height > 4 {
+            rects.push(bounds);
+        }
+    }
+    TRUE
 }
 
 pub fn window_corner_radius(id: WindowId, scale: f32) -> u32 {
