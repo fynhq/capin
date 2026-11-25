@@ -19,6 +19,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
 };
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Accessibility::{
     CUIAutomation8, IUIAutomation2, IUIAutomationCacheRequest, TreeScope_Descendants,
     TreeScope_Element, UIA_BoundingRectanglePropertyId,
@@ -30,8 +31,8 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetDesktopWindow,
     GetShellWindow, GetWindowDisplayAffinity, GetWindowLongPtrW, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, IsIconic, IsWindowVisible, IsZoomed,
-    MONITORINFOF_PRIMARY, WDA_EXCLUDEFROMCAPTURE, WS_CHILD, WS_EX_TOOLWINDOW,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+    IsZoomed, MONITORINFOF_PRIMARY, WDA_EXCLUDEFROMCAPTURE, WS_CHILD, WS_EX_TOOLWINDOW,
 };
 use windows::core::BOOL;
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
@@ -165,9 +166,22 @@ fn automation() -> Option<Automation> {
     })
 }
 
+fn belongs_to_current_process(hwnd: HWND) -> bool {
+    let mut pid = 0;
+    // SAFETY: hwnd is a live handle and pid is a writable local.
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        pid != 0 && pid == GetCurrentProcessId()
+    }
+}
+
 pub fn ui_elements(id: WindowId) -> Vec<PhysicalRect> {
     let hwnd = HWND(id.raw() as usize as *mut c_void);
-    let mut result = uia_elements(hwnd);
+    let mut result = if belongs_to_current_process(hwnd) {
+        Vec::new()
+    } else {
+        uia_elements(hwnd)
+    };
     if result.len() < 2 {
         result.extend(child_window_rects(hwnd));
         result.sort_by_key(|rect| {
