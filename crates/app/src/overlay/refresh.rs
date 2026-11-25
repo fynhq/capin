@@ -120,7 +120,11 @@ impl OverlayView {
     }
 
     pub(super) fn watch_close(&self, window: &Window, cx: &mut Context<Self>) {
+        let view = cx.entity().downgrade();
         window.on_window_should_close(cx, move |_, cx| {
+            if let Some(view) = view.upgrade() {
+                view.update(cx, |this, cx| this.release_capture_resources(cx));
+            }
             let handles = cx.windows();
             cx.defer(move |cx| crate::windows::close_capture_auxiliary(cx, handles));
             true

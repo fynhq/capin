@@ -818,8 +818,24 @@ impl OverlayView {
         vec![layer.into_any_element()]
     }
 
+    fn release_capture_resources(&mut self, cx: &mut Context<Self>) {
+        #[cfg(target_os = "windows")]
+        {
+            self.monitor_stream.take();
+        }
+        if let Some(magnifier) = self.magnifier.take() {
+            cx.drop_image(magnifier.image, None);
+        }
+        cx.drop_image(self.image.clone(), None);
+        self.image = crate::image_util::transparent_image();
+        if let Some(editor) = self.editor.clone() {
+            editor.update(cx, |editor, cx| editor.release_images(cx));
+        }
+    }
+
     fn close_overlays(&mut self, cx: &mut Context<Self>) {
         platform_window::set_cursor_hidden(false);
+        self.release_capture_resources(cx);
         let handles = cx.windows();
         cx.defer(move |cx| {
             crate::windows::close_capture_auxiliary(cx, handles);
