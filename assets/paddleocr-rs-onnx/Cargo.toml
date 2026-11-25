@@ -22,3 +22,11 @@ parking_lot = "0.13"
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2.0"
+
+[features]
+cann = ["ort/cann"]
+coreml = ["ort/coreml"]
+cuda = ["ort/cuda"]
+directml = ["ort/directml"]
+nnapi = ["ort/nnapi"]
+openvino = ["ort/openvino"]
