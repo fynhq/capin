@@ -447,21 +447,7 @@ pub(super) fn start_scroll_capture(view: &mut EditorView, cx: &mut Context<Edito
         return;
     }
     view.commit_text(cx);
-    let document = view.action_document();
-    let first_frame = match rasterize(&document, &view.frame) {
-        Ok(frame) => frame,
-        Err(error) => {
-            view.show_status(
-                format!(
-                    "{}{}",
-                    t(settings_state::get().language, "editor.export_failed"),
-                    error
-                ),
-                cx,
-            );
-            return;
-        }
-    };
+    let first_frame = (*view.frame).clone();
     let handles = cx.windows();
     cx.defer(move |cx| {
         crate::windows::close_capture_auxiliary(cx, handles);

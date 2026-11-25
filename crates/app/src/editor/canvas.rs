@@ -1,5 +1,43 @@
 use super::*;
 
+fn shift_inline_capture(inline: &mut InlineHost, rect: PhysicalRect) {
+    let Some(capture) = inline.capture.as_mut() else {
+        return;
+    };
+    capture.region = CaptureRegion::new(
+        capture.region.monitor,
+        PhysicalRect::new(
+            capture.region.rect.origin.x + rect.origin.x,
+            capture.region.rect.origin.y + rect.origin.y,
+            rect.size.width,
+            rect.size.height,
+        ),
+    );
+    capture.target = CaptureTarget::Region(capture.region);
+}
+
+fn apply_crop_result(
+    view: &mut EditorView,
+    cropped: RgbaFrame,
+    rect: PhysicalRect,
+    cx: &mut Context<EditorView>,
+) {
+    let new_size = PhysicalSize::new(cropped.width(), cropped.height());
+    let document = view.document.crop_to(rect.origin, new_size);
+    view.frame = Arc::new(cropped);
+    view.image_size = new_size;
+    view.refresh_frame_images(cx);
+    view.document = document;
+    view.crop_mode = false;
+    view.crop_draft = None;
+    view.text_edit = None;
+    if let Some(inline) = view.inline.as_mut() {
+        shift_inline_capture(inline, rect);
+    }
+    view.refit_zoomable_view();
+    view.reset_view(cx);
+}
+
 pub(super) fn push_preview_rounded_rect(
     builder: &mut PathBuilder,
     to_point: &impl Fn(f32, f32) -> Point<Pixels>,
@@ -475,17 +513,7 @@ impl EditorView {
             return;
         };
         self.push_canvas_snapshot();
-        let new_size = PhysicalSize::new(cropped.width(), cropped.height());
-        let document = self.document.crop_to(rect.origin, new_size);
-        self.frame = Arc::new(cropped);
-        self.image_size = new_size;
-        self.refresh_frame_images(cx);
-        self.document = document;
-        self.crop_mode = false;
-        self.crop_draft = None;
-        self.text_edit = None;
-        self.refit_zoomable_view();
-        self.reset_view(cx);
+        apply_crop_result(self, cropped, rect, cx);
         self.show_status(
             t(settings_state::get().language, "editor.cropped").to_owned(),
             cx,
