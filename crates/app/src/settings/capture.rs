@@ -104,6 +104,7 @@ impl SettingsView {
                             },
                         ),
                         self.repeat_pin_row(theme, cx),
+                        self.pin_double_click_row(theme, cx),
                     ],
                 ),
             ))
@@ -255,6 +256,32 @@ impl SettingsView {
         )
     }
 
+    fn pin_double_click_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let language = self.settings().language;
+        let current = t(
+            language,
+            pin_double_click_key(self.settings().pin_double_click),
+        );
+        a11y_row(
+            "settings-row-pin-double-click",
+            t(language, "settings.pin_double_click"),
+            row_shell()
+                .child(row_label_with_icon(
+                    theme,
+                    icons::CURSOR,
+                    t(language, "settings.pin_double_click"),
+                    t(language, "settings.pin_double_click_desc"),
+                ))
+                .child(self.select_trigger(
+                    theme,
+                    current,
+                    "settings-pin-double-click",
+                    SelectKind::PinDoubleClick,
+                    cx,
+                )),
+        )
+    }
+
     fn select_entries(&self, kind: SelectKind) -> Vec<(String, u32, bool)> {
         let language = self.settings().language;
         let mut entries: Vec<(String, u32, bool)> = Vec::new();
@@ -295,6 +322,15 @@ impl SettingsView {
                     ));
                 }
             }
+            SelectKind::PinDoubleClick => {
+                for (index, action) in PinDoubleClickAction::ALL.into_iter().enumerate() {
+                    entries.push((
+                        t(language, pin_double_click_key(action)).to_owned(),
+                        index as u32,
+                        self.settings().pin_double_click == action,
+                    ));
+                }
+            }
         }
         entries
     }
@@ -317,6 +353,10 @@ impl SettingsView {
             SelectKind::DoubleClick => {
                 let action = DoubleClickAction::ALL[value as usize];
                 settings_state::update(|settings| settings.capture_double_click = action);
+            }
+            SelectKind::PinDoubleClick => {
+                let action = PinDoubleClickAction::ALL[value as usize];
+                settings_state::update(|settings| settings.pin_double_click = action);
             }
         }
         self.status.clear();

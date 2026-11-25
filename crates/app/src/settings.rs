@@ -12,7 +12,8 @@ use crate::i18n::{Language, t};
 use crate::icons;
 use crate::logging::{log_error, log_info, log_warn};
 use crate::settings_state::{
-    self, AppSettings, DoubleClickAction, RepeatPinBehavior, WINDOW_PADDINGS, WindowBackground,
+    self, AppSettings, DoubleClickAction, PinDoubleClickAction, RepeatPinBehavior, WINDOW_PADDINGS,
+    WindowBackground,
 };
 use crate::storage;
 use crate::theme::{accent_text_color, fallback_accent, settings_palette};
@@ -216,6 +217,7 @@ enum SelectKind {
     WindowPadding,
     RepeatPin,
     DoubleClick,
+    PinDoubleClick,
 }
 
 #[derive(Clone, Copy)]
@@ -800,6 +802,13 @@ fn double_click_key(action: DoubleClickAction) -> &'static str {
         DoubleClickAction::NoAction => "double_click.none",
         DoubleClickAction::Copy => "double_click.copy",
         DoubleClickAction::Pin => "double_click.pin",
+    }
+}
+
+fn pin_double_click_key(action: PinDoubleClickAction) -> &'static str {
+    match action {
+        PinDoubleClickAction::NoAction => "pin_double_click.none",
+        PinDoubleClickAction::Close => "pin_double_click.close",
     }
 }
 

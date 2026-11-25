@@ -175,6 +175,32 @@ impl DoubleClickAction {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PinDoubleClickAction {
+    #[default]
+    NoAction,
+    Close,
+}
+
+impl PinDoubleClickAction {
+    pub const ALL: [Self; 2] = [Self::NoAction, Self::Close];
+
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::NoAction => "none",
+            Self::Close => "close",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "none" => Some(Self::NoAction),
+            "close" => Some(Self::Close),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppSettings {
     pub language: Language,
@@ -219,6 +245,7 @@ pub struct AppSettings {
     pub annotation_spotlight_radius: f32,
     pub pin_text_ocr: bool,
     pub pin_qr: bool,
+    pub pin_double_click: PinDoubleClickAction,
     pub hide_tray: bool,
 }
 
@@ -286,6 +313,7 @@ impl Default for AppSettings {
             annotation_spotlight_radius: 0.0,
             pin_text_ocr: true,
             pin_qr: true,
+            pin_double_click: PinDoubleClickAction::NoAction,
             hide_tray: false,
         }
     }
@@ -437,6 +465,15 @@ static FIELDS: &[Field] = &[
         key: "pin_qr",
         write: |settings, out| write_bool(out, settings.pin_qr),
         read: |settings, value| settings.pin_qr = read_bool_not_false(value),
+    },
+    Field {
+        key: "pin_double_click",
+        write: |settings, out| out.push_str(settings.pin_double_click.code()),
+        read: |settings, value| {
+            if let Some(action) = PinDoubleClickAction::from_code(value) {
+                settings.pin_double_click = action;
+            }
+        },
     },
     Field {
         key: "record_cursor_highlight",
@@ -1103,6 +1140,33 @@ mod tests {
 
         let settings = AppSettings {
             capture_double_click: DoubleClickAction::Pin,
+            ..Default::default()
+        };
+        assert_eq!(parse(&serialize(&settings)), settings);
+    }
+
+    #[test]
+    fn pin_double_click_defaults_and_round_trips() {
+        assert_eq!(
+            AppSettings::default().pin_double_click,
+            PinDoubleClickAction::NoAction
+        );
+
+        assert_eq!(
+            parse("pin_double_click=close\n").pin_double_click,
+            PinDoubleClickAction::Close
+        );
+        assert_eq!(
+            parse("pin_double_click=none\n").pin_double_click,
+            PinDoubleClickAction::NoAction
+        );
+        assert_eq!(
+            parse("pin_double_click=bogus\n").pin_double_click,
+            PinDoubleClickAction::NoAction
+        );
+
+        let settings = AppSettings {
+            pin_double_click: PinDoubleClickAction::Close,
             ..Default::default()
         };
         assert_eq!(parse(&serialize(&settings)), settings);

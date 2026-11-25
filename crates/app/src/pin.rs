@@ -685,26 +685,6 @@ impl PinView {
         best.map(|(_, index)| index)
     }
 
-    fn word_range_at(&self, index: usize) -> Option<(usize, usize)> {
-        let lines = self.text_lines()?;
-        let mut base = 0usize;
-        for line in lines {
-            let length = line.chars.len();
-            if index < base + length {
-                let local = index - base;
-                let ch = line.chars[local].ch;
-                if !ch.is_ascii() || ch.is_whitespace() {
-                    return Some((base + local, base + local));
-                }
-                let chars: Vec<char> = line.chars.iter().map(|item| item.ch).collect();
-                let range = crate::text_scan::word_range(&chars, local, |ch| !ch.is_whitespace())?;
-                return Some((base + range.start, base + range.end - 1));
-            }
-            base += length;
-        }
-        None
-    }
-
     fn selection_range(&self) -> Option<(usize, usize)> {
         let (anchor, focus) = self.selection?;
         Some((anchor.min(focus), anchor.max(focus)))
@@ -838,19 +818,6 @@ impl PinView {
             self.selection = None;
         }
         cx.notify();
-    }
-
-    fn select_word_at(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) -> bool {
-        let Some(index) = self.text_index_at(position) else {
-            return false;
-        };
-        let Some((start, end)) = self.word_range_at(index) else {
-            return false;
-        };
-        self.selection = Some((start, end));
-        self.selecting = false;
-        cx.notify();
-        true
     }
 
     fn select_all_text(&mut self, cx: &mut Context<Self>) -> bool {

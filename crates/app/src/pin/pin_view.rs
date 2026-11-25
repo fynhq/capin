@@ -1,5 +1,5 @@
 use crate::i18n::{Language, t};
-use crate::settings_state;
+use crate::settings_state::{self, PinDoubleClickAction};
 
 use super::*;
 
@@ -348,8 +348,10 @@ impl Render for PinView {
                     this.wake_ocr(cx);
                     this.hover_text = this.text_index_at(event.position).is_some();
                     if event.click_count >= 2 {
-                        this.select_word_at(event.position, cx);
-                        cx.notify();
+                        if settings_state::get().pin_double_click == PinDoubleClickAction::Close {
+                            let id = this.id;
+                            cx.defer(move |cx| crate::pin::close_pin(id, cx));
+                        }
                         return;
                     }
                     let bounds = window.bounds().size;

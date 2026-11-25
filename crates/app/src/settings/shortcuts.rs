@@ -181,13 +181,6 @@ impl SettingsView {
                         ),
                         info_row(
                             theme,
-                            t(language, "shortcuts.pin_word"),
-                            "",
-                            t(language, "shortcuts.value.double_click"),
-                            Some(icons::TEXT),
-                        ),
-                        info_row(
-                            theme,
                             t(language, "shortcuts.pin_copy_text"),
                             "",
                             t(language, "shortcuts.value.cmd_ctrl_c"),
