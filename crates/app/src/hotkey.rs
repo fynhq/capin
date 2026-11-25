@@ -8,6 +8,7 @@ mod imp {
     use global_hotkey::hotkey::{Code, HotKey, Modifiers};
     use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
     use gpui_kit::*;
+    use platform_window::ForegroundInfo;
 
     use crate::logging::{log_error, log_info, log_warn};
     use crate::settings_state;
@@ -29,6 +30,79 @@ mod imp {
         static THROUGH_ESCAPE_ID: Cell<u32> = const { Cell::new(0) };
         static THROUGH_ESCAPE_KEY: RefCell<Option<HotKey>> = const { RefCell::new(None) };
         static THROUGH_ESCAPE_FAILED: Cell<bool> = const { Cell::new(false) };
+        static SETTINGS_RECORDING: Cell<bool> = const { Cell::new(false) };
+        static SUSPENDED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    fn app_listed(list: &str, name: Option<&str>) -> bool {
+        let Some(name) = name else {
+            return false;
+        };
+        list.split([',', '|', ';'])
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .any(|entry| entry.eq_ignore_ascii_case(name))
+    }
+
+    fn yield_wanted() -> bool {
+        let settings = settings_state::get();
+        let fullscreen = settings.yield_hotkeys_fullscreen;
+        let apps = settings.yield_hotkey_apps.as_str();
+        if !fullscreen && apps.trim().is_empty() {
+            return false;
+        }
+        let ForegroundInfo {
+            covers_monitor,
+            process_name,
+        } = platform_window::foreground_info();
+        (fullscreen && covers_monitor) || app_listed(apps, process_name.as_deref())
+    }
+
+    fn sync_suspension() {
+        let wanted = SETTINGS_RECORDING.with(Cell::get) || yield_wanted();
+        if wanted == SUSPENDED.with(Cell::get) {
+            return;
+        }
+        MANAGER.with(|slot| {
+            let manager_borrow = slot.borrow();
+            let Some(manager) = manager_borrow.as_ref() else {
+                return;
+            };
+            if wanted {
+                let registered = REGISTERED.with(|registered| registered.borrow().clone());
+                for hotkey in registered {
+                    let _ = manager.unregister(hotkey);
+                }
+                REGISTERED.with(|registered| registered.borrow_mut().clear());
+                CAPTURE_ENABLED.with(|enabled| enabled.set(false));
+                PIN_ENABLED.with(|enabled| enabled.set(false));
+                SUSPENDED.with(|suspended| suspended.set(true));
+                log_info!("hotkey", "global shortcuts suspended");
+            } else {
+                let capture = CAPTURE_KEY
+                    .with(|slot| *slot.borrow())
+                    .unwrap_or_else(default_capture);
+                let pin = PIN_KEY
+                    .with(|slot| *slot.borrow())
+                    .unwrap_or_else(default_pin);
+                let (registered, error) = register_pair(manager, capture, pin);
+                CAPTURE_ENABLED.with(|enabled| enabled.set(registered.contains(&capture)));
+                PIN_ENABLED.with(|enabled| enabled.set(registered.contains(&pin)));
+                REGISTERED.with(|slot| *slot.borrow_mut() = registered);
+                REGISTRATION_ERROR.with(|slot| *slot.borrow_mut() = error);
+                SUSPENDED.with(|suspended| suspended.set(false));
+                log_info!("hotkey", "global shortcuts resumed");
+            }
+        });
+    }
+
+    pub fn set_settings_recording(enabled: bool) {
+        SETTINGS_RECORDING.with(|recording| recording.set(enabled));
+        sync_suspension();
+    }
+
+    pub fn refresh_yield() {
+        sync_suspension();
     }
 
     fn sync_through_escape(cx: &mut App) {
@@ -156,6 +230,7 @@ mod imp {
         PIN_ID.with(|id| id.set(pin.id()));
         MANAGER.with(|slot| *slot.borrow_mut() = Some(manager));
         REGISTERED.with(|slot| *slot.borrow_mut() = registered);
+        sync_suspension();
 
         let (sender, receiver) = mpsc::channel::<u32>();
         GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
@@ -177,7 +252,10 @@ mod imp {
                     .await;
                 match id {
                     Some(id) => cx.update(|cx| handle_event(id, cx)),
-                    None => cx.update(sync_through_escape),
+                    None => cx.update(|cx| {
+                        sync_through_escape(cx);
+                        sync_suspension();
+                    }),
                 }
             }
         })
@@ -230,7 +308,16 @@ mod imp {
             return Err("shortcuts must differ".to_owned());
         }
 
-        MANAGER.with(|slot| {
+        if SUSPENDED.with(Cell::get) {
+            CAPTURE_KEY.with(|slot| *slot.borrow_mut() = Some(capture));
+            PIN_KEY.with(|slot| *slot.borrow_mut() = Some(pin));
+            CAPTURE_ID.with(|id| id.set(capture.id()));
+            PIN_ID.with(|id| id.set(pin.id()));
+            REGISTRATION_ERROR.with(|slot| *slot.borrow_mut() = None);
+            return Ok(());
+        }
+
+        let result = MANAGER.with(|slot| {
             let manager_borrow = slot.borrow();
             let Some(manager) = manager_borrow.as_ref() else {
                 return Err("hotkey manager is unavailable".to_owned());
@@ -284,7 +371,11 @@ mod imp {
                 pin.into_string()
             );
             Ok(())
-        })
+        });
+        if result.is_ok() {
+            sync_suspension();
+        }
+        result
     }
 
     pub fn set_recording_shortcuts(enabled: bool) -> bool {
@@ -410,8 +501,8 @@ mod imp {
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub use imp::{
-    display_hotkey, install, refresh, registration_error, set_recording_shortcuts,
-    shortcut_from_key,
+    display_hotkey, install, refresh, refresh_yield, registration_error, set_recording_shortcuts,
+    set_settings_recording, shortcut_from_key,
 };
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -447,3 +538,9 @@ pub fn shortcut_from_key(
 pub fn set_recording_shortcuts(_enabled: bool) -> bool {
     false
 }
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn set_settings_recording(_enabled: bool) {}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn refresh_yield() {}

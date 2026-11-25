@@ -144,6 +144,7 @@ impl SettingsView {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let value = !row.value;
                                 settings_state::update(|settings| (row.set)(settings, value));
+                                crate::hotkey::refresh_yield();
                                 if row.refresh_pin {
                                     cx.defer(crate::pin::refresh_recognition);
                                 }

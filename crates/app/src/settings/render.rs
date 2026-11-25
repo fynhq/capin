@@ -72,7 +72,9 @@ impl SettingsView {
                                             self.capture_settings(theme, cx)
                                         }
                                         SettingsSection::Recording => self.recording(theme, cx),
-                                        SettingsSection::Shortcuts => self.shortcuts(theme, cx),
+                                        SettingsSection::Shortcuts => {
+                                            self.shortcuts(theme, window, cx)
+                                        }
                                     })
                                     .with_animation(
                                         SharedString::from(format!(

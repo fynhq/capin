@@ -4,30 +4,38 @@ use std::path::PathBuf;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::POINT as ScreenPoint;
-use windows::Win32::Foundation::{COLORREF, GlobalFree, HANDLE, HWND, RECT};
+use windows::Win32::Foundation::{COLORREF, CloseHandle, GlobalFree, HANDLE, HWND, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{
     DWM_WINDOW_CORNER_PREFERENCE, DWMNCRENDERINGPOLICY, DWMNCRP_DISABLED, DWMNCRP_ENABLED,
     DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
     DWMWCP_DONOTROUND, DwmSetWindowAttribute,
 };
-use windows::Win32::Graphics::Gdi::{ClientToScreen, MONITOR_DEFAULTTONEAREST, MonitorFromWindow};
+use windows::Win32::Graphics::Gdi::{
+    ClientToScreen, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MapWindowPoints,
+    MonitorFromWindow,
+};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
-use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, GetCurrentProcessId, OpenProcess, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW, SetProcessWorkingSetSize,
+};
 use windows::Win32::UI::Shell::{
     FOLDERID_Pictures, FOLDERID_Videos, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetCursorPos, GetWindowLongPtrW, GetWindowRect,
-    HWND_TOPMOST, IDC_ARROW, LWA_ALPHA, LoadCursorW, SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED,
+    GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow,
+    GetShellWindow, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, HWND_TOPMOST,
+    IDC_ARROW, LWA_ALPHA, LoadCursorW, SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetCursor, SetLayeredWindowAttributes,
     SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, SystemParametersInfoW,
     WDA_EXCLUDEFROMCAPTURE, WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+    WS_EX_TRANSPARENT, WS_MAXIMIZE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
+    WS_THICKFRAME,
 };
 use windows::core::GUID;
 
@@ -37,6 +45,110 @@ pub(super) fn trim_working_set() {
     // SAFETY: the pseudo-handle refers to this process; -1 sizes request a trim.
     unsafe {
         let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ForegroundInfo {
+    pub covers_monitor: bool,
+    pub process_name: Option<String>,
+}
+
+pub(super) fn foreground_info() -> ForegroundInfo {
+    // SAFETY: the calls only read desktop state and no pointer outlives the call.
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return ForegroundInfo::default();
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == 0 || pid == GetCurrentProcessId() {
+            return ForegroundInfo::default();
+        }
+        ForegroundInfo {
+            covers_monitor: covers_monitor(hwnd),
+            process_name: process_name(pid),
+        }
+    }
+}
+
+unsafe fn covers_monitor(hwnd: HWND) -> bool {
+    // SAFETY: the calls inspect a live foreground window and fill caller-owned buffers.
+    unsafe {
+        let shell = GetShellWindow();
+        let mut shell_pid = 0u32;
+        GetWindowThreadProcessId(shell, Some(&mut shell_pid));
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == shell_pid {
+            return false;
+        }
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+        if style & (WS_MAXIMIZE.0 | WS_CAPTION.0) == (WS_MAXIMIZE.0 | WS_CAPTION.0) {
+            return false;
+        }
+        let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        if ex_style & WS_EX_TOOLWINDOW.0 != 0 {
+            return false;
+        }
+        let mut class = [0u16; 64];
+        let class_len = GetClassNameW(hwnd, &mut class);
+        if class_len > 0 {
+            let name = String::from_utf16_lossy(&class[..class_len as usize]);
+            if name == "Windows.UI.Core.CoreWindow" {
+                return false;
+            }
+        }
+        let mut client = RECT::default();
+        if GetClientRect(hwnd, &mut client).is_err() {
+            return false;
+        }
+        let mut corners = [
+            POINT {
+                x: client.left,
+                y: client.top,
+            },
+            POINT {
+                x: client.right,
+                y: client.bottom,
+            },
+        ];
+        MapWindowPoints(Some(hwnd), None, &mut corners);
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            rcMonitor: RECT::default(),
+            rcWork: RECT::default(),
+            dwFlags: 0,
+        };
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return false;
+        }
+        corners[0].x <= info.rcMonitor.left
+            && corners[0].y <= info.rcMonitor.top
+            && corners[1].x >= info.rcMonitor.right
+            && corners[1].y >= info.rcMonitor.bottom
+    }
+}
+
+unsafe fn process_name(pid: u32) -> Option<String> {
+    // SAFETY: the process handle is owned here and closed before returning.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buffer = [0u16; 1024];
+        let mut size = buffer.len() as u32;
+        let result = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buffer.as_mut_ptr()),
+            &mut size,
+        );
+        let _ = CloseHandle(handle);
+        result.ok()?;
+        let path = String::from_utf16_lossy(&buffer[..size as usize]);
+        let name = path.rsplit(['\\', '/']).next()?.trim().to_owned();
+        (!name.is_empty()).then_some(name)
     }
 }
 

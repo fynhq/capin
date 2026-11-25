@@ -302,6 +302,9 @@ pub(crate) struct SettingsView {
     recording_shortcut: Option<ShortcutSlot>,
     filename_input: Entity<InputState>,
     filename_subscription: Option<Subscription>,
+    yield_apps_input: Entity<InputState>,
+    yield_apps_subscription: Option<Subscription>,
+    activation_subscription: Option<Subscription>,
     focus_handle: FocusHandle,
     #[cfg(target_os = "macos")]
     titlebar_drag: bool,
@@ -327,6 +330,7 @@ impl SettingsView {
             state.set_placeholder(settings_state::DEFAULT_FILENAME_TEMPLATE, window, cx);
             state.set_editor_style(input_editor_style(&theme));
         });
+        let yield_apps_input = yield_apps_input(window, cx, &theme, &settings.yield_hotkey_apps);
         let mut view = Self {
             section: SettingsSection::General,
             scroll_handle: ScrollHandle::new(),
@@ -338,6 +342,9 @@ impl SettingsView {
             recording_shortcut: None,
             filename_input,
             filename_subscription: None,
+            yield_apps_input,
+            yield_apps_subscription: None,
+            activation_subscription: None,
             focus_handle: cx.focus_handle(),
             #[cfg(target_os = "macos")]
             titlebar_drag: false,
@@ -363,7 +370,17 @@ impl SettingsView {
                 }
             },
         ));
+        view.yield_apps_subscription = Some(subscribe_yield_apps(&mut view, window, cx));
+        view.activation_subscription =
+            Some(cx.observe_window_activation(window, |this, window, cx| {
+                if !window.is_window_active() && this.recording_shortcut.take().is_some() {
+                    crate::hotkey::set_settings_recording(false);
+                    cx.notify();
+                }
+            }));
         cx.on_release(|this, cx| {
+            crate::hotkey::set_settings_recording(false);
+            commit_yield_apps_on_release(this, cx);
             let template: String = this
                 .filename_input
                 .read(cx)
@@ -377,9 +394,9 @@ impl SettingsView {
             }
         })
         .detach();
-        view.start_accent_watch(cx);
+        start_accent_watch(cx);
         #[cfg(target_os = "macos")]
-        view.start_permission_watch(cx);
+        start_permission_watch(cx);
         if let Some(status) = view.status.message().cloned() {
             view.show_status(status, cx);
         }
@@ -389,62 +406,62 @@ impl SettingsView {
     fn show_status(&mut self, message: String, cx: &mut Context<Self>) {
         self.status.show(message, cx);
     }
+}
 
-    fn start_accent_watch(&self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(500))
-                    .await;
-                let alive = this
-                    .update(cx, |view: &mut SettingsView, cx| {
-                        let current = system_accent_hex();
-                        if current == view.last_accent {
-                            return true;
-                        }
-                        view.last_accent = current;
-                        view.accent = current;
-                        cx.notify();
-                        true
-                    })
-                    .unwrap_or(false);
-                if !alive {
-                    break;
-                }
+fn start_accent_watch(cx: &mut Context<SettingsView>) {
+    cx.spawn(async move |this, cx| {
+        loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            let alive = this
+                .update(cx, |view: &mut SettingsView, cx| {
+                    let current = system_accent_hex();
+                    if current == view.last_accent {
+                        return true;
+                    }
+                    view.last_accent = current;
+                    view.accent = current;
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !alive {
+                break;
             }
-        })
-        .detach();
-    }
+        }
+    })
+    .detach();
+}
 
-    #[cfg(target_os = "macos")]
-    fn start_permission_watch(&self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(1000))
-                    .await;
-                let alive = this
-                    .update(cx, |view: &mut SettingsView, cx| {
-                        let screen = platform_window::screen_capture_trusted();
-                        let accessibility = platform_window::accessibility_trusted();
-                        if screen == view.permission_screen
-                            && accessibility == view.permission_accessibility
-                        {
-                            return true;
-                        }
-                        view.permission_screen = screen;
-                        view.permission_accessibility = accessibility;
-                        cx.notify();
-                        true
-                    })
-                    .unwrap_or(false);
-                if !alive {
-                    break;
-                }
+#[cfg(target_os = "macos")]
+fn start_permission_watch(cx: &mut Context<SettingsView>) {
+    cx.spawn(async move |this, cx| {
+        loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(1000))
+                .await;
+            let alive = this
+                .update(cx, |view: &mut SettingsView, cx| {
+                    let screen = platform_window::screen_capture_trusted();
+                    let accessibility = platform_window::accessibility_trusted();
+                    if screen == view.permission_screen
+                        && accessibility == view.permission_accessibility
+                    {
+                        return true;
+                    }
+                    view.permission_screen = screen;
+                    view.permission_accessibility = accessibility;
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !alive {
+                break;
             }
-        })
-        .detach();
-    }
+        }
+    })
+    .detach();
 }
 
 pub fn open_settings(cx: &mut App) {
@@ -482,8 +499,8 @@ pub fn open_settings(cx: &mut App) {
         let close_view = view.clone();
         window.on_window_should_close(cx, move |window, cx| {
             close_view.update(cx, |this, cx| {
-                let input = this.filename_input.clone();
-                this.commit_filename_template(&input, window, cx);
+                crate::hotkey::set_settings_recording(false);
+                commit_settings_inputs(this, window, cx);
             });
             let handle = window.window_handle();
             crate::windows::unregister_settings_window(&handle);
@@ -834,4 +851,54 @@ fn segment(theme: &Theme, label: &str, selected: bool) -> Div {
             button.hover(move |style| style.bg(hover))
         })
         .child(label.to_owned())
+}
+
+fn yield_apps_input(
+    window: &mut Window,
+    cx: &mut App,
+    theme: &Theme,
+    value: &str,
+) -> Entity<InputState> {
+    let input = cx.new(|cx| InputState::new(window, cx).default_value(value));
+    input.update(cx, |state, _| {
+        state.set_editor_style(input_editor_style(theme))
+    });
+    input
+}
+
+fn subscribe_yield_apps(
+    view: &mut SettingsView,
+    window: &mut Window,
+    cx: &mut Context<SettingsView>,
+) -> Subscription {
+    let input = view.yield_apps_input.clone();
+    cx.subscribe_in(
+        &input,
+        window,
+        |this: &mut SettingsView, input, event: &InputEvent, window, cx| match event {
+            InputEvent::Change | InputEvent::Focus => cx.notify(),
+            InputEvent::Blur | InputEvent::PressEnter { .. } => {
+                shortcuts::commit_yield_apps(this, input, window, cx);
+            }
+        },
+    )
+}
+
+fn commit_yield_apps_on_release(view: &SettingsView, cx: &mut App) {
+    let apps = settings_state::sanitize_yield_apps(&view.yield_apps_input.read(cx).value());
+    if apps != settings_state::get().yield_hotkey_apps {
+        settings_state::update(|settings| settings.yield_hotkey_apps = apps);
+        crate::hotkey::refresh_yield();
+    }
+}
+
+fn commit_settings_inputs(
+    view: &mut SettingsView,
+    window: &mut Window,
+    cx: &mut Context<SettingsView>,
+) {
+    let filename = view.filename_input.clone();
+    view.commit_filename_template(&filename, window, cx);
+    let apps = view.yield_apps_input.clone();
+    shortcuts::commit_yield_apps(view, &apps, window, cx);
 }

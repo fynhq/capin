@@ -304,7 +304,7 @@ impl SettingsView {
             .aria_label(t(language, "settings.copy_diagnostics"))
             .active(|style| style.opacity(0.88))
             .on_click(cx.listener(|this, _, _, cx| {
-                let report = this.diagnostics_report();
+                let report = diagnostics_report(&this.settings());
                 cx.write_to_clipboard(ClipboardItem::new_string(report));
                 let message = t(this.settings().language, "settings.diagnostics_copied").to_owned();
                 this.show_status(message, cx);
@@ -333,32 +333,31 @@ impl SettingsView {
     pub(super) fn open_project(&self, cx: &mut Context<Self>) {
         cx.open_url(PROJECT_URL);
     }
+}
 
-    fn diagnostics_report(&self) -> String {
-        let settings = self.settings();
-        let mut report = String::new();
-        report.push_str(&crate::build_info::version_label());
+fn diagnostics_report(settings: &AppSettings) -> String {
+    let mut report = String::new();
+    report.push_str(&crate::build_info::version_label());
+    report.push('\n');
+    report.push_str(&format!(
+        "OS: {} {}\n",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    ));
+    report.push_str(&format!("Language: {:?}\n", settings.language));
+    report.push_str(&format!("Capture hotkey: {}\n", settings.capture_hotkey));
+    report.push_str(&format!("Pin hotkey: {}\n", settings.pin_hotkey));
+    report.push_str(&format!("Autostart: {}\n", settings.auto_start));
+    report.push_str(&format!(
+        "Filename template: {}\n",
+        settings.filename_template
+    ));
+    report.push_str("Recent log:\n");
+    for line in crate::logging::recent_lines(40) {
+        report.push_str(&line);
         report.push('\n');
-        report.push_str(&format!(
-            "OS: {} {}\n",
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        ));
-        report.push_str(&format!("Language: {:?}\n", settings.language));
-        report.push_str(&format!("Capture hotkey: {}\n", settings.capture_hotkey));
-        report.push_str(&format!("Pin hotkey: {}\n", settings.pin_hotkey));
-        report.push_str(&format!("Autostart: {}\n", settings.auto_start));
-        report.push_str(&format!(
-            "Filename template: {}\n",
-            settings.filename_template
-        ));
-        report.push_str("Recent log:\n");
-        for line in crate::logging::recent_lines(40) {
-            report.push_str(&line);
-            report.push('\n');
-        }
-        report
     }
+    report
 }
 
 pub(super) fn settings_bounds(cx: &App) -> Bounds<Pixels> {
