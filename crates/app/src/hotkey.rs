@@ -223,7 +223,7 @@ mod imp {
                     .await;
                 match id {
                     Some(id) => cx.update(|cx| handle_event(id, cx)),
-                    None => cx.update(|cx| sync_through_escape(cx)),
+                    None => cx.update(sync_through_escape),
                 }
             }
         })
