@@ -3,6 +3,7 @@ use std::mem::size_of;
 use std::path::PathBuf;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use windows::Wdk::System::SystemServices::RtlGetVersion;
 use windows::Win32::Foundation::POINT as ScreenPoint;
 use windows::Win32::Foundation::{COLORREF, GlobalFree, HANDLE, HWND, RECT};
 use windows::Win32::Graphics::Dwm::{
@@ -16,6 +17,7 @@ use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
 use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
 use windows::Win32::UI::Shell::{
     FOLDERID_Pictures, FOLDERID_Videos, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
@@ -210,12 +212,27 @@ pub(super) fn apply(
     }
 
     if style.exclude_from_capture {
+        if !capture_exclusion_supported() {
+            return Err(PlatformWindowError::Platform {
+                operation: "SetWindowDisplayAffinity",
+                message: "requires Windows 10 version 2004 or later".to_owned(),
+            });
+        }
         // SAFETY: hwnd belongs to a live window created by the caller.
         unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) }
             .map_err(|error| platform_error("SetWindowDisplayAffinity", error))?;
     }
 
     Ok(())
+}
+
+fn capture_exclusion_supported() -> bool {
+    let mut version = OSVERSIONINFOW {
+        dwOSVersionInfoSize: size_of::<OSVERSIONINFOW>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: version is a valid, writable version buffer.
+    unsafe { RtlGetVersion(&mut version).is_ok() && version.dwBuildNumber >= 19_041 }
 }
 
 pub(super) fn pictures_dir() -> Option<PathBuf> {
@@ -267,6 +284,10 @@ pub(super) fn set_click_through(
 }
 
 const CF_DIB_FORMAT: u32 = 8;
+const CF_DIBV5_FORMAT: u32 = 17;
+const BI_BITFIELDS: u32 = 3;
+const LCS_SRGB: u32 = 0x7352_4742;
+const LCS_GM_GRAPHICS: u32 = 2;
 
 pub(super) fn set_image_clipboard(
     width: u32,
@@ -281,7 +302,8 @@ pub(super) fn set_image_clipboard(
             message: "invalid image buffer".to_owned(),
         });
     }
-    let dib = dib_from_rgba(width, height, rgba);
+    let dibv5 = dibv5_from_rgba(width, height, rgba);
+    let dib = dib24_from_rgba(width, height, rgba);
 
     let mut opened = false;
     for _ in 0..5 {
@@ -308,6 +330,7 @@ pub(super) fn set_image_clipboard(
                     set_clipboard_bytes(format, png)?;
                 }
             }
+            set_clipboard_bytes(CF_DIBV5_FORMAT, &dibv5)?;
             set_clipboard_bytes(CF_DIB_FORMAT, &dib)?;
         }
         Ok(())
@@ -319,28 +342,63 @@ pub(super) fn set_image_clipboard(
     result.map_err(|error| platform_error("SetClipboardData", error))
 }
 
-fn dib_from_rgba(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+fn dibv5_from_rgba(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
     let pixel_bytes = width as usize * height as usize * 4;
-    let mut dib = Vec::with_capacity(40 + pixel_bytes);
-    let mut header = [0u8; 40];
-    header[0..4].copy_from_slice(&40i32.to_le_bytes());
+    let mut dib = Vec::with_capacity(124 + pixel_bytes);
+    let mut header = [0u8; 124];
+    header[0..4].copy_from_slice(&124u32.to_le_bytes());
     header[4..8].copy_from_slice(&(width as i32).to_le_bytes());
     header[8..12].copy_from_slice(&(height as i32).to_le_bytes());
     header[12..14].copy_from_slice(&1u16.to_le_bytes());
     header[14..16].copy_from_slice(&32u16.to_le_bytes());
+    header[16..20].copy_from_slice(&BI_BITFIELDS.to_le_bytes());
     header[20..24].copy_from_slice(&(pixel_bytes as u32).to_le_bytes());
     header[24..28].copy_from_slice(&2835i32.to_le_bytes());
     header[28..32].copy_from_slice(&2835i32.to_le_bytes());
+    header[40..44].copy_from_slice(&0x00FF_0000u32.to_le_bytes());
+    header[44..48].copy_from_slice(&0x0000_FF00u32.to_le_bytes());
+    header[48..52].copy_from_slice(&0x0000_00FFu32.to_le_bytes());
+    header[52..56].copy_from_slice(&0xFF00_0000u32.to_le_bytes());
+    header[56..60].copy_from_slice(&LCS_SRGB.to_le_bytes());
+    header[108..112].copy_from_slice(&LCS_GM_GRAPHICS.to_le_bytes());
     dib.extend_from_slice(&header);
     for row in (0..height as usize).rev() {
         for column in 0..width as usize {
             let index = (row * width as usize + column) * 4;
+            dib.push(rgba[index + 2]);
+            dib.push(rgba[index + 1]);
+            dib.push(rgba[index]);
+            dib.push(rgba[index + 3]);
+        }
+    }
+    dib
+}
+
+fn dib24_from_rgba(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+    let row_bytes = ((width as usize * 3 + 3) & !3).max(4);
+    let pixel_bytes = row_bytes * height as usize;
+    let mut dib = Vec::with_capacity(40 + pixel_bytes);
+    let mut header = [0u8; 40];
+    header[0..4].copy_from_slice(&40u32.to_le_bytes());
+    header[4..8].copy_from_slice(&(width as i32).to_le_bytes());
+    header[8..12].copy_from_slice(&(height as i32).to_le_bytes());
+    header[12..14].copy_from_slice(&1u16.to_le_bytes());
+    header[14..16].copy_from_slice(&24u16.to_le_bytes());
+    header[20..24].copy_from_slice(&(pixel_bytes as u32).to_le_bytes());
+    header[24..28].copy_from_slice(&2835i32.to_le_bytes());
+    header[28..32].copy_from_slice(&2835i32.to_le_bytes());
+    dib.extend_from_slice(&header);
+    dib.resize(40 + pixel_bytes, 0);
+    for row in 0..height as usize {
+        let target_row = 40 + (height as usize - 1 - row) * row_bytes;
+        for column in 0..width as usize {
+            let index = (row * width as usize + column) * 4;
             let alpha = u32::from(rgba[index + 3]);
-            for channel in [2usize, 1, 0] {
-                let value = u32::from(rgba[index + channel]);
-                dib.push(((value * alpha + 255 * (255 - alpha) + 127) / 255) as u8);
+            for (channel, source) in [(0usize, 2usize), (1, 1), (2, 0)] {
+                let value = u32::from(rgba[index + source]);
+                dib[target_row + column * 3 + channel] =
+                    ((value * alpha + 255 * (255 - alpha) + 127) / 255) as u8;
             }
-            dib.push(255);
         }
     }
     dib
