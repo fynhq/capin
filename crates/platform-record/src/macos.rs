@@ -7,7 +7,8 @@ use std::time::Duration;
 use block2::RcBlock;
 use core_record::{
     CURSOR_HIGHLIGHT_ALPHA, CURSOR_HIGHLIGHT_RADIUS, CursorHighlight, FRAME_RATE, FrameDecision,
-    FrameTimeline, RecordConfig, paint_cursor_highlight_bgra, video_bitrate,
+    FrameTimeline, PREFERRED_VIDEO_CODECS, RecordConfig, VideoCodec, paint_cursor_highlight_bgra,
+    video_bitrate,
 };
 use core_types::{CaptureTarget, PhysicalRect};
 use dispatch2::DispatchQueue;
@@ -16,8 +17,8 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{AllocAnyThread, DefinedClass, Message, define_class, msg_send};
 use objc2_av_foundation::{
     AVAssetWriter, AVAssetWriterInput, AVAssetWriterInputPixelBufferAdaptor, AVAssetWriterStatus,
-    AVFileTypeMPEG4, AVMediaTypeVideo, AVVideoAverageBitRateKey, AVVideoCodecKey,
-    AVVideoCodecTypeH264, AVVideoCompressionPropertiesKey, AVVideoHeightKey,
+    AVFileTypeMPEG4, AVMediaTypeVideo, AVVideoAverageBitRateKey, AVVideoCodecKey, AVVideoCodecType,
+    AVVideoCodecTypeH264, AVVideoCodecTypeHEVC, AVVideoCompressionPropertiesKey, AVVideoHeightKey,
     AVVideoMaxKeyFrameIntervalKey, AVVideoWidthKey,
 };
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
@@ -620,7 +621,9 @@ fn encode_loop(
         let mut writer: Option<Writer> = None;
         while let Ok(frame) = rx.recv() {
             if writer.is_none() {
-                writer = Some(Writer::new(temp, width, height)?);
+                let (created, codec) = Writer::new_preferred(temp, width, height)?;
+                crate::note_codec_fallback(&flags, codec);
+                writer = Some(created);
             }
             if let Some(writer) = writer.as_mut() {
                 writer.append(&frame)?;
@@ -657,7 +660,22 @@ struct Writer {
 }
 
 impl Writer {
-    fn new(path: &Path, width: usize, height: usize) -> Result<Self, String> {
+    fn new_preferred(
+        path: &Path,
+        width: usize,
+        height: usize,
+    ) -> Result<(Self, VideoCodec), String> {
+        let mut last_error = String::new();
+        for codec in PREFERRED_VIDEO_CODECS {
+            match Self::new(path, width, height, codec) {
+                Ok(writer) => return Ok((writer, codec)),
+                Err(error) => last_error = format!("{codec}: {error}"),
+            }
+        }
+        Err(last_error)
+    }
+
+    fn new(path: &Path, width: usize, height: usize, codec: VideoCodec) -> Result<Self, String> {
         if path.exists() {
             let _ = std::fs::remove_file(path);
         }
@@ -670,7 +688,7 @@ impl Writer {
         }
         .map_err(|error| format!("failed to create the movie writer: {}", ns_error(&error)))?;
 
-        let settings = video_settings(width, height)?;
+        let settings = video_settings(width, height, codec)?;
         let media_type = unsafe { AVMediaTypeVideo }
             .ok_or_else(|| "video media type is unavailable".to_owned())?;
         let input = unsafe {
@@ -824,11 +842,21 @@ fn string_key(key: &objc2_core_foundation::CFString) -> Retained<NSString> {
     NSString::from_str(&key.to_string())
 }
 
+fn codec_type(codec: VideoCodec) -> Option<&'static AVVideoCodecType> {
+    unsafe {
+        match codec {
+            VideoCodec::Hevc => AVVideoCodecTypeHEVC,
+            VideoCodec::H264 => AVVideoCodecTypeH264,
+        }
+    }
+}
+
 fn video_settings(
     width: usize,
     height: usize,
+    codec: VideoCodec,
 ) -> Result<Retained<NSDictionary<NSString, AnyObject>>, String> {
-    let codec = unsafe { AVVideoCodecTypeH264 }.ok_or_else(|| "H.264 is unavailable".to_owned())?;
+    let codec = codec_type(codec).ok_or_else(|| format!("{codec} is unavailable"))?;
     let bitrate = NSNumber::new_u32(video_bitrate(width as u32, height as u32));
     let interval = NSNumber::new_u32(FRAME_RATE);
     let compression = NSDictionary::from_slices(

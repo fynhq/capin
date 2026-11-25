@@ -9,6 +9,23 @@ pub fn video_bitrate(width: u32, height: u32) -> u32 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VideoCodec {
+    Hevc,
+    H264,
+}
+
+pub const PREFERRED_VIDEO_CODECS: [VideoCodec; 2] = [VideoCodec::Hevc, VideoCodec::H264];
+
+impl std::fmt::Display for VideoCodec {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Hevc => "H.265",
+            Self::H264 => "H.264",
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CursorHighlight {
     pub color: u32,
 }
@@ -95,5 +112,12 @@ mod tests {
         assert_eq!(super::video_bitrate(1280, 720), 3_456_000);
         assert_eq!(super::video_bitrate(3840, 2160), 24_000_000);
         assert_eq!(super::video_bitrate(160, 120), 2_000_000);
+    }
+
+    #[test]
+    fn video_codecs_prefer_hevc_and_fall_back_to_h264() {
+        assert_eq!(PREFERRED_VIDEO_CODECS, [VideoCodec::Hevc, VideoCodec::H264]);
+        assert_eq!(VideoCodec::Hevc.to_string(), "H.265");
+        assert_eq!(VideoCodec::H264.to_string(), "H.264");
     }
 }

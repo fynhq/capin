@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use core_record::RecordConfig;
+use core_record::{PREFERRED_VIDEO_CODECS, RecordConfig, VideoCodec};
 use core_types::{CaptureTarget, PhysicalSize};
 use platform_capture::platform_backend;
 use thiserror::Error;
@@ -139,6 +139,16 @@ impl Flags {
 
     pub(crate) fn finish(&self) {
         self.finished.store(true, Ordering::Release);
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn note_codec_fallback(flags: &Flags, codec: VideoCodec) {
+    let preferred = PREFERRED_VIDEO_CODECS[0];
+    if codec != preferred {
+        flags.warn(format!(
+            "{preferred} encoding is unavailable; recorded with {codec}"
+        ));
     }
 }
 

@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -8,7 +8,8 @@ use windows::Win32::Media::MediaFoundation::MFGetSystemTime;
 
 use core_record::{
     CURSOR_HIGHLIGHT_ALPHA, CURSOR_HIGHLIGHT_RADIUS, CursorHighlight, FRAME_RATE, FrameDecision,
-    FrameTimeline, RecordConfig, paint_cursor_highlight_bgra, video_bitrate,
+    FrameTimeline, PREFERRED_VIDEO_CODECS, RecordConfig, VideoCodec, paint_cursor_highlight_bgra,
+    video_bitrate,
 };
 use core_types::{CaptureTarget, PhysicalRect};
 use platform_capture::platform_backend;
@@ -320,6 +321,34 @@ fn cursor_settings(include_cursor: bool) -> CursorCaptureSettings {
     }
 }
 
+fn create_encoder(
+    width: u32,
+    height: u32,
+    output: &Path,
+) -> Result<(VideoEncoder, VideoCodec), String> {
+    let bitrate = video_bitrate(width, height);
+    let mut last_error = String::new();
+    for codec in PREFERRED_VIDEO_CODECS {
+        let subtype = match codec {
+            VideoCodec::Hevc => VideoSettingsSubType::HEVC,
+            VideoCodec::H264 => VideoSettingsSubType::H264,
+        };
+        match VideoEncoder::new(
+            VideoSettingsBuilder::new(width, height)
+                .sub_type(subtype)
+                .frame_rate(FRAME_RATE)
+                .bitrate(bitrate),
+            AudioSettingsBuilder::default().disabled(true),
+            ContainerSettingsBuilder::default(),
+            output,
+        ) {
+            Ok(encoder) => return Ok((encoder, codec)),
+            Err(error) => last_error = format!("{codec}: {error}"),
+        }
+    }
+    Err(last_error)
+}
+
 fn window_rect(hwnd: isize) -> Option<(i32, i32, u32, u32)> {
     use windows::Win32::Foundation::{HWND, RECT};
     use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
@@ -485,22 +514,14 @@ impl GraphicsCaptureApiHandler for Recorder {
         }
 
         if self.encoder.is_none() {
-            let bitrate = video_bitrate(width, height);
-            let encoder = match VideoEncoder::new(
-                VideoSettingsBuilder::new(width, height)
-                    .sub_type(VideoSettingsSubType::H264)
-                    .frame_rate(FRAME_RATE)
-                    .bitrate(bitrate),
-                AudioSettingsBuilder::default().disabled(true),
-                ContainerSettingsBuilder::default(),
-                &self.flags.output,
-            ) {
-                Ok(encoder) => encoder,
+            let (encoder, codec) = match create_encoder(width, height, &self.flags.output) {
+                Ok(created) => created,
                 Err(error) => {
-                    self.flags.shared.fail(error.to_string());
-                    return Err(error.into());
+                    self.flags.shared.fail(error.clone());
+                    return Err(std::io::Error::other(error).into());
                 }
             };
+            crate::note_codec_fallback(&self.flags.shared, codec);
             self.encoder = Some(encoder);
             self.output_size = Some((width, height));
         }
