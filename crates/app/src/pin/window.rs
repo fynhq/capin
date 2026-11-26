@@ -197,8 +197,10 @@ pub(super) fn close_pin_inner(id: u64, cx: &mut App, remove_window: bool) {
     close_pin_menu(cx);
     let state = PINS.with(|pins| pins.borrow_mut().remove(&id));
     let Some(state) = state else {
+        log_warn!("pin", "close requested for missing pin={id}");
         return;
     };
+    log_info!("pin", "closed pin={id} remove_window={remove_window}");
     state.entity.update(cx, |view, cx| view.release_image(cx));
     if remove_window {
         let _ = state
@@ -299,6 +301,9 @@ pub(crate) fn release_click_through(cx: &mut App) -> usize {
             .collect()
     });
     let count = states.len();
+    if count > 0 {
+        log_info!("pin", "click-through released pins={count} reason=tray");
+    }
     for (id, entity, window) in states {
         let _ = window.update(cx, |_, window, _| {
             let _ = set_click_through(&*window, false);

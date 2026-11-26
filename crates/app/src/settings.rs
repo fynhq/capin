@@ -38,6 +38,24 @@ thread_local! {
     static PENDING_STATUS: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
+fn watch_settings_activation(handle: AnyWindowHandle, cx: &mut App) {
+    let window_id = handle.window_id().as_u64();
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(Duration::from_millis(200))
+            .await;
+        let active = handle
+            .update(cx, |_, window, _| window.is_window_active())
+            .unwrap_or(false);
+        if active {
+            log_info!("settings", "settings window={window_id} is active");
+        } else {
+            log_warn!("settings", "settings window={window_id} is not active");
+        }
+    })
+    .detach();
+}
+
 fn focus_settings_window(cx: &mut App) -> bool {
     let Some((handle, view)) = crate::windows::live_settings_windows(cx).into_iter().next() else {
         return false;
@@ -48,8 +66,24 @@ fn focus_settings_window(cx: &mut App) -> bool {
     {
         view.update(cx, |this, cx| this.show_status(pending, cx));
     }
-    let _ = handle.update(cx, |_, window, _| window.activate_window());
+    let focused = handle
+        .update(cx, |_, window, _| window.activate_window())
+        .is_ok();
+    if focused {
+        log_info!(
+            "settings",
+            "focused existing settings window={}",
+            handle.window_id().as_u64()
+        );
+    } else {
+        log_warn!(
+            "settings",
+            "existing settings window={} could not be focused",
+            handle.window_id().as_u64()
+        );
+    }
     cx.activate(true);
+    watch_settings_activation(handle, cx);
     true
 }
 
@@ -369,6 +403,12 @@ impl SettingsView {
         ));
         view.activation_subscription =
             Some(cx.observe_window_activation(window, |this, window, cx| {
+                log_info!(
+                    "settings",
+                    "settings window={} active={}",
+                    window.window_handle().window_id().as_u64(),
+                    window.is_window_active()
+                );
                 if !window.is_window_active() && this.recording_shortcut.take().is_some() {
                     crate::hotkey::set_settings_recording(false);
                     cx.notify();
@@ -493,6 +533,11 @@ pub fn open_settings(cx: &mut App) {
         let view = cx.new(|cx| SettingsView::new(window, cx));
         let close_view = view.clone();
         window.on_window_should_close(cx, move |window, cx| {
+            log_info!(
+                "settings",
+                "settings window={} closing",
+                window.window_handle().window_id().as_u64()
+            );
             close_view.update(cx, |this, cx| {
                 crate::hotkey::set_settings_recording(false);
                 commit_settings_inputs(this, window, cx);
@@ -509,11 +554,21 @@ pub fn open_settings(cx: &mut App) {
         view
     }) {
         Ok((handle, view)) => {
+            log_info!(
+                "settings",
+                "opened settings window={} at={:.0},{:.0} size={:.0}x{:.0}",
+                handle.window_id().as_u64(),
+                f32::from(bounds.origin.x),
+                f32::from(bounds.origin.y),
+                f32::from(bounds.size.width),
+                f32::from(bounds.size.height)
+            );
             crate::windows::register_settings_window(handle, view.downgrade());
             let _ = handle.update(cx, |_, window, _| window.activate_window());
             cx.activate(true);
+            watch_settings_activation(handle, cx);
         }
-        Err(error) => log_error!("settings", "failed to open settings: {error}"),
+        Err(error) => log_error!("settings", "failed to open settings window: {error}"),
     }
 }
 

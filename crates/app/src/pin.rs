@@ -365,6 +365,16 @@ fn open_pin_inner(
         view
     }) {
         Ok((window, entity)) => {
+            log_info!(
+                "pin",
+                "opened pin={id} window={} at={:.0},{:.0} size={:.0}x{:.0} zoom={:.2}",
+                window.window_id().as_u64(),
+                f32::from(bounds.origin.x),
+                f32::from(bounds.origin.y),
+                f32::from(bounds.size.width),
+                f32::from(bounds.size.height),
+                zoom
+            );
             let view_for_release = entity.clone();
             let state = PinState {
                 kind,
@@ -1069,6 +1079,7 @@ impl PinView {
     fn watch_close(&self, window: &Window, cx: &mut Context<Self>) {
         let id = self.id;
         window.on_window_should_close(cx, move |_, cx| {
+            log_info!("pin", "pin window close requested pin={id}");
             close_pin_inner(id, cx, false);
             true
         });

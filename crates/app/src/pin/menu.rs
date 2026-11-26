@@ -30,6 +30,11 @@ impl Render for PinMenuView {
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 match event.keystroke.key.as_str() {
                     "escape" => {
+                        log_info!(
+                            "pin",
+                            "context menu closed pin={} reason=escape",
+                            this.pin_id
+                        );
                         forget_pin_menu();
                         window.remove_window();
                         cx.stop_propagation();
@@ -53,6 +58,12 @@ impl Render for PinMenuView {
                     "enter" => {
                         let action = this.selected.and_then(|index| actions.get(index).copied());
                         if let Some(action) = action {
+                            log_info!(
+                                "pin",
+                                "context menu closed pin={} reason=keyboard action={}",
+                                pin_id,
+                                action.id()
+                            );
                             forget_pin_menu();
                             window.remove_window();
                             cx.defer(move |cx| perform_pin_action(pin_id, action, cx));
@@ -92,6 +103,12 @@ impl Render for PinMenuView {
                         cx.listener(|_, _, _, cx| cx.stop_propagation()),
                     )
                     .on_click(cx.listener(move |_, _, window, cx| {
+                        log_info!(
+                            "pin",
+                            "context menu closed pin={} reason=select action={}",
+                            pin_id,
+                            action.id()
+                        );
                         forget_pin_menu();
                         window.remove_window();
                         cx.defer(move |cx| perform_pin_action(pin_id, action, cx));
@@ -117,6 +134,11 @@ fn forget_pin_menu() {
 pub(crate) fn close_pin_menu(cx: &mut App) {
     let handle = PIN_MENU.with(|slot| slot.borrow_mut().take());
     if let Some(handle) = handle {
+        log_info!(
+            "pin",
+            "context menu closed window={} reason=external",
+            handle.window_id().as_u64()
+        );
         let _ = handle.update(cx, |_, window, _| window.remove_window());
     }
 }
@@ -130,6 +152,7 @@ pub(crate) fn open_pin_menu(
 ) {
     close_pin_menu(cx);
     let width = PIN_MENU_WIDTH;
+    let item_count = items.len();
     let separators = items
         .iter()
         .enumerate()
@@ -181,7 +204,8 @@ pub(crate) fn open_pin_menu(
         });
         let focus = view.read(cx).focus_handle.clone();
         view.update(cx, |view, cx| {
-            view._blur_subscription = Some(cx.on_blur(&focus, window, |_, window, _| {
+            view._blur_subscription = Some(cx.on_blur(&focus, window, move |_, window, _| {
+                log_info!("pin", "context menu closed pin={} reason=blur", pin_id);
                 forget_pin_menu();
                 window.remove_window();
             }));
@@ -190,9 +214,20 @@ pub(crate) fn open_pin_menu(
         view
     }) {
         Ok((handle, _)) => {
+            log_info!(
+                "pin",
+                "context menu opened pin={} window={} items={} at={:.0},{:.0} size={:.0}x{:.0}",
+                pin_id,
+                handle.window_id().as_u64(),
+                item_count,
+                f32::from(origin.x),
+                f32::from(origin.y),
+                width,
+                height
+            );
             PIN_MENU.with(|slot| *slot.borrow_mut() = Some(handle));
         }
-        Err(error) => log_error!("pin", "failed to open pin menu: {error}"),
+        Err(error) => log_error!("pin", "failed to open context menu pin={pin_id}: {error}"),
     }
 }
 
@@ -206,8 +241,14 @@ fn pin_handles(id: u64) -> Option<(Entity<PinView>, AnyWindowHandle)> {
 
 fn perform_pin_action(id: u64, action: PinMenuAction, cx: &mut App) {
     let Some((entity, window_handle)) = pin_handles(id) else {
+        log_warn!(
+            "pin",
+            "menu action dropped pin={id} action={} (pin is gone)",
+            action.id()
+        );
         return;
     };
+    log_info!("pin", "menu action pin={id} action={}", action.id());
     match action {
         PinMenuAction::Rotate => rotate_pin(id, &entity, window_handle, cx),
         PinMenuAction::Edit => {
@@ -269,8 +310,10 @@ fn enable_click_through(
         .update(cx, |_, window, _| set_click_through(&*window, true).is_ok())
         .unwrap_or(false);
     if !applied {
+        log_warn!("pin", "failed to enable click-through pin={id}");
         return;
     }
+    log_info!("pin", "click-through enabled pin={id}");
     entity.update(cx, |_, cx| {
         set_state_click_through(id, true);
         cx.notify();

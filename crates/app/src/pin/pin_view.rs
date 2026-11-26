@@ -1,4 +1,5 @@
 use crate::i18n::{Language, t};
+use crate::logging::log_debug;
 use crate::settings_state::{self, PinDoubleClickAction};
 
 use super::*;
@@ -319,6 +320,7 @@ impl Render for PinView {
                             });
                         }
                         set_state_click_through(id, false);
+                        log_info!("pin", "click-through released pin={id} reason=escape");
                         crate::tray::refresh_menu();
                         cx.notify();
                     } else {
@@ -339,6 +341,13 @@ impl Render for PinView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    log_debug!(
+                        "pin",
+                        "pin left down pin={} at={:.0},{:.0}",
+                        this.id,
+                        f32::from(event.position.x),
+                        f32::from(event.position.y)
+                    );
                     crate::pin::close_pin_menu(cx);
                     window.focus(&this.focus_handle, cx);
                     this.wake_ocr(cx);
@@ -378,6 +387,14 @@ impl Render for PinView {
                     let items = this.menu_items(settings_state::get().language);
                     let pin_id = this.id;
                     let display = this.display;
+                    log_info!(
+                        "pin",
+                        "context menu requested pin={} items={} at={:.0},{:.0}",
+                        pin_id,
+                        items.len(),
+                        f32::from(position.x),
+                        f32::from(position.y)
+                    );
                     cx.defer(move |cx| {
                         crate::pin::open_pin_menu(pin_id, position, display, items, cx)
                     });
