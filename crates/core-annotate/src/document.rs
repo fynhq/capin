@@ -211,10 +211,9 @@ impl AnnotationDocument {
         let mut cropped = Self::new(size);
         for annotation in &self.objects {
             let translated = annotation.clone().translated(-origin.x, -origin.y);
-            let id = AnnotationId(cropped.next_id);
-            cropped.next_id += 1;
+            cropped.next_id = cropped.next_id.max(annotation.id.0 + 1);
             cropped.objects.push(Annotation {
-                id,
+                id: annotation.id,
                 shape: translated.shape,
                 style: translated.style,
             });
@@ -475,6 +474,7 @@ impl AnnotationDocument {
     }
 
     fn restore(&mut self, snapshot: Snapshot) {
+        self.history_serial = self.history_serial.wrapping_add(1);
         self.objects = snapshot.objects;
         self.next_id = snapshot.next_id;
         if let Some(id) = self.selected
@@ -924,6 +924,58 @@ mod tests {
         );
         assert!(cropped.selected().is_none());
         assert!(!cropped.undo());
+    }
+
+    #[test]
+    fn undo_and_redo_advance_the_history_serial() {
+        let mut doc = document();
+        let id = doc.add(
+            Shape::Rect(PhysicalRect::new(10, 10, 20, 20)),
+            AnnotationStyle::default(),
+        );
+
+        let serial = doc.history_serial();
+        assert!(doc.undo());
+        assert_ne!(doc.history_serial(), serial);
+        let serial = doc.history_serial();
+        assert!(doc.redo());
+        assert_ne!(doc.history_serial(), serial);
+        assert_eq!(doc.objects()[0].id, id);
+    }
+
+    #[test]
+    fn crop_to_preserves_annotation_identity() {
+        let mut doc = document();
+        let first = doc.add(
+            Shape::Rect(PhysicalRect::new(10, 10, 20, 20)),
+            AnnotationStyle::default(),
+        );
+        let removed = doc.add(
+            Shape::Rect(PhysicalRect::new(40, 40, 10, 10)),
+            AnnotationStyle::default(),
+        );
+        assert!(doc.remove(removed));
+        let last = doc.add(
+            Shape::Ellipse(PhysicalRect::new(60, 60, 10, 10)),
+            AnnotationStyle::default(),
+        );
+
+        let mut cropped = doc.crop_to(PhysicalPoint::new(5, 7), PhysicalSize::new(80, 70));
+        assert_eq!(
+            cropped
+                .objects()
+                .iter()
+                .map(|object| object.id)
+                .collect::<Vec<_>>(),
+            vec![first, last]
+        );
+        assert_eq!(
+            cropped.add(
+                Shape::Rect(PhysicalRect::new(1, 1, 4, 4)),
+                AnnotationStyle::default()
+            ),
+            AnnotationId(last.0 + 1)
+        );
     }
 
     #[test]
