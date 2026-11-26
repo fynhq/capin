@@ -127,6 +127,10 @@ impl SelectionSession {
         self.windows.iter().find(|window| window.id == id)
     }
 
+    pub fn window_is_fully_visible(&self, id: WindowId) -> bool {
+        window_is_fully_visible(&self.windows, self.monitor_bounds, id)
+    }
+
     pub fn is_dragging(&self) -> bool {
         self.drag.as_ref().is_some_and(|drag| drag.active)
     }
@@ -273,6 +277,32 @@ impl SelectionSession {
             .iter()
             .find(|window| window.bounds.contains(point))
     }
+}
+
+pub fn window_is_fully_visible(
+    windows: &[WindowInfo],
+    monitor_bounds: PhysicalRect,
+    id: WindowId,
+) -> bool {
+    let Some(window) = windows.iter().find(|window| window.id == id) else {
+        return false;
+    };
+    if window.bounds.intersection(monitor_bounds) != Some(window.bounds) {
+        return false;
+    }
+    for candidate in windows {
+        if candidate.id == id {
+            break;
+        }
+        if candidate
+            .bounds
+            .intersection(window.bounds)
+            .is_some_and(|overlap| !overlap.is_empty())
+        {
+            return false;
+        }
+    }
+    true
 }
 
 pub fn element_candidates(
@@ -745,5 +775,46 @@ mod tests {
         assert_eq!(session.hovered_window().map(|window| window.id), None);
         assert_eq!(session.selection_rect(), None);
         assert!(!session.screen_targeting());
+    }
+
+    #[test]
+    fn fully_visible_window_ignores_windows_below_it() {
+        let monitor = PhysicalRect::new(0, 0, 1920, 1080);
+        let target = window(1, 100, 100, 800, 600);
+        let below = window(2, 0, 0, 1920, 1080);
+        assert!(window_is_fully_visible(
+            &[target.clone(), below],
+            monitor,
+            target.id
+        ));
+    }
+
+    #[test]
+    fn covered_or_offscreen_window_is_not_fully_visible() {
+        let monitor = PhysicalRect::new(0, 0, 1920, 1080);
+        let target = window(1, 100, 100, 800, 600);
+        let cover = window(2, 400, 300, 200, 200);
+        assert!(!window_is_fully_visible(
+            &[cover, target.clone()],
+            monitor,
+            target.id
+        ));
+
+        let partial = window(3, 1800, 100, 300, 200);
+        let partial_id = partial.id;
+        assert!(!window_is_fully_visible(&[partial], monitor, partial_id));
+
+        assert!(!window_is_fully_visible(
+            &[target],
+            monitor,
+            WindowId::from_raw(99)
+        ));
+    }
+
+    #[test]
+    fn session_reports_occluded_windows_as_not_fully_visible() {
+        let session = session();
+        assert!(session.window_is_fully_visible(WindowId::from_raw(10)));
+        assert!(!session.window_is_fully_visible(WindowId::from_raw(20)));
     }
 }

@@ -92,16 +92,8 @@ impl OverlayView {
         };
         let frame = match selected.target {
             CaptureTarget::Window(id) => {
-                let frozen = {
-                    #[cfg(target_os = "macos")]
-                    {
-                        !settings_state::get().capture_cursor && self.window_is_fully_visible(id)
-                    }
-                    #[cfg(not(target_os = "macos"))]
-                    {
-                        false
-                    }
-                };
+                let frozen =
+                    !settings_state::get().capture_cursor && self.window_is_fully_visible(id);
                 log_info!("overlay", "window {} frozen capture: {frozen}", id.raw());
                 if frozen {
                     crate::window_frame::compose_frozen_window_capture(
@@ -153,28 +145,8 @@ impl OverlayView {
             .ok_or_else(|| "empty selection".to_owned())
     }
 
-    #[cfg(target_os = "macos")]
     fn window_is_fully_visible(&self, id: WindowId) -> bool {
-        let Some(window) = self.session.window(id) else {
-            return false;
-        };
-        let monitor = self.session.monitor_bounds();
-        if window.bounds.intersection(monitor) != Some(window.bounds) {
-            return false;
-        }
-        for candidate in self.session.windows() {
-            if candidate.id == id {
-                break;
-            }
-            if candidate
-                .bounds
-                .intersection(window.bounds)
-                .is_some_and(|overlap| !overlap.is_empty())
-            {
-                return false;
-            }
-        }
-        true
+        self.session.window_is_fully_visible(id)
     }
 
     fn selected_output(&self) -> Result<RgbaFrame, String> {

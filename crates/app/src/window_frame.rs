@@ -1,4 +1,9 @@
+use core_capture::CaptureTarget;
+#[cfg(target_os = "windows")]
+use core_capture::window_is_fully_visible;
 use core_compose::{Background, Border, Shadow, WindowCanvas, compose_window};
+#[cfg(target_os = "windows")]
+use core_types::CaptureRegion;
 #[cfg(target_os = "windows")]
 use core_types::PhysicalRect;
 use core_types::{RgbaFrame, WindowId};
@@ -36,6 +41,62 @@ pub fn measure_window_corner_radius(_id: WindowId, _scale: f32) -> Option<u32> {
     None
 }
 
+#[cfg(target_os = "windows")]
+pub fn capture_visible_window(id: WindowId) -> Option<RgbaFrame> {
+    let mut backend = platform_capture::platform_backend();
+    let monitors = backend.monitors().ok()?;
+    let windows = backend.windows().ok()?;
+    let window = windows.iter().find(|window| window.id == id)?;
+    let monitor = window
+        .monitor
+        .and_then(|monitor| monitors.iter().find(|info| info.id == monitor))
+        .or_else(|| {
+            monitors
+                .iter()
+                .find(|info| info.bounds.contains(window.bounds.origin))
+        })?;
+    if !window_is_fully_visible(&windows, monitor.bounds, id) {
+        return None;
+    }
+    let rect = PhysicalRect::new(
+        window.bounds.origin.x - monitor.bounds.origin.x,
+        window.bounds.origin.y - monitor.bounds.origin.y,
+        window.bounds.size.width,
+        window.bounds.size.height,
+    );
+    backend
+        .capture(CaptureTarget::Region(CaptureRegion::new(monitor.id, rect)))
+        .ok()
+}
+
+pub fn capture_refresh_frame(
+    target: CaptureTarget,
+    scale: f32,
+    cursor: bool,
+) -> Result<RgbaFrame, String> {
+    let CaptureTarget::Window(id) = target else {
+        let mut backend = platform_capture::platform_backend();
+        return if cursor {
+            backend.capture_with_cursor(target)
+        } else {
+            backend.capture(target)
+        }
+        .map_err(|error| error.to_string());
+    };
+    #[cfg(target_os = "windows")]
+    if !cursor && let Some(frame) = capture_visible_window(id) {
+        return Ok(compose_frozen_window_capture(id, frame, scale));
+    }
+    let mut backend = platform_capture::platform_backend();
+    let frame = if cursor {
+        backend.capture_with_cursor(target)
+    } else {
+        backend.capture(target)
+    }
+    .map_err(|error| error.to_string())?;
+    Ok(compose_window_capture(id, frame, scale))
+}
+
 pub fn compose_frozen_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> RgbaFrame {
     compose_window_capture_measured(
         id,
@@ -43,11 +104,12 @@ pub fn compose_frozen_window_capture(id: WindowId, frame: RgbaFrame, scale: f32)
         scale,
         measure_window_corner_radius(id, scale),
         true,
+        false,
     )
 }
 
 pub fn compose_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> RgbaFrame {
-    compose_window_capture_measured(id, frame, scale, None, false)
+    compose_window_capture_measured(id, frame, scale, None, false, true)
 }
 
 fn compose_window_capture_measured(
@@ -56,11 +118,18 @@ fn compose_window_capture_measured(
     scale: f32,
     measured_radius: Option<u32>,
     edge_bleed: bool,
+    trim_fringe: bool,
 ) -> RgbaFrame {
     let settings = settings_state::get();
     let scale = scale.max(0.1);
     #[cfg(target_os = "windows")]
-    let frame = trim_capture_fringe(frame);
+    let frame = if trim_fringe {
+        trim_capture_fringe(frame)
+    } else {
+        frame
+    };
+    #[cfg(not(target_os = "windows"))]
+    let _ = trim_fringe;
     let fallback_radius = platform_capture::window_corner_radius(id, scale);
     #[cfg(target_os = "macos")]
     let corner_radius = if platform_window::window_capture_includes_native_shadow() {

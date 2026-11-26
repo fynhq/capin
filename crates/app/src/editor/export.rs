@@ -2,6 +2,21 @@ use std::time::Instant;
 
 use super::*;
 
+fn refresh_failed(
+    view: &mut EditorView,
+    error: impl std::fmt::Display,
+    cx: &mut Context<EditorView>,
+) {
+    view.show_status(
+        format!(
+            "{} {}",
+            t(settings_state::get().language, "editor.refresh_failed"),
+            error
+        ),
+        cx,
+    );
+}
+
 impl EditorView {
     pub(super) fn refresh_full_canvas(&mut self, cx: &mut Context<Self>) {
         let Some(capture) = self.inline.and_then(|inline| inline.capture) else {
@@ -18,14 +33,7 @@ impl EditorView {
         let frame = match captured {
             Ok(frame) => frame,
             Err(error) => {
-                self.show_status(
-                    format!(
-                        "{} {}",
-                        t(settings_state::get().language, "editor.refresh_failed"),
-                        error
-                    ),
-                    cx,
-                );
+                refresh_failed(self, error, cx);
                 return;
             }
         };
@@ -110,28 +118,14 @@ impl EditorView {
         let Some(capture) = self.inline.and_then(|inline| inline.capture) else {
             return;
         };
-        let mut backend = platform_capture::platform_backend();
-        let captured = if settings_state::get().capture_cursor {
-            backend.capture_with_cursor(capture.target)
-        } else {
-            backend.capture(capture.target)
-        };
-        let frame = match captured {
-            Ok(frame) => match capture.target {
-                CaptureTarget::Window(id) => {
-                    crate::window_frame::compose_window_capture(id, frame, capture.scale)
-                }
-                _ => frame,
-            },
+        let frame = match crate::window_frame::capture_refresh_frame(
+            capture.target,
+            capture.scale,
+            settings_state::get().capture_cursor,
+        ) {
+            Ok(frame) => frame,
             Err(error) => {
-                self.show_status(
-                    format!(
-                        "{} {}",
-                        t(settings_state::get().language, "editor.refresh_failed"),
-                        error
-                    ),
-                    cx,
-                );
+                refresh_failed(self, error, cx);
                 return;
             }
         };

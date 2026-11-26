@@ -9,5 +9,5 @@ pub use error::{CaptureError, Result};
 pub use info::{MonitorInfo, WindowInfo};
 pub use selection::{
     DRAG_THRESHOLD_PX, SelectionAction, SelectionOutcome, SelectionSession, element_candidates,
-    region_from_drag,
+    region_from_drag, window_is_fully_visible,
 };
