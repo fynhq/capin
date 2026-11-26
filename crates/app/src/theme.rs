@@ -241,7 +241,7 @@ pub(crate) fn settings_palette(dark: bool) -> SettingsPalette {
             popover: rgb(0x2B2B2B),
             page: None,
             sidebar: rgba(0x00000000),
-            card: rgb(0x2B2B2B),
+            card: rgba(0xFFFFFF0D),
             card_border: rgba(0x0000001A),
         }
     } else {
@@ -257,7 +257,7 @@ pub(crate) fn settings_palette(dark: bool) -> SettingsPalette {
             popover: rgb(0xF9F9F9),
             page: None,
             sidebar: rgba(0x00000000),
-            card: rgb(0xFAFAFA),
+            card: rgba(0xFFFFFFB3),
             card_border: rgba(0x0000000F),
         }
     }
