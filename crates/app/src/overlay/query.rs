@@ -1,4 +1,21 @@
+use std::collections::HashSet;
+use std::time::{Duration, Instant};
+
+use super::element_probe::ElementChain;
 use super::*;
+
+const SLOW_ELEMENT_QUERY: Duration = Duration::from_millis(500);
+const EMPTY_ELEMENT_RETRY_DELAY: Duration = Duration::from_millis(150);
+#[cfg(target_os = "macos")]
+const FULL_QUERY_IDLE: Duration = Duration::from_millis(250);
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+enum FullSchedule {
+    Run,
+    Wait,
+    Cancel,
+}
 
 impl OverlayView {
     pub(super) fn sample_color(&self, point: PhysicalPoint) -> Option<(u8, u8, u8)> {
@@ -32,37 +49,26 @@ impl OverlayView {
         }
         if self.element_probe.window != Some(window.id) {
             self.element_probe.retain_cache_for(window.id);
-            self.element_probe.window = Some(window.id);
-            self.element_probe.cache_point = None;
-            self.element_probe.level = 0;
-            self.element_probe.candidates.clear();
-            self.element_probe.scroll.reset();
+            self.element_probe.switch_window(window.id);
             self.session.set_hovered_element(None);
         }
-        let cached_for_point = {
-            #[cfg(target_os = "macos")]
-            {
-                self.element_probe.cache.contains_key(&window.id)
-                    && self.element_probe.cache_point == Some(point)
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                self.element_probe.cache.contains_key(&window.id)
-            }
-        };
-        if !cached_for_point {
-            if self.element_probe.pending.is_none() {
-                self.query_elements(window.id, point, cx);
-            }
-            self.session.set_hovered_element(None);
-            return;
-        }
-        let Some(cached) = self.element_probe.cache.get(&window.id) else {
-            self.session.set_hovered_element(None);
-            return;
-        };
+        self.start_element_queries(window.id, point, cx);
 
-        let candidates = core_capture::element_candidates(cached, window.bounds, point);
+        let mut elements = Vec::new();
+        if let Some(cached) = self.element_probe.cache.get(&window.id) {
+            elements.extend_from_slice(cached);
+        }
+        if let Some(chain) = self
+            .element_probe
+            .chain
+            .as_ref()
+            .filter(|chain| chain.window == window.id)
+        {
+            elements.extend_from_slice(&chain.elements);
+        }
+        let mut candidates = core_capture::element_candidates(&elements, window.bounds, point);
+        let mut seen = HashSet::new();
+        candidates.retain(|rect| seen.insert(*rect));
         if self.element_probe.level > candidates.len() {
             self.element_probe.level = candidates.len();
         }
@@ -79,39 +85,140 @@ impl OverlayView {
         self.session.set_hovered_element(selected);
     }
 
-    fn query_elements(
+    fn start_element_queries(
         &mut self,
-        window_id: WindowId,
+        window: WindowId,
         point: PhysicalPoint,
         cx: &mut Context<Self>,
     ) {
-        self.element_probe.pending = Some(window_id);
-        self.element_probe.pending_point = Some(point);
+        let has_full = self.element_probe.cache.contains_key(&window);
+        let chain_matches = self
+            .element_probe
+            .chain
+            .as_ref()
+            .is_some_and(|chain| chain.window == window && chain.point == point);
+        let need_chain =
+            (!has_full || !platform_capture::ui_element_tree_is_complete()) && !chain_matches;
+        if need_chain && self.element_probe.pending_chain.is_none() {
+            self.query_element_chain(window, point, cx);
+        }
+        if !has_full && self.element_probe.pending_full.is_none() {
+            #[cfg(target_os = "windows")]
+            {
+                if self.element_probe.pending_chain.is_none() {
+                    self.query_full_elements(window, cx);
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                self.query_full_elements(window, cx);
+            }
+        }
+    }
+
+    fn query_element_chain(
+        &mut self,
+        window: WindowId,
+        point: PhysicalPoint,
+        cx: &mut Context<Self>,
+    ) {
+        self.element_probe.pending_chain = Some((window, point));
         cx.spawn(async move |this, cx| {
-            let elements = cx
+            let (elements, elapsed) = cx
                 .background_executor()
-                .spawn(async move { platform_capture::ui_elements_at(window_id, point) })
+                .spawn(async move {
+                    let started = Instant::now();
+                    let elements = platform_capture::ui_element_chain(window, point);
+                    (elements, started.elapsed())
+                })
                 .await;
+            log_element_query("chain", window, elapsed, elements.len());
+            this.update(cx, |this, cx| {
+                if this.element_probe.pending_chain != Some((window, point)) {
+                    return;
+                }
+                this.element_probe.pending_chain = None;
+                let full_complete = platform_capture::ui_element_tree_is_complete()
+                    && this.element_probe.cache.contains_key(&window);
+                if this.element_probe.window == Some(window) && !full_complete {
+                    this.element_probe.chain = Some(ElementChain {
+                        window,
+                        point,
+                        elements,
+                    });
+                }
+                if let Some(cursor) = this.cursor {
+                    this.refresh_auto_target(cursor, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn query_full_elements(&mut self, window: WindowId, cx: &mut Context<Self>) {
+        self.element_probe.pending_full = Some(window);
+        cx.spawn(async move |this, cx| {
+            #[cfg(target_os = "macos")]
+            loop {
+                cx.background_executor().timer(FULL_QUERY_IDLE).await;
+                let schedule = this.update(cx, |this, cx| {
+                    if this.element_probe.pending_full != Some(window) {
+                        return FullSchedule::Cancel;
+                    }
+                    if this.element_probe.window != Some(window)
+                        || this.element_probe.cache.contains_key(&window)
+                    {
+                        this.element_probe.pending_full = None;
+                        if let Some(cursor) = this.cursor {
+                            this.refresh_auto_target(cursor, cx);
+                        }
+                        return FullSchedule::Cancel;
+                    }
+                    if this.element_probe.pending_chain.is_some() {
+                        FullSchedule::Wait
+                    } else {
+                        FullSchedule::Run
+                    }
+                });
+                match schedule {
+                    Ok(FullSchedule::Run) => break,
+                    Ok(FullSchedule::Wait) => {}
+                    _ => return,
+                }
+            }
+            let (elements, elapsed) = cx
+                .background_executor()
+                .spawn(async move {
+                    let started = Instant::now();
+                    let elements = platform_capture::ui_elements(window);
+                    (elements, started.elapsed())
+                })
+                .await;
+            log_element_query("full", window, elapsed, elements.len());
             let empty = elements.is_empty();
             let applied = this
                 .update(cx, |this, cx| {
-                    if this.element_probe.pending != Some(window_id)
-                        || this.element_probe.pending_point != Some(point)
-                    {
+                    if this.element_probe.pending_full != Some(window) {
                         return false;
                     }
-                    this.element_probe.pending = None;
-                    this.element_probe.pending_point = None;
+                    this.element_probe.pending_full = None;
+                    if this.element_probe.window != Some(window) {
+                        if let Some(cursor) = this.cursor {
+                            this.refresh_auto_target(cursor, cx);
+                        }
+                        return false;
+                    }
                     if empty && !platform_window::accessibility_trusted() {
                         return false;
                     }
-                    this.element_probe.cache.insert(window_id, elements);
-                    #[cfg(target_os = "macos")]
-                    {
-                        this.element_probe.cache_point = Some(point);
+                    this.element_probe.cache.insert(window, elements);
+                    if platform_capture::ui_element_tree_is_complete() {
+                        this.element_probe.chain = None;
                     }
-                    if let Some(point) = this.cursor {
-                        this.refresh_auto_target(point, cx);
+                    if let Some(cursor) = this.cursor {
+                        this.refresh_auto_target(cursor, cx);
                     }
                     cx.notify();
                     true
@@ -121,38 +228,38 @@ impl OverlayView {
                 return;
             }
             cx.background_executor()
-                .timer(Duration::from_millis(150))
+                .timer(EMPTY_ELEMENT_RETRY_DELAY)
                 .await;
             let retry = this
-                .update(cx, |this, _| this.element_probe.retry.insert(window_id))
+                .update(cx, |this, _| this.element_probe.retry.insert(window))
                 .unwrap_or(false);
             if !retry {
                 return;
             }
-            let elements = cx
+            let (elements, elapsed) = cx
                 .background_executor()
-                .spawn(async move { platform_capture::ui_elements_at(window_id, point) })
+                .spawn(async move {
+                    let started = Instant::now();
+                    let elements = platform_capture::ui_elements(window);
+                    (elements, started.elapsed())
+                })
                 .await;
+            log_element_query("full-retry", window, elapsed, elements.len());
             this.update(cx, |this, cx| {
-                let still_current = this.element_probe.pending.is_none()
-                    && this.element_probe.cache_point.unwrap_or(point) == point;
-                if still_current
-                    && this
+                if this.element_probe.window != Some(window)
+                    || !this
                         .element_probe
                         .cache
-                        .get(&window_id)
+                        .get(&window)
                         .is_some_and(Vec::is_empty)
                 {
-                    this.element_probe.cache.insert(window_id, elements);
-                    #[cfg(target_os = "macos")]
-                    {
-                        this.element_probe.cache_point = Some(point);
-                    }
-                    if let Some(point) = this.cursor {
-                        this.refresh_auto_target(point, cx);
-                    }
-                    cx.notify();
+                    return;
                 }
+                this.element_probe.cache.insert(window, elements);
+                if let Some(cursor) = this.cursor {
+                    this.refresh_auto_target(cursor, cx);
+                }
+                cx.notify();
             })
             .ok();
         })
@@ -180,6 +287,22 @@ impl OverlayView {
     pub(super) fn toggle_color_format(&mut self, cx: &mut Context<Self>) {
         self.color_format = self.color_format.next();
         cx.notify();
+    }
+}
+
+fn log_element_query(stage: &str, window: WindowId, elapsed: Duration, elements: usize) {
+    let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
+    crate::logging::log_debug!(
+        "element",
+        "{stage} window={} elapsed_ms={elapsed_ms:.1} elements={elements}",
+        window.raw()
+    );
+    if stage != "chain" && elapsed >= SLOW_ELEMENT_QUERY {
+        crate::logging::log_info!(
+            "element",
+            "{stage} window={} elapsed_ms={elapsed_ms:.1} elements={elements}",
+            window.raw()
+        );
     }
 }
 

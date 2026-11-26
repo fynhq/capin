@@ -504,7 +504,7 @@ fn collect_window_elements(window: &AXUIElement, info: &AxWindowInfo) -> Vec<Phy
     result
 }
 
-pub fn ui_elements_at(id: WindowId, point: core_types::PhysicalPoint) -> Vec<PhysicalRect> {
+pub fn ui_element_chain(id: WindowId, point: core_types::PhysicalPoint) -> Vec<PhysicalRect> {
     let Some((info, application, window)) = ax_window_context(id) else {
         return Vec::new();
     };
@@ -521,9 +521,6 @@ pub fn ui_elements_at(id: WindowId, point: core_types::PhysicalPoint) -> Vec<Phy
     }
     if !reached_window || chain.is_empty() {
         chain = ax_chain_at_point(&window, &info, point);
-    }
-    if chain.is_empty() {
-        return collect_window_elements(&window, &info);
     }
     chain.sort_by_key(|rect| u64::from(rect.size.width) * u64::from(rect.size.height));
     chain.dedup();

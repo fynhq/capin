@@ -44,21 +44,24 @@ pub fn ui_elements(id: WindowId) -> Vec<PhysicalRect> {
     }
 }
 
-pub fn ui_elements_at(id: WindowId, point: PhysicalPoint) -> Vec<PhysicalRect> {
+pub fn ui_element_chain(id: WindowId, point: PhysicalPoint) -> Vec<PhysicalRect> {
     #[cfg(target_os = "windows")]
     {
-        let _ = point;
-        windows::ui_elements(id)
+        windows::ui_element_chain(id, point)
     }
     #[cfg(target_os = "macos")]
     {
-        macos::ui_elements_at(id, point)
+        macos::ui_element_chain(id, point)
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         let _ = (id, point);
         Vec::new()
     }
+}
+
+pub fn ui_element_tree_is_complete() -> bool {
+    cfg!(target_os = "windows")
 }
 
 pub fn window_corner_radius(id: WindowId, scale: f32) -> u32 {

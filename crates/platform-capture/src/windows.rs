@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
-use core_types::{DpiScale, MonitorId, PhysicalRect, RgbaFrame, WindowId};
+use core_types::{DpiScale, MonitorId, PhysicalPoint, PhysicalRect, RgbaFrame, WindowId};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, TRUE};
 use windows::Win32::Graphics::Dwm::{
     DWM_WINDOW_CORNER_PREFERENCE, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
@@ -21,8 +21,9 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation8, IUIAutomation2, IUIAutomationCacheRequest, TreeScope_Descendants,
-    TreeScope_Element, UIA_BoundingRectanglePropertyId,
+    CUIAutomation8, IUIAutomation2, IUIAutomationCacheRequest, IUIAutomationCondition,
+    IUIAutomationElement, TreeScope_Children, TreeScope_Descendants, TreeScope_Element,
+    UIA_BoundingRectanglePropertyId,
 };
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, GetDpiForWindow,
@@ -132,6 +133,8 @@ fn capture_target(target: CaptureTarget, cursor: CursorCaptureSettings) -> Resul
 const UIA_TIMEOUT_MS: u32 = 1_500;
 const UIA_MAX_ELEMENTS: i32 = 16_384;
 const CHILD_WINDOW_LIMIT: usize = 64;
+const CHAIN_MAX_DEPTH: usize = 32;
+const CHAIN_BUDGET: Duration = Duration::from_millis(300);
 
 #[derive(Clone)]
 struct Automation {
@@ -166,6 +169,11 @@ fn automation() -> Option<Automation> {
     })
 }
 
+fn element_condition(automation: &IUIAutomation2) -> Option<IUIAutomationCondition> {
+    // SAFETY: the automation object is initialized and owned by this thread.
+    unsafe { automation.CreateTrueCondition().ok() }
+}
+
 fn belongs_to_current_process(hwnd: HWND) -> bool {
     let mut pid = 0;
     // SAFETY: hwnd is a live handle and pid is a writable local.
@@ -197,16 +205,79 @@ pub fn ui_elements(id: WindowId) -> Vec<PhysicalRect> {
     result
 }
 
+pub fn ui_element_chain(id: WindowId, point: PhysicalPoint) -> Vec<PhysicalRect> {
+    let hwnd = HWND(id.raw() as usize as *mut c_void);
+    if belongs_to_current_process(hwnd) {
+        return Vec::new();
+    }
+    uia_element_chain(hwnd, point)
+}
+
+fn uia_element_chain(hwnd: HWND, point: PhysicalPoint) -> Vec<PhysicalRect> {
+    let Some(Automation { automation, cache }) = automation() else {
+        return Vec::new();
+    };
+    let Some(condition) = element_condition(&automation) else {
+        return Vec::new();
+    };
+    let started = Instant::now();
+    let mut chain = Vec::new();
+    // SAFETY: the calls use live COM objects owned here and indices bounded by the child count.
+    unsafe {
+        let Ok(mut current) = automation.ElementFromHandle(hwnd) else {
+            return Vec::new();
+        };
+        for _ in 0..CHAIN_MAX_DEPTH {
+            if started.elapsed() > CHAIN_BUDGET {
+                break;
+            }
+            let Ok(children) = current.FindAllBuildCache(TreeScope_Children, &condition, &cache)
+            else {
+                break;
+            };
+            let length = children.Length().unwrap_or(0).clamp(0, UIA_MAX_ELEMENTS);
+            let mut best: Option<(IUIAutomationElement, PhysicalRect)> = None;
+            for index in 0..length {
+                let Ok(child) = children.GetElement(index) else {
+                    continue;
+                };
+                let Ok(rect) = child.CachedBoundingRectangle() else {
+                    continue;
+                };
+                let bounds = physical_rect(rect);
+                if bounds.size.width <= 1 || bounds.size.height <= 1 || !bounds.contains(point) {
+                    continue;
+                }
+                let area = u64::from(bounds.size.width) * u64::from(bounds.size.height);
+                let replace = best.as_ref().is_none_or(|(_, best)| {
+                    u64::from(best.size.width) * u64::from(best.size.height) > area
+                });
+                if replace {
+                    best = Some((child, bounds));
+                }
+            }
+            let Some((child, bounds)) = best else {
+                break;
+            };
+            chain.push(bounds);
+            current = child;
+        }
+    }
+    chain.sort_by_key(|rect| u64::from(rect.size.width) * u64::from(rect.size.height));
+    chain.dedup();
+    chain
+}
+
 fn uia_elements(hwnd: HWND) -> Vec<PhysicalRect> {
     let Some(Automation { automation, cache }) = automation() else {
+        return Vec::new();
+    };
+    let Some(condition) = element_condition(&automation) else {
         return Vec::new();
     };
     // SAFETY: the calls use live COM objects owned here and indices bounded by the reported length.
     unsafe {
         let Ok(root) = automation.ElementFromHandle(hwnd) else {
-            return Vec::new();
-        };
-        let Ok(condition) = automation.CreateTrueCondition() else {
             return Vec::new();
         };
         let Ok(elements) = root.FindAllBuildCache(TreeScope_Descendants, &condition, &cache) else {
