@@ -169,9 +169,23 @@ fn automation() -> Option<Automation> {
     })
 }
 
+fn uia_control_view() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("CAPIN_UIA_CONTROL_VIEW")
+            .is_some_and(|value| value.to_string_lossy() != "0")
+    })
+}
+
 fn element_condition(automation: &IUIAutomation2) -> Option<IUIAutomationCondition> {
     // SAFETY: the automation object is initialized and owned by this thread.
-    unsafe { automation.CreateTrueCondition().ok() }
+    unsafe {
+        if uia_control_view() {
+            automation.ControlViewCondition().ok()
+        } else {
+            automation.CreateTrueCondition().ok()
+        }
+    }
 }
 
 fn belongs_to_current_process(hwnd: HWND) -> bool {
