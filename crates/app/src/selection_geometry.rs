@@ -175,6 +175,28 @@ pub(crate) fn resize_rect(
     )
 }
 
+pub(crate) fn resize_edge(
+    rect: PhysicalRect,
+    handle: ResizeHandle,
+    outward: bool,
+    ratio: Option<f32>,
+    size: PhysicalSize,
+) -> PhysicalRect {
+    let left = i64::from(rect.origin.x);
+    let top = i64::from(rect.origin.y);
+    let right = left + i64::from(rect.size.width);
+    let bottom = top + i64::from(rect.size.height);
+    let step = if outward { 1 } else { -1 };
+    let cursor = match handle {
+        ResizeHandle::West => PhysicalPoint::new((left - step) as i32, top as i32),
+        ResizeHandle::East => PhysicalPoint::new((right + step) as i32, top as i32),
+        ResizeHandle::North => PhysicalPoint::new(left as i32, (top - step) as i32),
+        ResizeHandle::South => PhysicalPoint::new(left as i32, (bottom + step) as i32),
+        _ => return rect,
+    };
+    resize_rect(rect, handle, cursor, ratio, size)
+}
+
 pub(crate) fn handle_positions(rect: Bounds<Pixels>) -> Vec<(ResizeHandle, Point<Pixels>)> {
     let left = f32::from(rect.origin.x);
     let top = f32::from(rect.origin.y);
@@ -207,7 +229,7 @@ pub(crate) fn corner_handle_offset(handle: ResizeHandle, radius: f32) -> (f32, f
 
 #[cfg(test)]
 mod tests {
-    use super::{ResizeHandle, edge_resize_handle, resize_rect};
+    use super::{ResizeHandle, edge_resize_handle, resize_edge, resize_rect};
     use core_types::{PhysicalPoint, PhysicalRect, PhysicalSize};
 
     #[test]
@@ -248,5 +270,85 @@ mod tests {
         let ratio = resized.size.width as f32 / resized.size.height as f32;
         assert!((ratio - 16.0 / 9.0).abs() < 0.01, "ratio was {ratio}");
         assert_eq!(resized.origin, original.origin);
+    }
+
+    #[test]
+    fn keyboard_edges_expand_outward_and_shrink_inward() {
+        let original = PhysicalRect::new(100, 100, 200, 100);
+        let monitor = PhysicalSize::new(1000, 800);
+        assert_eq!(
+            resize_edge(original, ResizeHandle::West, true, None, monitor),
+            PhysicalRect::new(99, 100, 201, 100)
+        );
+        assert_eq!(
+            resize_edge(original, ResizeHandle::East, true, None, monitor),
+            PhysicalRect::new(100, 100, 201, 100)
+        );
+        assert_eq!(
+            resize_edge(original, ResizeHandle::West, false, None, monitor),
+            PhysicalRect::new(101, 100, 199, 100)
+        );
+        assert_eq!(
+            resize_edge(original, ResizeHandle::North, false, None, monitor),
+            PhysicalRect::new(100, 101, 200, 99)
+        );
+        assert_eq!(
+            resize_edge(original, ResizeHandle::South, true, None, monitor),
+            PhysicalRect::new(100, 100, 200, 101)
+        );
+    }
+
+    #[test]
+    fn keyboard_edges_clamp_to_monitor_and_minimum_size() {
+        let monitor = PhysicalSize::new(1000, 800);
+        let min = PhysicalRect::new(0, 0, 2, 2);
+        assert_eq!(
+            resize_edge(min, ResizeHandle::West, true, None, monitor),
+            min
+        );
+        assert_eq!(
+            resize_edge(min, ResizeHandle::North, true, None, monitor),
+            min
+        );
+        assert_eq!(
+            resize_edge(min, ResizeHandle::East, false, None, monitor),
+            min
+        );
+        let bottom_right = PhysicalRect::new(800, 600, 200, 200);
+        assert_eq!(
+            resize_edge(bottom_right, ResizeHandle::South, true, None, monitor),
+            bottom_right
+        );
+        assert_eq!(
+            resize_edge(bottom_right, ResizeHandle::East, true, None, monitor),
+            bottom_right
+        );
+    }
+
+    #[test]
+    fn keyboard_edges_keep_a_fixed_ratio() {
+        let original = PhysicalRect::new(100, 100, 160, 90);
+        let monitor = PhysicalSize::new(1000, 800);
+        let out = resize_edge(
+            original,
+            ResizeHandle::East,
+            true,
+            Some(16.0 / 9.0),
+            monitor,
+        );
+        assert_eq!(out.origin, original.origin);
+        let ratio = out.size.width as f32 / out.size.height as f32;
+        assert!((ratio - 16.0 / 9.0).abs() < 0.01, "ratio was {ratio}");
+        assert!(out.size.width > original.size.width);
+        assert!(out.size.height > original.size.height);
+        let inward = resize_edge(
+            original,
+            ResizeHandle::East,
+            false,
+            Some(16.0 / 9.0),
+            monitor,
+        );
+        assert!(inward.size.width < original.size.width);
+        assert!(inward.size.height < original.size.height);
     }
 }

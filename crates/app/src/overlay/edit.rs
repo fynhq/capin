@@ -240,6 +240,51 @@ impl OverlayView {
         cx.notify();
     }
 
+    pub(super) fn resize_selection_edge(
+        &mut self,
+        handle: ResizeHandle,
+        outward: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(selected) = self.selected.as_mut() else {
+            return;
+        };
+        let monitor = self.session.monitor_bounds();
+        let rect = resize_edge(
+            selected.rect,
+            handle,
+            outward,
+            selected.ratio.ratio(),
+            monitor.size,
+        );
+        selected.rect = rect;
+        selected.target = CaptureTarget::Region(CaptureRegion::new(self.session.monitor(), rect));
+        cx.notify();
+    }
+
+    pub(super) fn on_arrow_key(
+        &mut self,
+        key: &str,
+        shift: bool,
+        command: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let (handle, dx, dy) = match key {
+            "left" => (ResizeHandle::West, -1, 0),
+            "right" => (ResizeHandle::East, 1, 0),
+            "up" => (ResizeHandle::North, 0, -1),
+            "down" => (ResizeHandle::South, 0, 1),
+            _ => return,
+        };
+        if shift {
+            self.resize_selection_edge(handle, false, cx);
+        } else if command {
+            self.nudge_selection(dx, dy, cx);
+        } else {
+            self.resize_selection_edge(handle, true, cx);
+        }
+    }
+
     pub(super) fn update_region_drag(&mut self, point: PhysicalPoint, cx: &mut Context<Self>) {
         let Some(selected) = self.selected.as_mut() else {
             return;

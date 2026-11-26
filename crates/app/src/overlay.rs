@@ -26,7 +26,7 @@ use crate::{
     },
     selection_geometry::{
         MIN_REGION_SIZE, ResizeHandle, corner_handle_offset, edge_resize_handle, handle_positions,
-        region_handle_cursor, resize_rect,
+        region_handle_cursor, resize_edge, resize_rect,
     },
     settings_state::{self, DoubleClickAction},
     ui::tooltip_view,
@@ -1217,14 +1217,8 @@ impl OverlayView {
                         cx.notify();
                         return;
                     }
-                    if let Some((dx, dy)) = match key {
-                        "left" => Some((-1, 0)),
-                        "right" => Some((1, 0)),
-                        "up" => Some((0, -1)),
-                        "down" => Some((0, 1)),
-                        _ => None,
-                    } {
-                        this.nudge_selection(dx, dy, cx);
+                    if matches!(key, "left" | "right" | "up" | "down") {
+                        this.on_arrow_key(key, event.keystroke.modifiers.shift, command, cx);
                         return;
                     }
                     return;
