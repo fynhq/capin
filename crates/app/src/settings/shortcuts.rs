@@ -196,7 +196,7 @@ impl SettingsView {
                             theme,
                             t(language, "shortcuts.pin_close"),
                             "",
-                            t(language, "shortcuts.value.esc_middle"),
+                            t(language, "shortcuts.value.esc"),
                             Some(icons::CLOSE),
                         ),
                     ],

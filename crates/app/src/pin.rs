@@ -69,7 +69,8 @@ use pin_content::PinContent;
 const MAX_RESTORED_PINS: usize = 20;
 const MAX_RESTORE_ESTIMATED_BYTES: f64 = 96.0 * 1024.0 * 1024.0;
 
-const MIN_PIN_ZOOM: f32 = 0.02;
+const MIN_PIN_ZOOM: f32 = 0.1;
+const MIN_PIN_FIT_ZOOM: f32 = 0.02;
 const MAX_PIN_ZOOM: f32 = 4.0;
 
 fn pin_window_kind() -> WindowKind {
@@ -895,8 +896,8 @@ impl PinView {
         if self.content.image_size().is_none() {
             return;
         }
-        let fit = self.fitted_zoom_limit(window, cx).max(MIN_PIN_ZOOM);
-        let zoom = zoom.clamp(MIN_PIN_ZOOM, fit);
+        let fit = self.fitted_zoom_limit(window, cx);
+        let zoom = zoom.clamp(pin_display::pin_zoom_floor(fit), fit);
         let (width, height) = self.content.size(zoom);
         let bounds = window.bounds();
         let (center_x, center_y) = self.zoom_center.unwrap_or_else(|| {
@@ -991,10 +992,8 @@ impl PinView {
         if self.content.image_size().is_none() {
             return;
         }
-        let fit = self
-            .fitted_zoom_limit(window, cx)
-            .clamp(MIN_PIN_ZOOM, MAX_PIN_ZOOM);
-        self.zoom_target = target.clamp(MIN_PIN_ZOOM, fit);
+        let fit = self.fitted_zoom_limit(window, cx);
+        self.zoom_target = target.clamp(pin_display::pin_zoom_floor(fit), fit);
         let language = settings_state::get().language;
         let percent = (self.zoom_target * 100.0).round() as i32;
         if cx.reduce_motion() || cfg!(target_os = "windows") {
@@ -1299,6 +1298,12 @@ mod tests {
         assert!(
             (super::pin_display::fit_zoom_limit(3000, 12000, 1920.0, 1080.0) - 0.09).abs() < 0.001
         );
+    }
+
+    #[test]
+    fn user_zoom_stops_at_the_floor_unless_the_fit_is_lower() {
+        assert!((super::pin_display::pin_zoom_floor(0.5) - super::MIN_PIN_ZOOM).abs() < 0.001);
+        assert!((super::pin_display::pin_zoom_floor(0.09) - 0.09).abs() < 0.001);
     }
 
     #[test]

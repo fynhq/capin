@@ -204,7 +204,7 @@ pub(super) fn fit_pin_to_display(
             f32::from(display.size.width),
             f32::from(display.size.height),
         );
-        zoom = zoom.min(fit);
+        zoom = zoom.clamp(pin_zoom_floor(fit), fit);
     }
     let (width, height) = content.size(zoom);
     let center_x = f32::from(bounds.origin.x) + f32::from(bounds.size.width) / 2.0;
@@ -247,7 +247,11 @@ pub(super) fn fit_zoom_limit(
     }
     (screen_width / image_width as f32)
         .min(screen_height / image_height as f32)
-        .clamp(MIN_PIN_ZOOM, MAX_PIN_ZOOM)
+        .clamp(MIN_PIN_FIT_ZOOM, MAX_PIN_ZOOM)
+}
+
+pub(super) fn pin_zoom_floor(fit: f32) -> f32 {
+    fit.min(MIN_PIN_ZOOM)
 }
 
 pub(super) fn pin_display_bounds(window: &Window, cx: &App) -> Option<Bounds<Pixels>> {

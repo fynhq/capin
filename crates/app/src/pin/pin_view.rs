@@ -331,14 +331,6 @@ impl Render for PinView {
                 }
             }))
             .on_mouse_down(
-                MouseButton::Middle,
-                cx.listener(|this, _, _, cx| {
-                    let id = this.id;
-                    cx.defer(move |cx| crate::pin::close_pin(id, cx));
-                    cx.stop_propagation();
-                }),
-            )
-            .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     log_debug!(
