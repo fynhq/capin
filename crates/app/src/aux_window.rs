@@ -3,6 +3,21 @@ use core_types::{PhysicalPoint, PhysicalRect};
 use gpui_kit::*;
 use platform_capture::platform_backend;
 
+pub(crate) fn panel_background() -> WindowBackgroundAppearance {
+    #[cfg(target_os = "windows")]
+    {
+        WindowBackgroundAppearance::MicaBackdrop
+    }
+    #[cfg(target_os = "macos")]
+    {
+        WindowBackgroundAppearance::Blurred
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        WindowBackgroundAppearance::Transparent
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn popup_options(
     app_id: &'static str,

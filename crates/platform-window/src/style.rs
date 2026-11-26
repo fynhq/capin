@@ -60,6 +60,8 @@ impl WindowStyle {
         keeps_visible_when_inactive: true,
     };
 
+    pub const HINTS: Self = Self::CAPTURE_BAR;
+
     pub const CAPTURE_OUTLINE: Self = Self {
         always_on_top: true,
         skip_taskbar: true,

@@ -37,6 +37,7 @@ mod capture;
 mod edit;
 mod element_probe;
 mod element_scroll;
+mod hints_window;
 mod panels;
 mod query;
 mod refresh;
@@ -845,6 +846,7 @@ impl OverlayView {
 
     fn close_overlays(&mut self, cx: &mut Context<Self>) {
         platform_window::set_cursor_hidden(false);
+        hints_window::close(cx);
         self.release_capture_resources(cx);
         let handles = cx.windows();
         cx.defer(move |cx| {
@@ -1161,6 +1163,7 @@ impl OverlayView {
                         if selected.hints_open || selected.effects_open {
                             selected.hints_open = false;
                             selected.effects_open = false;
+                            hints_window::close(cx);
                             cx.notify();
                             return;
                         }
@@ -1187,11 +1190,7 @@ impl OverlayView {
                         return;
                     }
                     if key == "f1" {
-                        if let Some(selected) = this.selected.as_mut() {
-                            selected.hints_open = !selected.hints_open;
-                            selected.effects_open = false;
-                        }
-                        cx.notify();
+                        this.toggle_hints(window, cx);
                         return;
                     }
                     if key.eq_ignore_ascii_case("r") {
@@ -1204,6 +1203,7 @@ impl OverlayView {
                             selected.effects_open = false;
                             selected.hints_open = false;
                         }
+                        hints_window::close(cx);
                         cx.notify();
                         return;
                     }
@@ -1211,6 +1211,7 @@ impl OverlayView {
                         this.selected = None;
                         this.screen_targeting = false;
                         this.session.cancel();
+                        hints_window::close(cx);
                         cx.notify();
                         return;
                     }
@@ -1350,6 +1351,7 @@ impl OverlayView {
                         selected.hints_open = false;
                         selected.effects_open = false;
                     }
+                    hints_window::close(cx);
                     cx.stop_propagation();
                 }),
             )

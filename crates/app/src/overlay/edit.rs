@@ -293,6 +293,45 @@ impl OverlayView {
             selected.hints_open = false;
             selected.edit = None;
         }
+        super::hints_window::close(cx);
+        cx.notify();
+    }
+
+    pub(super) fn toggle_hints(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(selected) = self.selected.as_mut() else {
+            return;
+        };
+        selected.hints_open = !selected.hints_open;
+        selected.effects_open = false;
+        let open = selected.hints_open;
+        if open {
+            let owner = cx.entity().downgrade();
+            let owner_handle = window.window_handle();
+            let owner_focus = self.focus_handle.clone();
+            let display = window.display(cx).map(|display| display.id());
+            let bounds = window.bounds();
+            let theme = self.chrome;
+            cx.defer(move |cx| {
+                super::hints_window::show(
+                    owner,
+                    owner_handle,
+                    owner_focus,
+                    display,
+                    theme,
+                    bounds,
+                    cx,
+                );
+            });
+        } else {
+            super::hints_window::close(cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn hints_window_closed(&mut self, cx: &mut Context<Self>) {
+        if let Some(selected) = self.selected.as_mut() {
+            selected.hints_open = false;
+        }
         cx.notify();
     }
 
@@ -322,6 +361,7 @@ impl OverlayView {
         if let Some(selected) = self.selected.as_mut() {
             selected.hints_open = false;
         }
+        super::hints_window::close(cx);
         cx.notify();
     }
 }

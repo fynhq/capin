@@ -188,6 +188,7 @@ pub(crate) fn hints_card(
     width: f32,
     rows: &[(String, String)],
     shadow: bool,
+    translucent: bool,
 ) -> Div {
     let mut panel = div()
         .w(px(width))
@@ -196,7 +197,11 @@ pub(crate) fn hints_card(
         .gap(px(HINTS_GAP))
         .p(px(HINTS_PADDING))
         .rounded(px(theme.radius))
-        .bg(theme.surface_strong)
+        .bg(if translucent {
+            theme.surface_strong.opacity(0.72)
+        } else {
+            theme.surface_strong
+        })
         .border_1()
         .border_color(theme.border)
         .when(shadow, |panel| panel.shadow(theme.shadow()))
@@ -242,16 +247,23 @@ pub(crate) fn hints_panel<View: 'static>(
     cx: &mut Context<View>,
     on_dismiss: fn(&mut View, &mut Context<View>),
 ) -> AnyElement {
-    let panel = hints_card(theme, language, f32::from(rect.size.width), &rows, true)
-        .id(format!("{id_prefix}-hints-panel"))
-        .absolute()
-        .left(rect.origin.x)
-        .top(rect.origin.y)
-        .occlude()
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|_, _, _, cx| cx.stop_propagation()),
-        );
+    let panel = hints_card(
+        theme,
+        language,
+        f32::from(rect.size.width),
+        &rows,
+        true,
+        false,
+    )
+    .id(format!("{id_prefix}-hints-panel"))
+    .absolute()
+    .left(rect.origin.x)
+    .top(rect.origin.y)
+    .occlude()
+    .on_mouse_down(
+        MouseButton::Left,
+        cx.listener(|_, _, _, cx| cx.stop_propagation()),
+    );
     let panel = enter_slide_fade(
         panel,
         format!("{id_prefix}-hints-enter"),

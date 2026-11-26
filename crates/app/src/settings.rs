@@ -523,7 +523,7 @@ pub fn open_settings(cx: &mut App) {
         is_resizable: true,
         is_minimizable: true,
         display_id,
-        window_background: window::settings_background(),
+        window_background: crate::aux_window::panel_background(),
         window_min_size: Some(size(px(layout::MIN_WIDTH), px(layout::MIN_HEIGHT))),
         app_id: Some("capin-settings".to_owned()),
         ..Default::default()

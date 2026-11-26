@@ -62,21 +62,6 @@ impl SettingsView {
     }
 }
 
-pub(super) fn settings_background() -> WindowBackgroundAppearance {
-    #[cfg(target_os = "windows")]
-    {
-        WindowBackgroundAppearance::MicaBackdrop
-    }
-    #[cfg(target_os = "macos")]
-    {
-        WindowBackgroundAppearance::Blurred
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        WindowBackgroundAppearance::Transparent
-    }
-}
-
 #[cfg(target_os = "windows")]
 fn window_control_button(
     theme: &Theme,

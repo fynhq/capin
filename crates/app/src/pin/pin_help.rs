@@ -178,7 +178,7 @@ impl Render for PinHelpView {
                 }
             }))
             .child(crate::ui::enter_fade(
-                hints_card(theme, language, self.width, &self.rows, false),
+                hints_card(theme, language, self.width, &self.rows, false, false),
                 "pin-help-enter",
                 Duration::from_millis(100),
             ))

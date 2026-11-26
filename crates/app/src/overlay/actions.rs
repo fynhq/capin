@@ -9,6 +9,7 @@ impl OverlayView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        super::hints_window::close(cx);
         registry::set_focus(self.entity_id);
         let monitor = self.session.monitor_bounds();
         let (target, rect, scale, ratio) = match outcome {
@@ -171,6 +172,10 @@ impl OverlayView {
         platform_window::set_cursor_hidden(false);
         self.window_only = false;
         self.commit_edit(cx);
+        if let Some(selected) = self.selected.as_mut() {
+            selected.hints_open = false;
+        }
+        super::hints_window::close(cx);
         let Some(selected) = self.selected.clone() else {
             return;
         };
@@ -562,6 +567,7 @@ impl OverlayView {
                     selected.effects_open = false;
                     selected.hints_open = false;
                 }
+                super::hints_window::close(cx);
                 self.cursor_style = region_handle_cursor(handle);
                 cx.notify();
                 return;
@@ -588,6 +594,7 @@ impl OverlayView {
                     selected.effects_open = false;
                     selected.hints_open = false;
                 }
+                super::hints_window::close(cx);
                 self.cursor_style = crate::ui::closed_hand_cursor();
                 cx.notify();
                 return;

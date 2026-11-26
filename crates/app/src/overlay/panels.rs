@@ -542,35 +542,21 @@ pub(super) fn hints_panel(view: &OverlayView, cx: &mut Context<OverlayView>) -> 
     if !selected.hints_open {
         return None;
     }
-    let language = settings_state::get().language;
-    let width = crate::capture_panels::hints_panel_width()
-        .min((f32::from(view.window_size.width) - 16.0).max(120.0));
-    let pin_hotkey = crate::hotkey::display_hotkey(&settings_state::get().pin_hotkey);
-    let k = |key: &str| t(language, key).to_owned();
-    let rows = vec![
-        (k("editor.hint_key_copy"), k("editor.hint_copy")),
-        ("Cmd/Ctrl+S".to_owned(), k("editor.hint_save")),
-        (pin_hotkey, k("editor.hint_pin")),
-        ("Space".to_owned(), k("editor.hint_space")),
-        ("R / F5".to_owned(), k("editor.hint_ratio_refresh")),
-        ("Esc".to_owned(), k("editor.hint_cancel")),
-    ];
-    let height = crate::capture_panels::hints_panel_height(rows.len());
-    let left = (f32::from(view.window_size.width) - width) / 2.0;
-    let top = (f32::from(view.window_size.height) - height) / 2.0;
-    let rect = Bounds {
-        origin: point(px(left), px(top)),
-        size: size(px(width), px(height)),
-    };
-    Some(crate::capture_panels::hints_panel(
-        "overlay",
-        view.chrome,
-        language,
-        rect,
-        rows,
-        cx,
-        OverlayView::dismiss_hints,
-    ))
+    Some(
+        div()
+            .id("overlay-hints-dismiss")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.dismiss_hints(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .into_any_element(),
+    )
 }
 
 pub(super) fn selection_handles(
@@ -616,6 +602,7 @@ pub(super) fn selection_handles(
                             selected.effects_open = false;
                             selected.hints_open = false;
                         }
+                        super::hints_window::close(cx);
                         cx.stop_propagation();
                         cx.notify();
                     }),
