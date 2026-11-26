@@ -1,15 +1,15 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "windows")]
+use super::element_cache;
 use super::element_probe::ElementChain;
 use super::*;
 
 const SLOW_ELEMENT_QUERY: Duration = Duration::from_millis(500);
 const EMPTY_ELEMENT_RETRY_DELAY: Duration = Duration::from_millis(150);
-#[cfg(target_os = "macos")]
 const FULL_QUERY_IDLE: Duration = Duration::from_millis(250);
 
-#[cfg(target_os = "macos")]
 #[derive(Clone, Copy)]
 enum FullSchedule {
     Run,
@@ -51,6 +51,14 @@ impl OverlayView {
             self.element_probe.retain_cache_for(window.id);
             self.element_probe.switch_window(window.id);
             self.session.set_hovered_element(None);
+        }
+        #[cfg(target_os = "windows")]
+        if !self.element_probe.cache.contains_key(&window.id)
+            && let Some(elements) = element_cache::lookup(window.id, window.bounds)
+        {
+            log_element_query("cache", window.id, Duration::ZERO, elements.len());
+            self.element_probe.chain = None;
+            self.element_probe.cache.insert(window.id, elements);
         }
         self.start_element_queries(window.id, point, cx);
 
@@ -102,17 +110,12 @@ impl OverlayView {
         if need_chain && self.element_probe.pending_chain.is_none() {
             self.query_element_chain(window, point, cx);
         }
-        if !has_full && self.element_probe.pending_full.is_none() {
-            #[cfg(target_os = "windows")]
-            {
-                if self.element_probe.pending_chain.is_none() {
-                    self.query_full_elements(window, cx);
-                }
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                self.query_full_elements(window, cx);
-            }
+        #[cfg(target_os = "windows")]
+        let skip_full = element_cache::is_large(window);
+        #[cfg(not(target_os = "windows"))]
+        let skip_full = false;
+        if !has_full && !skip_full && self.element_probe.pending_full.is_none() {
+            self.query_full_elements(window, cx);
         }
     }
 
@@ -160,7 +163,6 @@ impl OverlayView {
     fn query_full_elements(&mut self, window: WindowId, cx: &mut Context<Self>) {
         self.element_probe.pending_full = Some(window);
         cx.spawn(async move |this, cx| {
-            #[cfg(target_os = "macos")]
             loop {
                 cx.background_executor().timer(FULL_QUERY_IDLE).await;
                 let schedule = this.update(cx, |this, cx| {
@@ -213,6 +215,10 @@ impl OverlayView {
                     if empty && !platform_window::accessibility_trusted() {
                         return false;
                     }
+                    #[cfg(target_os = "windows")]
+                    if let Some(bounds) = this.session.window(window).map(|info| info.bounds) {
+                        element_cache::store(window, bounds, &elements, elapsed);
+                    }
                     this.element_probe.cache.insert(window, elements);
                     if platform_capture::ui_element_tree_is_complete() {
                         this.element_probe.chain = None;
@@ -254,6 +260,10 @@ impl OverlayView {
                         .is_some_and(Vec::is_empty)
                 {
                     return;
+                }
+                #[cfg(target_os = "windows")]
+                if let Some(bounds) = this.session.window(window).map(|info| info.bounds) {
+                    element_cache::store(window, bounds, &elements, elapsed);
                 }
                 this.element_probe.cache.insert(window, elements);
                 if let Some(cursor) = this.cursor {

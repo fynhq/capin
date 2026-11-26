@@ -35,6 +35,8 @@ use crate::{
 mod actions;
 mod capture;
 mod edit;
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod element_cache;
 mod element_probe;
 mod element_scroll;
 mod hints_window;
