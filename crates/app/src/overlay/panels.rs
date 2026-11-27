@@ -316,7 +316,7 @@ pub(super) fn info_bar(view: &OverlayView, cx: &mut Context<OverlayView>) -> Opt
         view.chrome,
         language,
         cx,
-        OverlayView::refresh_frame,
+        OverlayView::refresh_frame_action,
     ));
 
     Some(
