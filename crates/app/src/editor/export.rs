@@ -17,6 +17,14 @@ fn refresh_failed(
     );
 }
 
+fn refresh_status(size_changed: bool) -> &'static str {
+    if size_changed {
+        "editor.refreshed_size_changed"
+    } else {
+        "editor.refreshed"
+    }
+}
+
 impl EditorView {
     pub(super) fn refresh_full_canvas(&mut self, cx: &mut Context<Self>) {
         let Some(capture) = self.inline.and_then(|inline| inline.capture) else {
@@ -105,7 +113,7 @@ impl EditorView {
             self.frame = Arc::new(cropped);
         }
         self.show_status(
-            t(settings_state::get().language, "editor.refreshed").to_owned(),
+            t(settings_state::get().language, refresh_status(size_changed)).to_owned(),
             cx,
         );
     }
@@ -171,7 +179,7 @@ impl EditorView {
             };
         }
         self.show_status(
-            t(settings_state::get().language, "editor.refreshed").to_owned(),
+            t(settings_state::get().language, refresh_status(size_changed)).to_owned(),
             cx,
         );
     }

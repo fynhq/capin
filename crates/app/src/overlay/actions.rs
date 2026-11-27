@@ -188,7 +188,7 @@ impl OverlayView {
         let mut full_canvas = None;
         let frame = if full_monitor {
             let Some(cache) = image_util::cropped_rgba(&self.image, selected.rect) else {
-                self.set_notice("empty selection".to_owned(), cx);
+                self.set_localized_notice("overlay.empty_selection", cx);
                 return;
             };
             full_canvas = Some(FullCanvasInit {
@@ -201,7 +201,7 @@ impl OverlayView {
             match self.capture_selected_raw() {
                 Ok(frame) => Arc::new(frame),
                 Err(error) => {
-                    self.set_notice(error, cx);
+                    self.set_capture_failed(error, cx);
                     return;
                 }
             }
@@ -340,7 +340,7 @@ impl OverlayView {
         let output = match self.selected_output() {
             Ok(output) => output,
             Err(error) => {
-                self.set_notice(error, cx);
+                self.set_copy_failed(error, cx);
                 return;
             }
         };
@@ -359,7 +359,7 @@ impl OverlayView {
                 image_util::copy_png_bytes(bytes, &output, cx);
                 self.close_overlays(cx);
             }
-            Err(error) => self.set_notice(error.to_string(), cx),
+            Err(error) => self.set_copy_failed(error.to_string(), cx),
         }
     }
 
@@ -368,7 +368,7 @@ impl OverlayView {
         let output = match self.selected_output() {
             Ok(output) => output,
             Err(error) => {
-                self.set_notice(error, cx);
+                self.set_save_failed(error, cx);
                 return;
             }
         };
@@ -386,7 +386,7 @@ impl OverlayView {
                 );
                 self.close_overlays(cx);
             }
-            Err(error) => self.set_notice(error.to_string(), cx),
+            Err(error) => self.set_save_failed(error.to_string(), cx),
         }
     }
 
@@ -398,7 +398,7 @@ impl OverlayView {
         let output = match self.capture_selected_raw() {
             Ok(frame) => frame,
             Err(error) => {
-                self.set_notice(error, cx);
+                self.set_capture_failed(error, cx);
                 return;
             }
         };
@@ -483,7 +483,7 @@ impl OverlayView {
         let frame = match self.capture_selected_raw() {
             Ok(frame) => frame,
             Err(error) => {
-                self.set_notice(error, cx);
+                self.set_capture_failed(error, cx);
                 return;
             }
         };
@@ -499,6 +499,26 @@ impl OverlayView {
         };
         self.close_overlays(cx);
         cx.defer(move |cx| crate::record::start(selected.target, cx));
+    }
+
+    fn set_localized_notice(&mut self, key: &'static str, cx: &mut Context<Self>) {
+        let language = settings_state::get().language;
+        self.set_notice(t(language, key).to_owned(), cx);
+    }
+
+    fn set_capture_failed(&mut self, error: String, cx: &mut Context<Self>) {
+        log_warn!("overlay", "capture failed: {error}");
+        self.set_localized_notice("overlay.capture_failed", cx);
+    }
+
+    fn set_copy_failed(&mut self, error: String, cx: &mut Context<Self>) {
+        log_warn!("overlay", "copy failed: {error}");
+        self.set_localized_notice("overlay.copy_failed", cx);
+    }
+
+    fn set_save_failed(&mut self, error: String, cx: &mut Context<Self>) {
+        log_warn!("overlay", "save failed: {error}");
+        self.set_localized_notice("overlay.save_failed", cx);
     }
 
     pub(super) fn set_notice(&mut self, message: String, cx: &mut Context<Self>) {
