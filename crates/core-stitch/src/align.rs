@@ -204,6 +204,7 @@ impl Stitcher {
         let previous = RowSet {
             signatures: head_signatures,
             energies: &head_energies,
+            spreads: None,
             samples,
             stable: None,
         };
@@ -211,9 +212,9 @@ impl Stitcher {
             .filter(|row| u32::from(previous.energy(*row)) >= self.config.anchor_threshold)
             .collect();
 
-        let mut candidates: Vec<(f64, u32)> = Vec::with_capacity(MAX_CANDIDATES);
+        let mut candidates: Vec<(f64, u64, u32)> = Vec::with_capacity(MAX_CANDIDATES);
         for overlap in (min_overlap..=max_overlap).rev() {
-            let score = head_candidate_score(
+            let (score, compared) = head_candidate_score(
                 samples,
                 &previous,
                 new,
@@ -222,14 +223,14 @@ impl Stitcher {
                 overlap,
                 COARSE_ROWS,
             );
-            insert_candidate(&mut candidates, score, overlap);
+            insert_candidate(&mut candidates, score, compared, overlap);
         }
         if candidates.is_empty() {
             return None;
         }
 
         let mut scored: Vec<(f64, u32)> = Vec::with_capacity(candidates.len());
-        for (_, overlap) in &candidates {
+        for (_, _, overlap) in &candidates {
             let offset = inset + content_height - *overlap;
             let score = head_full_score(samples, &previous, new, offset, *overlap);
             scored.push((score, *overlap));
@@ -450,7 +451,10 @@ impl Stitcher {
             );
             compared += 1;
         }
-        total as f64 / (compared.max(1) as f64 * samples as f64)
+        if compared == 0 {
+            return f64::INFINITY;
+        }
+        total as f64 / (compared as f64 * samples as f64)
     }
 
     fn contained_anchor_score(&self, new: &RowSet, anchors: &[(u32, u32)], q: u32) -> f64 {
@@ -469,7 +473,10 @@ impl Stitcher {
             );
             compared += 1;
         }
-        total as f64 / (compared.max(1) as f64 * samples as f64)
+        if compared == 0 {
+            return f64::INFINITY;
+        }
+        total as f64 / (compared as f64 * samples as f64)
     }
 }
 
@@ -481,7 +488,7 @@ fn head_candidate_score(
     new_offset: u32,
     overlap: u32,
     max_rows: usize,
-) -> f64 {
+) -> (f64, u64) {
     let usable = anchors.partition_point(|row| *row < overlap);
     let mut total = 0u64;
     let mut compared = 0u64;
@@ -507,7 +514,10 @@ fn head_candidate_score(
             compared += 1;
         }
     }
-    total as f64 / (compared.max(1) as f64 * samples as f64)
+    if compared == 0 {
+        return (f64::INFINITY, 0);
+    }
+    (total as f64 / (compared as f64 * samples as f64), compared)
 }
 
 fn head_full_score(
@@ -527,7 +537,10 @@ fn head_full_score(
         total += row_total(previous.signature(row), new.signature(new_row));
         compared += 1;
     }
-    total as f64 / (compared.max(1) as f64 * samples as f64)
+    if compared == 0 {
+        return f64::INFINITY;
+    }
+    total as f64 / (compared as f64 * samples as f64)
 }
 
 fn sampled_row_distance(left: &[u8], right: &[u8], stride: usize) -> u64 {

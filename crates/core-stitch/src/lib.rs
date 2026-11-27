@@ -8,7 +8,6 @@ pub use preview::PreviewAnchor;
 
 const BYTES_PER_PIXEL: usize = 4;
 const COARSE_ROWS: usize = 16;
-const FULL_ROWS: usize = 32;
 const REFINE_RADIUS: u32 = 4;
 const AMBIGUITY_MARGIN: f64 = 0.5;
 const EXACT_MATCH_SCORE: f64 = 2.0;
@@ -16,6 +15,7 @@ const MAX_CANDIDATES: usize = 5;
 const MIN_ANCHOR_ROWS: u32 = 6;
 const DUPLICATE_MEAN: f64 = 0.6;
 const DUPLICATE_CHANGED_DIVISOR: usize = 10_000;
+const MIN_ROW_SPREAD: u8 = 8;
 
 #[derive(Clone, Debug)]
 pub struct StitchConfig {
@@ -205,9 +205,11 @@ impl Stitcher {
         );
         let stable = self.stable_rows(&signatures, frame.height());
         let energies = row_energies(&signatures, frame.height(), self.samples);
+        let spreads = row_spreads(&signatures, frame.height(), self.samples);
         let new = RowSet {
             signatures: &signatures,
             energies: &energies,
+            spreads: Some(&spreads),
             samples: self.samples as usize,
             stable: Some(&stable),
         };
@@ -371,9 +373,11 @@ impl Stitcher {
         );
         let stable = self.stable_rows(&signatures, height);
         let energies = row_energies(&signatures, height, self.samples);
+        let spreads = row_spreads(&signatures, height, self.samples);
         let rows = RowSet {
             signatures: &signatures,
             energies: &energies,
+            spreads: Some(&spreads),
             samples: self.samples as usize,
             stable: Some(&stable),
         };
@@ -594,11 +598,31 @@ impl Stitcher {
             }
             matched += 1;
         }
-        if matched == max_rows || matched < self.config.min_static_rows {
+        if matched == max_rows
+            || matched < self.config.min_static_rows
+            || !self.band_is_chrome(rows, 0, matched, matched, height)
+        {
             0
         } else {
             matched
         }
+    }
+
+    fn band_is_chrome(
+        &self,
+        rows: &RowSet,
+        start: u32,
+        end: u32,
+        content_start: u32,
+        content_end: u32,
+    ) -> bool {
+        if (start..end).any(|row| rows.has_content(row)) {
+            return true;
+        }
+        let middle = start + (end - start) / 2;
+        let band_tone = signature_median(rows.signature(middle));
+        let background = rows_background(rows, content_start, content_end);
+        band_tone.abs_diff(background) > 8
     }
 
     fn detect_static_bottom(&self, rows: &RowSet, height: u32) -> u32 {
@@ -628,7 +652,10 @@ impl Stitcher {
             }
             matched = distance;
         }
-        if matched == max_rows || matched < self.config.min_static_rows {
+        if matched == max_rows
+            || matched < self.config.min_static_rows
+            || !self.band_is_chrome(rows, height - matched, height, 0, height - matched)
+        {
             0
         } else {
             matched
@@ -698,6 +725,7 @@ impl Stitcher {
         let previous = RowSet {
             signatures: previous_signatures,
             energies: &previous_energies,
+            spreads: None,
             samples: self.samples as usize,
             stable: None,
         };
@@ -707,28 +735,29 @@ impl Stitcher {
             .collect();
         let samples = self.samples as usize;
 
-        let mut candidates: Vec<(f64, u32)> = Vec::with_capacity(MAX_CANDIDATES);
+        let mut candidates: Vec<(f64, u64, u32)> = Vec::with_capacity(MAX_CANDIDATES);
         for overlap in (min_overlap..=max_overlap).rev() {
             let window = OverlapWindow {
                 max_overlap,
                 inset,
                 overlap,
             };
-            let score = candidate_score(samples, &previous, new, &anchors, window, COARSE_ROWS);
-            insert_candidate(&mut candidates, score, overlap);
+            let (score, compared) =
+                candidate_score(samples, &previous, new, &anchors, window, COARSE_ROWS);
+            insert_candidate(&mut candidates, score, compared, overlap);
         }
         if candidates.is_empty() {
             return None;
         }
 
         let mut scored: Vec<(f64, u32)> = Vec::with_capacity(candidates.len());
-        for (_, overlap) in &candidates {
+        for (_, _, overlap) in &candidates {
             let window = OverlapWindow {
                 max_overlap,
                 inset,
                 overlap: *overlap,
             };
-            let score = candidate_score(samples, &previous, new, &anchors, window, FULL_ROWS);
+            let score = full_row_score(samples, &previous, new, window);
             scored.push((score, *overlap));
         }
         scored.sort_by(|left, right| left.0.total_cmp(&right.0));
@@ -779,6 +808,7 @@ struct OverlapWindow {
 struct RowSet<'a> {
     signatures: &'a [u8],
     energies: &'a [u16],
+    spreads: Option<&'a [u8]>,
     samples: usize,
     stable: Option<&'a [bool]>,
 }
@@ -791,6 +821,17 @@ impl RowSet<'_> {
 
     fn energy(&self, row: u32) -> u16 {
         self.energies[row as usize]
+    }
+
+    fn spread(&self, row: u32) -> u8 {
+        self.spreads
+            .and_then(|spreads| spreads.get(row as usize))
+            .copied()
+            .unwrap_or(u8::MAX)
+    }
+
+    fn has_content(&self, row: u32) -> bool {
+        self.spread(row) >= MIN_ROW_SPREAD
     }
 
     fn is_stable(&self, row: u32) -> bool {
@@ -808,7 +849,7 @@ fn candidate_score(
     anchors: &[u32],
     window: OverlapWindow,
     max_rows: usize,
-) -> f64 {
+) -> (f64, u64) {
     let prev_offset = window.max_overlap - window.overlap;
     let start = anchors.partition_point(|row| *row < prev_offset);
     let anchor_rows = anchors.len() - start;
@@ -839,7 +880,10 @@ fn candidate_score(
             compared += 1;
         }
     }
-    total as f64 / (compared.max(1) as f64 * samples as f64)
+    if compared == 0 {
+        return (f64::INFINITY, 0);
+    }
+    (total as f64 / (compared as f64 * samples as f64), compared)
 }
 
 fn full_row_score(samples: usize, previous: &RowSet, new: &RowSet, window: OverlapWindow) -> f64 {
@@ -857,17 +901,31 @@ fn full_row_score(samples: usize, previous: &RowSet, new: &RowSet, window: Overl
         );
         compared += 1;
     }
-    total as f64 / (compared.max(1) as f64 * samples as f64)
+    if compared == 0 {
+        return f64::INFINITY;
+    }
+    total as f64 / (compared as f64 * samples as f64)
 }
 
-fn insert_candidate(candidates: &mut Vec<(f64, u32)>, score: f64, overlap: u32) {
+fn insert_candidate(
+    candidates: &mut Vec<(f64, u64, u32)>,
+    score: f64,
+    compared: u64,
+    overlap: u32,
+) {
+    if !score.is_finite() {
+        return;
+    }
     if candidates.len() >= MAX_CANDIDATES
-        && score >= candidates.last().map_or(f64::INFINITY, |entry| entry.0)
+        && candidates
+            .last()
+            .is_some_and(|entry| entry.0 < score || (entry.0 == score && entry.1 >= compared))
     {
         return;
     }
-    let position = candidates.partition_point(|entry| entry.0 <= score);
-    candidates.insert(position, (score, overlap));
+    let position = candidates
+        .partition_point(|entry| entry.0 < score || (entry.0 == score && entry.1 >= compared));
+    candidates.insert(position, (score, compared, overlap));
     candidates.truncate(MAX_CANDIDATES);
 }
 
@@ -917,6 +975,67 @@ fn row_energies(signatures: &[u8], rows: u32, samples: u32) -> Vec<u16> {
     energies
 }
 
+fn row_spreads(signatures: &[u8], rows: u32, samples: u32) -> Vec<u8> {
+    let samples = samples as usize;
+    (0..rows as usize)
+        .map(|row| signature_spread(&signatures[row * samples..][..samples]))
+        .collect()
+}
+
+fn signature_spread(signature: &[u8]) -> u8 {
+    let max = signature.iter().copied().max().unwrap_or(0);
+    let min = signature.iter().copied().min().unwrap_or(0);
+    max - min
+}
+
+fn signature_median(signature: &[u8]) -> u8 {
+    let mut histogram = [0u32; 256];
+    for &value in signature {
+        histogram[value as usize] += 1;
+    }
+    median_from_histogram(&histogram, signature.len() as u32)
+}
+
+fn rows_background(rows: &RowSet, start: u32, end: u32) -> u8 {
+    let mut histogram = [0u32; 256];
+    let mut total = 0u32;
+    for row in start..end {
+        for &value in rows.signature(row) {
+            histogram[value as usize] += 1;
+            total += 1;
+        }
+    }
+    if total == 0 {
+        return 0;
+    }
+    let (mode, count) = histogram
+        .iter()
+        .enumerate()
+        .max_by_key(|(value, count)| (**count, std::cmp::Reverse(*value)))
+        .map(|(value, count)| (value as u8, *count))
+        .unwrap_or((0, 0));
+    if count.saturating_mul(50) >= total {
+        mode
+    } else {
+        median_from_histogram(&histogram, total)
+    }
+}
+
+fn median_from_histogram(histogram: &[u32; 256], total: u32) -> u8 {
+    if total == 0 {
+        return 0;
+    }
+    let half = total / 2;
+    let mut seen = 0u32;
+    for (value, count) in histogram.iter().enumerate() {
+        seen += count;
+        if seen > half {
+            return value as u8;
+        }
+    }
+    0
+}
+
 fn row_total(left: &[u8], right: &[u8]) -> u64 {
     left.iter()
         .zip(right)
@@ -931,511 +1050,4 @@ fn signature_mean(left: &[u8], right: &[u8]) -> f64 {
 #[cfg(test)]
 mod extra_tests;
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn patterned_frame(width: u32, height: u32, seed: u32) -> RgbaFrame {
-        let mut pixels = vec![0u8; width as usize * height as usize * 4];
-        let mut state = seed | 1;
-        for pixel in pixels.as_chunks_mut::<4>().0 {
-            state ^= state << 13;
-            state ^= state >> 17;
-            state ^= state << 5;
-            pixel[0] = (state >> 8) as u8;
-            pixel[1] = (state >> 16) as u8;
-            pixel[2] = (state >> 24) as u8;
-            pixel[3] = 255;
-        }
-        RgbaFrame::from_pixels(width, height, pixels).unwrap()
-    }
-
-    fn gradient_frame(width: u32, height: u32) -> RgbaFrame {
-        let mut pixels = vec![0u8; width as usize * height as usize * 4];
-        for y in 0..height {
-            for x in 0..width {
-                let index = (y as usize * width as usize + x as usize) * 4;
-                let value = (y * 200 / height.max(1)) as u8;
-                let value = if y % 37 == 0 {
-                    (x * 255 / width.max(1)) as u8
-                } else {
-                    value
-                };
-                pixels[index] = value;
-                pixels[index + 1] = value;
-                pixels[index + 2] = value;
-                pixels[index + 3] = 255;
-            }
-        }
-        RgbaFrame::from_pixels(width, height, pixels).unwrap()
-    }
-
-    fn slice_rows(frame: &RgbaFrame, start: u32, end: u32) -> RgbaFrame {
-        let start_index = start as usize * frame.width() as usize * 4;
-        let end_index = end as usize * frame.width() as usize * 4;
-        RgbaFrame::from_pixels(
-            frame.width(),
-            end - start,
-            frame.pixels()[start_index..end_index].to_vec(),
-        )
-        .unwrap()
-    }
-
-    fn stitcher(width: u32) -> Stitcher {
-        Stitcher::new(width, StitchConfig::default()).unwrap()
-    }
-
-    fn with_header(content: &RgbaFrame, header: u32) -> RgbaFrame {
-        let width = content.width();
-        let mut pixels = vec![0u8; width as usize * header as usize * 4];
-        for pixel in pixels.as_chunks_mut::<4>().0 {
-            pixel.copy_from_slice(&[24, 24, 24, 255]);
-        }
-        pixels.extend_from_slice(content.pixels());
-        RgbaFrame::from_pixels(width, header + content.height(), pixels).unwrap()
-    }
-
-    fn with_footer(content: &RgbaFrame, footer: u32) -> RgbaFrame {
-        let width = content.width();
-        let mut pixels = content.pixels().to_vec();
-        for _ in 0..footer {
-            for _ in 0..width {
-                pixels.extend_from_slice(&[200, 80, 40, 255]);
-            }
-        }
-        RgbaFrame::from_pixels(width, content.height() + footer, pixels).unwrap()
-    }
-
-    #[test]
-    fn first_frame_is_kept_whole() {
-        let frame = patterned_frame(40, 100, 7);
-        let mut stitches = stitcher(40);
-        let report = stitches.push(&frame).unwrap();
-        assert_eq!(report.appended_rows, 100);
-        assert_eq!(stitches.height(), 100);
-        assert_eq!(stitches.finish().unwrap().pixels(), frame.pixels());
-    }
-
-    #[test]
-    fn overlapping_frames_are_stitched() {
-        let original = patterned_frame(48, 300, 42);
-        let mut stitches = stitcher(48);
-        stitches.push(&slice_rows(&original, 0, 140)).unwrap();
-        stitches.push(&slice_rows(&original, 100, 240)).unwrap();
-        stitches.push(&slice_rows(&original, 200, 300)).unwrap();
-        let stitched = stitches.finish().unwrap();
-        assert_eq!(stitched.width(), 48);
-        assert_eq!(stitched.height(), 300);
-        assert_eq!(stitched.pixels(), original.pixels());
-    }
-
-    #[test]
-    fn gentle_scroll_with_large_overlap_is_stitched() {
-        let original = patterned_frame(48, 1500, 21);
-        let mut stitches = stitcher(48);
-        stitches.push(&slice_rows(&original, 0, 1000)).unwrap();
-        let report = stitches.push(&slice_rows(&original, 120, 1120)).unwrap();
-        assert_eq!(report.overlap_rows, 880);
-        assert_eq!(report.appended_rows, 120);
-        let stitched = stitches.finish().unwrap();
-        assert_eq!(stitched.height(), 1120);
-        assert_eq!(stitched.pixels(), &original.pixels()[..1120 * 48 * 4]);
-    }
-
-    #[test]
-    fn refinement_picks_the_exact_alignment() {
-        let original = gradient_frame(64, 600);
-        let mut stitches = stitcher(64);
-        stitches.push(&slice_rows(&original, 0, 300)).unwrap();
-        stitches.push(&slice_rows(&original, 60, 360)).unwrap();
-        let stitched = stitches.finish().unwrap();
-        assert_eq!(stitched.height(), 360);
-        assert_eq!(stitched.pixels(), &original.pixels()[..360 * 64 * 4]);
-    }
-
-    #[test]
-    fn duplicate_frame_appends_nothing() {
-        let frame = patterned_frame(32, 120, 9);
-        let mut stitches = stitcher(32);
-        stitches.push(&frame).unwrap();
-        let report = stitches.push(&frame).unwrap();
-        assert_eq!(report.overlap_rows, 120);
-        assert_eq!(report.appended_rows, 0);
-        assert_eq!(stitches.height(), 120);
-    }
-
-    #[test]
-    fn fixed_header_is_trimmed_from_later_frames() {
-        let original = patterned_frame(48, 300, 17);
-        let header = 20;
-        let mut stitches = stitcher(48);
-        stitches
-            .push(&with_header(&slice_rows(&original, 0, 140), header))
-            .unwrap();
-        let report = stitches
-            .push(&with_header(&slice_rows(&original, 100, 240), header))
-            .unwrap();
-        assert_eq!(report.trimmed_top_rows, header);
-        stitches
-            .push(&with_header(&slice_rows(&original, 200, 300), header))
-            .unwrap();
-
-        let stitched = stitches.finish().unwrap();
-        assert_eq!(stitched.height(), header + 300);
-        let header_bytes = header as usize * 48 * 4;
-        assert_eq!(
-            &stitched.pixels()[header_bytes..],
-            original.pixels(),
-            "content below the header should match the original image"
-        );
-    }
-
-    #[test]
-    fn tall_fixed_header_is_trimmed() {
-        let original = patterned_frame(48, 400, 23);
-        let header = 200;
-        let mut stitches = stitcher(48);
-        stitches
-            .push(&with_header(&slice_rows(&original, 0, 160), header))
-            .unwrap();
-        let report = stitches
-            .push(&with_header(&slice_rows(&original, 120, 280), header))
-            .unwrap();
-        assert_eq!(report.trimmed_top_rows, header);
-        stitches
-            .push(&with_header(&slice_rows(&original, 240, 400), header))
-            .unwrap();
-        let stitched = stitches.finish().unwrap();
-        assert_eq!(stitched.height(), header + 400);
-        let header_bytes = header as usize * 48 * 4;
-        assert_eq!(&stitched.pixels()[header_bytes..], original.pixels());
-    }
-
-    #[test]
-    fn fixed_footer_is_appended_once() {
-        let original = patterned_frame(48, 400, 51);
-        let footer = 32;
-        let mut stitches = stitcher(48);
-        stitches
-            .push(&with_footer(&slice_rows(&original, 0, 160), footer))
-            .unwrap();
-        stitches
-            .push(&with_footer(&slice_rows(&original, 100, 260), footer))
-            .unwrap();
-        stitches
-            .push(&with_footer(&slice_rows(&original, 200, 360), footer))
-            .unwrap();
-        let stitched = stitches.finish().unwrap();
-        assert_eq!(stitched.height(), 360 + footer);
-        let content_bytes = 360 * 48 * 4;
-        assert_eq!(
-            &stitched.pixels()[..content_bytes],
-            &original.pixels()[..content_bytes]
-        );
-        let footer_pixels = &stitched.pixels()[content_bytes..];
-        for pixel in footer_pixels.as_chunks::<4>().0 {
-            assert_eq!(*pixel, [200, 80, 40, 255]);
-        }
-    }
-
-    #[test]
-    fn fixed_header_and_footer_are_trimmed_together() {
-        let original = patterned_frame(48, 300, 61);
-        let header = 16;
-        let footer = 24;
-        let mut stitches = stitcher(48);
-        for (start, end) in [(0, 140), (100, 240), (200, 300)] {
-            let content = with_footer(
-                &with_header(&slice_rows(&original, start, end), header),
-                footer,
-            );
-            stitches.push(&content).unwrap();
-        }
-
-        let stitched = stitches.finish().unwrap();
-        assert_eq!(stitched.height(), header + 300 + footer);
-        let header_bytes = header as usize * 48 * 4;
-        let content_bytes = 300 * 48 * 4;
-        assert_eq!(
-            &stitched.pixels()[header_bytes..header_bytes + content_bytes],
-            original.pixels(),
-            "content between the fixed header and footer should match the original"
-        );
-        for pixel in stitched.pixels()[header_bytes + content_bytes..]
-            .as_chunks::<4>()
-            .0
-        {
-            assert_eq!(*pixel, [200, 80, 40, 255]);
-        }
-    }
-
-    #[test]
-    fn upward_frames_are_prepended() {
-        let original = patterned_frame(48, 300, 81);
-        let mut stitches = stitcher(48);
-        stitches.push(&slice_rows(&original, 100, 300)).unwrap();
-        let report = stitches.push(&slice_rows(&original, 0, 200)).unwrap();
-        assert_eq!(report.overlap_rows, 100);
-        assert_eq!(report.prepended_rows, 100);
-        assert_eq!(report.appended_rows, 0);
-        let stitched = stitches.finish().unwrap();
-        assert_eq!(stitched.height(), 300);
-        assert_eq!(stitched.pixels(), original.pixels());
-    }
-
-    #[test]
-    fn scrolling_both_ways_keeps_the_content_order() {
-        let original = patterned_frame(48, 400, 82);
-        let mut stitches = stitcher(48);
-        for (start, end) in [(100, 300), (150, 350), (50, 250), (0, 200), (200, 400)] {
-            stitches.push(&slice_rows(&original, start, end)).unwrap();
-        }
-        let stitched = stitches.finish().unwrap();
-        assert_eq!(stitched.height(), 400);
-        assert_eq!(stitched.pixels(), original.pixels());
-    }
-
-    #[test]
-    fn frames_inside_the_capture_append_nothing() {
-        let original = patterned_frame(48, 400, 83);
-        let mut stitches = stitcher(48);
-        stitches.push(&slice_rows(&original, 0, 200)).unwrap();
-        stitches.push(&slice_rows(&original, 100, 300)).unwrap();
-        let report = stitches.push(&slice_rows(&original, 50, 250)).unwrap();
-        assert_eq!(report.appended_rows, 0);
-        assert_eq!(report.prepended_rows, 0);
-        let stitched = stitches.finish().unwrap();
-        assert_eq!(stitched.height(), 300);
-        assert_eq!(stitched.pixels(), &original.pixels()[..300 * 48 * 4]);
-    }
-
-    #[test]
-    fn paused_frame_after_scrolling_back_keeps_the_capture() {
-        let original = patterned_frame(48, 400, 84);
-        let mut stitches = stitcher(48);
-        stitches.push(&slice_rows(&original, 0, 300)).unwrap();
-        stitches.push(&slice_rows(&original, 100, 400)).unwrap();
-        stitches.push(&slice_rows(&original, 50, 350)).unwrap();
-        let mut pixels = slice_rows(&original, 50, 350).into_pixels();
-        let row_bytes = 48 * 4;
-        pixels[100 * row_bytes..102 * row_bytes].fill(0);
-        let paused = RgbaFrame::from_pixels(48, 300, pixels).unwrap();
-        let report = stitches.push(&paused).unwrap();
-        assert_eq!(report.appended_rows, 0);
-        assert_eq!(report.prepended_rows, 0);
-        assert_eq!(stitches.height(), 400);
-    }
-
-    #[test]
-    fn fixed_header_and_footer_are_kept_once_when_scrolling_up() {
-        let original = patterned_frame(48, 300, 91);
-        let header = 16;
-        let footer = 24;
-        let mut stitches = stitcher(48);
-        for (start, end) in [(100, 300), (0, 200)] {
-            let content = with_footer(
-                &with_header(&slice_rows(&original, start, end), header),
-                footer,
-            );
-            stitches.push(&content).unwrap();
-        }
-        let stitched = stitches.finish().unwrap();
-        assert_eq!(stitched.height(), header + 300 + footer);
-        let header_bytes = header as usize * 48 * 4;
-        let content_bytes = 300 * 48 * 4;
-        assert_eq!(
-            &stitched.pixels()[header_bytes..header_bytes + content_bytes],
-            original.pixels()
-        );
-        for pixel in stitched.pixels()[header_bytes + content_bytes..]
-            .as_chunks::<4>()
-            .0
-        {
-            assert_eq!(*pixel, [200, 80, 40, 255]);
-        }
-    }
-
-    #[test]
-    fn fixed_header_and_footer_survive_reversing_direction() {
-        let original = patterned_frame(48, 400, 92);
-        let header = 16;
-        let footer = 24;
-        let mut stitches = stitcher(48);
-        for (start, end) in [(100, 300), (50, 250), (0, 200), (200, 400)] {
-            let content = with_footer(
-                &with_header(&slice_rows(&original, start, end), header),
-                footer,
-            );
-            stitches.push(&content).unwrap();
-        }
-        let stitched = stitches.finish().unwrap();
-        assert_eq!(stitched.height(), header + 400 + footer);
-        let header_bytes = header as usize * 48 * 4;
-        let content_bytes = 400 * 48 * 4;
-        assert_eq!(
-            &stitched.pixels()[header_bytes..header_bytes + content_bytes],
-            original.pixels()
-        );
-        for pixel in stitched.pixels()[header_bytes + content_bytes..]
-            .as_chunks::<4>()
-            .0
-        {
-            assert_eq!(*pixel, [200, 80, 40, 255]);
-        }
-    }
-
-    #[test]
-    fn height_limit_stops_upward_growth() {
-        let mut stitches = Stitcher::new(
-            16,
-            StitchConfig {
-                max_height: 180,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let original = patterned_frame(16, 300, 5);
-        stitches.push(&slice_rows(&original, 100, 250)).unwrap();
-        let result = stitches.push(&slice_rows(&original, 0, 150));
-        assert!(matches!(result, Err(StitchError::HeightLimit(180))));
-    }
-
-    #[test]
-    fn blank_frames_append_nothing() {
-        let width = 32;
-        let pixels = vec![255u8; width as usize * 120 * 4];
-        let frame = RgbaFrame::from_pixels(width, 120, pixels).unwrap();
-        let mut stitches = stitcher(width);
-        stitches.push(&frame).unwrap();
-        let report = stitches.push(&frame).unwrap();
-        assert_eq!(report.appended_rows, 0);
-        assert_eq!(stitches.height(), 120);
-    }
-
-    #[test]
-    fn width_mismatch_is_rejected() {
-        let frame = patterned_frame(30, 120, 3);
-        let mut stitches = stitcher(32);
-        assert!(matches!(
-            stitches.push(&frame),
-            Err(StitchError::WidthMismatch { .. })
-        ));
-    }
-
-    #[test]
-    fn disjoint_frames_report_no_overlap() {
-        let mut stitches = stitcher(40);
-        stitches.push(&patterned_frame(40, 120, 11)).unwrap();
-        let result = stitches.push(&patterned_frame(40, 120, 29));
-        assert!(matches!(result, Err(StitchError::NoOverlap)));
-    }
-
-    #[test]
-    fn height_limit_stops_growth() {
-        let mut stitches = Stitcher::new(
-            16,
-            StitchConfig {
-                max_height: 180,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let original = patterned_frame(16, 300, 5);
-        stitches.push(&slice_rows(&original, 0, 180)).unwrap();
-        let result = stitches.push(&slice_rows(&original, 140, 240));
-        assert!(matches!(result, Err(StitchError::HeightLimit(180))));
-    }
-
-    #[test]
-    fn memory_budget_stops_wide_frames() {
-        let mut stitches = Stitcher::new(
-            64,
-            StitchConfig {
-                max_height: 10_000,
-                max_bytes: (64 * 4 + 48) * 70 + 512 * 48 + 256 * 64 * 4,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let original = patterned_frame(64, 120, 31);
-        stitches.push(&slice_rows(&original, 0, 60)).unwrap();
-        let result = stitches.push(&slice_rows(&original, 30, 90));
-        assert!(matches!(result, Err(StitchError::MemoryLimit(_))));
-    }
-
-    #[test]
-    fn owned_first_frame_donates_its_buffer() {
-        let frame = patterned_frame(40, 100, 13);
-        let pointer = frame.pixels().as_ptr();
-        let mut stitches = stitcher(40);
-        let report = stitches.push_owned(frame).unwrap();
-        assert_eq!(report.appended_rows, 100);
-        assert_eq!(stitches.height(), 100);
-        assert_eq!(stitches.pixels.as_ptr(), pointer);
-    }
-
-    #[test]
-    fn replacing_the_first_frame_discards_the_previous_buffer() {
-        let stale = patterned_frame(48, 200, 7);
-        let page = patterned_frame(48, 400, 19);
-        let mut stitches = stitcher(48);
-        stitches.push(&stale).unwrap();
-        stitches
-            .replace_with_frame(&slice_rows(&page, 0, 200))
-            .unwrap();
-        stitches.push(&slice_rows(&page, 100, 300)).unwrap();
-        let stitched = stitches.finish().unwrap();
-        assert_eq!(stitched.height(), 300);
-        assert_eq!(stitched.pixels(), &page.pixels()[..300 * 48 * 4]);
-    }
-
-    #[test]
-    fn replace_with_frame_rejects_a_width_mismatch_and_keeps_the_buffer() {
-        let page = patterned_frame(48, 200, 21);
-        let mut stitches = stitcher(48);
-        stitches.push(&page).unwrap();
-        let other = patterned_frame(40, 200, 22);
-        assert!(matches!(
-            stitches.replace_with_frame(&other),
-            Err(StitchError::WidthMismatch { .. })
-        ));
-        let stitched = stitches.finish().unwrap();
-        assert_eq!(stitched.pixels(), page.pixels());
-    }
-
-    #[test]
-    fn thumbnail_keeps_the_aspect_ratio() {
-        let frame = patterned_frame(40, 100, 71);
-        let mut stitches = stitcher(40);
-        stitches.push(&frame).unwrap();
-        let thumbnail = stitches.thumbnail(20, 100).expect("thumbnail");
-        assert_eq!(thumbnail.width(), 20);
-        assert_eq!(thumbnail.height(), 50);
-        assert_eq!(&thumbnail.pixels()[..4], &frame.pixels()[..4]);
-    }
-
-    #[test]
-    fn capacity_never_exceeds_the_byte_budget() {
-        let width = 32u32;
-        let row_bytes = width as usize * 4;
-        let max_bytes = (row_bytes + 32) * 500 + 512 * 32 + 256 * row_bytes;
-        let mut stitches = Stitcher::new(
-            width,
-            StitchConfig {
-                max_height: 10_000,
-                max_bytes,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let original = patterned_frame(width, 400, 41);
-        for (start, end) in [(0, 120), (90, 210), (180, 300), (270, 390)] {
-            stitches.push(&slice_rows(&original, start, end)).unwrap();
-            assert!(
-                stitches.pixels.capacity() <= max_bytes,
-                "capacity {} exceeds budget {max_bytes}",
-                stitches.pixels.capacity()
-            );
-        }
-        assert!(stitches.finish().is_ok());
-    }
-}
+mod tests;

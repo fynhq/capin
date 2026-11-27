@@ -25,6 +25,8 @@ const PREVIEW_GAP: f32 = 12.0;
 const PREVIEW_THUMB_WIDTH: u32 = 272;
 const PREVIEW_THUMB_HEIGHT: u32 = 456;
 const CAPTURE_INTERVAL: Duration = Duration::from_millis(400);
+const ACTIVE_CAPTURE_INTERVAL: Duration = Duration::from_millis(200);
+const ACTIVE_WINDOW: Duration = Duration::from_millis(1200);
 const SLOW_CAPTURE_INTERVAL: Duration = Duration::from_millis(700);
 const SLOW_CAPTURE_THRESHOLD: Duration = Duration::from_millis(200);
 const MAX_PENDING_FRAMES: usize = 1;
@@ -351,6 +353,7 @@ struct ScrollView {
     running: bool,
     cancelled: bool,
     missed_frames: u32,
+    last_append: Option<Instant>,
     worker_failed: bool,
     finishing: bool,
 }
@@ -385,6 +388,7 @@ impl ScrollView {
             running: true,
             cancelled: false,
             missed_frames: 0,
+            last_append: None,
             worker_failed: false,
             finishing: false,
         };
@@ -416,20 +420,25 @@ impl ScrollView {
                             .map_err(|error| error.to_string())
                     })
                     .await;
-                let alive = this
+                let (alive, active) = this
                     .update(cx, |this, cx| {
                         if !this.running {
-                            return false;
+                            return (false, false);
                         }
                         this.apply_capture(captured, cx);
-                        true
+                        let active = this
+                            .last_append
+                            .is_some_and(|at| at.elapsed() < ACTIVE_WINDOW);
+                        (true, active)
                     })
-                    .unwrap_or(false);
+                    .unwrap_or((false, false));
                 if !alive {
                     break;
                 }
                 let interval = if started.elapsed() > SLOW_CAPTURE_THRESHOLD {
                     SLOW_CAPTURE_INTERVAL
+                } else if active {
+                    ACTIVE_CAPTURE_INTERVAL
                 } else {
                     CAPTURE_INTERVAL
                 };
@@ -467,6 +476,7 @@ impl ScrollView {
                 StitchEvent::Appended(report)
                     if report.appended_rows + report.prepended_rows == 0 => {}
                 StitchEvent::Appended(report) => {
+                    self.last_append = Some(Instant::now());
                     self.status = format!(
                         "{} · {} px",
                         t(self.language, "scroll.added"),
