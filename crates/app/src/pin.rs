@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::i18n::t;
 use crate::icons;
@@ -70,9 +70,10 @@ use pin_content::PinContent;
 const MAX_RESTORED_PINS: usize = 20;
 const MAX_RESTORE_ESTIMATED_BYTES: f64 = 96.0 * 1024.0 * 1024.0;
 
-const MIN_PIN_ZOOM: f32 = 0.1;
+const MIN_PIN_ZOOM: f32 = 0.2;
 const MIN_PIN_FIT_ZOOM: f32 = 0.02;
 const MAX_PIN_ZOOM: f32 = 4.0;
+const PIN_ZOOM_STEP: f32 = 0.05;
 
 fn pin_window_kind() -> WindowKind {
     #[cfg(target_os = "macos")]
@@ -298,7 +299,8 @@ fn open_pin_inner(
 ) -> Option<u64> {
     let display_id = display_id.or_else(|| cx.primary_display().map(|display| display.id()));
     let display = pin_open_display_bounds(cx, bounds, display_id);
-    let (bounds, zoom) = fit_pin_to_display(&content, bounds, zoom, display);
+    let scale = pin_display::display_scale_for(display_id);
+    let (bounds, zoom) = fit_pin_to_display(&content, bounds, zoom, display, scale);
     let values = Rc::new(RefCell::new(PinWindowState {
         zoom,
         opacity,
@@ -460,7 +462,11 @@ struct PinView {
     values: SharedPinWindowState,
     zoom_target: f32,
     zoom_serial: u64,
+    zoom_animating: bool,
     zoom_center: Option<(f32, f32)>,
+    zoom_hud_at: Option<Instant>,
+    #[cfg(target_os = "windows")]
+    resize_refresh_pending: bool,
     toasts: [PinToast; 2],
     ocr: Option<platform_ocr::OcrOutput>,
     ocr_path: Option<PathBuf>,
@@ -499,7 +505,11 @@ impl PinView {
             values,
             zoom_target: zoom,
             zoom_serial: 0,
+            zoom_animating: false,
             zoom_center: None,
+            zoom_hud_at: None,
+            #[cfg(target_os = "windows")]
+            resize_refresh_pending: false,
             ocr_path,
             ocr_deferred: defer_ocr,
             toasts: [
@@ -601,7 +611,7 @@ impl PinView {
 
     fn qr_display_rect(&self, viewport: Size<Pixels>) -> Option<(f32, f32, f32, f32)> {
         let rect = self.qr()?.rect;
-        let zoom = self.values.borrow().zoom.max(MIN_PIN_ZOOM);
+        let zoom = self.values.borrow().zoom;
         let (fit, offset_x, offset_y) = self.image_layout(zoom, viewport);
         let scale = zoom * fit;
         Some((
@@ -631,7 +641,7 @@ impl PinView {
 
     fn text_index_at(&self, position: Point<Pixels>) -> Option<usize> {
         let lines = self.text_lines()?;
-        let zoom = self.values.borrow().zoom.max(MIN_PIN_ZOOM);
+        let zoom = self.values.borrow().zoom;
         let x = f32::from(position.x) / zoom;
         let y = f32::from(position.y) / zoom;
         let mut base = 0usize;
@@ -832,7 +842,7 @@ impl PinView {
             return;
         }
         let fit = self.fitted_zoom_limit(window, cx);
-        let zoom = zoom.clamp(pin_display::pin_zoom_floor(fit), fit);
+        let zoom = zoom.clamp(pin_display::pin_zoom_floor(fit, window.scale_factor()), fit);
         let (width, height) = self.content.size(zoom);
         let bounds = window.bounds();
         let (center_x, center_y) = self.zoom_center.unwrap_or_else(|| {
@@ -887,14 +897,19 @@ impl PinView {
             window.refresh();
         });
         #[cfg(target_os = "windows")]
-        {
+        if !self.resize_refresh_pending {
+            self.resize_refresh_pending = true;
             let handle = window.window_handle();
             cx.spawn(async move |this, cx| {
                 cx.background_executor()
                     .timer(Duration::from_millis(32))
                     .await;
                 let _ = handle.update(cx, |_, window, _| window.refresh());
-                this.update(cx, |_, cx| cx.notify()).ok();
+                this.update(cx, |this, cx| {
+                    this.resize_refresh_pending = false;
+                    cx.notify();
+                })
+                .ok();
             })
             .detach();
         }
@@ -908,6 +923,11 @@ impl PinView {
         if serial != self.zoom_serial {
             return true;
         }
+        let fit = self.fitted_zoom_limit(window, cx);
+        let scale = window.scale_factor();
+        self.zoom_target = self
+            .zoom_target
+            .clamp(pin_display::pin_zoom_floor(fit, scale), fit);
         let difference = self.zoom_target - self.values.borrow().zoom;
         if difference.abs() <= 0.001 {
             if (self.zoom_target - self.values.borrow().zoom).abs() > f32::EPSILON {
@@ -915,10 +935,14 @@ impl PinView {
             }
             self.ensure_display_resolution(window);
             self.zoom_center = None;
+            self.zoom_animating = false;
+            self.zoom_target = self.values.borrow().zoom;
             schedule_manifest_save(cx);
+            let percent = pin_display::zoom_percent(self.zoom_target, scale);
+            self.show_zoom_hud(percent, cx, true);
             return true;
         }
-        let next = self.values.borrow().zoom + difference * 0.35;
+        let next = self.values.borrow().zoom + difference * 0.5;
         self.apply_zoom(next, window, cx);
         false
     }
@@ -928,17 +952,22 @@ impl PinView {
             return;
         }
         let fit = self.fitted_zoom_limit(window, cx);
-        self.zoom_target = target.clamp(pin_display::pin_zoom_floor(fit), fit);
-        let language = settings_state::get().language;
-        let percent = (self.zoom_target * 100.0).round() as i32;
-        if cx.reduce_motion() || cfg!(target_os = "windows") {
+        let scale = window.scale_factor();
+        self.zoom_target = target.clamp(pin_display::pin_zoom_floor(fit, scale), fit);
+        let percent = pin_display::zoom_percent(self.zoom_target, scale);
+        self.show_zoom_hud(percent, cx, false);
+        if cx.reduce_motion() {
+            self.zoom_serial = self.zoom_serial.wrapping_add(1);
+            self.zoom_animating = false;
             self.zoom_center = None;
             let target = self.zoom_target;
             self.apply_zoom(target, window, cx);
             self.zoom_target = self.values.borrow().zoom;
             self.ensure_display_resolution(window);
             schedule_manifest_save(cx);
-            self.show_hud(format!("{} {percent}%", t(language, "pin.zoom_hud")), cx);
+            let percent =
+                pin_display::zoom_percent(self.values.borrow().zoom, window.scale_factor());
+            self.show_zoom_hud(percent, cx, true);
             return;
         }
         if self.zoom_center.is_none() {
@@ -948,10 +977,13 @@ impl PinView {
                 f32::from(bounds.origin.y) + f32::from(bounds.size.height) / 2.0,
             ));
         }
+        if self.zoom_animating {
+            return;
+        }
+        self.zoom_animating = true;
         self.zoom_serial = self.zoom_serial.wrapping_add(1);
         let serial = self.zoom_serial;
         let handle = window.window_handle();
-        self.show_hud(format!("{} {percent}%", t(language, "pin.zoom_hud")), cx);
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -1031,6 +1063,7 @@ impl PinView {
         );
         self.zoom_target = self.values.borrow().zoom;
         self.zoom_center = None;
+        self.zoom_animating = false;
         self.zoom_serial = self.zoom_serial.wrapping_add(1);
         if let PinContent::Image { image, .. } = previous {
             cx.defer(move |cx| cx.drop_image(image, None));
@@ -1095,6 +1128,25 @@ impl PinView {
 
     fn show_hud(&mut self, message: String, cx: &mut Context<Self>) {
         self.show_toast(HUD_TOAST, message, cx);
+    }
+
+    fn show_zoom_hud(&mut self, percent: i32, cx: &mut Context<Self>, force: bool) {
+        let language = settings_state::get().language;
+        let message = format!("{} {percent}%", t(language, "pin.zoom_hud"));
+        let toast = &self.toasts[HUD_TOAST];
+        if !toast.leaving && toast.message.as_deref() == Some(message.as_str()) {
+            return;
+        }
+        let now = Instant::now();
+        if !force
+            && self
+                .zoom_hud_at
+                .is_some_and(|at| now.duration_since(at) < Duration::from_millis(50))
+        {
+            return;
+        }
+        self.zoom_hud_at = Some(now);
+        self.show_hud(message, cx);
     }
 
     fn copy_content(&mut self, cx: &mut Context<Self>) {
@@ -1221,24 +1273,55 @@ mod tests {
 
     #[test]
     fn zoom_limit_keeps_the_pin_inside_the_display() {
-        assert!((super::pin_display::fit_zoom_limit(1000, 500, 1200.0, 800.0) - 1.2).abs() < 0.001);
         assert!(
-            (super::pin_display::fit_zoom_limit(200, 100, 1920.0, 1080.0) - super::MAX_PIN_ZOOM)
+            (super::pin_display::fit_zoom_limit(1000, 500, 1200.0, 800.0, 1.0) - 1.2).abs() < 0.001
+        );
+        assert!(
+            (super::pin_display::fit_zoom_limit(200, 100, 1920.0, 1080.0, 1.0)
+                - super::MAX_PIN_ZOOM)
                 .abs()
                 < 0.001
         );
         assert!(
-            (super::pin_display::fit_zoom_limit(4000, 3000, 1920.0, 1080.0) - 0.36).abs() < 0.001
+            (super::pin_display::fit_zoom_limit(4000, 3000, 1920.0, 1080.0, 1.0) - 0.36).abs()
+                < 0.001
         );
         assert!(
-            (super::pin_display::fit_zoom_limit(3000, 12000, 1920.0, 1080.0) - 0.09).abs() < 0.001
+            (super::pin_display::fit_zoom_limit(3000, 12000, 1920.0, 1080.0, 1.0) - 0.09).abs()
+                < 0.001
         );
     }
 
     #[test]
+    fn fit_limit_is_normalized_to_physical_pixels() {
+        assert!(
+            (super::pin_display::fit_zoom_limit(1920, 1200, 1536.0, 960.0, 1.25) - 0.8).abs()
+                < 0.001
+        );
+        assert!(
+            (super::pin_display::fit_zoom_limit(200, 100, 1536.0, 960.0, 1.25) - 3.2).abs() < 0.001
+        );
+    }
+
+    #[test]
+    fn zoom_percent_matches_physical_pixels() {
+        assert_eq!(super::pin_display::zoom_percent(0.8, 1.25), 100);
+        assert_eq!(super::pin_display::zoom_percent(0.8, 1.0), 80);
+        assert_eq!(super::pin_display::zoom_percent(0.16, 1.25), 20);
+    }
+
+    #[test]
     fn user_zoom_stops_at_the_floor_unless_the_fit_is_lower() {
-        assert!((super::pin_display::pin_zoom_floor(0.5) - super::MIN_PIN_ZOOM).abs() < 0.001);
-        assert!((super::pin_display::pin_zoom_floor(0.09) - 0.09).abs() < 0.001);
+        assert!((super::pin_display::pin_zoom_floor(0.5, 1.0) - super::MIN_PIN_ZOOM).abs() < 0.001);
+        assert!((super::pin_display::pin_zoom_floor(0.09, 1.0) - 0.09).abs() < 0.001);
+        assert!((super::pin_display::pin_zoom_floor(0.5, 1.25) - 0.16).abs() < 0.001);
+        assert!((super::pin_display::pin_zoom_floor(0.1, 1.25) - 0.1).abs() < 0.001);
+    }
+
+    #[test]
+    fn raw_zoom_limits_follow_the_display_scale() {
+        assert!((super::pin_display::min_raw_zoom(1.25) - 0.16).abs() < 0.001);
+        assert!((super::pin_display::max_raw_zoom(1.25) - 3.2).abs() < 0.001);
     }
 
     #[test]
@@ -1297,7 +1380,7 @@ mod tests {
             origin: gpui_kit::point(gpui_kit::px(-100.0), gpui_kit::px(-100.0)),
             size: gpui_kit::size(gpui_kit::px(400.0), gpui_kit::px(300.0)),
         };
-        let (fitted, zoom) = super::fit_pin_to_display(&content, bounds, 1.0, Some(display));
+        let (fitted, zoom) = super::fit_pin_to_display(&content, bounds, 1.0, Some(display), 1.0);
         assert!((zoom - 0.5).abs() < 0.001, "zoom was {zoom}");
         assert_eq!(f32::from(fitted.size.width), 200.0);
         assert_eq!(f32::from(fitted.size.height), 150.0);
@@ -1317,7 +1400,7 @@ mod tests {
             origin: gpui_kit::point(gpui_kit::px(1900.0), gpui_kit::px(1000.0)),
             size: gpui_kit::size(gpui_kit::px(100.0), gpui_kit::px(100.0)),
         };
-        let (fitted, zoom) = super::fit_pin_to_display(&content, bounds, 1.0, Some(display));
+        let (fitted, zoom) = super::fit_pin_to_display(&content, bounds, 1.0, Some(display), 1.0);
         assert!((zoom - 1.0).abs() < 0.001);
         assert_eq!(f32::from(fitted.origin.x), 1820.0);
         assert_eq!(f32::from(fitted.origin.y), 980.0);

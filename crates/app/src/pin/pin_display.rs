@@ -2,17 +2,19 @@ use super::*;
 
 impl PinView {
     pub(super) fn fitted_zoom_limit(&self, window: &Window, cx: &App) -> f32 {
+        let scale = window.scale_factor();
         let Some(size) = self.content.image_size() else {
-            return 4.0;
+            return max_raw_zoom(scale);
         };
         let Some(screen) = pin_display_bounds(window, cx) else {
-            return 4.0;
+            return max_raw_zoom(scale);
         };
         fit_zoom_limit(
             size.width,
             size.height,
             f32::from(screen.size.width),
             f32::from(screen.size.height),
+            scale,
         )
     }
 
@@ -62,9 +64,7 @@ impl PinView {
             return;
         }
         let scale = window.scale_factor().max(0.1);
-        let (width, height) = self
-            .content
-            .size(self.values.borrow().zoom.max(MIN_PIN_ZOOM));
+        let (width, height) = self.content.size(self.values.borrow().zoom);
         let need_width = (width * scale).ceil().max(1.0) as u32;
         let need_height = (height * scale).ceil().max(1.0) as u32;
         if need_width as f32 <= current.width as f32 * 1.05
@@ -195,16 +195,19 @@ pub(super) fn fit_pin_to_display(
     bounds: Bounds<Pixels>,
     zoom: f32,
     display: Option<Bounds<Pixels>>,
+    scale: f32,
 ) -> (Bounds<Pixels>, f32) {
-    let mut zoom = zoom.clamp(MIN_PIN_ZOOM, MAX_PIN_ZOOM);
+    let scale = valid_scale(scale);
+    let mut zoom = zoom.clamp(min_raw_zoom(scale), max_raw_zoom(scale));
     if let (Some(size), Some(display)) = (content.image_size(), display) {
         let fit = fit_zoom_limit(
             size.width,
             size.height,
             f32::from(display.size.width),
             f32::from(display.size.height),
+            scale,
         );
-        zoom = zoom.clamp(pin_zoom_floor(fit), fit);
+        zoom = zoom.clamp(pin_zoom_floor(fit, scale), fit);
     }
     let (width, height) = content.size(zoom);
     let center_x = f32::from(bounds.origin.x) + f32::from(bounds.size.width) / 2.0;
@@ -241,17 +244,53 @@ pub(super) fn fit_zoom_limit(
     image_height: u32,
     screen_width: f32,
     screen_height: f32,
+    scale: f32,
 ) -> f32 {
+    let scale = valid_scale(scale);
     if image_width == 0 || image_height == 0 || screen_width <= 0.0 || screen_height <= 0.0 {
-        return MAX_PIN_ZOOM;
+        return max_raw_zoom(scale);
     }
-    (screen_width / image_width as f32)
-        .min(screen_height / image_height as f32)
-        .clamp(MIN_PIN_FIT_ZOOM, MAX_PIN_ZOOM)
+    let display =
+        (screen_width / image_width as f32).min(screen_height / image_height as f32) * scale;
+    display.clamp(MIN_PIN_FIT_ZOOM, MAX_PIN_ZOOM) / scale
 }
 
-pub(super) fn pin_zoom_floor(fit: f32) -> f32 {
-    fit.min(MIN_PIN_ZOOM)
+pub(super) fn pin_zoom_floor(fit: f32, scale: f32) -> f32 {
+    fit.min(min_raw_zoom(scale))
+}
+
+pub(super) fn valid_scale(scale: f32) -> f32 {
+    scale.max(0.1)
+}
+
+pub(super) fn min_raw_zoom(scale: f32) -> f32 {
+    MIN_PIN_ZOOM / valid_scale(scale)
+}
+
+pub(super) fn max_raw_zoom(scale: f32) -> f32 {
+    MAX_PIN_ZOOM / valid_scale(scale)
+}
+
+pub(super) fn zoom_percent(zoom: f32, scale: f32) -> i32 {
+    (zoom * valid_scale(scale) * 100.0).round() as i32
+}
+
+pub(super) fn display_scale_for(display_id: Option<DisplayId>) -> f32 {
+    let Some(display_id) = display_id else {
+        return 1.0;
+    };
+    let target = u64::from(display_id);
+    platform_capture::platform_backend()
+        .monitors()
+        .ok()
+        .and_then(|monitors| {
+            monitors
+                .iter()
+                .find(|monitor| monitor.id.raw() == target)
+                .or_else(|| monitors.iter().find(|monitor| monitor.is_primary))
+                .map(|monitor| monitor.scale.get().max(0.1))
+        })
+        .unwrap_or(1.0)
 }
 
 pub(super) fn pin_display_bounds(window: &Window, cx: &App) -> Option<Bounds<Pixels>> {

@@ -56,9 +56,7 @@ impl PinView {
     pub(super) fn body(&self, theme: &PinTheme, viewport: Size<Pixels>) -> Div {
         match &self.content {
             PinContent::Image { image, .. } => {
-                let (width, height) = self
-                    .content
-                    .size(self.values.borrow().zoom.max(MIN_PIN_ZOOM));
+                let (width, height) = self.content.size(self.values.borrow().zoom);
                 let viewport_width = f32::from(viewport.width);
                 let viewport_height = f32::from(viewport.height);
                 let fit = if viewport_width <= 0.0 || viewport_height <= 0.0 {
@@ -108,7 +106,7 @@ impl Render for PinView {
         let body = self
             .body(&theme, window.viewport_size())
             .opacity(self.values.borrow().opacity);
-        let zoom = self.values.borrow().zoom.max(MIN_PIN_ZOOM);
+        let zoom = self.values.borrow().zoom;
         let text_layers: Vec<Div> = self
             .selection_rects()
             .into_iter()
@@ -498,12 +496,13 @@ impl Render for PinView {
                     }
                 } else {
                     let step = if lines {
-                        delta_y.signum() * 0.10
+                        delta_y.signum() * PIN_ZOOM_STEP
                     } else {
-                        delta_y * 0.10
+                        delta_y * PIN_ZOOM_STEP
                     };
                     if step != 0.0 {
-                        this.zoom_toward(this.zoom_target + step, window, cx);
+                        let scale = window.scale_factor().max(0.1);
+                        this.zoom_toward(this.zoom_target + step / scale, window, cx);
                     }
                 }
             }))

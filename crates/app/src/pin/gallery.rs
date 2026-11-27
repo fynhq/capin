@@ -263,7 +263,7 @@ pub(super) fn open_history_pin(image: crate::capture_history::HistoryImage, cx: 
         native_shadow,
     } = image;
     LAST_PIN_TRIGGER.with(|slot| slot.set(Some(hash)));
-    let zoom = scale.map(|scale| (1.0 / scale.max(0.1)).clamp(MIN_PIN_ZOOM, MAX_PIN_ZOOM));
+    let zoom = scale.map(|scale| 1.0 / scale.max(0.1));
     let Some(shadow) = pin_shadow else {
         let content = PinContent::from_frame_with_hash(frame, hash);
         if let Some(zoom) = zoom {
@@ -337,7 +337,6 @@ fn open_pin_content_at(
     native_shadow: bool,
     cx: &mut App,
 ) -> Option<u64> {
-    let zoom = zoom.clamp(MIN_PIN_ZOOM, MAX_PIN_ZOOM);
     let size = bounds.size;
     log_info!(
         "pin",

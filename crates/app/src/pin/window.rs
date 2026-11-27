@@ -65,7 +65,7 @@ pub(crate) fn restore(cx: &mut App) {
             }
             _ => continue,
         };
-        let zoom = entry.zoom.clamp(MIN_PIN_ZOOM, MAX_PIN_ZOOM);
+        let zoom = entry.zoom;
         let (width, height) = content.size(zoom);
         let display_id = saved_display_id(cx, entry.display);
         let bounds = clamp_to_display(
