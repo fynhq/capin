@@ -870,7 +870,7 @@ mod tests {
     use core_types::PhysicalPoint;
 
     use super::*;
-    use crate::{AnnotationDocument, AnnotationStyle, Shape};
+    use crate::{AnnotationDocument, AnnotationStyle, HIGHLIGHTER_ALPHA, Shape};
 
     fn black_frame(width: u32, height: u32) -> RgbaFrame {
         RgbaFrame::from_pixels(
@@ -1176,13 +1176,10 @@ mod tests {
         );
         let output = rasterize(&document, &frame).unwrap();
         let center = pixel(&output, 30, 20);
-        assert!(
-            center[0] > 80 && center[1] > 80 && center[3] == 255,
-            "highlighter box should tint the background: {center:?}"
-        );
         assert_eq!(
-            center[2], 0,
-            "the highlighter must not mix white into its color: {center:?}"
+            center,
+            [HIGHLIGHTER_ALPHA as u8, HIGHLIGHTER_ALPHA as u8, 0, 255],
+            "highlighter box should tint the background with its fixed alpha: {center:?}"
         );
         assert_eq!(pixel(&output, 2, 2), [0, 0, 0, 255]);
     }
@@ -1200,8 +1197,9 @@ mod tests {
             },
         );
         let output = rasterize(&document, &frame).unwrap();
-        assert!(
-            pixel(&output, 30, 20)[0] > 80,
+        assert_eq!(
+            pixel(&output, 30, 20)[0],
+            HIGHLIGHTER_ALPHA as u8,
             "the wash center must keep its color"
         );
         assert_eq!(

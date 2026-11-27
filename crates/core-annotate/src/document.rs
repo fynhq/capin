@@ -31,7 +31,7 @@ pub struct AnnotationStyle {
     pub spotlight_radius: f32,
 }
 
-pub const HIGHLIGHTER_ALPHA: u32 = 0x66;
+pub const HIGHLIGHTER_ALPHA: u32 = 0x4D;
 
 pub fn highlighter_color(color: u32) -> u32 {
     (color & 0xFFFF_FF00) | HIGHLIGHTER_ALPHA
@@ -619,10 +619,10 @@ mod tests {
 
     #[test]
     fn highlighter_color_keeps_rgb_and_only_lowers_alpha() {
-        assert_eq!(super::highlighter_color(0xFF0000FF), 0xFF000066);
-        assert_eq!(super::highlighter_color(0x000000FF), 0x00000066);
-        assert_eq!(super::highlighter_color(0xFFFFFFFF), 0xFFFFFF66);
-        assert_eq!(super::highlighter_color(0x0A84FFFF), 0x0A84FF66);
+        assert_eq!(super::highlighter_color(0xFF0000FF), 0xFF00004D);
+        assert_eq!(super::highlighter_color(0x000000FF), 0x0000004D);
+        assert_eq!(super::highlighter_color(0xFFFFFFFF), 0xFFFFFF4D);
+        assert_eq!(super::highlighter_color(0x0A84FFFF), 0x0A84FF4D);
     }
 
     #[test]
