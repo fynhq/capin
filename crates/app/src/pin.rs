@@ -465,8 +465,6 @@ struct PinView {
     zoom_animating: bool,
     zoom_center: Option<(f32, f32)>,
     zoom_hud_at: Option<Instant>,
-    #[cfg(target_os = "windows")]
-    resize_refresh_pending: bool,
     toasts: [PinToast; 2],
     ocr: Option<platform_ocr::OcrOutput>,
     ocr_path: Option<PathBuf>,
@@ -508,8 +506,6 @@ impl PinView {
             zoom_animating: false,
             zoom_center: None,
             zoom_hud_at: None,
-            #[cfg(target_os = "windows")]
-            resize_refresh_pending: false,
             ocr_path,
             ocr_deferred: defer_ocr,
             toasts: [
@@ -897,19 +893,14 @@ impl PinView {
             window.refresh();
         });
         #[cfg(target_os = "windows")]
-        if !self.resize_refresh_pending {
-            self.resize_refresh_pending = true;
+        {
             let handle = window.window_handle();
             cx.spawn(async move |this, cx| {
                 cx.background_executor()
                     .timer(Duration::from_millis(32))
                     .await;
                 let _ = handle.update(cx, |_, window, _| window.refresh());
-                this.update(cx, |this, cx| {
-                    this.resize_refresh_pending = false;
-                    cx.notify();
-                })
-                .ok();
+                this.update(cx, |_, cx| cx.notify()).ok();
             })
             .detach();
         }
@@ -955,8 +946,7 @@ impl PinView {
         let scale = window.scale_factor();
         self.zoom_target = target.clamp(pin_display::pin_zoom_floor(fit, scale), fit);
         let percent = pin_display::zoom_percent(self.zoom_target, scale);
-        self.show_zoom_hud(percent, cx, false);
-        if cx.reduce_motion() {
+        if cx.reduce_motion() || cfg!(target_os = "windows") {
             self.zoom_serial = self.zoom_serial.wrapping_add(1);
             self.zoom_animating = false;
             self.zoom_center = None;
@@ -970,6 +960,7 @@ impl PinView {
             self.show_zoom_hud(percent, cx, true);
             return;
         }
+        self.show_zoom_hud(percent, cx, false);
         if self.zoom_center.is_none() {
             let bounds = window.bounds();
             self.zoom_center = Some((
