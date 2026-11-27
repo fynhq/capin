@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -26,6 +27,8 @@ const PREVIEW_THUMB_HEIGHT: u32 = 456;
 const CAPTURE_INTERVAL: Duration = Duration::from_millis(400);
 const SLOW_CAPTURE_INTERVAL: Duration = Duration::from_millis(700);
 const SLOW_CAPTURE_THRESHOLD: Duration = Duration::from_millis(200);
+const MAX_PENDING_FRAMES: usize = 1;
+const BACKLOG_WAIT: Duration = Duration::from_millis(50);
 
 pub(crate) fn supports_target(target: CaptureTarget) -> bool {
     matches!(target, CaptureTarget::Region(_))
@@ -113,16 +116,19 @@ enum StitchEvent {
 struct StitchWorker {
     commands: mpsc::Sender<StitchCommand>,
     events: Arc<Mutex<VecDeque<StitchEvent>>>,
+    pending: Arc<AtomicUsize>,
 }
 
 impl StitchWorker {
     fn new(stitcher: Stitcher) -> Self {
         let (commands, receiver) = mpsc::channel();
         let events = Arc::new(Mutex::new(VecDeque::new()));
+        let pending = Arc::new(AtomicUsize::new(0));
         let worker_events = Arc::clone(&events);
+        let worker_pending = Arc::clone(&pending);
         let spawned = std::thread::Builder::new()
             .name("capin-stitch".to_owned())
-            .spawn(move || stitch_loop(stitcher, receiver, worker_events));
+            .spawn(move || stitch_loop(stitcher, receiver, worker_events, worker_pending));
         if let Err(error) = spawned
             && let Ok(mut events) = events.lock()
         {
@@ -131,11 +137,26 @@ impl StitchWorker {
                 fatal: true,
             });
         }
-        Self { commands, events }
+        Self {
+            commands,
+            events,
+            pending,
+        }
     }
 
     fn push(&self, frame: RgbaFrame) {
-        let _ = self.commands.send(StitchCommand::Push(Arc::new(frame)));
+        self.pending.fetch_add(1, Ordering::AcqRel);
+        if self
+            .commands
+            .send(StitchCommand::Push(Arc::new(frame)))
+            .is_err()
+        {
+            self.pending.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    fn pending(&self) -> usize {
+        self.pending.load(Ordering::Acquire)
     }
 
     fn finish(&self) {
@@ -150,12 +171,45 @@ impl StitchWorker {
     }
 }
 
+struct WorkerGuard {
+    events: Arc<Mutex<VecDeque<StitchEvent>>>,
+    finished: bool,
+}
+
+impl Drop for WorkerGuard {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        push_event(
+            &self.events,
+            StitchEvent::Failed {
+                message: "the stitch worker stopped".to_owned(),
+                fatal: true,
+            },
+        );
+    }
+}
+
+fn push_event(events: &Mutex<VecDeque<StitchEvent>>, event: StitchEvent) {
+    match events.lock() {
+        Ok(mut events) => events.push_back(event),
+        Err(poisoned) => poisoned.into_inner().push_back(event),
+    }
+}
+
 fn stitch_loop(
     mut stitcher: Stitcher,
     receiver: mpsc::Receiver<StitchCommand>,
     events: Arc<Mutex<VecDeque<StitchEvent>>>,
+    pending: Arc<AtomicUsize>,
 ) {
+    let mut guard = WorkerGuard {
+        events: Arc::clone(&events),
+        finished: false,
+    };
     while let Ok(command) = receiver.recv() {
+        let is_push = matches!(&command, StitchCommand::Push(_));
         let started = Instant::now();
         let (event, operation) = match command {
             StitchCommand::Push(frame) => {
@@ -184,6 +238,9 @@ fn stitch_loop(
                 (event, "finish")
             }
         };
+        if is_push {
+            let _ = pending.fetch_sub(1, Ordering::AcqRel);
+        }
         match &event {
             StitchEvent::Appended(report) => log_debug!(
                 "stitch",
@@ -241,11 +298,10 @@ fn stitch_loop(
             _ => None,
         };
         let finished = matches!(event, StitchEvent::Finished(_));
-        if let Ok(mut events) = events.lock() {
-            events.push_back(event);
-            if let Some(preview) = preview {
-                events.push_back(preview);
-            }
+        guard.finished |= finished || matches!(&event, StitchEvent::Failed { fatal: true, .. });
+        push_event(&events, event);
+        if let Some(preview) = preview {
+            push_event(&events, preview);
         }
         if finished {
             break;
@@ -308,9 +364,18 @@ impl ScrollView {
         let capture_region = region;
         cx.spawn(async move |this, cx| {
             loop {
-                let running = this.update(cx, |this, _| this.running).unwrap_or(false);
+                let (running, ready) = this
+                    .update(cx, |this, cx| {
+                        this.apply_worker_events(cx);
+                        (this.running, this.worker.pending() < MAX_PENDING_FRAMES)
+                    })
+                    .unwrap_or((false, false));
                 if !running {
                     break;
+                }
+                if !ready {
+                    cx.background_executor().timer(BACKLOG_WAIT).await;
+                    continue;
                 }
                 let started = Instant::now();
                 let captured = cx
@@ -402,8 +467,8 @@ impl ScrollView {
                 }
                 StitchEvent::Failed { message, fatal } => {
                     self.missed_frames += 1;
-                    self.worker_failed = true;
                     if fatal {
+                        self.worker_failed = true;
                         self.running = false;
                     }
                     self.status = format!("{}{}", t(self.language, "scroll.failed"), message);
@@ -443,16 +508,32 @@ impl ScrollView {
                 let _ = this.update(cx, |this, cx| this.apply_capture(captured, cx));
             }
             let _ = this.update(cx, |this, _| this.worker.finish());
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let started = Instant::now();
+            let mut slow = false;
             loop {
-                let finished = this
+                let state = this
                     .update(cx, |this, cx| {
                         this.apply_worker_events(cx);
-                        this.finished_frame.is_some()
+                        if this.finished_frame.is_some() {
+                            Some(true)
+                        } else if this.worker_failed {
+                            Some(false)
+                        } else {
+                            None
+                        }
                     })
-                    .unwrap_or(false);
-                if finished || Instant::now() >= deadline {
+                    .unwrap_or(Some(false));
+                if state.is_some() {
                     break;
+                }
+                if !slow && started.elapsed() >= Duration::from_secs(5) {
+                    slow = true;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.finished_frame.is_none() && !this.worker_failed {
+                            this.status = t(this.language, "scroll.finishing").to_owned();
+                            cx.notify();
+                        }
+                    });
                 }
                 cx.background_executor()
                     .timer(Duration::from_millis(50))
@@ -475,10 +556,14 @@ impl ScrollView {
                             log_error!("scroll", "failed to open the in-place long-capture editor");
                         }
                     });
-                } else if !this.worker_failed {
+                } else {
                     this.finishing = false;
-                    this.status = t(this.language, "scroll.finish_timeout").to_owned();
-                    cx.notify();
+                    if this.worker_failed {
+                        cx.notify();
+                    } else {
+                        this.status = t(this.language, "scroll.finish_timeout").to_owned();
+                        cx.notify();
+                    }
                 }
             });
         })
@@ -700,6 +785,33 @@ mod tests {
                 .drain()
                 .into_iter()
                 .any(|event| matches!(event, StitchEvent::Finished(frame) if frame.width() == 4))
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "stitch worker did not finish");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn stitch_worker_tracks_pending_frames() {
+        let frame = RgbaFrame::from_pixels(4, 4, vec![32; 4 * 4 * 4]).unwrap();
+        let stitcher = Stitcher::new(4, StitchConfig::default()).unwrap();
+        let worker = StitchWorker::new(stitcher);
+        assert_eq!(worker.pending(), 0);
+        worker.push(frame);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while worker.pending() > 0 {
+            assert!(Instant::now() < deadline, "pending frame was not consumed");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        worker.finish();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if worker
+                .drain()
+                .into_iter()
+                .any(|event| matches!(event, StitchEvent::Finished(_)))
             {
                 break;
             }
