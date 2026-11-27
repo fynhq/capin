@@ -386,6 +386,34 @@ impl Stitcher {
         Ok(self.report(0, 0, 0, height, 0))
     }
 
+    pub fn replace_with_frame(&mut self, frame: &RgbaFrame) -> Result<AppendReport, StitchError> {
+        if frame.width() != self.width {
+            return Err(StitchError::WidthMismatch {
+                expected: self.width,
+                frame: frame.width(),
+            });
+        }
+        if frame.height() == 0 {
+            return Err(StitchError::EmptyFrame);
+        }
+        self.pixels.clear();
+        self.signatures.clear();
+        self.height = 0;
+        self.frames = 0;
+        self.header_rows = 0;
+        self.last_direction = None;
+        self.last_placement = None;
+        self.previous_top.clear();
+        self.previous_top_rows = 0;
+        self.previous_bottom.clear();
+        self.previous_bottom_rows = 0;
+        self.previous_frame.clear();
+        self.previous_frame_rows = 0;
+        self.footer_rows = 0;
+        self.footer_pixels.clear();
+        self.push(frame)
+    }
+
     fn reserve_rows(&mut self, rows: usize) -> Result<(), StitchError> {
         let row_bytes = (self.width as usize).saturating_mul(4).max(1);
         let needed = self
@@ -1343,6 +1371,35 @@ mod tests {
         assert_eq!(report.appended_rows, 100);
         assert_eq!(stitches.height(), 100);
         assert_eq!(stitches.pixels.as_ptr(), pointer);
+    }
+
+    #[test]
+    fn replacing_the_first_frame_discards_the_previous_buffer() {
+        let stale = patterned_frame(48, 200, 7);
+        let page = patterned_frame(48, 400, 19);
+        let mut stitches = stitcher(48);
+        stitches.push(&stale).unwrap();
+        stitches
+            .replace_with_frame(&slice_rows(&page, 0, 200))
+            .unwrap();
+        stitches.push(&slice_rows(&page, 100, 300)).unwrap();
+        let stitched = stitches.finish().unwrap();
+        assert_eq!(stitched.height(), 300);
+        assert_eq!(stitched.pixels(), &page.pixels()[..300 * 48 * 4]);
+    }
+
+    #[test]
+    fn replace_with_frame_rejects_a_width_mismatch_and_keeps_the_buffer() {
+        let page = patterned_frame(48, 200, 21);
+        let mut stitches = stitcher(48);
+        stitches.push(&page).unwrap();
+        let other = patterned_frame(40, 200, 22);
+        assert!(matches!(
+            stitches.replace_with_frame(&other),
+            Err(StitchError::WidthMismatch { .. })
+        ));
+        let stitched = stitches.finish().unwrap();
+        assert_eq!(stitched.pixels(), page.pixels());
     }
 
     #[test]

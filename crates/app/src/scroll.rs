@@ -208,13 +208,42 @@ fn stitch_loop(
         events: Arc::clone(&events),
         finished: false,
     };
+    let mut appended_any = false;
     while let Ok(command) = receiver.recv() {
         let is_push = matches!(&command, StitchCommand::Push(_));
         let started = Instant::now();
         let (event, operation) = match command {
             StitchCommand::Push(frame) => {
                 let event = match stitcher.push(&frame) {
-                    Ok(report) => StitchEvent::Appended(report),
+                    Ok(report) => {
+                        appended_any |= report.appended_rows > 0 || report.prepended_rows > 0;
+                        StitchEvent::Appended(report)
+                    }
+                    Err(StitchError::NoOverlap) if !appended_any => {
+                        match stitcher.replace_with_frame(&frame) {
+                            Ok(report) => {
+                                log_info!(
+                                    "stitch",
+                                    "initial frame did not match; rebased to a live frame {}x{}",
+                                    frame.width(),
+                                    frame.height()
+                                );
+                                StitchEvent::Appended(AppendReport {
+                                    appended_rows: 0,
+                                    prepended_rows: 0,
+                                    ..report
+                                })
+                            }
+                            Err(StitchError::WidthMismatch { .. }) => StitchEvent::SizeChanged,
+                            Err(error) => StitchEvent::Failed {
+                                message: error.to_string(),
+                                fatal: matches!(
+                                    error,
+                                    StitchError::HeightLimit(_) | StitchError::MemoryLimit(_)
+                                ),
+                            },
+                        }
+                    }
                     Err(StitchError::NoOverlap) => StitchEvent::NoOverlap,
                     Err(StitchError::WidthMismatch { .. }) => StitchEvent::SizeChanged,
                     Err(error) => StitchEvent::Failed {
@@ -770,6 +799,60 @@ mod tests {
     use core_stitch::{StitchConfig, Stitcher};
     use core_types::{CaptureRegion, MonitorId, PhysicalRect, RgbaFrame, WindowId};
     use std::time::{Duration, Instant};
+
+    fn pattern_frame(width: u32, height: u32, seed: u32) -> RgbaFrame {
+        let mut pixels = vec![0u8; width as usize * height as usize * 4];
+        let mut state = seed | 1;
+        for pixel in pixels.as_chunks_mut::<4>().0 {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            pixel[0] = (state >> 8) as u8;
+            pixel[1] = (state >> 16) as u8;
+            pixel[2] = (state >> 24) as u8;
+            pixel[3] = 255;
+        }
+        RgbaFrame::from_pixels(width, height, pixels).unwrap()
+    }
+
+    fn slice_rows(frame: &RgbaFrame, start: u32, end: u32) -> RgbaFrame {
+        let row_bytes = frame.width() as usize * 4;
+        RgbaFrame::from_pixels(
+            frame.width(),
+            end - start,
+            frame.pixels()[start as usize * row_bytes..end as usize * row_bytes].to_vec(),
+        )
+        .unwrap()
+    }
+
+    fn finished_frame(worker: &StitchWorker) -> Option<RgbaFrame> {
+        worker.drain().into_iter().find_map(|event| match event {
+            StitchEvent::Finished(frame) => Some(frame),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn stitch_worker_rebases_an_unmatched_initial_frame() {
+        let stale = pattern_frame(48, 120, 3);
+        let page = pattern_frame(48, 400, 9);
+        let mut stitcher = Stitcher::new(48, StitchConfig::default()).unwrap();
+        stitcher.push_owned(stale).unwrap();
+        let worker = StitchWorker::new(stitcher);
+        worker.push(slice_rows(&page, 0, 200));
+        worker.push(slice_rows(&page, 100, 300));
+        worker.finish();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(frame) = finished_frame(&worker) {
+                assert_eq!(frame.height(), 300);
+                assert_eq!(frame.pixels(), &page.pixels()[..300 * 48 * 4]);
+                break;
+            }
+            assert!(Instant::now() < deadline, "stitch worker did not finish");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 
     #[test]
     fn stitch_worker_returns_a_finished_frame() {
