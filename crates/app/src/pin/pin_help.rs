@@ -15,6 +15,13 @@ thread_local! {
     static PIN_HELP: RefCell<Option<AnyWindowHandle>> = const { RefCell::new(None) };
 }
 
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy)]
+struct HelpDrag {
+    cursor: (i32, i32),
+    origin: (i32, i32),
+}
+
 pub(super) fn toggle(
     anchor: Bounds<Pixels>,
     display_id: Option<DisplayId>,
@@ -80,6 +87,8 @@ fn open(anchor: Bounds<Pixels>, display_id: Option<DisplayId>, image: bool, cx: 
             accent_hex: system_accent_hex().unwrap_or_else(|| crate::theme::fallback_accent(false)),
             focus_handle: cx.focus_handle(),
             _blur_subscription: None,
+            #[cfg(target_os = "windows")]
+            drag: None,
         });
         let focus = view.read(cx).focus_handle.clone();
         view.update(cx, |view, cx| {
@@ -140,6 +149,10 @@ fn rows(image: bool, language: Language) -> Vec<(String, String)> {
         ));
         rows.push(("Scroll".to_owned(), t(language, "pin.hint_zoom").to_owned()));
         rows.push((
+            "Cmd/Ctrl+=".to_owned(),
+            t(language, "pin.hint_zoom_in").to_owned(),
+        ));
+        rows.push((
             "Cmd/Ctrl+-".to_owned(),
             t(language, "pin.hint_zoom_out").to_owned(),
         ));
@@ -169,6 +182,36 @@ struct PinHelpView {
     accent_hex: u32,
     focus_handle: FocusHandle,
     _blur_subscription: Option<gpui_kit::Subscription>,
+    #[cfg(target_os = "windows")]
+    drag: Option<HelpDrag>,
+}
+
+impl PinHelpView {
+    fn begin_drag(&mut self, window: &mut Window) {
+        #[cfg(target_os = "windows")]
+        {
+            let cursor = platform_window::cursor_screen_position();
+            let origin = platform_window::window_screen_origin(&*window);
+            if let (Some(cursor), Some(origin)) = (cursor, origin) {
+                self.drag = Some(HelpDrag { cursor, origin });
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            window.start_window_move();
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn update_drag(&mut self, window: &mut Window) {
+        if let Some(drag) = self.drag
+            && let Some((cursor_x, cursor_y)) = platform_window::cursor_screen_position()
+        {
+            let x = drag.origin.0 + cursor_x - drag.cursor.0;
+            let y = drag.origin.1 + cursor_y - drag.cursor.1;
+            let _ = platform_window::move_window_to(&*window, x, y);
+        }
+    }
 }
 
 impl Render for PinHelpView {
@@ -185,6 +228,27 @@ impl Render for PinHelpView {
                     cx.stop_propagation();
                 }
             }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseDownEvent, window, cx| {
+                    window.focus(&this.focus_handle, cx);
+                    this.begin_drag(window);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_move(cx.listener(|_this, _event: &MouseMoveEvent, _window, _cx| {
+                #[cfg(target_os = "windows")]
+                _this.update_drag(_window);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|_this, _event: &MouseUpEvent, _window, _cx| {
+                    #[cfg(target_os = "windows")]
+                    {
+                        _this.drag = None;
+                    }
+                }),
+            )
             .child(crate::ui::enter_fade(
                 hints_card(theme, language, self.width, &self.rows, false, false),
                 "pin-help-enter",
