@@ -1303,7 +1303,9 @@ mod tests {
         if has_fonts {
             let painted = output
                 .packed_pixels()
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .filter(|pixel| pixel[0] > 0 || pixel[1] > 0 || pixel[2] > 0)
                 .count();
             assert!(painted > 0, "CJK text must paint at least one glyph pixel");
