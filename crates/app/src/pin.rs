@@ -28,6 +28,7 @@ mod pin_clipboard;
 mod pin_content;
 mod pin_display;
 mod pin_help;
+mod pin_ocr;
 mod pin_qr;
 mod pin_view;
 mod toast;
@@ -567,72 +568,6 @@ impl PinView {
                 .and_then(|path| image_util::load_frame(&path))
                 .map(Arc::new)
         })
-    }
-
-    fn ocr_source(&mut self) -> Option<crate::ocr_queue::Source> {
-        if let Some(path) = self.ocr_path.take() {
-            return Some(crate::ocr_queue::Source::Path(path));
-        }
-        if let Some(frame) = self.content.frame_arc() {
-            Some(crate::ocr_queue::Source::Frame(frame))
-        } else {
-            self.persisted_path().map(crate::ocr_queue::Source::Path)
-        }
-    }
-
-    fn release_frame_if_persisted(&mut self) {
-        if self.persisted_path().is_some() {
-            self.content.drop_frame();
-        }
-    }
-
-    fn wake_ocr(&mut self, cx: &mut Context<Self>) {
-        if self.ocr_deferred {
-            self.start_ocr(cx);
-        }
-    }
-
-    fn start_ocr(&mut self, cx: &mut Context<Self>) {
-        self.ocr_deferred = false;
-        let settings = settings_state::get();
-        if !settings.pin_text_ocr && !settings.pin_qr {
-            self.ocr = None;
-            self.release_frame_if_persisted();
-            return;
-        }
-        let Some(source) = self.ocr_source() else {
-            self.ocr = None;
-            return;
-        };
-        let options = platform_ocr::OcrOptions {
-            text: settings.pin_text_ocr,
-            qr: settings.pin_qr,
-        };
-        let generation = self.content_generation;
-        cx.spawn(async move |this, cx| {
-            let current = this
-                .update(cx, |this, _| this.content_generation == generation)
-                .unwrap_or(false);
-            if !current {
-                return;
-            }
-            let output = cx
-                .background_executor()
-                .spawn(async move { crate::ocr_queue::recognize(source, options) })
-                .await;
-            this.update_in(cx, |this, window, cx| {
-                if this.content_generation == generation {
-                    this.ocr = Some(output);
-                    this.hover_qr =
-                        this.hover && this.qr_hit(window.mouse_position(), window.viewport_size());
-                    this.release_frame_if_persisted();
-                    cx.notify();
-                }
-            })
-            .ok();
-        })
-        .detach();
-        self.release_frame_if_persisted();
     }
 
     fn qr(&self) -> Option<&platform_ocr::OcrQrCode> {
