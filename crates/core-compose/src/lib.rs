@@ -1,6 +1,12 @@
 use core_types::RgbaFrame;
 use thiserror::Error;
 
+mod shape;
+
+pub use shape::{AlphaMask, ShapeSource};
+
+use shape::{Coverage, DistanceField, bleed_color};
+
 const MAX_PADDING: u32 = 2048;
 const MAX_BLUR_RADIUS: u32 = 512;
 const BLUR_PASSES: usize = 3;
@@ -64,6 +70,8 @@ impl Default for WindowCanvas {
 pub enum ComposeError {
     #[error("window frame is empty")]
     EmptyWindow,
+    #[error("window shape mask is invalid")]
+    InvalidMask,
     #[error("composed canvas is too large")]
     SizeOverflow,
 }
@@ -114,6 +122,14 @@ pub fn compose_window(
     window: &RgbaFrame,
     canvas: &WindowCanvas,
 ) -> Result<RgbaFrame, ComposeError> {
+    compose_window_shaped(window, canvas, ShapeSource::Rounded)
+}
+
+pub fn compose_window_shaped(
+    window: &RgbaFrame,
+    canvas: &WindowCanvas,
+    shape: ShapeSource<'_>,
+) -> Result<RgbaFrame, ComposeError> {
     if window.width() == 0 || window.height() == 0 {
         return Err(ComposeError::EmptyWindow);
     }
@@ -138,6 +154,19 @@ pub fn compose_window(
         .and_then(|pixels| pixels.checked_mul(4))
         .ok_or(ComposeError::SizeOverflow)?;
 
+    let coverage = match shape {
+        ShapeSource::Rounded => None,
+        ShapeSource::Mask(mask) => Some(
+            Coverage::from_mask(&mask, window.width(), window.height())
+                .ok_or(ComposeError::InvalidMask)?,
+        ),
+        ShapeSource::WindowAlpha => Some(Coverage::from_window(window)),
+    };
+    let distance = coverage
+        .as_ref()
+        .filter(|_| canvas.edge_bleed || canvas.border.is_some())
+        .map(DistanceField::new);
+
     let mut pixels = vec![0u8; buffer_len];
     paint_background(&mut pixels, &canvas.background);
 
@@ -153,31 +182,50 @@ pub fn compose_window(
                 corner_radius: canvas.corner_radius,
             },
             shadow,
+            coverage.as_ref(),
         );
     }
 
     paint_window(
         &mut pixels,
-        width,
-        padding,
+        CanvasWindow {
+            canvas_width: width,
+            padding,
+            corner_radius: canvas.corner_radius,
+            edge_bleed: canvas.edge_bleed,
+            edge_feather: canvas.edge_feather,
+        },
         window,
-        canvas.corner_radius,
-        canvas.edge_bleed,
-        canvas.edge_feather,
+        coverage.as_ref(),
+        distance.as_ref(),
     );
     if let Some(border) = &canvas.border {
         paint_border(
             &mut pixels,
-            width,
-            padding,
+            CanvasWindow {
+                canvas_width: width,
+                padding,
+                corner_radius: canvas.corner_radius,
+                edge_bleed: canvas.edge_bleed,
+                edge_feather: canvas.edge_feather,
+            },
             window,
-            canvas.corner_radius,
             border,
-            canvas.edge_feather,
+            coverage.as_ref(),
+            distance.as_ref(),
         );
     }
 
     RgbaFrame::from_pixels(width, height, pixels).map_err(|_| ComposeError::SizeOverflow)
+}
+
+#[derive(Clone, Copy)]
+struct CanvasWindow {
+    canvas_width: u32,
+    padding: u32,
+    corner_radius: u32,
+    edge_bleed: bool,
+    edge_feather: bool,
 }
 
 fn paint_background(pixels: &mut [u8], background: &Background) {
@@ -198,7 +246,12 @@ struct CanvasLayout {
     corner_radius: u32,
 }
 
-fn paint_shadow(pixels: &mut [u8], layout: CanvasLayout, shadow: &Shadow) {
+fn paint_shadow(
+    pixels: &mut [u8],
+    layout: CanvasLayout,
+    shadow: &Shadow,
+    coverage: Option<&Coverage>,
+) {
     let opacity = shadow.opacity.clamp(0.0, 1.0);
     if opacity <= 0.0 || layout.padding == 0 {
         return;
@@ -228,16 +281,21 @@ fn paint_shadow(pixels: &mut [u8], layout: CanvasLayout, shadow: &Shadow) {
         for x in left as u32..right as u32 {
             let local_x = (i64::from(x) - origin_x) as u32;
             let local_y = (i64::from(y) - origin_y) as u32;
-            let coverage = rounded_coverage(
-                local_x,
-                local_y,
-                layout.window_width,
-                layout.window_height,
-                layout.corner_radius,
+            let window_coverage = coverage.map_or_else(
+                || {
+                    rounded_coverage(
+                        local_x,
+                        local_y,
+                        layout.window_width,
+                        layout.window_height,
+                        layout.corner_radius,
+                    )
+                },
+                |shape| f32::from(shape.at(local_x, local_y)) / 255.0,
             );
-            if coverage > 0.0 {
+            if window_coverage > 0.0 {
                 mask[y as usize * layout.width as usize + x as usize] =
-                    (coverage * 255.0).round().clamp(0.0, 255.0) as u8;
+                    (window_coverage * 255.0).round().clamp(0.0, 255.0) as u8;
             }
         }
     }
@@ -261,12 +319,10 @@ fn paint_shadow(pixels: &mut [u8], layout: CanvasLayout, shadow: &Shadow) {
 
 fn paint_window(
     pixels: &mut [u8],
-    canvas_width: u32,
-    padding: u32,
+    canvas: CanvasWindow,
     window: &RgbaFrame,
-    corner_radius: u32,
-    edge_bleed: bool,
-    edge_feather: bool,
+    coverage: Option<&Coverage>,
+    distance: Option<&DistanceField>,
 ) {
     let width = window.width();
     let height = window.height();
@@ -279,40 +335,58 @@ fn paint_window(
             let Some(source) = row.get(source_offset..source_offset + 4) else {
                 continue;
             };
-            let coverage = if edge_feather {
-                feathered_coverage(
-                    x as f32 + 0.5,
-                    y as f32 + 0.5,
-                    width as f32,
-                    height as f32,
-                    corner_radius as f32,
-                )
-            } else {
-                rounded_coverage(x, y, width, height, corner_radius)
+            let (masked, coverage, alpha) = match coverage {
+                Some(shape) => {
+                    let mask = shape.at(x, y);
+                    (true, f32::from(mask) / 255.0, source[3].min(mask))
+                }
+                None => {
+                    let coverage = if canvas.edge_feather {
+                        feathered_coverage(
+                            x as f32 + 0.5,
+                            y as f32 + 0.5,
+                            width as f32,
+                            height as f32,
+                            canvas.corner_radius as f32,
+                        )
+                    } else {
+                        rounded_coverage(x, y, width, height, canvas.corner_radius)
+                    };
+                    (
+                        false,
+                        coverage,
+                        (f32::from(source[3]) * coverage).round().clamp(0.0, 255.0) as u8,
+                    )
+                }
             };
-            if coverage <= 0.0 {
+            if coverage <= 0.0 || alpha == 0 {
                 continue;
             }
-            let alpha = (f32::from(source[3]) * coverage).round().clamp(0.0, 255.0) as u8;
-            if alpha == 0 {
-                continue;
-            }
-            let color = if edge_bleed {
+            let source_color = [source[0], source[1], source[2]];
+            let color = if !canvas.edge_bleed {
+                source_color
+            } else if masked {
+                if coverage < 1.0 || distance.is_some_and(|field| field.at(x, y) <= EDGE_BLEED_BAND)
+                {
+                    bleed_color(window, x, y)
+                } else {
+                    source_color
+                }
+            } else {
                 bleeded_color(
                     window,
                     x,
                     y,
                     width,
                     height,
-                    corner_radius,
-                    [source[0], source[1], source[2]],
+                    canvas.corner_radius,
+                    source_color,
                 )
-            } else {
-                [source[0], source[1], source[2]]
             };
-            let target_x = padding + x;
-            let target_y = padding + y;
-            let target_offset = (target_y as usize * canvas_width as usize + target_x as usize) * 4;
+            let target_x = canvas.padding + x;
+            let target_y = canvas.padding + y;
+            let target_offset =
+                (target_y as usize * canvas.canvas_width as usize + target_x as usize) * 4;
             if alpha == 255 {
                 pixels[target_offset..target_offset + 4]
                     .copy_from_slice(&[color[0], color[1], color[2], 255]);
@@ -377,20 +451,30 @@ fn bleeded_color(
 
 fn paint_border(
     pixels: &mut [u8],
-    canvas_width: u32,
-    padding: u32,
+    canvas: CanvasWindow,
     window: &RgbaFrame,
-    corner_radius: u32,
     border: &Border,
-    edge_feather: bool,
+    coverage: Option<&Coverage>,
+    distance: Option<&DistanceField>,
 ) {
     if border.outside {
-        paint_border_outside(pixels, canvas_width, padding, window, corner_radius, border);
+        paint_border_outside(
+            pixels,
+            canvas.canvas_width,
+            canvas.padding,
+            window,
+            canvas.corner_radius,
+            border,
+        );
         return;
     }
     let width = border.width;
     let color_alpha = f32::from(border.color[3]);
     if width == 0 || color_alpha <= 0.0 {
+        return;
+    }
+    if let (Some(shape), Some(distance)) = (coverage, distance) {
+        paint_border_masked(pixels, canvas, border, shape, distance);
         return;
     }
     let window_width = window.width();
@@ -400,20 +484,20 @@ fn paint_border(
     if inner_width == 0 || inner_height == 0 {
         return;
     }
-    let inner_radius = corner_radius.saturating_sub(width);
+    let inner_radius = canvas.corner_radius.saturating_sub(width);
 
     for y in 0..window_height {
         for x in 0..window_width {
-            let outer = if edge_feather {
+            let outer = if canvas.edge_feather {
                 feathered_coverage(
                     x as f32 + 0.5,
                     y as f32 + 0.5,
                     window_width as f32,
                     window_height as f32,
-                    corner_radius as f32,
+                    canvas.corner_radius as f32,
                 )
             } else {
-                rounded_coverage(x, y, window_width, window_height, corner_radius)
+                rounded_coverage(x, y, window_width, window_height, canvas.corner_radius)
             };
             if outer <= 0.0 {
                 continue;
@@ -437,10 +521,44 @@ fn paint_border(
             if coverage <= 0.0 {
                 continue;
             }
-            let target_x = padding + x;
-            let target_y = padding + y;
-            let target_offset = (target_y as usize * canvas_width as usize + target_x as usize) * 4;
+            let target_x = canvas.padding + x;
+            let target_y = canvas.padding + y;
+            let target_offset =
+                (target_y as usize * canvas.canvas_width as usize + target_x as usize) * 4;
             let alpha = (color_alpha * coverage).round().clamp(0.0, 255.0) as u8;
+            blend_pixel(
+                &mut pixels[target_offset..target_offset + 4],
+                [border.color[0], border.color[1], border.color[2], alpha],
+            );
+        }
+    }
+}
+
+fn paint_border_masked(
+    pixels: &mut [u8],
+    canvas: CanvasWindow,
+    border: &Border,
+    shape: &Coverage,
+    distance: &DistanceField,
+) {
+    let color_alpha = f32::from(border.color[3]);
+    let width = border.width as f32;
+    for y in 0..shape.height() {
+        for x in 0..shape.width() {
+            let coverage = f32::from(shape.at(x, y)) / 255.0;
+            if coverage <= 0.0 {
+                continue;
+            }
+            let inner = (distance.at(x, y) - width).clamp(0.0, 1.0);
+            let border_coverage = coverage * (1.0 - inner);
+            if border_coverage <= 0.0 {
+                continue;
+            }
+            let target_x = canvas.padding + x;
+            let target_y = canvas.padding + y;
+            let target_offset =
+                (target_y as usize * canvas.canvas_width as usize + target_x as usize) * 4;
+            let alpha = (color_alpha * border_coverage).round().clamp(0.0, 255.0) as u8;
             blend_pixel(
                 &mut pixels[target_offset..target_offset + 4],
                 [border.color[0], border.color[1], border.color[2], alpha],
@@ -1007,5 +1125,212 @@ mod tests {
     fn opaque_frames_report_no_corner_radius() {
         let frame = solid_frame(80, 60, [200, 50, 50, 255]);
         assert_eq!(estimate_corner_radius(&frame, 64), None);
+    }
+
+    fn rounded_alpha(width: u32, height: u32, radius: u32) -> Vec<u8> {
+        let mut alpha = vec![0u8; width as usize * height as usize];
+        for y in 0..height {
+            for x in 0..width {
+                alpha[y as usize * width as usize + x as usize] =
+                    (rounded_coverage(x, y, width, height, radius) * 255.0).round() as u8;
+            }
+        }
+        alpha
+    }
+
+    fn shaped_canvas() -> WindowCanvas {
+        WindowCanvas {
+            padding: 0,
+            corner_radius: 0,
+            shadow: None,
+            background: Background::Transparent,
+            border: None,
+            edge_bleed: false,
+            edge_feather: false,
+        }
+    }
+
+    #[test]
+    fn masked_composition_keeps_the_alpha_shape() {
+        let width = 24;
+        let height = 24;
+        let alpha = rounded_alpha(width, height, 8);
+        let window = solid_frame(width, height, [20, 20, 20, 255]);
+        let output = compose_window_shaped(
+            &window,
+            &shaped_canvas(),
+            ShapeSource::Mask(AlphaMask {
+                alpha: &alpha,
+                width,
+                height,
+            }),
+        )
+        .unwrap();
+
+        for y in 0..height {
+            for x in 0..width {
+                let expected = alpha[y as usize * width as usize + x as usize];
+                assert_eq!(
+                    output.pixel(x, y).unwrap()[3],
+                    expected,
+                    "mask alpha mismatch at {x},{y}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn window_alpha_shape_keeps_translucent_pixels() {
+        let width = 20;
+        let height = 20;
+        let mut pixels = vec![0u8; width as usize * height as usize * 4];
+        for y in 0..height {
+            for x in 0..width {
+                let coverage = (rounded_coverage(x, y, width, height, 6) * 255.0).round() as u8;
+                let index = (y as usize * width as usize + x as usize) * 4;
+                pixels[index..index + 4].copy_from_slice(&[90, 150, 210, coverage]);
+            }
+        }
+        let window = RgbaFrame::from_pixels(width, height, pixels).unwrap();
+        let output =
+            compose_window_shaped(&window, &shaped_canvas(), ShapeSource::WindowAlpha).unwrap();
+
+        for y in 0..height {
+            for x in 0..width {
+                let source = window.pixel(x, y).unwrap();
+                let composed = output.pixel(x, y).unwrap();
+                assert_eq!(composed[3], source[3], "alpha changed at {x},{y}");
+                if source[3] == 255 {
+                    assert_eq!(composed, source);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn masked_border_follows_the_curved_edge_without_gaps() {
+        let width = 24;
+        let height = 24;
+        let alpha = rounded_alpha(width, height, 8);
+        let window = solid_frame(width, height, [200, 50, 50, 255]);
+        let mut options = shaped_canvas();
+        options.border = Some(Border {
+            width: 1,
+            color: [0, 0, 0, 255],
+            outside: false,
+        });
+        let output = compose_window_shaped(
+            &window,
+            &options,
+            ShapeSource::Mask(AlphaMask {
+                alpha: &alpha,
+                width,
+                height,
+            }),
+        )
+        .unwrap();
+
+        let mut edge_pixels = 0;
+        for y in 0..12 {
+            let first =
+                (0..width).find(|x| alpha[y as usize * width as usize + *x as usize] >= 128);
+            let Some(x) = first else {
+                continue;
+            };
+            let composed = output.pixel(x, y).unwrap();
+            assert!(
+                composed[0] < 180,
+                "masked border is missing at {x},{y}: {composed:?}"
+            );
+            edge_pixels += 1;
+        }
+        assert!(edge_pixels > 0, "the corner needs border pixels");
+        assert_eq!(output.pixel(12, 12).unwrap(), [200, 50, 50, 255]);
+    }
+
+    #[test]
+    fn masked_edge_bleed_replaces_the_wallpaper_fringe() {
+        let width = 24;
+        let height = 24;
+        let radius = 8;
+        let alpha = rounded_alpha(width, height, radius);
+        let mut pixels = vec![0u8; width as usize * height as usize * 4];
+        for y in 0..height {
+            for x in 0..width {
+                let inside = rounded_coverage(x, y, width, height, radius) >= 0.99;
+                let color = if inside {
+                    [20, 20, 20, 255]
+                } else {
+                    [240, 240, 240, 255]
+                };
+                let offset = (y as usize * width as usize + x as usize) * 4;
+                pixels[offset..offset + 4].copy_from_slice(&color);
+            }
+        }
+        let window = RgbaFrame::from_pixels(width, height, pixels).unwrap();
+        let mut options = shaped_canvas();
+        options.edge_bleed = true;
+        let output = compose_window_shaped(
+            &window,
+            &options,
+            ShapeSource::Mask(AlphaMask {
+                alpha: &alpha,
+                width,
+                height,
+            }),
+        )
+        .unwrap();
+
+        let mut checked = false;
+        for y in 0..radius {
+            for x in 0..radius {
+                let coverage = alpha[y as usize * width as usize + x as usize];
+                if coverage > 0 && coverage < 255 {
+                    checked = true;
+                    let composed = output.pixel(x, y).unwrap();
+                    assert!(
+                        composed[0] < 80,
+                        "edge bleed missed the wallpaper fringe at {x},{y}: {composed:?}"
+                    );
+                }
+            }
+        }
+        assert!(checked, "the corner needs partially covered pixels");
+    }
+
+    #[test]
+    fn mask_is_resampled_when_the_probe_differs() {
+        let width = 24;
+        let height = 24;
+        let alpha = rounded_alpha(12, 12, 4);
+        let window = solid_frame(width, height, [20, 20, 20, 255]);
+        let output = compose_window_shaped(
+            &window,
+            &shaped_canvas(),
+            ShapeSource::Mask(AlphaMask {
+                alpha: &alpha,
+                width: 12,
+                height: 12,
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(output.pixel(0, 0).unwrap()[3], 0);
+        assert_eq!(output.pixel(12, 12).unwrap()[3], 255);
+    }
+
+    #[test]
+    fn invalid_masks_are_rejected() {
+        let window = solid_frame(8, 8, [20, 20, 20, 255]);
+        let result = compose_window_shaped(
+            &window,
+            &shaped_canvas(),
+            ShapeSource::Mask(AlphaMask {
+                alpha: &[0; 4],
+                width: 8,
+                height: 8,
+            }),
+        );
+        assert_eq!(result, Err(ComposeError::InvalidMask));
     }
 }

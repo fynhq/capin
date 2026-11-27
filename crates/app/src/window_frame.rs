@@ -1,7 +1,9 @@
 use core_capture::CaptureTarget;
 #[cfg(target_os = "windows")]
 use core_capture::window_is_fully_visible;
-use core_compose::{Background, Border, Shadow, WindowCanvas, compose_window};
+#[cfg(target_os = "macos")]
+use core_compose::AlphaMask;
+use core_compose::{Background, Border, Shadow, ShapeSource, WindowCanvas, compose_window_shaped};
 #[cfg(target_os = "windows")]
 use core_types::CaptureRegion;
 #[cfg(target_os = "windows")]
@@ -18,8 +20,15 @@ const SHADOW_OFFSET: f32 = 6.0;
 const SHADOW_BLUR: f32 = 16.0;
 const SHADOW_OPACITY: f32 = 0.35;
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+struct WindowShapeProbe {
+    alpha: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
 #[cfg(target_os = "macos")]
-pub fn measure_window_corner_radius(id: WindowId, scale: f32) -> Option<u32> {
+fn probe_window_shape(id: WindowId) -> Option<WindowShapeProbe> {
     use core_capture::CaptureTarget;
 
     if platform_window::window_capture_includes_native_shadow() {
@@ -33,12 +42,23 @@ pub fn measure_window_corner_radius(id: WindowId, scale: f32) -> Option<u32> {
             return None;
         }
     };
-    core_compose::estimate_corner_radius(&frame, (64.0 * scale.max(0.1)).round() as u32)
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn measure_window_corner_radius(_id: WindowId, _scale: f32) -> Option<u32> {
-    None
+    let width = frame.width();
+    let height = frame.height();
+    let mut alpha = vec![0u8; width as usize * height as usize];
+    for y in 0..height {
+        let Some(row) = frame.row(y) else {
+            continue;
+        };
+        let start = y as usize * width as usize;
+        for (index, value) in alpha[start..start + width as usize].iter_mut().enumerate() {
+            *value = row[index * 4 + 3];
+        }
+    }
+    Some(WindowShapeProbe {
+        alpha,
+        width,
+        height,
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -98,27 +118,29 @@ pub fn capture_refresh_frame(
 }
 
 pub fn compose_frozen_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> RgbaFrame {
-    compose_window_capture_measured(
-        id,
-        frame,
-        scale,
-        measure_window_corner_radius(id, scale),
-        true,
-        false,
-    )
+    #[cfg(target_os = "macos")]
+    let probe = probe_window_shape(id);
+    #[cfg(not(target_os = "macos"))]
+    let probe: Option<WindowShapeProbe> = None;
+    compose_window_capture_measured(id, frame, scale, probe, true, false, false)
 }
 
 pub fn compose_window_capture(id: WindowId, frame: RgbaFrame, scale: f32) -> RgbaFrame {
-    compose_window_capture_measured(id, frame, scale, None, false, true)
+    #[cfg(target_os = "macos")]
+    let use_source_alpha = true;
+    #[cfg(not(target_os = "macos"))]
+    let use_source_alpha = false;
+    compose_window_capture_measured(id, frame, scale, None, false, true, use_source_alpha)
 }
 
 fn compose_window_capture_measured(
     id: WindowId,
     frame: RgbaFrame,
     scale: f32,
-    measured_radius: Option<u32>,
+    probe: Option<WindowShapeProbe>,
     edge_bleed: bool,
     trim_fringe: bool,
+    use_source_alpha: bool,
 ) -> RgbaFrame {
     let settings = settings_state::get();
     let scale = scale.max(0.1);
@@ -131,24 +153,32 @@ fn compose_window_capture_measured(
     #[cfg(not(target_os = "windows"))]
     let _ = trim_fringe;
     let fallback_radius = platform_capture::window_corner_radius(id, scale);
-    #[cfg(target_os = "macos")]
-    let corner_radius = if platform_window::window_capture_includes_native_shadow() {
-        fallback_radius
-    } else {
-        measured_radius
-            .or_else(|| core_compose::estimate_corner_radius(&frame, (64.0 * scale).round() as u32))
-            .unwrap_or(fallback_radius)
-    };
-    #[cfg(not(target_os = "macos"))]
-    let corner_radius = {
-        let _ = measured_radius;
-        fallback_radius
-    };
     let native_shadow = platform_window::window_capture_includes_native_shadow();
     #[cfg(target_os = "macos")]
-    let edge_feather = !native_shadow;
+    let (corner_radius, shape, edge_feather) = if native_shadow {
+        (fallback_radius, ShapeSource::Rounded, false)
+    } else if use_source_alpha {
+        (fallback_radius, ShapeSource::WindowAlpha, false)
+    } else if let Some(probe) = probe.as_ref() {
+        (
+            fallback_radius,
+            ShapeSource::Mask(AlphaMask {
+                alpha: &probe.alpha,
+                width: probe.width,
+                height: probe.height,
+            }),
+            false,
+        )
+    } else {
+        let radius = core_compose::estimate_corner_radius(&frame, (64.0 * scale).round() as u32)
+            .unwrap_or(fallback_radius);
+        (radius, ShapeSource::Rounded, true)
+    };
     #[cfg(not(target_os = "macos"))]
-    let edge_feather = false;
+    let (corner_radius, shape, edge_feather) = {
+        let _ = (probe, use_source_alpha);
+        (fallback_radius, ShapeSource::Rounded, false)
+    };
     let canvas = window_canvas(
         &settings,
         scale,
@@ -158,7 +188,7 @@ fn compose_window_capture_measured(
         edge_feather,
     );
 
-    match compose_window(&frame, &canvas) {
+    match compose_window_shaped(&frame, &canvas, shape) {
         Ok(frame) => frame,
         Err(error) => {
             log_error!("window", "failed to compose the window capture: {error}");
@@ -205,8 +235,18 @@ fn window_canvas(
 }
 
 #[cfg(target_os = "macos")]
-fn system_border(_scale: f32) -> Option<Border> {
-    None
+fn system_border(scale: f32) -> Option<Border> {
+    let width = scale.max(0.1).round().max(1.0) as u32;
+    let light = platform_window::system_uses_light_theme().unwrap_or(true);
+    Some(Border {
+        width,
+        color: if light {
+            [0x00, 0x00, 0x00, 0x28]
+        } else {
+            [0xFF, 0xFF, 0xFF, 0x1E]
+        },
+        outside: false,
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -270,9 +310,9 @@ mod tests {
         assert!(canvas.shadow.is_some());
         assert!(canvas.edge_bleed);
         assert!(canvas.edge_feather);
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         assert!(canvas.border.is_some());
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         assert!(canvas.border.is_none());
     }
 }

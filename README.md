@@ -8,7 +8,7 @@
 
 Capin 是面向 Windows 10+ 与 macOS 13+ 的截图、标注、贴图、OCR、长截图与录屏工具。一个快捷键截取区域、窗口或元素，原地标注、贴图置顶、复制文字、拼接长页或录制 MP4，简单、高效、类原生。
 
-支持 Windows 10+（x64 / arm64）与 macOS 13+（Apple Silicon / Intel）。窗口截图保留系统风格阴影与内边距；Windows 在内容内侧合成 1px 主题边框，macOS 保留系统原生边框与窗口效果。区域截图可单独设置圆角与阴影。Windows 11 上托盘空闲约 5 MB，截图期间内存会上升，完成后逐步回落。所有内容仅在本机处理，不上传、无遥测。
+支持 Windows 10+（x64 / arm64）与 macOS 13+（Apple Silicon / Intel）。窗口截图保留系统风格阴影与内边距；Windows 在内容内侧合成 1px 主题边框，macOS 按窗口原生形状合成 1px 边框与窗口效果。区域截图可单独设置圆角与阴影。Windows 11 上托盘空闲约 5 MB，截图期间内存会上升，完成后逐步回落。所有内容仅在本机处理，不上传、无遥测。
 
 [English](#english) | 中文
 
@@ -63,7 +63,7 @@ Windows/macOS 平台层与官方安装包由 CI 在对应系统构建。
 
 Capin is a screenshot, annotation, pin, OCR, scrolling-capture, and screen-recording tool for Windows 10+ and macOS 13+. One hotkey captures a region, window, or element; annotate it in place, pin the result, copy recognized text, stitch long pages, or record an MP4 — simple, fast, native.
 
-It runs on Windows 10+ (x64, arm64) and macOS 13+ (Apple Silicon, Intel). Window captures keep the system-style shadow and padding; Windows adds a 1 px theme border inside the content, while macOS keeps the native window border and treatment. Region captures can set their own corner radius and shadow. The tray app idles at about 5 MB on Windows 11 (release build); memory rises during a capture and settles back down afterwards. Everything is processed locally — no upload, no telemetry.
+It runs on Windows 10+ (x64, arm64) and macOS 13+ (Apple Silicon, Intel). Window captures keep the system-style shadow and padding; Windows adds a 1 px theme border inside the content, while macOS composes a 1 px border along the native window shape. Region captures can set their own corner radius and shadow. The tray app idles at about 5 MB on Windows 11 (release build); memory rises during a capture and settles back down afterwards. Everything is processed locally — no upload, no telemetry.
 
 English | [中文](#chinese)
 
