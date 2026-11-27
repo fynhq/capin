@@ -42,7 +42,7 @@ impl SettingsView {
                         .items_center()
                         .justify_center()
                         .child(icons::icon(
-                            section.icon(),
+                            section.icon(selected),
                             layout::NAV_ICON,
                             if selected { accent } else { muted },
                         )),

@@ -125,12 +125,16 @@ impl SettingsSection {
             },
         )
     }
-    fn icon(self) -> &'static [u8] {
-        match self {
-            Self::General => icons::GENERAL,
-            Self::Capture => icons::CAPTURE,
-            Self::Recording => icons::RECORDING,
-            Self::Shortcuts => icons::SHORTCUTS,
+    fn icon(self, selected: bool) -> &'static [u8] {
+        match (self, selected) {
+            (Self::General, false) => icons::GENERAL,
+            (Self::General, true) => icons::GENERAL_FILLED,
+            (Self::Capture, false) => icons::CAPTURE,
+            (Self::Capture, true) => icons::CAPTURE_FILLED,
+            (Self::Recording, false) => icons::RECORDING,
+            (Self::Recording, true) => icons::RECORDING_FILLED,
+            (Self::Shortcuts, false) => icons::SHORTCUTS,
+            (Self::Shortcuts, true) => icons::SHORTCUTS_FILLED,
         }
     }
 }
