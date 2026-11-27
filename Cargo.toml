@@ -27,5 +27,11 @@ thiserror = "2.0.21"
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 
+# Keep opt-level 3 and panic=unwind: hot image paths and OCR panic recovery.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
 [patch.crates-io]
 paddleocr_rs_onnx = { path = "assets/paddleocr-rs-onnx" }

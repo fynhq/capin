@@ -14,8 +14,8 @@ path = "src/lib.rs"
 
 [dependencies]
 geo = "0.33"
-image = "0.25"
-imageproc = "0.27"
+image = { version = "0.25", default-features = false }
+imageproc = { version = "0.27", default-features = false }
 log = "0.4"
 ort = "2.0.0-rc.15"
 parking_lot = "0.13"
