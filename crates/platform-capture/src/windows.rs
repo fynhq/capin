@@ -22,8 +22,8 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Accessibility::{
     CUIAutomation8, IUIAutomation2, IUIAutomationCacheRequest, IUIAutomationCondition,
-    IUIAutomationElement, TreeScope_Children, TreeScope_Descendants, TreeScope_Element,
-    UIA_BoundingRectanglePropertyId,
+    IUIAutomationElement, IUIAutomationElementArray, TreeScope_Children, TreeScope_Descendants,
+    TreeScope_Element, UIA_BoundingRectanglePropertyId, UIA_IsOffscreenPropertyId,
 };
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, GetDpiForWindow,
@@ -132,6 +132,8 @@ fn capture_target(target: CaptureTarget, cursor: CursorCaptureSettings) -> Resul
 
 const UIA_TIMEOUT_MS: u32 = 1_500;
 const UIA_MAX_ELEMENTS: i32 = 16_384;
+const ELEMENT_TREE_LEVELS: usize = 2;
+const ELEMENT_FRONTIER_LIMIT: usize = 256;
 const CHILD_WINDOW_LIMIT: usize = 64;
 const CHAIN_MAX_DEPTH: usize = 32;
 const CHAIN_BUDGET: Duration = Duration::from_millis(300);
@@ -289,30 +291,116 @@ fn uia_elements(hwnd: HWND) -> Vec<PhysicalRect> {
     let Some(condition) = element_condition(&automation) else {
         return Vec::new();
     };
+    let Ok(offscreen_cache) = create_offscreen_cache(&automation) else {
+        return Vec::new();
+    };
     // SAFETY: the calls use live COM objects owned here and indices bounded by the reported length.
     unsafe {
         let Ok(root) = automation.ElementFromHandle(hwnd) else {
             return Vec::new();
         };
+        if let Some(elements) = pruned_elements(&root, &condition, &cache, &offscreen_cache) {
+            return elements;
+        }
         let Ok(elements) = root.FindAllBuildCache(TreeScope_Descendants, &condition, &cache) else {
             return Vec::new();
         };
-        let length = elements.Length().unwrap_or(0).clamp(0, UIA_MAX_ELEMENTS);
-        let mut result = Vec::with_capacity(length as usize);
-        for index in 0..length {
-            let Ok(element) = elements.GetElement(index) else {
-                continue;
-            };
-            let Ok(rect) = element.CachedBoundingRectangle() else {
-                continue;
-            };
-            let bounds = physical_rect(rect);
-            if bounds.size.width > 1 && bounds.size.height > 1 {
-                result.push(bounds);
+        cached_rects(&elements)
+    }
+}
+
+fn create_offscreen_cache(
+    automation: &IUIAutomation2,
+) -> windows::core::Result<IUIAutomationCacheRequest> {
+    // SAFETY: the automation object is initialized and owned by this thread.
+    unsafe {
+        let cache = automation.CreateCacheRequest()?;
+        cache.AddProperty(UIA_BoundingRectanglePropertyId)?;
+        cache.AddProperty(UIA_IsOffscreenPropertyId)?;
+        cache.SetTreeScope(TreeScope_Element)?;
+        Ok(cache)
+    }
+}
+
+fn pruned_elements(
+    root: &IUIAutomationElement,
+    condition: &IUIAutomationCondition,
+    cache: &IUIAutomationCacheRequest,
+    offscreen_cache: &IUIAutomationCacheRequest,
+) -> Option<Vec<PhysicalRect>> {
+    let mut result = Vec::new();
+    let mut frontier = vec![root.to_owned()];
+    for _ in 0..ELEMENT_TREE_LEVELS {
+        let mut next = Vec::new();
+        for node in &frontier {
+            let children =
+                unsafe { node.FindAllBuildCache(TreeScope_Children, condition, offscreen_cache) }
+                    .ok()?;
+            let length = unsafe { children.Length() }
+                .unwrap_or(0)
+                .clamp(0, UIA_MAX_ELEMENTS);
+            let mut rows = Vec::with_capacity(length as usize);
+            let mut visible = HashSet::new();
+            for index in 0..length {
+                let Ok(child) = (unsafe { children.GetElement(index) }) else {
+                    continue;
+                };
+                let Ok(rect) = (unsafe { child.CachedBoundingRectangle() }) else {
+                    continue;
+                };
+                let bounds = physical_rect(rect);
+                let offscreen =
+                    unsafe { child.CachedIsOffscreen() }.is_ok_and(|value| value.as_bool());
+                if !offscreen && usable(bounds) {
+                    visible.insert(bounds);
+                }
+                rows.push((child, bounds, offscreen));
+            }
+            for (child, bounds, offscreen) in rows {
+                if offscreen && visible.contains(&bounds) {
+                    continue;
+                }
+                if usable(bounds) {
+                    result.push(bounds);
+                }
+                next.push(child);
             }
         }
-        result
+        if next.len() > ELEMENT_FRONTIER_LIMIT {
+            return None;
+        }
+        frontier = next;
     }
+    for node in &frontier {
+        let elements =
+            unsafe { node.FindAllBuildCache(TreeScope_Descendants, condition, cache) }.ok()?;
+        result.extend(cached_rects(&elements));
+    }
+    Some(result)
+}
+
+fn usable(bounds: PhysicalRect) -> bool {
+    bounds.size.width > 1 && bounds.size.height > 1
+}
+
+fn cached_rects(elements: &IUIAutomationElementArray) -> Vec<PhysicalRect> {
+    let length = unsafe { elements.Length() }
+        .unwrap_or(0)
+        .clamp(0, UIA_MAX_ELEMENTS);
+    let mut result = Vec::with_capacity(length as usize);
+    for index in 0..length {
+        let Ok(element) = (unsafe { elements.GetElement(index) }) else {
+            continue;
+        };
+        let Ok(rect) = (unsafe { element.CachedBoundingRectangle() }) else {
+            continue;
+        };
+        let bounds = physical_rect(rect);
+        if usable(bounds) {
+            result.push(bounds);
+        }
+    }
+    result
 }
 
 fn child_window_rects(hwnd: HWND) -> Vec<PhysicalRect> {

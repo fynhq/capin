@@ -522,7 +522,10 @@ pub fn open_overlays(cx: &mut App) {
                         "monitor {monitor_id} overlay still on display {actual} after re-placement"
                     );
                 }
-                geometry.update(cx, |this, cx| this.refresh_geometry(window, cx));
+                geometry.update(cx, |this, cx| {
+                    this.refresh_geometry(window, cx);
+                    this.seed_cursor(window, cx);
+                });
                 window.focus(&focus, cx);
                 window.activate_window();
                 cx.activate(true);

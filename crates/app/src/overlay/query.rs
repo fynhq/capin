@@ -29,6 +29,26 @@ impl OverlayView {
             .map(|[red, green, blue, _]| (red, green, blue))
     }
 
+    pub(super) fn seed_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cursor.is_some() {
+            return;
+        }
+        let Some((x, y)) = platform_window::cursor_screen_position() else {
+            return;
+        };
+        let point = PhysicalPoint::new(x, y);
+        if !self.session.monitor_bounds().contains(point) {
+            return;
+        }
+        self.cursor = Some(point);
+        self.session.pointer_moved(point);
+        if !self.session.has_drag() {
+            self.refresh_auto_target(point, cx);
+        }
+        self.update_magnifier(window);
+        cx.notify();
+    }
+
     pub(super) fn refresh_auto_target(&mut self, point: PhysicalPoint, cx: &mut Context<Self>) {
         if self.session.is_dragging() || self.selected.is_some() {
             return;
