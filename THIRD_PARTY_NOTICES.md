@@ -4,10 +4,10 @@ Capin includes open-source third-party components. This notice is
 included in the Windows packages and in the macOS app bundle.
 
 The list covers the components used by the Windows and macOS binaries
-(525 packages in the union of all four shipped targets).
+(519 packages in the union of all four shipped targets).
 A package may be present on only some platforms or architectures.
 
-Generated from Cargo.lock. Dependency-set fingerprint: 9b7006e1c1a685da683fb03749f0391a94f4fe53aaf8f0f3dffaadf545c97392.
+Generated from Cargo.lock. Dependency-set fingerprint: 266137a60ef48a5915fd97762eba64f10fe628e21e1a2c0da0ca4720cd03b7cc.
 
 License expressions are shown as declared by the upstream package (usually
 SPDX syntax). Where a component is offered under several licenses, Capin
@@ -99,7 +99,6 @@ authoritative.
 | dpi | 0.1.2 | Apache-2.0 AND MIT | https://github.com/rust-windowing/winit |
 | dunce | 1.0.5 | CC0-1.0 OR MIT-0 OR Apache-2.0 | https://gitlab.com/kornelski/dunce |
 | dyn-clone | 1.0.20 | MIT OR Apache-2.0 | https://github.com/dtolnay/dyn-clone |
-| earcut | 0.4.5 | ISC | https://github.com/ciscorn/earcut-rs |
 | either | 1.19.0 | MIT OR Apache-2.0 | https://github.com/rayon-rs/either |
 | enumn | 0.1.14 | MIT OR Apache-2.0 | https://github.com/dtolnay/enumn |
 | equator | 0.4.2 | MIT | https://github.com/sarah-ek/equator/ |
@@ -230,7 +229,6 @@ authoritative.
 | linktime-proc-macro | 0.2.3 | Apache-2.0 OR MIT | https://github.com/mmastrac/linktime |
 | litemap | 0.8.3 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | lock_api | 0.4.14 | MIT OR Apache-2.0 | https://github.com/Amanieu/parking_lot |
-| lock_api | 0.5.0 | MIT OR Apache-2.0 | https://github.com/Amanieu/parking_lot |
 | log | 0.4.35 | MIT OR Apache-2.0 | https://github.com/rust-lang/log |
 | loop9 | 0.1.5 | MIT | https://gitlab.com/kornelski/loop9.git |
 | lru | 0.18.5 | MIT | https://github.com/jeromefroe/lru-rs.git |
@@ -313,8 +311,6 @@ authoritative.
 | paddleocr_rs_onnx | 0.2.8 | MIT | https://github.com/Craun718/PaddleOCR-rs |
 | parking | 2.2.1 | Apache-2.0 OR MIT | https://github.com/smol-rs/parking |
 | parking_lot | 0.12.5 | MIT OR Apache-2.0 | https://github.com/Amanieu/parking_lot |
-| parking_lot | 0.13.0 | MIT OR Apache-2.0 | https://github.com/Amanieu/parking_lot |
-| parking_lot_core | 0.10.0 | MIT OR Apache-2.0 | https://github.com/Amanieu/parking_lot |
 | parking_lot_core | 0.9.12 | MIT OR Apache-2.0 | https://github.com/Amanieu/parking_lot |
 | paste | 1.0.15 | MIT OR Apache-2.0 | https://github.com/dtolnay/paste |
 | pastey | 0.1.1 | MIT OR Apache-2.0 | https://github.com/as1100k/pastey |
@@ -333,7 +329,6 @@ authoritative.
 | png | 0.18.1 | MIT OR Apache-2.0 | https://github.com/image-rs/image-png |
 | polling | 3.11.0 | Apache-2.0 OR MIT | https://github.com/smol-rs/polling |
 | pollster | 0.4.0 | Apache-2.0/MIT | https://github.com/zesterer/pollster |
-| pollster | 1.0.3 | MIT OR Apache-2.0 | https://github.com/zesterer/pollster |
 | polycool | 0.4.0 | MIT OR Apache-2.0 | https://github.com/linebender/kurbo |
 | potential_utf | 0.1.6 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | ppv-lite86 | 0.2.21 | MIT OR Apache-2.0 | https://github.com/cryptocorrosion/cryptocorrosion |
@@ -411,7 +406,6 @@ authoritative.
 | smallvec | 1.16.6 | MIT OR Apache-2.0 | https://github.com/smallvec/smallvec |
 | smol | 2.0.2 | Apache-2.0 OR MIT | https://github.com/smol-rs/smol |
 | smol_str | 0.3.7 | MIT OR Apache-2.0 | https://github.com/rust-lang/rust-analyzer/tree/master/lib/smol_str |
-| spade | 2.15.1 | MIT OR Apache-2.0 | https://github.com/Stoeoef/spade |
 | spin | 0.10.1 | MIT | https://github.com/mvdnes/spin-rs.git |
 | spin | 0.9.9 | MIT | https://github.com/mvdnes/spin-rs.git |
 | stable_deref_trait | 1.2.1 | MIT OR Apache-2.0 | https://github.com/storyyeller/stable_deref_trait |
@@ -769,7 +763,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### LICENSE-APACHE / aclysma__profiling / master__LICENSE-APACHE / servo__pathfinder / main__LICENSE-APACHE / servo__pathfinder / master__LICENSE-APACHE
 
-Used by: addr2line 0.27.1, aligned 0.4.3, arrayvec 0.7.8, as-slice 0.2.1, async-channel 2.5.0, async-executor 1.14.1, async-fs 2.2.0, async-io 2.6.0, async-lock 3.5.0, async-net 2.0.0, async-process 2.5.0, async-signal 0.2.14, async-task 4.7.1, atomic-waker 1.1.2, backtrace 0.3.77, base64 0.22.1, base64 0.23.1, bitflags 1.3.2, bitflags 2.13.2, bitstream-io 4.10.0, blocking 1.7.0, bumpalo 3.20.4, cfg-if 1.0.5, concurrent-queue 2.5.0, core-foundation 0.10.1, core-foundation-sys 0.8.7, core-graphics 0.24.0, core-graphics 0.25.0, core-graphics-types 0.2.0, core-text 21.0.0, crossbeam-channel 0.5.17, crossbeam-deque 0.8.8, crossbeam-epoch 0.9.21, crossbeam-utils 0.8.23, data-url 0.3.2, displaydoc 0.2.7, either 1.19.0, equivalent 1.0.3, errno 0.3.15, euclid 0.22.14, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, flate2 1.1.11, form_urlencoded 1.2.3, futf 0.1.5, futures-lite 2.6.1, geo-types 0.7.20, gif 0.14.2, gimli 0.34.0, global-hotkey 0.10.0, hash32 0.3.1, hashbrown 0.16.1, hashbrown 0.17.2, heapless 0.8.0, heapless 0.9.4, heck 0.5.0, html5ever 0.27.0, httparse 1.10.1, idna 1.1.0, idna_adapter 1.2.2, indexmap 2.14.2, itertools 0.13.0, itertools 0.14.0, keyboard-types 0.8.3, lazy_static 1.5.1, lock_api 0.4.14, lock_api 0.5.0, log 0.4.35, markup5ever 0.12.1, markup5ever_rcdom 0.3.0, matrixmultiply 0.3.11, muda 0.21.2, ndarray 0.17.2, num 0.4.3, num-bigint 0.4.8, num-complex 0.4.6, num-derive 0.4.2, num-integer 0.1.47, num-iter 0.1.46, num-rational 0.4.2, num-traits 0.2.19, num_cpus 1.17.0, object 0.40.0, once_cell 1.21.4, parking 2.2.1, parking_lot 0.12.5, parking_lot 0.13.0, parking_lot_core 0.10.0, parking_lot_core 0.9.12, pathfinder_geometry 0.5.1, pathfinder_simd 0.5.6, percent-encoding 2.3.2, piper 0.2.5, png 0.17.16, png 0.18.1, polling 3.11.0, pollster 0.4.0, pollster 1.0.3, profiling 1.0.18, profiling-procmacros 1.0.18, rawpointer 0.2.1, rayon 1.12.0, rayon-core 1.13.0, regex 1.13.2, regex-automata 0.4.19, regex-syntax 0.8.12, robust 1.2.0, roxmltree 0.21.2, rustc-demangle 0.1.28, rustix 1.1.6, scopeguard 1.2.0, signal-hook-registry 1.4.8, simplecss 0.2.2, smallvec 1.16.6, smol 2.0.2, smol_str 0.3.7, stable_deref_trait 1.2.1, string_cache 0.8.9, svgtypes 0.16.2, swash 0.2.10, tendril 0.4.3, tray-icon 0.26.1, ttf-parser 0.25.1, unicode-bidi 0.3.18, unicode-bidi-mirroring 0.4.0, unicode-ccc 0.4.0, unicode-id 0.3.7, unicode-properties 0.1.5, unicode-segmentation 1.13.3, unicode-vo 0.1.0, url 2.5.9, uuid 1.29.3, waker-fn 1.2.0, wasm-bindgen 0.2.130, wasm-bindgen-macro 0.2.130, wasm-bindgen-macro-support 0.2.130, wasm-bindgen-shared 0.2.130, weezl 0.1.12, xml5ever 0.18.1, yazi 0.2.2, zed-font-kit 0.14.1-zed, zeno 0.3.3
+Used by: addr2line 0.27.1, aligned 0.4.3, arrayvec 0.7.8, as-slice 0.2.1, async-channel 2.5.0, async-executor 1.14.1, async-fs 2.2.0, async-io 2.6.0, async-lock 3.5.0, async-net 2.0.0, async-process 2.5.0, async-signal 0.2.14, async-task 4.7.1, atomic-waker 1.1.2, backtrace 0.3.77, base64 0.22.1, base64 0.23.1, bitflags 1.3.2, bitflags 2.13.2, bitstream-io 4.10.0, blocking 1.7.0, bumpalo 3.20.4, cfg-if 1.0.5, concurrent-queue 2.5.0, core-foundation 0.10.1, core-foundation-sys 0.8.7, core-graphics 0.24.0, core-graphics 0.25.0, core-graphics-types 0.2.0, core-text 21.0.0, crossbeam-channel 0.5.17, crossbeam-deque 0.8.8, crossbeam-epoch 0.9.21, crossbeam-utils 0.8.23, data-url 0.3.2, displaydoc 0.2.7, either 1.19.0, equivalent 1.0.3, errno 0.3.15, euclid 0.22.14, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, flate2 1.1.11, form_urlencoded 1.2.3, futf 0.1.5, futures-lite 2.6.1, geo-types 0.7.20, gif 0.14.2, gimli 0.34.0, global-hotkey 0.10.0, hash32 0.3.1, hashbrown 0.16.1, hashbrown 0.17.2, heapless 0.8.0, heapless 0.9.4, heck 0.5.0, html5ever 0.27.0, httparse 1.10.1, idna 1.1.0, idna_adapter 1.2.2, indexmap 2.14.2, itertools 0.13.0, itertools 0.14.0, keyboard-types 0.8.3, lazy_static 1.5.1, lock_api 0.4.14, log 0.4.35, markup5ever 0.12.1, markup5ever_rcdom 0.3.0, matrixmultiply 0.3.11, muda 0.21.2, ndarray 0.17.2, num 0.4.3, num-bigint 0.4.8, num-complex 0.4.6, num-derive 0.4.2, num-integer 0.1.47, num-iter 0.1.46, num-rational 0.4.2, num-traits 0.2.19, num_cpus 1.17.0, object 0.40.0, once_cell 1.21.4, parking 2.2.1, parking_lot 0.12.5, parking_lot_core 0.9.12, pathfinder_geometry 0.5.1, pathfinder_simd 0.5.6, percent-encoding 2.3.2, piper 0.2.5, png 0.17.16, png 0.18.1, polling 3.11.0, pollster 0.4.0, profiling 1.0.18, profiling-procmacros 1.0.18, rawpointer 0.2.1, rayon 1.12.0, rayon-core 1.13.0, regex 1.13.2, regex-automata 0.4.19, regex-syntax 0.8.12, robust 1.2.0, roxmltree 0.21.2, rustc-demangle 0.1.28, rustix 1.1.6, scopeguard 1.2.0, signal-hook-registry 1.4.8, simplecss 0.2.2, smallvec 1.16.6, smol 2.0.2, smol_str 0.3.7, stable_deref_trait 1.2.1, string_cache 0.8.9, svgtypes 0.16.2, swash 0.2.10, tendril 0.4.3, tray-icon 0.26.1, ttf-parser 0.25.1, unicode-bidi 0.3.18, unicode-bidi-mirroring 0.4.0, unicode-ccc 0.4.0, unicode-id 0.3.7, unicode-properties 0.1.5, unicode-segmentation 1.13.3, unicode-vo 0.1.0, url 2.5.9, uuid 1.29.3, waker-fn 1.2.0, wasm-bindgen 0.2.130, wasm-bindgen-macro 0.2.130, wasm-bindgen-macro-support 0.2.130, wasm-bindgen-shared 0.2.130, weezl 0.1.12, xml5ever 0.18.1, yazi 0.2.2, zed-font-kit 0.14.1-zed, zeno 0.3.3
 
 <pre>
 Apache License
@@ -1365,7 +1359,7 @@ SOFTWARE.
 
 ### LICENSE / LICENSE-APACHE / LICENSE-APACHE.md / LICENSE-APACHE.txt / etemesi254__zune-image / master__LICENSE-APACHE
 
-Used by: approx 0.5.1, flume 0.12.0, imgref 1.12.3, kurbo 0.13.1, multiversion 0.8.1, multiversion-macros 0.8.1, ntapi 0.4.3, ort 2.0.0-rc.15, ort-sys 2.0.0-rc.15, polycool 0.4.0, self_cell 1.3.0, siphasher 1.0.4, spade 2.15.1, static_assertions 1.1.0, sys-locale 0.3.2, target-features 0.1.6, tinyvec 1.13.3, unicode-linebreak 0.1.5, ureq 3.5.2, ureq-proto 0.7.1, utf8_iter 1.1.0, utf_types 1.0.0, zeroize 1.9.2, zeroize_derive 1.5.0, zune-core 0.5.3, zune-inflate 0.2.54, zune-jpeg 0.5.15
+Used by: approx 0.5.1, flume 0.12.0, imgref 1.12.3, kurbo 0.13.1, multiversion 0.8.1, multiversion-macros 0.8.1, ntapi 0.4.3, ort 2.0.0-rc.15, ort-sys 2.0.0-rc.15, polycool 0.4.0, self_cell 1.3.0, siphasher 1.0.4, static_assertions 1.1.0, sys-locale 0.3.2, target-features 0.1.6, tinyvec 1.13.3, unicode-linebreak 0.1.5, ureq 3.5.2, ureq-proto 0.7.1, utf8_iter 1.1.0, utf_types 1.0.0, zeroize 1.9.2, zeroize_derive 1.5.0, zune-core 0.5.3, zune-inflate 0.2.54, zune-jpeg 0.5.15
 
 <pre>
 Apache License
@@ -4704,29 +4698,6 @@ express Statement of Purpose.
  d. Affirmer understands and acknowledges that Creative Commons is not a
     party to this document and has no duty or obligation with respect to
     this CC0 or use of the Work.
-</pre>
-
-### LICENSE.txt
-
-Used by: earcut 0.4.5
-
-<pre>
-ISC License
-
-Copyright (c) 2016, Mapbox
-Copyright (c) 2023, Taku Fukada
-
-Permission to use, copy, modify, and/or distribute this software for any purpose
-with or without fee is hereby granted, provided that the above copyright notice
-and this permission notice appear in all copies.
-
-THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
-REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
-FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
-INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
-OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
-TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
-THIS SOFTWARE.
 </pre>
 
 ### LICENSE-MIT
@@ -8514,7 +8485,7 @@ Copyright notices are retained in src/* files where relevant.
 
 ### LICENSE-MIT
 
-Used by: lock_api 0.4.14, lock_api 0.5.0, parking_lot 0.12.5, parking_lot 0.13.0, parking_lot_core 0.10.0, parking_lot_core 0.9.12
+Used by: lock_api 0.4.14, parking_lot 0.12.5, parking_lot_core 0.9.12
 
 <pre>
 Copyright (c) 2016 The Rust Project Developers
@@ -10475,7 +10446,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### LICENSE-MIT
 
-Used by: pollster 0.4.0, pollster 1.0.3
+Used by: pollster 0.4.0
 
 <pre>
 Copyright (c) 2020-2021 Joshua Barretto
@@ -13858,38 +13829,6 @@ Used by: smallvec 1.16.6
 
 <pre>
 Copyright (c) 2018 The Servo Project Developers
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-</pre>
-
-### LICENSE-MIT
-
-Used by: spade 2.15.1
-
-<pre>
-Copyright (c) 2017 The Spade Developers
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated

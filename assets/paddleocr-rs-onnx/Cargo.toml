@@ -13,12 +13,12 @@ name = "paddleocr_rs_onnx"
 path = "src/lib.rs"
 
 [dependencies]
-geo = "0.33"
+geo = { version = "0.33", default-features = false }
 image = { version = "0.25", default-features = false }
 imageproc = { version = "0.27", default-features = false }
 log = "0.4"
 ort = "2.0.0-rc.15"
-parking_lot = "0.13"
+parking_lot = "0.12"
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2.0"

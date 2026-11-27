@@ -20,7 +20,7 @@ core-record.workspace = true
 core-stitch.workspace = true
 core-types.workspace = true
 gpui-kit.workspace = true
-image = { version = "0.25.10", default-features = false, features = ["bmp", "jpeg", "png"] }
+image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
 jiff.workspace = true
 platform-capture.workspace = true
 platform-ocr.workspace = true

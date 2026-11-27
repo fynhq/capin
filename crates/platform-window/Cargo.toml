@@ -23,7 +23,6 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Threading",
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
-    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
     "Wdk_System_SystemServices",
@@ -32,7 +31,6 @@ windows = { version = "0.62.2", features = [
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10.1"
 core-graphics = { version = "0.25.0", features = ["highsierra"] }
-foreign-types-shared = "0.3.1"
 objc2 = "0.6.5"
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "std",
