@@ -1272,6 +1272,45 @@ mod tests {
     }
 
     #[test]
+    fn mixed_cjk_text_wraps_and_rasterizes_stably() {
+        let text = "Capin \u{4e2d}\u{6587}\u{957f}\u{6587}\u{672c} mixed 123 \u{6807}\u{70b9} \u{4e2d}\u{6587}\u{957f}\u{6587}\u{672c} mixed 123 \u{6807}\u{70b9}\u{3002}";
+        let has_fonts = with_text_engine(|engine| !engine.font_system.db_mut().is_empty());
+        let wide = measure_text_height(text, 16.0, 800);
+        let narrow = measure_text_height(text, 16.0, 80);
+        if has_fonts {
+            assert!(
+                narrow > wide,
+                "narrow text must wrap: narrow={narrow} wide={wide}"
+            );
+        }
+        assert_eq!(narrow, measure_text_height(text, 16.0, 80));
+
+        let frame = black_frame(120, 200);
+        let mut document = document(120, 200);
+        document.add(
+            Shape::Text {
+                bounds: PhysicalRect::new(4, 4, 110, 190),
+                text: text.to_owned(),
+            },
+            AnnotationStyle {
+                color: 0xFFFFFFFF,
+                ..Default::default()
+            },
+        );
+        let output = rasterize(&document, &frame).unwrap();
+        assert_eq!(output.width(), 120);
+        assert_eq!(output.height(), 200);
+        if has_fonts {
+            let painted = output
+                .packed_pixels()
+                .chunks_exact(4)
+                .filter(|pixel| pixel[0] > 0 || pixel[1] > 0 || pixel[2] > 0)
+                .count();
+            assert!(painted > 0, "CJK text must paint at least one glyph pixel");
+        }
+    }
+
+    #[test]
     fn text_styles_render_without_error() {
         let frame = black_frame(120, 60);
         let mut document = document(120, 60);
