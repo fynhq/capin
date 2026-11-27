@@ -140,6 +140,14 @@ fn rows(image: bool, language: Language) -> Vec<(String, String)> {
         ));
         rows.push(("Scroll".to_owned(), t(language, "pin.hint_zoom").to_owned()));
         rows.push((
+            "Cmd/Ctrl+-".to_owned(),
+            t(language, "pin.hint_zoom_out").to_owned(),
+        ));
+        rows.push((
+            "Cmd/Ctrl+0".to_owned(),
+            t(language, "pin.hint_zoom_reset").to_owned(),
+        ));
+        rows.push((
             "Shift+Scroll".to_owned(),
             t(language, "pin.hint_opacity").to_owned(),
         ));

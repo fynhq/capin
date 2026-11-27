@@ -299,6 +299,17 @@ impl Render for PinView {
                     cx.stop_propagation();
                     return;
                 }
+                if command && matches!(key, "-" | "0") && this.content.image_size().is_some() {
+                    let scale = window.scale_factor().max(0.1);
+                    let target = if key == "0" {
+                        1.0 / scale
+                    } else {
+                        this.zoom_target - PIN_ZOOM_STEP / scale
+                    };
+                    this.zoom_toward(target, window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
                 if key == "f1" {
                     let bounds = window.bounds();
                     let image = matches!(&this.content, PinContent::Image { .. });
