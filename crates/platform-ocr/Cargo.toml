@@ -37,7 +37,15 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSEnumerator",
     "NSString",
 ] }
-objc2-core-video = "0.3.2"
+objc2-core-video = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CVBase",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+    "CVReturn",
+    "objc2",
+] }
 objc2-vision = { version = "0.3.2", default-features = false, features = [
     "std",
     "VNObservation",

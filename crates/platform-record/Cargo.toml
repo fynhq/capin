@@ -26,13 +26,82 @@ windows-capture = "2.0.1"
 block2 = "0.6.2"
 dispatch2 = "0.3.1"
 objc2 = "0.6.5"
-objc2-av-foundation = { version = "0.3.2", features = ["objc2-core-media", "objc2-core-video"] }
-objc2-core-foundation = "0.3.2"
-objc2-core-graphics = "0.3.2"
-objc2-core-media = "0.3.2"
-objc2-core-video = "0.3.2"
-objc2-foundation = "0.3.2"
-objc2-screen-capture-kit = "0.3.2"
+objc2-av-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "AVAssetWriter",
+    "AVAssetWriterInput",
+    "AVBase",
+    "AVMediaFormat",
+    "AVVideoSettings",
+    "block2",
+    "dispatch2",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "objc2-core-media",
+    "objc2-core-video",
+    "objc2-uniform-type-identifiers",
+] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CFBase",
+    "CFCGTypes",
+    "objc2",
+] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CGBase",
+    "CGColorSpace",
+    "CGDataProvider",
+    "CGDirectDisplay",
+    "CGImage",
+    "CGWindow",
+    "objc2",
+] }
+objc2-core-media = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CMBase",
+    "CMBlockBuffer",
+    "CMFormatDescription",
+    "CMSampleBuffer",
+    "CMTime",
+    "block2",
+    "objc2",
+    "objc2-core-video",
+] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CVBase",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+    "CVPixelBufferPool",
+    "CVPixelFormatDescription",
+    "CVReturn",
+    "objc2",
+    "objc2-core-graphics",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSDictionary",
+    "NSError",
+    "NSString",
+    "NSURL",
+    "NSValue",
+] }
+objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "SCError",
+    "SCShareableContent",
+    "SCStream",
+    "block2",
+    "dispatch2",
+    "libc",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "objc2-core-media",
+    "objc2-uniform-type-identifiers",
+] }
 
 [lints]
 workspace = true

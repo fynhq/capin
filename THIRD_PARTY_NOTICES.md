@@ -4,10 +4,10 @@ Capin includes open-source third-party components. This notice is
 included in the Windows packages and in the macOS app bundle.
 
 The list covers the components used by the Windows and macOS binaries
-(519 packages in the union of all four shipped targets).
+(517 packages in the union of all four shipped targets).
 A package may be present on only some platforms or architectures.
 
-Generated from Cargo.lock. Dependency-set fingerprint: 266137a60ef48a5915fd97762eba64f10fe628e21e1a2c0da0ca4720cd03b7cc.
+Generated from Cargo.lock. Dependency-set fingerprint: 27fc41783b4332faa1c382a2b7a5d98b8c474ec0944e44247c9e96fd1395a546.
 
 License expressions are shown as declared by the upstream package (usually
 SPDX syntax). Where a component is offered under several licenses, Capin
@@ -274,7 +274,6 @@ authoritative.
 | objc2-app-kit | 0.3.2 | Zlib OR Apache-2.0 OR MIT | https://github.com/madsmtm/objc2 |
 | objc2-application-services | 0.3.2 | Zlib OR Apache-2.0 OR MIT | https://github.com/madsmtm/objc2 |
 | objc2-av-foundation | 0.3.2 | Zlib OR Apache-2.0 OR MIT | https://github.com/madsmtm/objc2 |
-| objc2-avf-audio | 0.3.2 | Zlib OR Apache-2.0 OR MIT | https://github.com/madsmtm/objc2 |
 | objc2-cloud-kit | 0.3.2 | Zlib OR Apache-2.0 OR MIT | https://github.com/madsmtm/objc2 |
 | objc2-core-audio | 0.3.2 | Zlib OR Apache-2.0 OR MIT | https://github.com/madsmtm/objc2 |
 | objc2-core-audio-types | 0.3.2 | Zlib OR Apache-2.0 OR MIT | https://github.com/madsmtm/objc2 |
@@ -293,7 +292,6 @@ authoritative.
 | objc2-foundation | 0.3.2 | MIT | https://github.com/madsmtm/objc2 |
 | objc2-image-io | 0.3.2 | Zlib OR Apache-2.0 OR MIT | https://github.com/madsmtm/objc2 |
 | objc2-io-surface | 0.3.2 | Zlib OR Apache-2.0 OR MIT | https://github.com/madsmtm/objc2 |
-| objc2-media-toolbox | 0.3.2 | Zlib OR Apache-2.0 OR MIT | https://github.com/madsmtm/objc2 |
 | objc2-metal | 0.2.2 | MIT | https://github.com/madsmtm/objc2 |
 | objc2-metal | 0.3.2 | Zlib OR Apache-2.0 OR MIT | https://github.com/madsmtm/objc2 |
 | objc2-quartz-core | 0.2.2 | MIT | https://github.com/madsmtm/objc2 |
@@ -2469,7 +2467,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### madsmtm__objc2 / main__LICENSE-APACHE.txt
 
-Used by: block2 0.5.1, block2 0.6.2, dispatch2 0.3.1, objc-sys 0.3.5, objc2 0.5.3, objc2 0.6.5, objc2-app-kit 0.2.2, objc2-app-kit 0.3.2, objc2-application-services 0.3.2, objc2-av-foundation 0.3.2, objc2-avf-audio 0.3.2, objc2-cloud-kit 0.3.2, objc2-core-audio 0.3.2, objc2-core-audio-types 0.3.2, objc2-core-data 0.2.2, objc2-core-data 0.3.2, objc2-core-foundation 0.3.2, objc2-core-graphics 0.3.2, objc2-core-image 0.2.2, objc2-core-image 0.3.2, objc2-core-media 0.3.2, objc2-core-services 0.3.2, objc2-core-text 0.3.2, objc2-core-video 0.3.2, objc2-encode 4.1.0, objc2-foundation 0.2.2, objc2-foundation 0.3.2, objc2-image-io 0.3.2, objc2-io-surface 0.3.2, objc2-media-toolbox 0.3.2, objc2-metal 0.2.2, objc2-metal 0.3.2, objc2-quartz-core 0.2.2, objc2-quartz-core 0.3.2, objc2-screen-capture-kit 0.3.2, objc2-security 0.3.2, objc2-uniform-type-identifiers 0.3.2, objc2-user-notifications 0.3.2, objc2-vision 0.3.2
+Used by: block2 0.5.1, block2 0.6.2, dispatch2 0.3.1, objc-sys 0.3.5, objc2 0.5.3, objc2 0.6.5, objc2-app-kit 0.2.2, objc2-app-kit 0.3.2, objc2-application-services 0.3.2, objc2-av-foundation 0.3.2, objc2-cloud-kit 0.3.2, objc2-core-audio 0.3.2, objc2-core-audio-types 0.3.2, objc2-core-data 0.2.2, objc2-core-data 0.3.2, objc2-core-foundation 0.3.2, objc2-core-graphics 0.3.2, objc2-core-image 0.2.2, objc2-core-image 0.3.2, objc2-core-media 0.3.2, objc2-core-services 0.3.2, objc2-core-text 0.3.2, objc2-core-video 0.3.2, objc2-encode 4.1.0, objc2-foundation 0.2.2, objc2-foundation 0.3.2, objc2-image-io 0.3.2, objc2-io-surface 0.3.2, objc2-metal 0.2.2, objc2-metal 0.3.2, objc2-quartz-core 0.2.2, objc2-quartz-core 0.3.2, objc2-screen-capture-kit 0.3.2, objc2-security 0.3.2, objc2-uniform-type-identifiers 0.3.2, objc2-user-notifications 0.3.2, objc2-vision 0.3.2
 
 <pre>
 Apache License
@@ -2654,7 +2652,7 @@ Copyright 2026 Mads Marquart
 
 ### madsmtm__objc2 / main__LICENSE-MIT.txt
 
-Used by: block2 0.5.1, block2 0.6.2, dispatch2 0.3.1, objc-sys 0.3.5, objc2 0.5.3, objc2 0.6.5, objc2-app-kit 0.2.2, objc2-app-kit 0.3.2, objc2-application-services 0.3.2, objc2-av-foundation 0.3.2, objc2-avf-audio 0.3.2, objc2-cloud-kit 0.3.2, objc2-core-audio 0.3.2, objc2-core-audio-types 0.3.2, objc2-core-data 0.2.2, objc2-core-data 0.3.2, objc2-core-foundation 0.3.2, objc2-core-graphics 0.3.2, objc2-core-image 0.2.2, objc2-core-image 0.3.2, objc2-core-media 0.3.2, objc2-core-services 0.3.2, objc2-core-text 0.3.2, objc2-core-video 0.3.2, objc2-encode 4.1.0, objc2-foundation 0.2.2, objc2-foundation 0.3.2, objc2-image-io 0.3.2, objc2-io-surface 0.3.2, objc2-media-toolbox 0.3.2, objc2-metal 0.2.2, objc2-metal 0.3.2, objc2-quartz-core 0.2.2, objc2-quartz-core 0.3.2, objc2-screen-capture-kit 0.3.2, objc2-security 0.3.2, objc2-uniform-type-identifiers 0.3.2, objc2-user-notifications 0.3.2, objc2-vision 0.3.2
+Used by: block2 0.5.1, block2 0.6.2, dispatch2 0.3.1, objc-sys 0.3.5, objc2 0.5.3, objc2 0.6.5, objc2-app-kit 0.2.2, objc2-app-kit 0.3.2, objc2-application-services 0.3.2, objc2-av-foundation 0.3.2, objc2-cloud-kit 0.3.2, objc2-core-audio 0.3.2, objc2-core-audio-types 0.3.2, objc2-core-data 0.2.2, objc2-core-data 0.3.2, objc2-core-foundation 0.3.2, objc2-core-graphics 0.3.2, objc2-core-image 0.2.2, objc2-core-image 0.3.2, objc2-core-media 0.3.2, objc2-core-services 0.3.2, objc2-core-text 0.3.2, objc2-core-video 0.3.2, objc2-encode 4.1.0, objc2-foundation 0.2.2, objc2-foundation 0.3.2, objc2-image-io 0.3.2, objc2-io-surface 0.3.2, objc2-metal 0.2.2, objc2-metal 0.3.2, objc2-quartz-core 0.2.2, objc2-quartz-core 0.3.2, objc2-screen-capture-kit 0.3.2, objc2-security 0.3.2, objc2-uniform-type-identifiers 0.3.2, objc2-user-notifications 0.3.2, objc2-vision 0.3.2
 
 <pre>
 Copyright 2026 Mads Marquart
@@ -2686,7 +2684,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### madsmtm__objc2 / main__LICENSE-ZLIB.txt
 
-Used by: block2 0.5.1, block2 0.6.2, dispatch2 0.3.1, objc-sys 0.3.5, objc2 0.5.3, objc2 0.6.5, objc2-app-kit 0.2.2, objc2-app-kit 0.3.2, objc2-application-services 0.3.2, objc2-av-foundation 0.3.2, objc2-avf-audio 0.3.2, objc2-cloud-kit 0.3.2, objc2-core-audio 0.3.2, objc2-core-audio-types 0.3.2, objc2-core-data 0.2.2, objc2-core-data 0.3.2, objc2-core-foundation 0.3.2, objc2-core-graphics 0.3.2, objc2-core-image 0.2.2, objc2-core-image 0.3.2, objc2-core-media 0.3.2, objc2-core-services 0.3.2, objc2-core-text 0.3.2, objc2-core-video 0.3.2, objc2-encode 4.1.0, objc2-foundation 0.2.2, objc2-foundation 0.3.2, objc2-image-io 0.3.2, objc2-io-surface 0.3.2, objc2-media-toolbox 0.3.2, objc2-metal 0.2.2, objc2-metal 0.3.2, objc2-quartz-core 0.2.2, objc2-quartz-core 0.3.2, objc2-screen-capture-kit 0.3.2, objc2-security 0.3.2, objc2-uniform-type-identifiers 0.3.2, objc2-user-notifications 0.3.2, objc2-vision 0.3.2
+Used by: block2 0.5.1, block2 0.6.2, dispatch2 0.3.1, objc-sys 0.3.5, objc2 0.5.3, objc2 0.6.5, objc2-app-kit 0.2.2, objc2-app-kit 0.3.2, objc2-application-services 0.3.2, objc2-av-foundation 0.3.2, objc2-cloud-kit 0.3.2, objc2-core-audio 0.3.2, objc2-core-audio-types 0.3.2, objc2-core-data 0.2.2, objc2-core-data 0.3.2, objc2-core-foundation 0.3.2, objc2-core-graphics 0.3.2, objc2-core-image 0.2.2, objc2-core-image 0.3.2, objc2-core-media 0.3.2, objc2-core-services 0.3.2, objc2-core-text 0.3.2, objc2-core-video 0.3.2, objc2-encode 4.1.0, objc2-foundation 0.2.2, objc2-foundation 0.3.2, objc2-image-io 0.3.2, objc2-io-surface 0.3.2, objc2-metal 0.2.2, objc2-metal 0.3.2, objc2-quartz-core 0.2.2, objc2-quartz-core 0.3.2, objc2-screen-capture-kit 0.3.2, objc2-security 0.3.2, objc2-uniform-type-identifiers 0.3.2, objc2-user-notifications 0.3.2, objc2-vision 0.3.2
 
 <pre>
 Copyright 2026 Mads Marquart
@@ -2704,7 +2702,7 @@ Permission is granted to anyone to use this software for any purpose, including 
 
 ### madsmtm__objc2 / main__LICENSE.md / madsmtm__objc2 / master__LICENSE.md
 
-Used by: block2 0.5.1, block2 0.6.2, dispatch2 0.3.1, objc-sys 0.3.5, objc2 0.5.3, objc2 0.6.5, objc2-app-kit 0.2.2, objc2-app-kit 0.3.2, objc2-application-services 0.3.2, objc2-av-foundation 0.3.2, objc2-avf-audio 0.3.2, objc2-cloud-kit 0.3.2, objc2-core-audio 0.3.2, objc2-core-audio-types 0.3.2, objc2-core-data 0.2.2, objc2-core-data 0.3.2, objc2-core-foundation 0.3.2, objc2-core-graphics 0.3.2, objc2-core-image 0.2.2, objc2-core-image 0.3.2, objc2-core-media 0.3.2, objc2-core-services 0.3.2, objc2-core-text 0.3.2, objc2-core-video 0.3.2, objc2-encode 4.1.0, objc2-foundation 0.2.2, objc2-foundation 0.3.2, objc2-image-io 0.3.2, objc2-io-surface 0.3.2, objc2-media-toolbox 0.3.2, objc2-metal 0.2.2, objc2-metal 0.3.2, objc2-quartz-core 0.2.2, objc2-quartz-core 0.3.2, objc2-screen-capture-kit 0.3.2, objc2-security 0.3.2, objc2-uniform-type-identifiers 0.3.2, objc2-user-notifications 0.3.2, objc2-vision 0.3.2
+Used by: block2 0.5.1, block2 0.6.2, dispatch2 0.3.1, objc-sys 0.3.5, objc2 0.5.3, objc2 0.6.5, objc2-app-kit 0.2.2, objc2-app-kit 0.3.2, objc2-application-services 0.3.2, objc2-av-foundation 0.3.2, objc2-cloud-kit 0.3.2, objc2-core-audio 0.3.2, objc2-core-audio-types 0.3.2, objc2-core-data 0.2.2, objc2-core-data 0.3.2, objc2-core-foundation 0.3.2, objc2-core-graphics 0.3.2, objc2-core-image 0.2.2, objc2-core-image 0.3.2, objc2-core-media 0.3.2, objc2-core-services 0.3.2, objc2-core-text 0.3.2, objc2-core-video 0.3.2, objc2-encode 4.1.0, objc2-foundation 0.2.2, objc2-foundation 0.3.2, objc2-image-io 0.3.2, objc2-io-surface 0.3.2, objc2-metal 0.2.2, objc2-metal 0.3.2, objc2-quartz-core 0.2.2, objc2-quartz-core 0.3.2, objc2-screen-capture-kit 0.3.2, objc2-security 0.3.2, objc2-uniform-type-identifiers 0.3.2, objc2-user-notifications 0.3.2, objc2-vision 0.3.2
 
 <pre>
 # License
