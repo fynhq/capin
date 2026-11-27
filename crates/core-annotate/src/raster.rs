@@ -5,6 +5,7 @@ use core_types::{
 };
 use cosmic_text::{
     Align, Attrs, Buffer, Color as TextColor, Family, FontSystem, Metrics, Shaping, SwashCache,
+    Wrap,
 };
 use thiserror::Error;
 use tiny_skia::{
@@ -315,6 +316,7 @@ pub fn measure_text_height(text: &str, font_size: f32, width: u32) -> u32 {
             Metrics::new(font_size, font_size * 1.3),
         );
         buffer.set_size(Some(width as f32), None);
+        buffer.set_wrap(Wrap::WordOrGlyph);
         buffer.set_text(
             text,
             &Attrs::new().family(Family::SansSerif),
@@ -351,6 +353,7 @@ fn draw_text(pixmap: &mut Pixmap, annotation: &Annotation) {
             Metrics::new(font_size, font_size * 1.3),
         );
         buffer.set_size(Some(bounds.size.width as f32), None);
+        buffer.set_wrap(Wrap::WordOrGlyph);
         let alignment = match annotation.style.text_alignment {
             TextAlignment::Left => Align::Left,
             TextAlignment::Center => Align::Center,
@@ -1271,13 +1274,31 @@ mod tests {
         assert_eq!(output.width(), 120);
     }
 
+    fn can_shape_text(text: &str, width: u32) -> bool {
+        with_text_engine(|engine| {
+            if engine.font_system.db_mut().is_empty() {
+                return false;
+            }
+            let mut buffer = Buffer::new(&mut engine.font_system, Metrics::new(16.0, 16.0 * 1.3));
+            buffer.set_size(Some(width as f32), None);
+            buffer.set_wrap(Wrap::WordOrGlyph);
+            buffer.set_text(
+                text,
+                &Attrs::new().family(Family::SansSerif),
+                Shaping::Advanced,
+                None,
+            );
+            buffer.layout_runs().next().is_some()
+        })
+    }
+
     #[test]
     fn mixed_cjk_text_wraps_and_rasterizes_stably() {
         let text = "Capin \u{4e2d}\u{6587}\u{957f}\u{6587}\u{672c} mixed 123 \u{6807}\u{70b9} \u{4e2d}\u{6587}\u{957f}\u{6587}\u{672c} mixed 123 \u{6807}\u{70b9}\u{3002}";
-        let has_fonts = with_text_engine(|engine| !engine.font_system.db_mut().is_empty());
+        let can_shape = can_shape_text(text, 80);
         let wide = measure_text_height(text, 16.0, 800);
         let narrow = measure_text_height(text, 16.0, 80);
-        if has_fonts {
+        if can_shape {
             assert!(
                 narrow > wide,
                 "narrow text must wrap: narrow={narrow} wide={wide}"
@@ -1300,7 +1321,7 @@ mod tests {
         let output = rasterize(&document, &frame).unwrap();
         assert_eq!(output.width(), 120);
         assert_eq!(output.height(), 200);
-        if has_fonts {
+        if can_shape {
             let painted = output
                 .packed_pixels()
                 .as_chunks::<4>()
