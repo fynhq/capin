@@ -39,10 +39,18 @@ impl ChromeTheme {
         let palette = crate::theme::chrome_palette(dark);
         let accent_hex = accent_hex.unwrap_or_else(|| crate::theme::fallback_accent(dark));
         let accent = rgb(accent_hex);
+        let (surface, surface_strong) = if crate::aux_window::transparency_allowed() {
+            (palette.surface, palette.surface_strong)
+        } else {
+            (
+                crate::theme::opaque(palette.surface),
+                crate::theme::opaque(palette.surface_strong),
+            )
+        };
         Self {
             dark,
-            surface: palette.surface,
-            surface_strong: palette.surface_strong,
+            surface,
+            surface_strong,
             border: palette.border,
             separator: palette.separator,
             text: palette.text,

@@ -82,7 +82,7 @@ impl EditorView {
             .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
             .w(px(width))
             .h(px(22.0))
-            .rounded(px(5.0))
+            .rounded(px(crate::ui::RADIUS_CHIP))
             .flex()
             .items_center()
             .justify_center()
@@ -94,7 +94,7 @@ impl EditorView {
             .on_click(cx.listener(move |this, _, _, cx| apply(this, cx)))
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(px(crate::ui::FONT_CAPTION))
                     .text_color(if selected { accent } else { muted })
                     .child(label),
             )
@@ -106,6 +106,7 @@ impl EditorView {
         &self,
         id: &'static str,
         label: String,
+        shortcut: Option<String>,
         icon: &'static [u8],
         enabled: bool,
         color: Rgba,
@@ -113,30 +114,36 @@ impl EditorView {
         action: fn(&mut Self, &mut Context<Self>),
     ) -> AnyElement {
         let hover = self.chrome.hover;
+        let tooltip = crate::ui::tooltip_with_shortcut(&label, shortcut.as_deref());
         if !enabled {
             return div()
+                .id(id)
+                .role(Role::Button)
+                .aria_label(label)
                 .w(px(TOOLBAR_SIZE as f32))
                 .h(px(TOOLBAR_SIZE as f32))
                 .flex()
                 .items_center()
                 .justify_center()
                 .opacity(0.35)
-                .child(icons::icon(icon, 18.0, self.chrome.muted))
+                .child(icons::icon(icon, crate::ui::TOOL_ICON, self.chrome.muted))
                 .into_any_element();
         }
         div()
             .id(id)
-            .tooltip(move |_, cx| tooltip_view(label.clone(), cx))
+            .role(Role::Button)
+            .aria_label(label.clone())
+            .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
             .w(px(TOOLBAR_SIZE as f32))
             .h(px(TOOLBAR_SIZE as f32))
-            .rounded(px(7.0))
+            .rounded(px(crate::ui::RADIUS_CONTROL))
             .flex()
             .items_center()
             .justify_center()
             .hover(move |style| style.bg(hover))
             .active(|style| style.opacity(0.85))
             .on_click(cx.listener(move |this, _, _, cx| action(this, cx)))
-            .child(icons::icon(icon, 18.0, color))
+            .child(icons::icon(icon, crate::ui::TOOL_ICON, color))
             .into_any_element()
     }
 }
@@ -158,9 +165,8 @@ impl EditorView {
             .gap(px(8.0))
             .px(px(8.0))
             .py(px(6.0))
-            .rounded(px(5.0))
+            .rounded(px(crate::ui::RADIUS_CHIP))
             .hover(|style| style.bg(self.chrome.hover))
-            .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toolbar.more_open = false;
                 action(this, cx);
@@ -169,7 +175,7 @@ impl EditorView {
             .child(icons::icon(icon, 15.0, self.chrome.icon))
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(px(crate::ui::FONT_BODY))
                     .text_color(self.chrome.text)
                     .child(label),
             )
@@ -208,7 +214,7 @@ impl EditorView {
             .border_1()
             .border_color(self.chrome.border)
             .shadow(self.chrome.shadow())
-            .text_size(px(11.0))
+            .text_size(px(crate::ui::FONT_CAPTION))
             .child(
                 div()
                     .text_color(self.chrome.muted)
@@ -285,7 +291,7 @@ impl EditorView {
         let k = |key: &str| t(language, key).to_owned();
         let mut rows: Vec<(String, String)> = vec![
             (k("editor.hint_key_copy"), k("editor.hint_copy")),
-            ("Cmd/Ctrl+S".to_owned(), k("editor.hint_save")),
+            (crate::shortcut_text::primary("S"), k("editor.hint_save")),
         ];
         if self.inline.and_then(|inline| inline.capture).is_some() {
             rows.push((pin_hotkey, k("editor.hint_pin")));

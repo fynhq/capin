@@ -245,6 +245,9 @@ pub struct AppSettings {
     pub pin_qr: bool,
     pub pin_double_click: PinDoubleClickAction,
     pub hide_tray: bool,
+    pub settings_window_display: Option<u64>,
+    pub settings_window_frame: Option<[f32; 4]>,
+    pub settings_section: String,
 }
 
 impl AppSettings {
@@ -311,6 +314,9 @@ impl Default for AppSettings {
             pin_qr: true,
             pin_double_click: PinDoubleClickAction::NoAction,
             hide_tray: false,
+            settings_window_display: None,
+            settings_window_frame: None,
+            settings_section: "general".to_owned(),
         }
     }
 }
@@ -626,7 +632,54 @@ static FIELDS: &[Field] = &[
             }
         },
     },
+    Field {
+        key: "settings_window_display",
+        write: |settings, out| {
+            if let Some(display) = settings.settings_window_display {
+                let _ = write!(out, "{display}");
+            }
+        },
+        read: |settings, value| {
+            settings.settings_window_display = value.trim().parse::<u64>().ok();
+        },
+    },
+    Field {
+        key: "settings_window_frame",
+        write: |settings, out| {
+            if let Some([left, top, width, height]) = settings.settings_window_frame {
+                let _ = write!(out, "{left:.1},{top:.1},{width:.1},{height:.1}");
+            }
+        },
+        read: |settings, value| {
+            settings.settings_window_frame = parse_window_frame(value);
+        },
+    },
+    Field {
+        key: "settings_section",
+        write: |settings, out| out.push_str(&settings.settings_section),
+        read: |settings, value| {
+            let value = value.trim();
+            if !value.is_empty() && value.len() <= 32 {
+                settings.settings_section = value.to_owned();
+            }
+        },
+    },
 ];
+
+fn parse_window_frame(value: &str) -> Option<[f32; 4]> {
+    let mut values = [0.0; 4];
+    let mut parts = value.split(',');
+    for slot in &mut values {
+        *slot = parts.next()?.trim().parse::<f32>().ok()?;
+        if !slot.is_finite() {
+            return None;
+        }
+    }
+    if parts.next().is_some() || values[2] <= 0.0 || values[3] <= 0.0 {
+        return None;
+    }
+    Some(values)
+}
 
 fn write_bool(out: &mut String, value: bool) {
     out.push_str(if value { "true" } else { "false" });
@@ -938,6 +991,31 @@ fn serialize(settings: &AppSettings) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn round_trips_settings_window_frame() {
+        let settings = AppSettings {
+            settings_window_display: Some(42),
+            settings_window_frame: Some([10.0, 20.0, 800.0, 600.0]),
+            settings_section: "capture".to_owned(),
+            ..Default::default()
+        };
+        let parsed = parse(&serialize(&settings));
+        assert_eq!(parsed.settings_window_display, Some(42));
+        assert_eq!(
+            parsed.settings_window_frame,
+            Some([10.0, 20.0, 800.0, 600.0])
+        );
+        assert_eq!(parsed.settings_section, "capture");
+    }
+
+    #[test]
+    fn rejects_invalid_settings_window_frames() {
+        assert_eq!(parse_window_frame(""), None);
+        assert_eq!(parse_window_frame("1,2,0,600"), None);
+        assert_eq!(parse_window_frame("1,2,800"), None);
+        assert_eq!(parse_window_frame("1,2,800,600,4"), None);
+    }
 
     #[test]
     fn parses_opaque_and_alpha_annotation_colors() {

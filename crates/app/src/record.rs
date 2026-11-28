@@ -496,20 +496,20 @@ impl Render for RecordBar {
         } else if self.completed {
             theme.accent
         } else {
-            rgb(0xFF453A)
+            crate::theme::danger()
         };
         let dot_core = div()
             .w(px(if recording { 9.0 } else { 7.0 }))
             .h(px(if recording { 9.0 } else { 7.0 }))
             .rounded(px(5.0))
             .bg(dot);
-        let dot = if recording {
+        let dot = if recording && !cx.reduce_motion() {
             dot_core
                 .with_animation(
                     "record-dot-pulse",
                     Animation::new(Duration::from_millis(1600))
                         .repeat_synced()
-                        .with_max_fps(30.0)
+                        .with_max_fps(10.0)
                         .with_easing(|delta| 0.7 + 0.3 * (delta * std::f32::consts::TAU).cos()),
                     |dot, delta| dot.opacity(delta),
                 )
@@ -518,7 +518,8 @@ impl Render for RecordBar {
             dot_core.into_any_element()
         };
         let timer_text = div()
-            .text_size(px(12.5))
+            .text_size(px(crate::ui::FONT_TITLE))
+            .font_features(crate::ui::tabular_numbers())
             .font_weight(FontWeight::MEDIUM)
             .text_color(theme.accent)
             .child(timer);
@@ -527,6 +528,7 @@ impl Render for RecordBar {
                 timer_text,
                 SharedString::from(format!("record-countdown-{}", self.countdown_remaining())),
                 Duration::from_millis(180),
+                cx.reduce_motion(),
             )
             .into_any_element()
         } else {
@@ -563,13 +565,13 @@ impl Render for RecordBar {
             .child(timer_text)
             .child(
                 div()
-                    .text_size(px(10.5))
+                    .text_size(px(crate::ui::FONT_MICRO))
                     .text_color(theme.muted)
                     .child(format!("MP4 · {} fps", FRAME_RATE)),
             );
         let badge = crate::control_bar::bar_badge(
             if recording {
-                rgba(0xFF453A33)
+                crate::theme::danger_tint()
             } else {
                 theme.selected
             },

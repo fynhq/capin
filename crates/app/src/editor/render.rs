@@ -537,19 +537,23 @@ pub(super) fn render_view(
                 div()
                     .px(px(12.0))
                     .py(px(6.0))
-                    .rounded(px(6.0))
+                    .rounded(px(crate::ui::RADIUS_CONTROL))
                     .bg(view.chrome.surface_strong)
                     .border_1()
                     .border_color(view.chrome.border)
                     .shadow(view.chrome.shadow())
-                    .text_size(px(11.0))
+                    .text_size(px(crate::ui::FONT_BODY))
                     .text_color(view.chrome.text)
                     .child(message),
             )
             .with_animation(
                 SharedString::from(format!("editor-status-{status_serial}")),
-                Animation::new(Duration::from_millis(120))
-                    .with_easing(|delta| 1.0 - (1.0 - delta).powi(3)),
+                Animation::new(if cx.reduce_motion() {
+                    Duration::ZERO
+                } else {
+                    Duration::from_millis(120)
+                })
+                .with_easing(|delta| 1.0 - (1.0 - delta).powi(3)),
                 move |toast, delta| toast.opacity(delta).bottom(px(46.0 - (1.0 - delta) * 4.0)),
             )
     });
@@ -618,7 +622,7 @@ pub(super) fn render_view(
                 .absolute()
                 .left(px(12.0))
                 .bottom(px(8.0))
-                .text_size(px(10.5))
+                .text_size(px(crate::ui::FONT_MICRO))
                 .text_color(view.chrome.muted)
                 .child(format!(
                     "{} x {} · {:.0}%",
@@ -643,14 +647,13 @@ pub(super) fn render_view(
                         .occlude()
                         .px(px(10.0))
                         .py(px(6.0))
-                        .rounded(px(6.0))
+                        .rounded(px(crate::ui::RADIUS_CONTROL))
                         .bg(view.chrome.surface_strong)
                         .border_1()
                         .border_color(view.chrome.border)
                         .shadow(view.chrome.shadow())
-                        .text_size(px(11.0))
+                        .text_size(px(crate::ui::FONT_BODY))
                         .text_color(view.chrome.text)
-                        .cursor_pointer()
                         .hover(|style| style.bg(view.chrome.hover))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.toolbar.hidden = false;

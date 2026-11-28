@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -106,6 +107,23 @@ impl SettingsSection {
         Self::Recording,
         Self::Shortcuts,
     ];
+    fn code(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Capture => "capture",
+            Self::Recording => "recording",
+            Self::Shortcuts => "shortcuts",
+        }
+    }
+    fn from_code(value: &str) -> Option<Self> {
+        match value {
+            "general" => Some(Self::General),
+            "capture" => Some(Self::Capture),
+            "recording" => Some(Self::Recording),
+            "shortcuts" => Some(Self::Shortcuts),
+            _ => None,
+        }
+    }
     fn id(self) -> &'static str {
         match self {
             Self::General => "settings-nav-general",
@@ -262,6 +280,7 @@ enum SelectKind {
 struct SelectMenu {
     kind: SelectKind,
     anchor: Bounds<Pixels>,
+    highlighted: usize,
 }
 
 struct RecordColorPicker {
@@ -307,13 +326,24 @@ impl Theme {
 
     fn build(dark: bool, accent_hex: u32, scale_factor: f32) -> Self {
         let palette = settings_palette(dark);
+        let material = crate::aux_window::settings_material_active();
+        let page_solid = if dark { rgb(0x202020) } else { rgb(0xF3F3F3) };
+        let card_solid = if dark { rgb(0x2B2B2B) } else { rgb(0xFFFFFF) };
         Self {
             text: palette.text,
             muted: palette.muted,
-            card: palette.card,
+            card: if material { palette.card } else { card_solid },
             card_border: palette.card_border,
-            page: palette.page,
-            sidebar: palette.sidebar,
+            page: if material {
+                palette.page
+            } else {
+                Some(page_solid)
+            },
+            sidebar: if material {
+                palette.sidebar
+            } else {
+                page_solid
+            },
             border: palette.border,
             accent: rgb(accent_hex),
             accent_text: accent_text_color(accent_hex),
@@ -325,9 +355,13 @@ impl Theme {
             control_hover: palette.control_hover,
             toggle_off: palette.toggle_off,
             knob: rgb(0xFFFFFF),
-            popover: palette.popover,
+            popover: if material {
+                palette.popover
+            } else {
+                card_solid
+            },
             #[cfg(target_os = "windows")]
-            close_hover: rgb(0xEF4444),
+            close_hover: rgb(crate::theme::DANGER_HEX),
             hairline: 1.0 / scale_factor.max(1.0),
         }
     }
@@ -343,7 +377,10 @@ pub(crate) struct SettingsView {
     filename_input: Entity<InputState>,
     filename_subscription: Option<Subscription>,
     activation_subscription: Option<Subscription>,
+    appearance_subscription: Option<Subscription>,
     focus_handle: FocusHandle,
+    nav_focus: [FocusHandle; 4],
+    control_focus: RefCell<HashMap<&'static str, FocusHandle>>,
     #[cfg(target_os = "macos")]
     titlebar_drag: bool,
     select_menu: Option<SelectMenu>,
@@ -369,7 +406,8 @@ impl SettingsView {
             state.set_editor_style(input_editor_style(&theme));
         });
         let mut view = Self {
-            section: SettingsSection::General,
+            section: SettingsSection::from_code(&settings.settings_section)
+                .unwrap_or(SettingsSection::General),
             scroll_handle: ScrollHandle::new(),
             accent: system_accent_hex(),
             last_accent: None,
@@ -380,7 +418,10 @@ impl SettingsView {
             filename_input,
             filename_subscription: None,
             activation_subscription: None,
+            appearance_subscription: None,
             focus_handle: cx.focus_handle(),
+            nav_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
+            control_focus: RefCell::new(HashMap::new()),
             #[cfg(target_os = "macos")]
             titlebar_drag: false,
             select_menu: None,
@@ -405,6 +446,12 @@ impl SettingsView {
                 }
             },
         ));
+        view.appearance_subscription =
+            Some(cx.observe_window_appearance(window, |this, _window, cx| {
+                this.accent = system_accent_hex();
+                this.last_accent = this.accent;
+                cx.notify();
+            }));
         view.activation_subscription =
             Some(cx.observe_window_activation(window, |this, window, cx| {
                 log_info!(
@@ -445,6 +492,67 @@ impl SettingsView {
     fn show_status(&mut self, message: String, cx: &mut Context<Self>) {
         self.status.show(message, cx);
     }
+}
+
+pub(super) fn control_focus(
+    view: &SettingsView,
+    id: &'static str,
+    cx: &mut Context<SettingsView>,
+) -> FocusHandle {
+    let mut controls = view.control_focus.borrow_mut();
+    controls
+        .entry(id)
+        .or_insert_with(|| cx.focus_handle().tab_stop(true))
+        .clone()
+}
+
+pub(super) fn handle_tab_key(
+    view: &mut SettingsView,
+    event: &KeyDownEvent,
+    window: &mut Window,
+    cx: &mut Context<SettingsView>,
+) -> bool {
+    if event.keystroke.key != "tab" {
+        return false;
+    }
+    view.select_menu = None;
+    if event.keystroke.modifiers.shift {
+        window.focus_prev(cx);
+    } else {
+        window.focus_next(cx);
+    }
+    cx.notify();
+    cx.stop_propagation();
+    true
+}
+
+fn select_section(
+    view: &mut SettingsView,
+    section: SettingsSection,
+    cx: &mut Context<SettingsView>,
+) {
+    view.section = section;
+    view.scroll_handle.set_offset(point(px(0.0), px(0.0)));
+    view.select_menu = None;
+    settings_state::update(|settings| {
+        settings.settings_section = section.code().to_owned();
+    });
+    cx.notify();
+}
+
+fn save_window_state(section: SettingsSection, bounds: Bounds<Pixels>, display: Option<u64>) {
+    let frame = [
+        f32::from(bounds.origin.x),
+        f32::from(bounds.origin.y),
+        f32::from(bounds.size.width),
+        f32::from(bounds.size.height),
+    ];
+    let section = section.code().to_owned();
+    settings_state::update(|settings| {
+        settings.settings_window_display = display;
+        settings.settings_window_frame = Some(frame);
+        settings.settings_section = section;
+    });
 }
 
 fn start_accent_watch(cx: &mut Context<SettingsView>) {
@@ -508,7 +616,12 @@ pub fn open_settings(cx: &mut App) {
         return;
     }
     let bounds = general::settings_bounds(cx);
-    let display_id = cx.primary_display().map(|display| display.id());
+    let display_id = cx
+        .displays()
+        .into_iter()
+        .find(|display| display.visible_bounds().contains(&bounds.center()))
+        .map(|display| display.id())
+        .or_else(|| cx.primary_display().map(|display| display.id()));
     let language = settings_state::get().language;
     platform_window::set_macos_regular_activation_policy();
     let titlebar = custom_titlebar().then(|| TitlebarOptions {
@@ -527,7 +640,7 @@ pub fn open_settings(cx: &mut App) {
         is_resizable: true,
         is_minimizable: true,
         display_id,
-        window_background: crate::aux_window::panel_background(),
+        window_background: crate::aux_window::settings_background(),
         window_min_size: Some(size(px(layout::MIN_WIDTH), px(layout::MIN_HEIGHT))),
         app_id: Some("capin-settings".to_owned()),
         ..Default::default()
@@ -542,9 +655,12 @@ pub fn open_settings(cx: &mut App) {
                 "settings window={} closing",
                 window.window_handle().window_id().as_u64()
             );
+            let bounds = window.bounds();
+            let display = window.display(cx).map(|display| u64::from(display.id()));
             close_view.update(cx, |this, cx| {
                 crate::hotkey::set_settings_recording(false);
                 commit_settings_inputs(this, window, cx);
+                save_window_state(this.section, bounds, display);
             });
             let handle = window.window_handle();
             crate::windows::unregister_settings_window(&handle);
@@ -774,47 +890,66 @@ fn info_row(
     )
 }
 
-fn toggle(theme: &Theme, value: bool, id: &'static str) -> impl IntoElement {
+fn toggle(theme: &Theme, value: bool, id: &'static str, reduce_motion: bool) -> AnyElement {
     let accent = theme.accent;
     let off = theme.toggle_off;
     let knob = theme.knob;
-    let spring = SpringAnimation::new(SpringConfig::new(700.0, 46.0, 1.0)).to(if value {
+    let width = layout::TOGGLE_WIDTH;
+    let height = layout::TOGGLE_HEIGHT;
+    let knob_size = layout::TOGGLE_KNOB;
+    let inset = 2.0;
+    let travel = width - knob_size - inset * 2.0;
+
+    let track = move |progress: f32| {
+        div()
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded(px((height - 1.0) * 0.5))
+                    .bg(accent)
+                    .opacity(progress.clamp(0.0, 1.0)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(inset + progress.clamp(0.0, 1.0) * travel))
+                    .top(px(inset))
+                    .w(px(knob_size))
+                    .h(px(knob_size))
+                    .rounded(px(knob_size * 0.5))
+                    .bg(knob),
+            )
+    };
+
+    let shell = || {
+        div()
+            .relative()
+            .w(px(width))
+            .h(px(height))
+            .flex_shrink_0()
+            .rounded(px(height * 0.5))
+            .bg(off)
+    };
+
+    if reduce_motion {
+        return shell()
+            .child(track(if value { 1.0 } else { 0.0 }))
+            .into_any_element();
+    }
+
+    let spring = SpringAnimation::new(SpringConfig::new(700.0, 53.0, 1.0)).to(if value {
         1.0f32
     } else {
         0.0
     });
-    div()
-        .relative()
-        .w(px(36.0))
-        .h(px(20.0))
-        .flex_shrink_0()
-        .rounded(px(10.0))
-        .bg(off)
+    shell()
         .with_spring(
             SharedString::from(format!("settings-toggle-{id}")),
             spring,
-            move |track, progress| {
-                track
-                    .child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .rounded(px(9.0))
-                            .bg(accent)
-                            .opacity(progress.clamp(0.0, 1.0)),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .left(px(2.0 + progress.clamp(0.0, 1.0) * 16.0))
-                            .top(px(2.0))
-                            .w(px(16.0))
-                            .h(px(16.0))
-                            .rounded(px(8.0))
-                            .bg(knob),
-                    )
-            },
+            move |element, progress| element.child(track(progress)),
         )
+        .into_any_element()
 }
 
 fn input_editor_style(theme: &Theme) -> InputEditorStyle {

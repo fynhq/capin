@@ -79,8 +79,12 @@ impl SettingsView {
                                             "settings-page-{}",
                                             self.section.id()
                                         )),
-                                        Animation::new(Duration::from_millis(120))
-                                            .with_easing(|delta| 1.0 - (1.0 - delta).powi(3)),
+                                        Animation::new(if cx.reduce_motion() {
+                                            Duration::ZERO
+                                        } else {
+                                            Duration::from_millis(120)
+                                        })
+                                        .with_easing(|delta| 1.0 - (1.0 - delta).powi(3)),
                                         |page, delta| page.opacity(delta),
                                     ),
                             ),
@@ -153,20 +157,31 @@ impl Render for SettingsView {
             .text_color(theme.text)
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "tab" {
+                    this.select_menu = None;
+                    if event.keystroke.modifiers.shift {
+                        window.focus_prev(cx);
+                    } else {
+                        window.focus_next(cx);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 let command =
                     event.keystroke.modifiers.platform || event.keystroke.modifiers.control;
                 if this.record_color_picker.is_some() && this.handle_record_color_key(event, cx) {
                     return;
                 }
-                if this.select_menu.is_some() && event.keystroke.key == "escape" {
-                    this.select_menu = None;
-                    cx.notify();
+                if capture::handle_select_key(this, event, cx) {
                     return;
                 }
                 if command && matches!(event.keystroke.key.as_str(), "w" | "q") {
                     platform_window::set_macos_accessory_activation_policy();
                     let input = this.filename_input.clone();
                     this.commit_filename_template(&input, window, cx);
+                    let bounds = window.bounds();
+                    let display = window.display(cx).map(|display| u64::from(display.id()));
+                    super::save_window_state(this.section, bounds, display);
                     window.remove_window();
                     return;
                 }
@@ -180,7 +195,9 @@ impl Render for SettingsView {
             .children(select_popup)
             .children(record_color_popup)
             .children(status.map(|message| {
-                let duration = if status_leaving {
+                let duration = if cx.reduce_motion() {
+                    Duration::ZERO
+                } else if status_leaving {
                     Duration::from_millis(150)
                 } else {
                     Duration::from_millis(120)

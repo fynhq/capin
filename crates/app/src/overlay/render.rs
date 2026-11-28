@@ -106,7 +106,7 @@ impl OverlayView {
                         .border_1()
                         .border_color(rgba((ELEMENT_HOVER << 8) | 0xAA))
                         .shadow(self.chrome.shadow())
-                        .text_size(px(12.5))
+                        .text_size(px(crate::ui::FONT_TITLE))
                         .text_color(self.chrome.text)
                         .child(t(language, "overlay.window_mode_hint")),
                 )
@@ -123,12 +123,12 @@ impl OverlayView {
                     div()
                         .px(px(11.0))
                         .py(px(5.0))
-                        .rounded(px(6.0))
+                        .rounded(px(crate::ui::RADIUS_CONTROL))
                         .bg(self.chrome.surface)
                         .border_1()
                         .border_color(self.chrome.border)
                         .shadow(self.chrome.shadow())
-                        .text_size(px(10.5))
+                        .text_size(px(crate::ui::FONT_MICRO))
                         .text_color(self.chrome.muted)
                         .child(t(language, "overlay.capture_hint")),
                 )
@@ -136,7 +136,9 @@ impl OverlayView {
         let notice_serial = self.notice_serial;
         let notice_leaving = self.notice_leaving;
         let notice = self.notice.clone().map(|message| {
-            let duration = if notice_leaving {
+            let duration = if cx.reduce_motion() {
+                Duration::ZERO
+            } else if notice_leaving {
                 Duration::from_millis(150)
             } else {
                 Duration::from_millis(120)
@@ -152,12 +154,12 @@ impl OverlayView {
                     div()
                         .px(px(12.0))
                         .py(px(6.0))
-                        .rounded(px(6.0))
+                        .rounded(px(crate::ui::RADIUS_CONTROL))
                         .bg(self.chrome.surface_strong)
                         .border_1()
                         .border_color(self.chrome.border)
                         .shadow(self.chrome.shadow())
-                        .text_size(px(11.0))
+                        .text_size(px(crate::ui::FONT_BODY))
                         .text_color(self.chrome.text)
                         .child(message),
                 )

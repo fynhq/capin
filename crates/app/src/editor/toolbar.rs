@@ -35,6 +35,7 @@ pub(super) fn toolbar(
     let undo = view.toolbar_button(
         "editor-undo",
         undo_label,
+        Some(crate::shortcut_text::primary("Z")),
         icons::UNDO,
         view.can_undo(),
         muted,
@@ -50,6 +51,7 @@ pub(super) fn toolbar(
     let redo = view.toolbar_button(
         "editor-redo",
         redo_label,
+        Some(crate::shortcut_text::primary_shift("Z")),
         icons::REDO,
         view.can_redo(),
         muted,
@@ -65,6 +67,7 @@ pub(super) fn toolbar(
     let delete = view.toolbar_button(
         "editor-delete",
         delete_label,
+        Some("Delete".to_owned()),
         icons::TRASH,
         view.document.selected().is_some(),
         text,
@@ -80,6 +83,9 @@ pub(super) fn toolbar(
         view.toolbar_button(
             "editor-pin",
             pin_label,
+            Some(crate::hotkey::display_hotkey(
+                &settings_state::get().pin_hotkey,
+            )),
             icons::PIN,
             true,
             text,
@@ -92,6 +98,7 @@ pub(super) fn toolbar(
     let copy = view.toolbar_button(
         "editor-copy",
         copy_label,
+        Some("Enter".to_owned()),
         icons::COPY,
         true,
         text,
@@ -103,6 +110,7 @@ pub(super) fn toolbar(
     let save = view.toolbar_button(
         "editor-save",
         save_label,
+        Some(crate::shortcut_text::primary("S")),
         icons::SAVE,
         true,
         text,
@@ -117,6 +125,7 @@ pub(super) fn toolbar(
         capture_actions.push(view.toolbar_button(
             "editor-scroll-capture",
             t(language, "menu.scroll_capture").to_owned(),
+            None,
             icons::SCROLL,
             true,
             muted,
@@ -128,6 +137,7 @@ pub(super) fn toolbar(
         capture_actions.push(view.toolbar_button(
             "editor-record",
             t(language, "menu.record").to_owned(),
+            None,
             icons::RECORDING,
             true,
             muted,
@@ -142,10 +152,12 @@ pub(super) fn toolbar(
     let more = (!capture_page).then(|| {
         div()
             .id("editor-more")
+            .role(Role::Button)
+            .aria_label(more_label.clone())
             .tooltip(move |_, cx| tooltip_view(more_label.clone(), cx))
             .w(px(TOOLBAR_SIZE as f32))
             .h(px(TOOLBAR_SIZE as f32))
-            .rounded(px(7.0))
+            .rounded(px(crate::ui::RADIUS_CONTROL))
             .flex()
             .items_center()
             .justify_center()
@@ -158,16 +170,18 @@ pub(super) fn toolbar(
                 this.toolbar.hints_visible = false;
                 cx.notify();
             }))
-            .child(icons::icon(icons::MORE, 18.0, muted))
+            .child(icons::icon(icons::MORE, crate::ui::TOOL_ICON, muted))
             .into_any_element()
     });
 
     let close = div()
         .id("editor-close")
+        .role(Role::Button)
+        .aria_label(close_label.clone())
         .tooltip(move |_, cx| tooltip_view(close_label.clone(), cx))
         .w(px(TOOLBAR_SIZE as f32))
         .h(px(TOOLBAR_SIZE as f32))
-        .rounded(px(7.0))
+        .rounded(px(crate::ui::RADIUS_CONTROL))
         .flex()
         .items_center()
         .justify_center()
@@ -182,18 +196,13 @@ pub(super) fn toolbar(
                 window.remove_window();
             }
         }))
-        .child(icons::icon(icons::CLOSE, 18.0, muted))
+        .child(icons::icon(icons::CLOSE, crate::ui::TOOL_ICON, muted))
         .into_any_element();
 
     let bar_rect = view.toolbar_rect(window);
     let options_rect = view.options_rect(window, bar_rect);
     let options_panel = (!config_children.is_empty() && !view.toolbar.hidden).then(|| {
         let top = f32::from(options_rect.origin.y);
-        let offset = if top >= f32::from(bar_rect.origin.y) + f32::from(bar_rect.size.height) {
-            4.0
-        } else {
-            -4.0
-        };
         crate::ui::enter_slide_fade(
             div()
                 .id("editor-options-panel")
@@ -220,8 +229,9 @@ pub(super) fn toolbar(
                 .children(config_children),
             "editor-options-enter",
             top,
-            offset,
-            Duration::from_millis(120),
+            0.0,
+            Duration::from_millis(80),
+            cx.reduce_motion(),
         )
         .into_any_element()
     });
@@ -281,17 +291,13 @@ pub(super) fn toolbar(
                 ));
         }
         let top = f32::from(more_rect.origin.y);
-        let offset = if top >= f32::from(bar_rect.origin.y) + f32::from(bar_rect.size.height) {
-            4.0
-        } else {
-            -4.0
-        };
         crate::ui::enter_slide_fade(
             panel.h(more_rect.size.height),
             "editor-more-enter",
             top,
-            offset,
-            Duration::from_millis(120),
+            0.0,
+            Duration::from_millis(50),
+            cx.reduce_motion(),
         )
     });
 
@@ -385,10 +391,12 @@ fn tool_buttons(
         let label = t(language, tool.label_key()).to_owned();
         let button = div()
             .id(tool.id())
+            .role(Role::Button)
+            .aria_label(label.clone())
             .tooltip(move |_, cx| tooltip_view(label.clone(), cx))
             .w(px(TOOLBAR_SIZE as f32))
             .h(px(TOOLBAR_SIZE as f32))
-            .rounded(px(7.0))
+            .rounded(px(crate::ui::RADIUS_CONTROL))
             .flex()
             .items_center()
             .justify_center()
@@ -435,7 +443,7 @@ fn tool_buttons(
             }))
             .child(icons::icon(
                 tool.icon(),
-                18.0,
+                crate::ui::TOOL_ICON,
                 if selected { accent } else { muted },
             ));
         tools.push(button.into_any_element());
@@ -549,7 +557,6 @@ fn toolbar_groups(
                 .when(!custom_active, |button| {
                     button.hover(move |style| style.bg(hover))
                 })
-                .cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.commit_text(cx);
                     if this.toolbar.custom_color_open {
@@ -599,7 +606,7 @@ fn toolbar_groups(
                 .tooltip(move |_, cx| tooltip_view(label.clone(), cx))
                 .w(px(22.0))
                 .h(px(22.0))
-                .rounded(px(5.0))
+                .rounded(px(crate::ui::RADIUS_CHIP))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -656,7 +663,7 @@ fn toolbar_groups(
                 .tooltip(move |_, cx| tooltip_view(label.clone(), cx))
                 .w(px(22.0))
                 .h(px(22.0))
-                .rounded(px(5.0))
+                .rounded(px(crate::ui::RADIUS_CHIP))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -699,7 +706,7 @@ fn toolbar_groups(
                 .tooltip(move |_, cx| tooltip_view(label.clone(), cx))
                 .w(px(22.0))
                 .h(px(22.0))
-                .rounded(px(5.0))
+                .rounded(px(crate::ui::RADIUS_CHIP))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -784,7 +791,7 @@ fn toolbar_groups(
             .tooltip(move |_, cx| tooltip_view(background_tooltip.clone(), cx))
             .w(px(24.0))
             .h(px(22.0))
-            .rounded(px(5.0))
+            .rounded(px(crate::ui::RADIUS_CHIP))
             .flex()
             .items_center()
             .justify_center()
@@ -811,7 +818,7 @@ fn toolbar_groups(
             .tooltip(move |_, cx| tooltip_view(outline_tooltip.clone(), cx))
             .w(px(24.0))
             .h(px(22.0))
-            .rounded(px(5.0))
+            .rounded(px(crate::ui::RADIUS_CHIP))
             .flex()
             .items_center()
             .justify_center()
@@ -843,7 +850,7 @@ fn toolbar_groups(
             .tooltip(move |_, cx| tooltip_view(alignment_tooltip.clone(), cx))
             .w(px(28.0))
             .h(px(22.0))
-            .rounded(px(5.0))
+            .rounded(px(crate::ui::RADIUS_CHIP))
             .flex()
             .items_center()
             .justify_center()
@@ -857,7 +864,7 @@ fn toolbar_groups(
             }))
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(px(crate::ui::FONT_CAPTION))
                     .text_color(accent)
                     .child(alignment_label),
             )
@@ -899,7 +906,7 @@ fn toolbar_groups(
                 .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
                 .w(px(24.0))
                 .h(px(22.0))
-                .rounded(px(5.0))
+                .rounded(px(crate::ui::RADIUS_CHIP))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -939,7 +946,7 @@ fn toolbar_groups(
                 .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
                 .w(px(24.0))
                 .h(px(22.0))
-                .rounded(px(5.0))
+                .rounded(px(crate::ui::RADIUS_CHIP))
                 .flex()
                 .items_center()
                 .justify_center()

@@ -693,7 +693,7 @@ impl Render for ScrollPreview {
         };
         div()
             .size_full()
-            .rounded(px(12.0))
+            .rounded(px(theme.radius))
             .bg(theme.surface)
             .border_1()
             .border_color(theme.border)
@@ -712,7 +712,7 @@ impl Render for ScrollPreview {
                     .child(crate::icons::icon(crate::icons::SCROLL, 14.0, theme.icon))
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(px(crate::ui::FONT_TITLE))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.text)
                             .child(t(language, "scroll.preview").to_owned()),
@@ -735,7 +735,7 @@ impl Render for ScrollPreview {
                             .object_fit(ObjectFit::Contain)
                             .into_any_element(),
                         None => div()
-                            .text_size(px(10.0))
+                            .text_size(px(crate::ui::FONT_MICRO))
                             .text_color(theme.muted)
                             .child(caption.clone())
                             .into_any_element(),
@@ -743,7 +743,7 @@ impl Render for ScrollPreview {
             )
             .child(
                 div()
-                    .text_size(px(10.0))
+                    .text_size(px(crate::ui::FONT_MICRO))
                     .text_color(theme.muted)
                     .text_align(TextAlign::Center)
                     .child(caption),

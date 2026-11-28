@@ -31,6 +31,7 @@ mod scroll;
 mod selection_geometry;
 mod settings;
 mod settings_state;
+mod shortcut_text;
 mod storage;
 mod text_scan;
 mod theme;

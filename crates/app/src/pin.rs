@@ -356,6 +356,7 @@ fn open_pin_inner(
         });
         view.update(cx, |view, cx| {
             view.watch_close(window, cx);
+            view.observe_appearance(window, cx);
             view.fit_display_to_size(
                 window.scale_factor(),
                 f32::from(bounds.size.width),
@@ -436,11 +437,29 @@ impl PinTheme {
             WindowAppearance::Dark | WindowAppearance::VibrantDark
         );
         let palette = crate::theme::pin_palette(dark);
+        let material = crate::aux_window::transient_material_active();
+        let transparency = crate::aux_window::transparency_allowed();
+        let card = if transparency {
+            palette.card
+        } else {
+            crate::theme::opaque(palette.card)
+        };
+        let menu = if material {
+            if dark {
+                rgba(0x2B2B2BD9)
+            } else {
+                rgba(0xF9F9F9D9)
+            }
+        } else if transparency {
+            palette.menu
+        } else {
+            crate::theme::opaque(palette.menu)
+        };
         Self {
-            card: palette.card,
+            card,
             text: palette.text,
             border: palette.border,
-            menu: palette.menu,
+            menu,
             menu_hover: palette.menu_hover,
             menu_border: palette.menu_border,
             accent: rgb(accent_hex),
@@ -480,6 +499,7 @@ struct PinView {
     flash_active: bool,
     flash_generation: u64,
     focus_handle: FocusHandle,
+    appearance_subscription: Option<Subscription>,
 }
 
 impl PinView {
@@ -524,6 +544,7 @@ impl PinView {
             flash_active: false,
             flash_generation: 0,
             focus_handle: cx.focus_handle(),
+            appearance_subscription: None,
         };
         cx.on_release(|this, cx| {
             if let PinContent::Image { image, .. } = &this.content {
@@ -535,6 +556,19 @@ impl PinView {
             view.start_ocr(cx);
         }
         view
+    }
+
+    fn observe_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.appearance_subscription =
+            Some(cx.observe_window_appearance(window, |this, window, cx| {
+                let dark = matches!(
+                    window.appearance(),
+                    WindowAppearance::Dark | WindowAppearance::VibrantDark
+                );
+                this.accent_hex =
+                    system_accent_hex().unwrap_or_else(|| crate::theme::fallback_accent(dark));
+                cx.notify();
+            }));
     }
 
     #[cfg(any(target_os = "windows", target_os = "macos"))]

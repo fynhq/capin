@@ -51,7 +51,7 @@ pub(crate) fn bar_badge(background: Rgba, radius: f32) -> Div {
 
 pub(crate) fn bar_title(theme: &ChromeTheme, text: String) -> Div {
     div()
-        .text_size(px(12.5))
+        .text_size(px(crate::ui::FONT_TITLE))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme.text)
         .child(text)
@@ -72,7 +72,7 @@ pub(crate) fn bar_shell(
             .items_center()
             .gap(px(10.0))
             .px(px(12.0))
-            .rounded(px(10.0))
+            .rounded(px(theme.radius))
             .bg(theme.surface)
             .border_1()
             .border_color(theme.border)
@@ -89,7 +89,7 @@ pub(crate) fn bar_shell(
                     .child(title)
                     .child(
                         div()
-                            .text_size(px(10.0))
+                            .text_size(px(crate::ui::FONT_MICRO))
                             .text_color(theme.muted)
                             .overflow_hidden()
                             .whitespace_nowrap()

@@ -179,24 +179,39 @@ impl SettingsView {
 
     fn language_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let language = self.settings().language;
+        let accent = theme.accent;
         let mut control = segmented();
         for option in Language::ALL {
             let selected = language == option;
             let label = option.label();
             let code = option.code();
+            let focus_id = match option {
+                Language::Zh => "settings-language-zh",
+                Language::En => "settings-language-en",
+            };
+            let focus = super::control_focus(self, focus_id, cx);
+            let focus_for_click = focus.clone();
             control = control.child(
                 segment(theme, label, selected)
                     .id(code)
                     .role(Role::Button)
                     .aria_label(label.to_owned())
                     .aria_selected(selected)
+                    .track_focus(&focus)
+                    .focus_visible(move |style| style.shadow(crate::ui::focus_ring(accent)))
                     .active(|style| style.opacity(0.9))
+                    .on_key_down(cx.listener(move |this, event, window, cx| {
+                        if super::handle_tab_key(this, event, window, cx) {
+                            return;
+                        }
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            set_language(this, option, window, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        settings_state::update(|settings| settings.language = option);
-                        crate::tray::refresh_menu();
-                        window.set_window_title(t(option, "settings.title"));
-                        this.status.clear();
-                        cx.notify();
+                        window.focus(&focus_for_click, cx);
+                        set_language(this, option, window, cx);
                     })),
             );
         }
@@ -218,6 +233,9 @@ impl SettingsView {
     fn auto_start_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let language = self.settings().language;
         let value = self.settings().auto_start;
+        let focus = super::control_focus(self, "settings-auto-start", cx);
+        let focus_for_click = focus.clone();
+        let accent = theme.accent;
 
         a11y_row(
             "settings-row-auto-start",
@@ -232,53 +250,31 @@ impl SettingsView {
                 .child(
                     div()
                         .id("settings-auto-start")
-                        .cursor_pointer()
+                        .role(Role::Switch)
+                        .aria_label(t(language, "settings.auto_start"))
+                        .aria_toggled(if value { Toggled::True } else { Toggled::False })
+                        .track_focus(&focus)
+                        .focus_visible(move |style| style.shadow(crate::ui::focus_ring(accent)))
                         .active(move |style| style.opacity(0.85))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let language = this.settings().language;
-                            let desired = !this.settings().auto_start;
-                            match set_autostart(desired) {
-                                Ok(AutostartState::Unsupported) => {
-                                    this.show_status(
-                                        t(language, "settings.status_autostart_failed").to_owned(),
-                                        cx,
-                                    );
-                                }
-                                Ok(state) => {
-                                    settings_state::update(|settings| {
-                                        settings.auto_start = desired;
-                                        settings.auto_start_explicit = true;
-                                    });
-                                    let message = match state {
-                                        AutostartState::Enabled => {
-                                            t(language, "settings.status_autostart_enabled")
-                                        }
-                                        AutostartState::Disabled => {
-                                            t(language, "settings.status_autostart_disabled")
-                                        }
-                                        AutostartState::RequiresApproval => {
-                                            t(language, "settings.status_autostart_approval")
-                                        }
-                                        AutostartState::Unsupported => {
-                                            t(language, "settings.status_autostart_failed")
-                                        }
-                                    };
-                                    this.show_status(message.to_owned(), cx);
-                                }
-                                Err(error) => {
-                                    this.show_status(
-                                        format!(
-                                            "{}{}",
-                                            t(language, "settings.status_autostart_failed"),
-                                            error
-                                        ),
-                                        cx,
-                                    );
-                                }
+                        .on_key_down(cx.listener(|this, event, window, cx| {
+                            if super::handle_tab_key(this, event, window, cx) {
+                                return;
                             }
-                            cx.notify();
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                toggle_auto_start(this, cx);
+                                cx.stop_propagation();
+                            }
                         }))
-                        .child(toggle(theme, value, "settings-auto-start-toggle")),
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            window.focus(&focus_for_click, cx);
+                            toggle_auto_start(this, cx);
+                        }))
+                        .child(toggle(
+                            theme,
+                            value,
+                            "settings-auto-start-toggle",
+                            cx.reduce_motion(),
+                        )),
                 ),
         )
     }
@@ -361,5 +357,110 @@ fn diagnostics_report(settings: &AppSettings) -> String {
 }
 
 pub(super) fn settings_bounds(cx: &App) -> Bounds<Pixels> {
-    crate::ui::centered_bounds(cx, layout::WINDOW_WIDTH, layout::WINDOW_HEIGHT)
+    let settings = settings_state::get();
+    let displays = cx.displays();
+    let primary = cx.primary_display();
+    let display = settings
+        .settings_window_display
+        .and_then(|id| {
+            displays
+                .iter()
+                .find(|display| u64::from(display.id()) == id)
+                .cloned()
+        })
+        .or(primary)
+        .or_else(|| displays.first().cloned());
+    let Some(display) = display else {
+        return Bounds {
+            origin: point(px(80.0), px(80.0)),
+            size: size(px(layout::WINDOW_WIDTH), px(layout::WINDOW_HEIGHT)),
+        };
+    };
+    let visible = display.visible_bounds();
+    let available_width = (f32::from(visible.size.width) - 32.0).max(1.0);
+    let available_height = (f32::from(visible.size.height) - 32.0).max(1.0);
+    let (stored_width, stored_height, stored_origin) = match settings.settings_window_frame {
+        Some([left, top, width, height]) => (width, height, Some(point(px(left), px(top)))),
+        None => (layout::WINDOW_WIDTH, layout::WINDOW_HEIGHT, None),
+    };
+    let width = stored_width
+        .min(available_width)
+        .max(layout::MIN_WIDTH.min(available_width));
+    let height = stored_height
+        .min(available_height)
+        .max(layout::MIN_HEIGHT.min(available_height));
+    let left = f32::from(visible.origin.x);
+    let top = f32::from(visible.origin.y);
+    let default_x = left + (f32::from(visible.size.width) - width) / 2.0;
+    let default_y = top + (f32::from(visible.size.height) - height) / 2.0;
+    let x = stored_origin
+        .map(|origin| f32::from(origin.x))
+        .unwrap_or(default_x)
+        .clamp(
+            left + 8.0,
+            (left + f32::from(visible.size.width) - width - 8.0).max(left + 8.0),
+        );
+    let y = stored_origin
+        .map(|origin| f32::from(origin.y))
+        .unwrap_or(default_y)
+        .clamp(
+            top + 8.0,
+            (top + f32::from(visible.size.height) - height - 8.0).max(top + 8.0),
+        );
+    Bounds {
+        origin: point(px(x), px(y)),
+        size: size(px(width), px(height)),
+    }
+}
+
+fn set_language(
+    view: &mut SettingsView,
+    option: Language,
+    window: &mut Window,
+    cx: &mut Context<SettingsView>,
+) {
+    settings_state::update(|settings| settings.language = option);
+    crate::tray::refresh_menu();
+    window.set_window_title(t(option, "settings.title"));
+    view.status.clear();
+    cx.notify();
+}
+
+fn toggle_auto_start(view: &mut SettingsView, cx: &mut Context<SettingsView>) {
+    let language = view.settings().language;
+    let desired = !view.settings().auto_start;
+    match set_autostart(desired) {
+        Ok(AutostartState::Unsupported) => {
+            view.show_status(
+                t(language, "settings.status_autostart_failed").to_owned(),
+                cx,
+            );
+        }
+        Ok(state) => {
+            settings_state::update(|settings| {
+                settings.auto_start = desired;
+                settings.auto_start_explicit = true;
+            });
+            let message = match state {
+                AutostartState::Enabled => t(language, "settings.status_autostart_enabled"),
+                AutostartState::Disabled => t(language, "settings.status_autostart_disabled"),
+                AutostartState::RequiresApproval => {
+                    t(language, "settings.status_autostart_approval")
+                }
+                AutostartState::Unsupported => t(language, "settings.status_autostart_failed"),
+            };
+            view.show_status(message.to_owned(), cx);
+        }
+        Err(error) => {
+            view.show_status(
+                format!(
+                    "{}{}",
+                    t(language, "settings.status_autostart_failed"),
+                    error
+                ),
+                cx,
+            );
+        }
+    }
+    cx.notify();
 }

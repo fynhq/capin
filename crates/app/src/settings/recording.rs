@@ -44,7 +44,6 @@ impl SettingsView {
                 .flex_shrink_0()
                 .rounded(px(14.0))
                 .p(px(3.0))
-                .cursor_pointer()
                 .border_1()
                 .when(selected, |item| item.border_2().border_color(theme.accent))
                 .when(!selected, |item| item.border_color(theme.border))
@@ -89,7 +88,6 @@ impl SettingsView {
             .flex_shrink_0()
             .rounded(px(14.0))
             .p(px(3.0))
-            .cursor_pointer()
             .border_1()
             .when(custom_selected || picker_open, |item| {
                 item.border_2().border_color(theme.accent)
@@ -265,7 +263,6 @@ impl SettingsView {
                     .bg(rgb(hue_color))
                     .border_1()
                     .border_color(theme.border)
-                    .cursor_pointer()
                     .hover(|style| style.opacity(0.85))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let color = hue_color;
@@ -321,7 +318,7 @@ impl SettingsView {
                             )
                             .child(
                                 div()
-                                    .text_size(px(11.0))
+                                    .text_size(px(crate::ui::FONT_CAPTION))
                                     .text_color(theme.text)
                                     .child(t(language, "editor.custom_color")),
                             )
@@ -332,7 +329,7 @@ impl SettingsView {
                                     .py(px(2.0))
                                     .rounded(px(4.0))
                                     .bg(theme.control)
-                                    .text_size(px(11.0))
+                                    .text_size(px(crate::ui::FONT_CAPTION))
                                     .text_color(theme.text)
                                     .child({
                                         let mut row = div()
@@ -364,14 +361,15 @@ impl SettingsView {
                     .child(hue_row)
                     .child(
                         div()
-                            .text_size(px(9.5))
+                            .text_size(px(crate::ui::FONT_MICRO))
                             .text_color(theme.muted)
                             .child(t(language, "editor.custom_color_hint")),
                     ),
                 "settings-record-color-enter",
                 y,
-                4.0,
-                Duration::from_millis(120),
+                0.0,
+                Duration::from_millis(50),
+                cx.reduce_motion(),
             )
             .into_any_element(),
         )

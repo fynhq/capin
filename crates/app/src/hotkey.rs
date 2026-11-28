@@ -415,35 +415,43 @@ mod imp {
         let Ok(hotkey) = HotKey::from_str(value) else {
             return value.to_owned();
         };
-        let mut parts = Vec::new();
-        if hotkey.mods.contains(Modifiers::CONTROL) {
-            parts.push("Ctrl".to_owned());
+        let key = display_key(hotkey.key);
+        #[cfg(target_os = "macos")]
+        {
+            let mut text = String::new();
+            if hotkey.mods.contains(Modifiers::CONTROL) {
+                text.push('⌃');
+            }
+            if hotkey.mods.contains(Modifiers::ALT) {
+                text.push('⌥');
+            }
+            if hotkey.mods.contains(Modifiers::SHIFT) {
+                text.push('⇧');
+            }
+            if hotkey.mods.contains(Modifiers::META) {
+                text.push('⌘');
+            }
+            text.push_str(&key);
+            text
         }
-        if hotkey.mods.contains(Modifiers::META) {
-            parts.push(
-                if cfg!(target_os = "macos") {
-                    "Cmd"
-                } else {
-                    "Win"
-                }
-                .to_owned(),
-            );
+        #[cfg(not(target_os = "macos"))]
+        {
+            let mut parts = Vec::new();
+            if hotkey.mods.contains(Modifiers::CONTROL) {
+                parts.push("Ctrl".to_owned());
+            }
+            if hotkey.mods.contains(Modifiers::ALT) {
+                parts.push("Alt".to_owned());
+            }
+            if hotkey.mods.contains(Modifiers::SHIFT) {
+                parts.push("Shift".to_owned());
+            }
+            if hotkey.mods.contains(Modifiers::META) {
+                parts.push("Win".to_owned());
+            }
+            parts.push(key);
+            parts.join("+")
         }
-        if hotkey.mods.contains(Modifiers::ALT) {
-            parts.push(
-                if cfg!(target_os = "macos") {
-                    "Option"
-                } else {
-                    "Alt"
-                }
-                .to_owned(),
-            );
-        }
-        if hotkey.mods.contains(Modifiers::SHIFT) {
-            parts.push("Shift".to_owned());
-        }
-        parts.push(display_key(hotkey.key));
-        parts.join("+")
     }
 
     fn display_key(code: Code) -> String {

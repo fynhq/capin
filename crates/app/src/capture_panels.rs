@@ -11,9 +11,9 @@ use crate::ui::{enter_slide_fade, tooltip_view};
 
 const HINTS_PADDING: f32 = 14.0;
 const HINTS_GAP: f32 = 7.0;
-const HINTS_TITLE_FONT: f32 = 13.0;
-const HINTS_KEY_FONT: f32 = 11.5;
-const HINTS_TEXT_FONT: f32 = 12.5;
+const HINTS_TITLE_FONT: f32 = crate::ui::FONT_TITLE;
+const HINTS_KEY_FONT: f32 = crate::ui::FONT_CAPTION;
+const HINTS_TEXT_FONT: f32 = crate::ui::FONT_BODY;
 const HINTS_LINE_HEIGHT: f32 = 1.618;
 const HINTS_TITLE_HEIGHT: f32 = HINTS_TITLE_FONT * HINTS_LINE_HEIGHT;
 const HINTS_ROW_HEIGHT: f32 = HINTS_TEXT_FONT * HINTS_LINE_HEIGHT;
@@ -65,7 +65,7 @@ pub(crate) fn effects_panel<View: 'static>(
     language: Language,
     rect: Bounds<Pixels>,
     effects: RegionEffects,
-    offset: f32,
+    _offset: f32,
     cx: &mut Context<View>,
     on_radius: fn(&mut View, u32, &mut Context<View>),
     on_shadow: fn(&mut View, &mut Context<View>),
@@ -91,7 +91,7 @@ pub(crate) fn effects_panel<View: 'static>(
                 .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
                 .h(px(22.0))
                 .px(px(6.0))
-                .rounded(px(5.0))
+                .rounded(px(crate::ui::RADIUS_CHIP))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -100,9 +100,8 @@ pub(crate) fn effects_panel<View: 'static>(
                     chip.hover(move |style| style.bg(theme.hover))
                 })
                 .active(|style| style.opacity(0.85))
-                .text_size(px(11.0))
+                .text_size(px(crate::ui::FONT_CAPTION))
                 .text_color(if selected { theme.accent } else { theme.muted })
-                .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| on_radius(this, radius, cx)))
                 .child(label),
         );
@@ -118,7 +117,7 @@ pub(crate) fn effects_panel<View: 'static>(
         })
         .h(px(22.0))
         .px(px(8.0))
-        .rounded(px(5.0))
+        .rounded(px(crate::ui::RADIUS_CHIP))
         .flex()
         .items_center()
         .justify_center()
@@ -127,9 +126,8 @@ pub(crate) fn effects_panel<View: 'static>(
             chip.hover(move |style| style.bg(theme.hover))
         })
         .active(|style| style.opacity(0.85))
-        .text_size(px(11.0))
+        .text_size(px(crate::ui::FONT_CAPTION))
         .text_color(if shadow { theme.accent } else { theme.muted })
-        .cursor_pointer()
         .on_click(cx.listener(move |this, _, _, cx| on_shadow(this, cx)))
         .child(shadow_label);
 
@@ -162,8 +160,9 @@ pub(crate) fn effects_panel<View: 'static>(
         panel,
         format!("{id_prefix}-effects-enter"),
         f32::from(rect.origin.y),
-        offset,
-        Duration::from_millis(120),
+        0.0,
+        Duration::from_millis(80),
+        cx.reduce_motion(),
     );
 
     div()
@@ -268,8 +267,9 @@ pub(crate) fn hints_panel<View: 'static>(
         panel,
         format!("{id_prefix}-hints-enter"),
         f32::from(rect.origin.y),
-        4.0,
-        Duration::from_millis(120),
+        0.0,
+        Duration::from_millis(80),
+        cx.reduce_motion(),
     );
     div()
         .id(format!("{id_prefix}-hints-layer"))
@@ -300,7 +300,7 @@ pub(crate) fn effects_chip<View: 'static>(
         .id(id)
         .px(px(6.0))
         .py(px(3.0))
-        .rounded(px(5.0))
+        .rounded(px(crate::ui::RADIUS_CHIP))
         .flex()
         .flex_row()
         .items_center()
@@ -311,7 +311,6 @@ pub(crate) fn effects_chip<View: 'static>(
             chip.hover(move |style| style.bg(theme.hover))
         })
         .active(|style| style.opacity(0.85))
-        .cursor_pointer()
         .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
         .child(t(language, "overlay.info_effects"))
         .when(active, |chip| {
@@ -339,13 +338,12 @@ pub(crate) fn refresh_button<View: 'static>(
         .tooltip(move |_, cx| tooltip_view(label.clone(), cx))
         .w(px(22.0))
         .h(px(22.0))
-        .rounded(px(5.0))
+        .rounded(px(crate::ui::RADIUS_CHIP))
         .flex()
         .items_center()
         .justify_center()
         .hover(move |style| style.bg(theme.hover))
         .active(|style| style.opacity(0.85))
-        .cursor_pointer()
         .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
         .child(icons::icon(icons::REFRESH, 14.0, theme.icon))
         .into_any_element()

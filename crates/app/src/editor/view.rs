@@ -313,7 +313,6 @@ impl EditorView {
                     .bg(rgb(hue_color))
                     .border_1()
                     .border_color(self.chrome.border)
-                    .cursor_pointer()
                     .hover(|style| style.opacity(0.85))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.apply_color((hue_color << 8) | 0xFF);
@@ -362,7 +361,7 @@ impl EditorView {
                     )
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(px(crate::ui::FONT_CAPTION))
                             .text_color(self.chrome.text)
                             .child(t(language, "editor.custom_color")),
                     )
@@ -373,7 +372,7 @@ impl EditorView {
                             .py(px(2.0))
                             .rounded(px(4.0))
                             .bg(self.chrome.selected)
-                            .text_size(px(11.0))
+                            .text_size(px(crate::ui::FONT_CAPTION))
                             .text_color(self.chrome.text)
                             .cursor_text()
                             .child({
@@ -404,7 +403,7 @@ impl EditorView {
             .child(hue_row)
             .child(
                 div()
-                    .text_size(px(9.5))
+                    .text_size(px(crate::ui::FONT_MICRO))
                     .text_color(self.chrome.muted)
                     .child(t(language, "editor.custom_color_hint")),
             );
@@ -412,8 +411,9 @@ impl EditorView {
             panel,
             "editor-custom-color-enter",
             f32::from(rect.origin.y),
-            4.0,
-            Duration::from_millis(120),
+            0.0,
+            Duration::from_millis(50),
+            cx.reduce_motion(),
         );
 
         Some(

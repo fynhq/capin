@@ -7,9 +7,10 @@ use windows::Wdk::System::SystemServices::RtlGetVersion;
 use windows::Win32::Foundation::POINT as ScreenPoint;
 use windows::Win32::Foundation::{COLORREF, GlobalFree, HANDLE, HWND, RECT};
 use windows::Win32::Graphics::Dwm::{
-    DWM_WINDOW_CORNER_PREFERENCE, DWMNCRENDERINGPOLICY, DWMNCRP_DISABLED, DWMNCRP_ENABLED,
-    DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
-    DWMWCP_DONOTROUND, DwmSetWindowAttribute,
+    DWM_SYSTEMBACKDROP_TYPE, DWM_WINDOW_CORNER_PREFERENCE, DWMNCRENDERINGPOLICY, DWMNCRP_DISABLED,
+    DWMNCRP_ENABLED, DWMSBT_MAINWINDOW, DWMSBT_TRANSIENTWINDOW, DWMWA_BORDER_COLOR,
+    DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY, DWMWA_SYSTEMBACKDROP_TYPE,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{ClientToScreen, MONITOR_DEFAULTTONEAREST, MonitorFromWindow};
 use windows::Win32::System::Com::CoTaskMemFree;
@@ -19,21 +20,22 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
 use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
+use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows::Win32::UI::Shell::{
     FOLDERID_Pictures, FOLDERID_Videos, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetCursorPos, GetWindowLongPtrW, GetWindowRect,
-    HWND_TOPMOST, IDC_ARROW, LWA_ALPHA, LoadCursorW, SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetCursor, SetLayeredWindowAttributes,
+    HWND_TOPMOST, IDC_ARROW, LWA_ALPHA, LoadCursorW, SPI_GETCLIENTAREAANIMATION,
+    SPI_GETHIGHCONTRAST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SWP_SHOWWINDOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetCursor, SetLayeredWindowAttributes,
     SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, SystemParametersInfoW,
     WDA_EXCLUDEFROMCAPTURE, WS_CAPTION, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
 };
 use windows::core::GUID;
 
-use crate::{PlatformWindowError, WindowStyle};
+use crate::{BackdropMaterial, PlatformWindowError, WindowStyle};
 
 pub(super) fn trim_working_set() {
     // SAFETY: the pseudo-handle refers to this process; -1 sizes request a trim.
@@ -227,12 +229,84 @@ pub(super) fn apply(
 }
 
 fn capture_exclusion_supported() -> bool {
+    windows_build_number() >= 19_041
+}
+
+fn windows_build_number() -> u32 {
     let mut version = OSVERSIONINFOW {
         dwOSVersionInfoSize: size_of::<OSVERSIONINFOW>() as u32,
         ..Default::default()
     };
     // SAFETY: version is a valid, writable version buffer.
-    unsafe { RtlGetVersion(&mut version).is_ok() && version.dwBuildNumber >= 19_041 }
+    if unsafe { RtlGetVersion(&mut version) }.is_ok() {
+        version.dwBuildNumber
+    } else {
+        0
+    }
+}
+
+pub(super) fn transparency_allowed() -> bool {
+    if high_contrast_enabled() {
+        return false;
+    }
+    const PERSONALIZE_KEY: &str =
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
+    super::accent::hkcu_dword(PERSONALIZE_KEY, "EnableTransparency")
+        .map(|value| value != 0)
+        .unwrap_or(true)
+}
+
+fn high_contrast_enabled() -> bool {
+    let mut contrast = HIGHCONTRASTW {
+        cbSize: size_of::<HIGHCONTRASTW>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: the struct is sized and writable for the duration of the call.
+    let queried = unsafe {
+        SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            contrast.cbSize,
+            Some(&mut contrast as *mut _ as *mut c_void),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+        .is_ok()
+    };
+    queried && contrast.dwFlags.contains(HCF_HIGHCONTRASTON)
+}
+
+pub(super) fn backdrop_supported(_material: BackdropMaterial) -> bool {
+    windows_build_number() >= 22_621
+}
+
+pub(super) fn set_backdrop(
+    window: &impl HasWindowHandle,
+    material: BackdropMaterial,
+) -> Result<(), PlatformWindowError> {
+    if !backdrop_supported(material) {
+        return Err(PlatformWindowError::Platform {
+            operation: "SetWindowBackdrop",
+            message: "requires Windows 11 22H2 or later".to_owned(),
+        });
+    }
+    let handle = window.window_handle()?;
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return Err(PlatformWindowError::NotWin32);
+    };
+    let hwnd = HWND(win32.hwnd.get() as *mut c_void);
+    let backdrop = match material {
+        BackdropMaterial::Mica => DWMSBT_MAINWINDOW,
+        BackdropMaterial::Acrylic => DWMSBT_TRANSIENTWINDOW,
+    };
+    // SAFETY: hwnd is live and the DWM reads the value during this call.
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            &backdrop as *const _ as *const c_void,
+            size_of::<DWM_SYSTEMBACKDROP_TYPE>() as u32,
+        )
+    }
+    .map_err(|error| platform_error("SetWindowBackdrop", error))
 }
 
 pub(super) fn pictures_dir() -> Option<PathBuf> {

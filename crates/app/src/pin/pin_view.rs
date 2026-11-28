@@ -187,8 +187,9 @@ impl Render for PinView {
                             .w(px(open_size))
                             .h(px(open_size))
                             .rounded_full()
+                            .role(Role::Button)
+                            .aria_label(open_tooltip.clone())
                             .bg(accent)
-                            .cursor_pointer()
                             .hover(move |style| style.opacity(0.85))
                             .tooltip(move |_, cx| crate::ui::tooltip_view(open_tooltip.clone(), cx))
                             .on_mouse_down(
@@ -229,8 +230,9 @@ impl Render for PinView {
                                 .w(px(copy_size))
                                 .h(px(copy_size))
                                 .rounded(px(copy_size * 0.3))
+                                .role(Role::Button)
+                                .aria_label(copy_tooltip.clone())
                                 .bg(rgba(0xFFFFFFF2))
-                                .cursor_pointer()
                                 .hover(move |style| style.bg(rgb(0xFFFFFF)))
                                 .tooltip(move |_, cx| {
                                     crate::ui::tooltip_view(copy_tooltip.clone(), cx)
@@ -526,7 +528,9 @@ impl Render for PinView {
             .children(qr_overlay);
 
         root.children(hud.map(|message| {
-            let duration = if hud_leaving {
+            let duration = if cx.reduce_motion() {
+                Duration::ZERO
+            } else if hud_leaving {
                 Duration::from_millis(150)
             } else {
                 Duration::from_millis(120)
@@ -542,11 +546,11 @@ impl Render for PinView {
                     div()
                         .px(px(8.0))
                         .py(px(3.0))
-                        .rounded(px(5.0))
+                        .rounded(px(crate::ui::RADIUS_CHIP))
                         .bg(theme.menu)
                         .border_1()
                         .border_color(theme.menu_border)
-                        .text_size(px(10.5))
+                        .text_size(px(crate::ui::FONT_MICRO))
                         .text_color(theme.text)
                         .child(message),
                 )
@@ -563,7 +567,9 @@ impl Render for PinView {
                 )
         }))
         .children(notice.map(|notice| {
-            let duration = if notice_leaving {
+            let duration = if cx.reduce_motion() {
+                Duration::ZERO
+            } else if notice_leaving {
                 Duration::from_millis(150)
             } else {
                 Duration::from_millis(120)
@@ -579,9 +585,9 @@ impl Render for PinView {
                     div()
                         .px(px(10.0))
                         .py(px(4.0))
-                        .rounded(px(6.0))
+                        .rounded(px(crate::ui::RADIUS_CONTROL))
                         .bg(rgba(0x000000CC))
-                        .text_size(px(10.0))
+                        .text_size(px(crate::ui::FONT_BODY))
                         .text_color(rgb(0xFFFFFF))
                         .max_w_full()
                         .overflow_hidden()

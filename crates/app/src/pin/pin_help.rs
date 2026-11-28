@@ -10,6 +10,7 @@ use crate::chrome_theme::ChromeTheme;
 use crate::i18n::{Language, t};
 use crate::logging::log_error;
 use crate::settings_state;
+use crate::shortcut_text;
 
 thread_local! {
     static PIN_HELP: RefCell<Option<AnyWindowHandle>> = const { RefCell::new(None) };
@@ -77,10 +78,11 @@ fn open(anchor: Bounds<Pixels>, display_id: Option<DisplayId>, image: bool, cx: 
         Some(display.id()),
         true,
         super::pin_window_kind(),
-        WindowBackgroundAppearance::Transparent,
+        crate::aux_window::transient_background(),
     );
     match gpui_kit::open_window(options, cx, move |window, cx| {
         let _ = apply_window_style(&*window, WindowStyle::PIN_MENU);
+        crate::aux_window::apply_transient_backdrop(&*window);
         let view = cx.new(|cx| PinHelpView {
             rows,
             width,
@@ -124,9 +126,11 @@ fn forget_help() {
 }
 
 fn rows(image: bool, language: Language) -> Vec<(String, String)> {
+    let wheel = t(language, "shortcuts.value.wheel").to_owned();
+    let drag = t(language, "shortcuts.value.drag").to_owned();
     let mut rows = vec![
         (
-            "Cmd/Ctrl+C".to_owned(),
+            shortcut_text::primary("C"),
             t(
                 language,
                 if image {
@@ -138,38 +142,38 @@ fn rows(image: bool, language: Language) -> Vec<(String, String)> {
             .to_owned(),
         ),
         (
-            "Cmd/Ctrl+V".to_owned(),
+            shortcut_text::primary("V"),
             t(language, "pin.hint_paste").to_owned(),
         ),
     ];
     if image {
         rows.push((
-            "Cmd/Ctrl+S".to_owned(),
+            shortcut_text::primary("S"),
             t(language, "pin.hint_save").to_owned(),
         ));
-        rows.push(("Scroll".to_owned(), t(language, "pin.hint_zoom").to_owned()));
+        rows.push((wheel.clone(), t(language, "pin.hint_zoom").to_owned()));
         rows.push((
-            "Cmd/Ctrl+=".to_owned(),
+            shortcut_text::primary("="),
             t(language, "pin.hint_zoom_in").to_owned(),
         ));
         rows.push((
-            "Cmd/Ctrl+-".to_owned(),
+            shortcut_text::primary("-"),
             t(language, "pin.hint_zoom_out").to_owned(),
         ));
         rows.push((
-            "Cmd/Ctrl+0".to_owned(),
+            shortcut_text::primary("0"),
             t(language, "pin.hint_zoom_reset").to_owned(),
         ));
         rows.push((
-            "Shift+Scroll".to_owned(),
+            shortcut_text::shift(&wheel),
             t(language, "pin.hint_opacity").to_owned(),
         ));
         rows.push((
-            "Alt+Drag".to_owned(),
+            shortcut_text::alt(&drag),
             t(language, "pin.hint_drag_any").to_owned(),
         ));
     } else {
-        rows.push(("Drag".to_owned(), t(language, "pin.hint_drag").to_owned()));
+        rows.push((drag, t(language, "pin.hint_drag").to_owned()));
     }
     rows.push(("F1".to_owned(), t(language, "pin.hint_help").to_owned()));
     rows.push(("Esc".to_owned(), t(language, "pin.hint_close").to_owned()));
@@ -250,9 +254,17 @@ impl Render for PinHelpView {
                 }),
             )
             .child(crate::ui::enter_fade(
-                hints_card(theme, language, self.width, &self.rows, false, false),
+                hints_card(
+                    theme,
+                    language,
+                    self.width,
+                    &self.rows,
+                    false,
+                    crate::aux_window::transient_material_active(),
+                ),
                 "pin-help-enter",
-                Duration::from_millis(100),
+                Duration::from_millis(80),
+                cx.reduce_motion(),
             ))
     }
 }

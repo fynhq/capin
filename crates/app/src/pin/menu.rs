@@ -94,7 +94,7 @@ impl Render for PinMenuView {
                     .rounded(px(4.0))
                     .flex()
                     .items_center()
-                    .text_size(px(12.5))
+                    .text_size(px(crate::ui::FONT_BODY))
                     .text_color(theme.text)
                     .when(selected, |item| item.bg(theme.menu_hover))
                     .hover(move |style| style.bg(theme.menu_hover))
@@ -116,7 +116,7 @@ impl Render for PinMenuView {
                     .child(label),
             );
         }
-        crate::ui::enter_fade(menu, "pin-menu-enter", Duration::from_millis(90))
+        menu
     }
 }
 
@@ -188,12 +188,13 @@ pub(crate) fn open_pin_menu(
         display_id,
         true,
         pin_window_kind(),
-        WindowBackgroundAppearance::Transparent,
+        crate::aux_window::transient_background(),
     );
     let accent_hex = system_accent_hex().unwrap_or_else(|| crate::theme::fallback_accent(false));
 
     match gpui_kit::open_window(options, cx, move |window, cx| {
         let _ = apply_window_style(&*window, WindowStyle::PIN_MENU);
+        crate::aux_window::apply_transient_backdrop(&*window);
         let view = cx.new(|cx| PinMenuView {
             pin_id,
             items,

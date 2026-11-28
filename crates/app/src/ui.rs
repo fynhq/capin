@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(any(target_os = "windows", test))]
@@ -7,6 +8,31 @@ use gpui_kit::*;
 
 use crate::chrome_theme::ChromeTheme;
 use crate::icons;
+
+pub(crate) const RADIUS_CONTROL: f32 = 6.0;
+pub(crate) const RADIUS_CHIP: f32 = 4.0;
+
+pub(crate) const FONT_MICRO: f32 = 10.0;
+pub(crate) const FONT_CAPTION: f32 = 11.0;
+pub(crate) const FONT_BODY: f32 = 12.0;
+pub(crate) const FONT_TITLE: f32 = 13.0;
+
+pub(crate) const TOOL_ICON: f32 = 17.0;
+
+pub(crate) fn tabular_numbers() -> FontFeatures {
+    FontFeatures(Arc::new(vec![("tnum".to_owned(), 1)]))
+}
+
+pub(crate) fn tooltip_with_shortcut(label: &str, shortcut: Option<&str>) -> String {
+    match shortcut {
+        Some(shortcut) if !shortcut.is_empty() => format!("{label}  {shortcut}"),
+        _ => label.to_owned(),
+    }
+}
+
+pub(crate) fn focus_ring(accent: Rgba) -> Vec<BoxShadow> {
+    vec![BoxShadow::new(px(0.0), px(0.0), Hsla::from(accent)).spread_radius(px(2.0))]
+}
 
 struct TooltipLabel {
     text: SharedString,
@@ -18,12 +44,12 @@ impl Render for TooltipLabel {
         div()
             .px(px(8.0))
             .py(px(4.0))
-            .rounded(px(6.0))
+            .rounded(px(RADIUS_CONTROL))
             .bg(chrome.surface_strong)
             .border_1()
             .border_color(chrome.border)
             .shadow(chrome.shadow())
-            .text_size(px(11.5))
+            .text_size(px(FONT_BODY))
             .text_color(chrome.text)
             .child(self.text.clone())
     }
@@ -252,18 +278,20 @@ pub fn bar_button<View: 'static>(
     action: fn(&mut View, &mut Context<View>),
 ) -> AnyElement {
     let theme = *theme;
+    let danger = crate::theme::danger();
     let (background, foreground) = match tone {
         BarButtonTone::Neutral => (rgba(0x00000000), theme.text),
         BarButtonTone::Accent => (theme.accent, theme.accent_text),
-        BarButtonTone::Danger => (rgb(0xFF453A), rgb(0xFFFFFF)),
+        BarButtonTone::Danger => (danger, rgb(0xFFFFFF)),
     };
     let hover = match tone {
         BarButtonTone::Neutral => theme.hover,
         BarButtonTone::Accent => opacity_color(theme.accent, 0.88),
-        BarButtonTone::Danger => opacity_color(rgb(0xFF453A), 0.88),
+        BarButtonTone::Danger => opacity_color(danger, 0.88),
     };
     div()
         .id(id)
+        .role(Role::Button)
         .h(px(28.0))
         .px(px(10.0))
         .flex()
@@ -271,11 +299,10 @@ pub fn bar_button<View: 'static>(
         .items_center()
         .gap(px(5.0))
         .flex_shrink_0()
-        .rounded(px(6.0))
+        .rounded(px(RADIUS_CONTROL))
         .bg(background)
-        .text_size(px(11.5))
+        .text_size(px(FONT_BODY))
         .text_color(foreground)
-        .cursor_pointer()
         .hover(move |style| style.bg(hover))
         .active(|style| style.opacity(0.85))
         .on_click(cx.listener(move |this, _, _, cx| action(this, cx)))
@@ -327,10 +354,17 @@ pub fn enter_slide_fade<E>(
     base_top: f32,
     offset: f32,
     duration: Duration,
+    reduce_motion: bool,
 ) -> AnimationElement<E>
 where
     E: IntoElement + Styled + 'static,
 {
+    let offset = if reduce_motion { 0.0 } else { offset };
+    let duration = if reduce_motion {
+        Duration::ZERO
+    } else {
+        duration
+    };
     element.with_animation(
         id,
         Animation::new(duration).with_easing(ease_out_cubic),
@@ -346,10 +380,16 @@ pub fn enter_fade<E>(
     element: E,
     id: impl Into<ElementId>,
     duration: Duration,
+    reduce_motion: bool,
 ) -> AnimationElement<E>
 where
     E: IntoElement + Styled + 'static,
 {
+    let duration = if reduce_motion {
+        Duration::ZERO
+    } else {
+        duration
+    };
     element.with_animation(
         id,
         Animation::new(duration).with_easing(ease_out_cubic),

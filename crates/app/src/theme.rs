@@ -39,6 +39,23 @@ pub(crate) fn accent_text_color(hex: u32) -> Rgba {
     }
 }
 
+#[cfg(target_os = "windows")]
+pub(crate) const DANGER_HEX: u32 = 0xC42B1C;
+#[cfg(not(target_os = "windows"))]
+pub(crate) const DANGER_HEX: u32 = 0xFF453A;
+
+pub(crate) fn danger() -> Rgba {
+    rgb(DANGER_HEX)
+}
+
+pub(crate) fn danger_tint() -> Rgba {
+    rgba((DANGER_HEX << 8) | 0x33)
+}
+
+pub(crate) fn opaque(color: Rgba) -> Rgba {
+    rgba((u32::from(color) & 0xFFFF_FF00) | 0xFF)
+}
+
 pub(crate) struct ChromePalette {
     pub surface: Rgba,
     pub surface_strong: Rgba,

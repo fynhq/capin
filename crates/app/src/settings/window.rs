@@ -91,8 +91,8 @@ fn window_control_button(
         .child(
             svg()
                 .data(icon)
-                .w(px(14.0))
-                .h(px(14.0))
+                .w(px(10.0))
+                .h(px(10.0))
                 .text_color(theme.text)
                 .when(close, |glyph| {
                     glyph.group_hover("settings-window-close", |style| {

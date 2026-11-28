@@ -94,7 +94,7 @@ impl SettingsView {
                             theme,
                             t(language, "shortcuts.save_capture"),
                             "",
-                            t(language, "shortcuts.value.cmd_ctrl_s"),
+                            &crate::shortcut_text::primary("S"),
                             Some(icons::SAVE),
                         ),
                         info_row(
@@ -161,14 +161,14 @@ impl SettingsView {
                             theme,
                             t(language, "shortcuts.pin_copy_text"),
                             "",
-                            t(language, "shortcuts.value.cmd_ctrl_c"),
+                            &crate::shortcut_text::primary("C"),
                             Some(icons::COPY),
                         ),
                         info_row(
                             theme,
                             t(language, "shortcuts.pin_select_all"),
                             "",
-                            t(language, "shortcuts.value.cmd_ctrl_a"),
+                            &crate::shortcut_text::primary("A"),
                             Some(icons::SELECT),
                         ),
                         info_row(
@@ -182,7 +182,7 @@ impl SettingsView {
                             theme,
                             t(language, "shortcuts.pin_opacity"),
                             "",
-                            t(language, "shortcuts.value.shift_wheel"),
+                            &crate::shortcut_text::shift(t(language, "shortcuts.value.wheel")),
                             Some(icons::PALETTE),
                         ),
                         info_row(
@@ -252,7 +252,6 @@ impl SettingsView {
                             .flex()
                             .flex_shrink_0()
                             .items_center()
-                            .cursor_pointer()
                             .bg(if recording { selected } else { control })
                             .border_1()
                             .border_color(if recording { accent } else { border })

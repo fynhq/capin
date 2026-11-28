@@ -45,7 +45,7 @@ fn rows() -> Vec<(String, String)> {
     let k = |key: &str| crate::i18n::t(language, key).to_owned();
     vec![
         (k("editor.hint_key_copy"), k("editor.hint_copy")),
-        ("Cmd/Ctrl+S".to_owned(), k("editor.hint_save")),
+        (crate::shortcut_text::primary("S"), k("editor.hint_save")),
         (pin_hotkey, k("editor.hint_pin")),
         ("Space".to_owned(), k("editor.hint_space")),
         ("R / F5".to_owned(), k("editor.hint_ratio_refresh")),
@@ -91,13 +91,14 @@ pub(super) fn show(
         display,
         false,
         window_kind(),
-        crate::aux_window::panel_background(),
+        crate::aux_window::transient_background(),
     );
     let view_focus = owner_focus.clone();
     match gpui_kit::open_window(options, cx, move |window, cx| {
         if let Err(error) = apply_window_style(&*window, WindowStyle::HINTS) {
             log_warn!("overlay", "failed to style hints window: {error}");
         }
+        crate::aux_window::apply_transient_backdrop(&*window);
         cx.new(|cx| HintsWindowView {
             owner: owner.clone(),
             owner_handle,
@@ -234,7 +235,12 @@ impl Render for HintsWindowView {
                 }),
             )
             .child(hints_card(
-                self.theme, language, self.width, &self.rows, false, true,
+                self.theme,
+                language,
+                self.width,
+                &self.rows,
+                false,
+                crate::aux_window::transient_material_active(),
             ))
     }
 }

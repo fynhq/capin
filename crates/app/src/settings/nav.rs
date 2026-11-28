@@ -3,7 +3,8 @@ use super::*;
 impl SettingsView {
     pub(super) fn sidebar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let mut nav: Vec<AnyElement> = Vec::new();
-        for section in SettingsSection::ALL {
+        let nav_focus = self.nav_focus.clone();
+        for (index, section) in SettingsSection::ALL.into_iter().enumerate() {
             let selected = self.section == section;
             let hover = theme.hover;
             let accent = theme.accent;
@@ -27,11 +28,33 @@ impl SettingsView {
                 .aria_label(section.title(self.settings().language))
                 .aria_selected(selected)
                 .active(move |style| style.bg(selected_bg))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.section = section;
-                    this.scroll_handle.set_offset(point(px(0.0), px(0.0)));
-                    this.select_menu = None;
-                    cx.notify();
+                .track_focus(&nav_focus[index])
+                .focus_visible(move |style| style.shadow(crate::ui::focus_ring(accent)))
+                .on_key_down(cx.listener(move |this, event, window, cx| {
+                    if super::handle_tab_key(this, event, window, cx) {
+                        return;
+                    }
+                    match event.keystroke.key.as_str() {
+                        "up" if index > 0 => {
+                            window.focus(&this.nav_focus[index - 1], cx);
+                            cx.notify();
+                            cx.stop_propagation();
+                        }
+                        "down" if index + 1 < this.nav_focus.len() => {
+                            window.focus(&this.nav_focus[index + 1], cx);
+                            cx.notify();
+                            cx.stop_propagation();
+                        }
+                        "enter" | "space" => {
+                            super::select_section(this, section, cx);
+                            cx.stop_propagation();
+                        }
+                        _ => {}
+                    }
+                }))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    window.focus(&this.nav_focus[index], cx);
+                    super::select_section(this, section, cx);
                 }))
                 .child(
                     div()
@@ -62,8 +85,6 @@ impl SettingsView {
             .unwrap_or(0) as f32;
         let indicator_top = selected_index * (layout::NAV_ITEM_HEIGHT + 2.0)
             + (layout::NAV_ITEM_HEIGHT - 16.0) / 2.0;
-        let spring =
-            SpringAnimation::new(SpringConfig::new(700.0, 46.0, 1.0)).to(px(indicator_top));
         let indicator = div()
             .absolute()
             .left(px(0.0))
@@ -71,8 +92,7 @@ impl SettingsView {
             .w(px(3.0))
             .h(px(16.0))
             .rounded(px(1.5))
-            .bg(theme.accent)
-            .with_spring("settings-nav-indicator", spring, |bar, top| bar.top(top));
+            .bg(theme.accent);
         let nav = div()
             .id("settings-nav")
             .role(Role::Navigation)

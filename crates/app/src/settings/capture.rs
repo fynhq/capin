@@ -117,6 +117,9 @@ impl SettingsView {
         row: ToggleRow,
     ) -> AnyElement {
         let language = self.settings().language;
+        let focus = super::control_focus(self, row.id, cx);
+        let focus_for_click = focus.clone();
+        let accent = theme.accent;
         a11y_row(
             row.id,
             t(language, row.title_key),
@@ -140,18 +143,23 @@ impl SettingsView {
                             } else {
                                 Toggled::False
                             })
-                            .cursor_pointer()
+                            .track_focus(&focus)
+                            .focus_visible(move |style| style.shadow(crate::ui::focus_ring(accent)))
                             .active(move |style| style.opacity(0.85))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let value = !row.value;
-                                settings_state::update(|settings| (row.set)(settings, value));
-                                if row.refresh_pin {
-                                    cx.defer(crate::pin::refresh_recognition);
+                            .on_key_down(cx.listener(move |this, event, window, cx| {
+                                if super::handle_tab_key(this, event, window, cx) {
+                                    return;
                                 }
-                                this.status.clear();
-                                cx.notify();
+                                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                    toggle_row_action(this, row, cx);
+                                    cx.stop_propagation();
+                                }
                             }))
-                            .child(toggle(theme, row.value, row.id)),
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                window.focus(&focus_for_click, cx);
+                                toggle_row_action(this, row, cx);
+                            }))
+                            .child(toggle(theme, row.value, row.id, cx.reduce_motion())),
                     ),
             ),
         )
@@ -381,6 +389,10 @@ impl SettingsView {
         .into_any_element();
         let hover = theme.control_hover;
         let chevron = theme.muted;
+        let focus = super::control_focus(self, id, cx);
+        let focus_for_click = focus.clone();
+        let accent = theme.accent;
+        let anchor_for_key = anchor.clone();
         div()
             .id(id)
             .role(Role::Button)
@@ -401,41 +413,26 @@ impl SettingsView {
             .gap(px(8.0))
             .text_size(px(layout::CONTROL_TEXT))
             .text_color(theme.text)
-            .cursor_pointer()
             .hover(move |style| style.bg(hover))
+            .track_focus(&focus)
+            .focus_visible(move |style| style.shadow(crate::ui::focus_ring(accent)))
             .active(move |style| style.opacity(0.9))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                #[cfg(target_os = "macos")]
-                {
-                    let entries = this.select_entries(kind);
-                    let selected = entries.iter().position(|(_, _, active)| *active);
-                    let items: Vec<String> =
-                        entries.iter().map(|(label, _, _)| label.clone()).collect();
-                    let values: Vec<u32> = entries.iter().map(|(_, value, _)| *value).collect();
-                    cx.spawn(async move |this, cx| {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(1))
-                            .await;
-                        let Some(index) =
-                            platform_window::show_native_menu(&items, selected.unwrap_or(0))
-                        else {
-                            return;
-                        };
-                        let Some(value) = values.get(index).copied() else {
-                            return;
-                        };
-                        this.update(cx, |this, cx| this.apply_select(kind, value, cx))
-                            .ok();
-                    })
-                    .detach();
+            .on_key_down(cx.listener(move |this, event, window, cx| {
+                if super::handle_tab_key(this, event, window, cx) {
+                    return;
                 }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    if let Some(anchor) = anchor.get() {
-                        this.select_menu = Some(SelectMenu { kind, anchor });
-                    }
-                    cx.notify();
+                if this.select_menu.is_some() && handle_select_key(this, event, cx) {
+                    cx.stop_propagation();
+                    return;
                 }
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    open_select(this, kind, anchor_for_key.get(), cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                window.focus(&focus_for_click, cx);
+                open_select(this, kind, anchor.get(), cx);
             }))
             .child(label.to_owned())
             .child(icons::icon(icons::CHEVRON_DOWN, 10.0, chevron))
@@ -494,6 +491,7 @@ impl SettingsView {
             .occlude();
         for (index, (label, value, selected)) in entries.into_iter().enumerate() {
             let selected_bg = theme.option_selected;
+            let highlighted = menu.highlighted == index;
             let check = theme.text;
             let text = theme.text;
             let hover = theme.option_hover;
@@ -508,8 +506,13 @@ impl SettingsView {
                     .items_center()
                     .gap(px(4.0))
                     .text_size(px(layout::CONTROL_TEXT))
-                    .when(selected, |item| item.bg(selected_bg).text_color(text))
-                    .when(!selected, |item| {
+                    .when(highlighted, |item| {
+                        item.bg(selected_bg).text_color(theme.accent)
+                    })
+                    .when(!highlighted && selected, |item| {
+                        item.bg(selected_bg).text_color(text)
+                    })
+                    .when(!highlighted && !selected, |item| {
                         item.text_color(text).hover(move |style| style.bg(hover))
                     })
                     .on_click(cx.listener(move |this, _, _window, cx| {
@@ -528,10 +531,110 @@ impl SettingsView {
                 popup,
                 SharedString::from(format!("settings-select-popup-{}", menu.kind as u8)),
                 base_top,
-                -8.0,
-                Duration::from_millis(150),
+                0.0,
+                Duration::from_millis(50),
+                cx.reduce_motion(),
             )
             .into_any_element(),
         )
+    }
+}
+
+fn toggle_row_action(view: &mut SettingsView, row: ToggleRow, cx: &mut Context<SettingsView>) {
+    let value = !row.value;
+    settings_state::update(|settings| (row.set)(settings, value));
+    if row.refresh_pin {
+        cx.defer(crate::pin::refresh_recognition);
+    }
+    view.status.clear();
+    cx.notify();
+}
+
+fn open_select(
+    view: &mut SettingsView,
+    kind: SelectKind,
+    anchor: Option<Bounds<Pixels>>,
+    cx: &mut Context<SettingsView>,
+) {
+    #[cfg(target_os = "macos")]
+    {
+        let entries = view.select_entries(kind);
+        let selected = entries.iter().position(|(_, _, active)| *active);
+        let items: Vec<String> = entries.iter().map(|(label, _, _)| label.clone()).collect();
+        let values: Vec<u32> = entries.iter().map(|(_, value, _)| *value).collect();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1))
+                .await;
+            let Some(index) = platform_window::show_native_menu(&items, selected.unwrap_or(0))
+            else {
+                return;
+            };
+            let Some(value) = values.get(index).copied() else {
+                return;
+            };
+            this.update(cx, |this, cx| this.apply_select(kind, value, cx))
+                .ok();
+        })
+        .detach();
+        let _ = anchor;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let Some(anchor) = anchor else {
+            return;
+        };
+        let highlighted = view
+            .select_entries(kind)
+            .iter()
+            .position(|(_, _, active)| *active)
+            .unwrap_or(0);
+        view.select_menu = Some(SelectMenu {
+            kind,
+            anchor,
+            highlighted,
+        });
+        cx.notify();
+    }
+}
+
+pub(super) fn handle_select_key(
+    view: &mut SettingsView,
+    event: &KeyDownEvent,
+    cx: &mut Context<SettingsView>,
+) -> bool {
+    let Some(menu) = view.select_menu else {
+        return false;
+    };
+    match event.keystroke.key.as_str() {
+        "escape" => {
+            view.select_menu = None;
+            cx.notify();
+            true
+        }
+        "up" | "down" => {
+            let count = view.select_entries(menu.kind).len();
+            if count == 0 {
+                return true;
+            }
+            let delta = if event.keystroke.key == "up" { -1 } else { 1 };
+            let next = (menu.highlighted as isize + delta)
+                .clamp(0, count.saturating_sub(1) as isize) as usize;
+            if let Some(menu) = view.select_menu.as_mut() {
+                menu.highlighted = next;
+            }
+            cx.notify();
+            true
+        }
+        "enter" => {
+            let entries = view.select_entries(menu.kind);
+            if let Some((_, value, _)) = entries.get(menu.highlighted) {
+                let value = *value;
+                view.select_menu = None;
+                view.apply_select(menu.kind, value, cx);
+            }
+            true
+        }
+        _ => false,
     }
 }

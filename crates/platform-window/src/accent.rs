@@ -16,7 +16,7 @@ pub fn system_accent_hex() -> Option<u32> {
 }
 
 #[cfg(windows)]
-fn hkcu_dword(key: &str, value: &str) -> Option<u32> {
+pub(super) fn hkcu_dword(key: &str, value: &str) -> Option<u32> {
     use windows::Win32::System::Registry::{
         HKEY, HKEY_CURRENT_USER, KEY_READ, REG_DWORD, REG_VALUE_TYPE, RegCloseKey, RegOpenKeyExW,
         RegQueryValueExW,

@@ -88,7 +88,7 @@ pub(super) fn magnifier_panel(
             )
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(px(crate::ui::FONT_BODY))
                     .text_color(view.chrome.text)
                     .child(text),
             )
@@ -100,7 +100,7 @@ pub(super) fn magnifier_panel(
                     .bg(view.chrome.surface)
                     .border_1()
                     .border_color(view.chrome.border)
-                    .text_size(px(9.0))
+                    .text_size(px(crate::ui::FONT_MICRO))
                     .text_color(view.chrome.muted)
                     .child(format_label),
             )
@@ -111,7 +111,7 @@ pub(super) fn magnifier_panel(
         let width = (f32::from(selection.size.width) * scale_x).round() as u32;
         let height = (f32::from(selection.size.height) * scale_y).round() as u32;
         div()
-            .text_size(px(10.0))
+            .text_size(px(crate::ui::FONT_MICRO))
             .text_color(view.chrome.muted)
             .child(format!("{width} x {height}"))
     });
@@ -158,7 +158,7 @@ pub(super) fn magnifier_panel(
             .children(size_row)
             .child(
                 div()
-                    .text_size(px(9.5))
+                    .text_size(px(crate::ui::FONT_MICRO))
                     .text_color(view.chrome.muted)
                     .child(t(language, "overlay.magnifier_hint")),
             ),
@@ -192,7 +192,7 @@ pub(super) fn info_bar(view: &OverlayView, cx: &mut Context<OverlayView>) -> Opt
         .border_color(view.chrome.border)
         .shadow(view.chrome.shadow())
         .cursor(CursorStyle::Arrow)
-        .text_size(px(11.0));
+        .text_size(px(crate::ui::FONT_CAPTION));
 
     for field in [
         InfoField::X,
@@ -243,7 +243,7 @@ pub(super) fn info_bar(view: &OverlayView, cx: &mut Context<OverlayView>) -> Opt
                 .gap(px(3.0))
                 .px(px(4.0))
                 .py(px(3.0))
-                .rounded(px(5.0))
+                .rounded(px(crate::ui::RADIUS_CHIP))
                 .when(editing, |chip| chip.bg(view.chrome.selected))
                 .when(!editing, |chip| {
                     chip.hover(|style| style.bg(view.chrome.hover))
@@ -270,11 +270,10 @@ pub(super) fn info_bar(view: &OverlayView, cx: &mut Context<OverlayView>) -> Opt
                 .id("overlay-info-unit")
                 .px(px(5.0))
                 .py(px(3.0))
-                .rounded(px(5.0))
+                .rounded(px(crate::ui::RADIUS_CHIP))
                 .text_color(view.chrome.muted)
                 .hover(|style| style.bg(view.chrome.hover))
                 .active(|style| style.opacity(0.85))
-                .cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| {
                     if let Some(selected) = this.selected.as_mut() {
                         selected.unit = selected.unit.next();
@@ -290,11 +289,10 @@ pub(super) fn info_bar(view: &OverlayView, cx: &mut Context<OverlayView>) -> Opt
                 .id("overlay-info-ratio")
                 .px(px(6.0))
                 .py(px(3.0))
-                .rounded(px(5.0))
+                .rounded(px(crate::ui::RADIUS_CHIP))
                 .text_color(view.chrome.text)
                 .hover(|style| style.bg(view.chrome.hover))
                 .active(|style| style.opacity(0.85))
-                .cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| this.cycle_ratio(cx)))
                 .child(ratio_label),
         );
@@ -324,8 +322,9 @@ pub(super) fn info_bar(view: &OverlayView, cx: &mut Context<OverlayView>) -> Opt
             bar,
             "overlay-info-enter",
             f32::from(rect.origin.y),
-            4.0,
-            Duration::from_millis(90),
+            0.0,
+            Duration::from_millis(70),
+            cx.reduce_motion(),
         )
         .into_any_element(),
     )
@@ -377,29 +376,33 @@ pub(super) fn effects_panel(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn action_button(
     view: &OverlayView,
     id: &'static str,
     label: String,
+    shortcut: Option<String>,
     icon: &'static [u8],
     color: Rgba,
     cx: &mut Context<OverlayView>,
     action: fn(&mut OverlayView, &mut Context<OverlayView>),
 ) -> AnyElement {
+    let tooltip = crate::ui::tooltip_with_shortcut(&label, shortcut.as_deref());
     div()
         .id(id)
-        .tooltip(move |_, cx| tooltip_view(label.clone(), cx))
+        .role(Role::Button)
+        .aria_label(label)
+        .tooltip(move |_, cx| tooltip_view(tooltip.clone(), cx))
         .w(px(30.0))
         .h(px(30.0))
-        .rounded(px(6.0))
+        .rounded(px(crate::ui::RADIUS_CONTROL))
         .flex()
         .items_center()
         .justify_center()
         .hover(move |style| style.bg(view.chrome.hover))
         .active(|style| style.opacity(0.85))
-        .cursor_pointer()
         .on_click(cx.listener(move |this, _, _, cx| action(this, cx)))
-        .child(icons::icon(icon, 17.0, color))
+        .child(icons::icon(icon, crate::ui::TOOL_ICON, color))
         .into_any_element()
 }
 
@@ -419,20 +422,25 @@ pub(super) fn selection_toolbar(
         tools = tools.child(
             div()
                 .id(format!("overlay-tool-{}", tool.id()))
+                .role(Role::Button)
+                .aria_label(label.clone())
                 .tooltip(move |_, cx| tooltip_view(label.clone(), cx))
                 .w(px(30.0))
                 .h(px(30.0))
-                .rounded(px(6.0))
+                .rounded(px(crate::ui::RADIUS_CONTROL))
                 .flex()
                 .items_center()
                 .justify_center()
                 .hover(|style| style.bg(view.chrome.hover))
                 .active(|style| style.opacity(0.85))
-                .cursor_pointer()
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.open_editor_for_selected(tool, window, cx);
                 }))
-                .child(icons::icon(tool.icon(), 17.0, view.chrome.icon)),
+                .child(icons::icon(
+                    tool.icon(),
+                    crate::ui::TOOL_ICON,
+                    view.chrome.icon,
+                )),
         );
     }
 
@@ -441,6 +449,9 @@ pub(super) fn selection_toolbar(
         view,
         "overlay-action-pin",
         t(language, "editor.pin").to_owned(),
+        Some(crate::hotkey::display_hotkey(
+            &settings_state::get().pin_hotkey,
+        )),
         icons::PIN,
         view.chrome.icon,
         cx,
@@ -450,6 +461,7 @@ pub(super) fn selection_toolbar(
         view,
         "overlay-action-copy",
         t(language, "editor.copy").to_owned(),
+        Some("Enter".to_owned()),
         icons::COPY,
         view.chrome.icon,
         cx,
@@ -459,6 +471,7 @@ pub(super) fn selection_toolbar(
         view,
         "overlay-action-save",
         t(language, "editor.save").to_owned(),
+        Some(crate::shortcut_text::primary("S")),
         icons::SAVE,
         view.chrome.icon,
         cx,
@@ -469,6 +482,7 @@ pub(super) fn selection_toolbar(
             view,
             "overlay-action-scroll",
             t(language, "menu.scroll_capture").to_owned(),
+            None,
             icons::SCROLL,
             view.chrome.icon,
             cx,
@@ -479,6 +493,7 @@ pub(super) fn selection_toolbar(
         view,
         "overlay-action-record",
         t(language, "menu.record").to_owned(),
+        None,
         icons::RECORDING,
         view.chrome.icon,
         cx,
@@ -488,6 +503,7 @@ pub(super) fn selection_toolbar(
         view,
         "overlay-action-close",
         t(language, "editor.close").to_owned(),
+        Some("Esc".to_owned()),
         icons::CLOSE,
         view.chrome.muted,
         cx,
@@ -530,8 +546,9 @@ pub(super) fn selection_toolbar(
                 ),
             "overlay-toolbar-enter",
             f32::from(rect.origin.y),
-            4.0,
-            Duration::from_millis(90),
+            0.0,
+            Duration::from_millis(70),
+            cx.reduce_motion(),
         )
         .into_any_element(),
     )
@@ -637,12 +654,12 @@ pub(super) fn selection_size_tag(view: &OverlayView, language: Language) -> Opti
             .top(px(top))
             .px_2()
             .py_1()
-            .rounded(px(6.0))
+            .rounded(px(crate::ui::RADIUS_CONTROL))
             .bg(view.chrome.surface)
             .border_1()
             .border_color(view.chrome.border)
             .shadow(view.chrome.shadow())
-            .text_size(px(11.0))
+            .text_size(px(crate::ui::FONT_CAPTION))
             .text_color(view.chrome.text)
             .child(text),
     )

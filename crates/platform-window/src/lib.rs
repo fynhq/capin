@@ -15,6 +15,62 @@ pub use style::WindowStyle;
 
 use raw_window_handle::HasWindowHandle;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackdropMaterial {
+    Mica,
+    Acrylic,
+}
+
+pub fn transparency_allowed() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        windows::transparency_allowed()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::transparency_allowed()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        true
+    }
+}
+
+pub fn backdrop_supported(material: BackdropMaterial) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        windows::backdrop_supported(material)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::backdrop_supported(material)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = material;
+        false
+    }
+}
+
+pub fn set_backdrop(
+    window: &impl HasWindowHandle,
+    material: BackdropMaterial,
+) -> Result<(), PlatformWindowError> {
+    #[cfg(target_os = "windows")]
+    {
+        windows::set_backdrop(window, material)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::set_backdrop(window, material)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = (window, material);
+        Err(PlatformWindowError::UnsupportedPlatform)
+    }
+}
+
 pub fn trim_working_set() {
     #[cfg(target_os = "windows")]
     {

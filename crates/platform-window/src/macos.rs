@@ -17,10 +17,27 @@ use objc2_app_kit::{
 use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-use crate::{PlatformWindowError, PrivacyPane, WindowStyle};
+use crate::{BackdropMaterial, PlatformWindowError, PrivacyPane, WindowStyle};
 
 pub(super) fn reduce_motion() -> bool {
     NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+}
+
+pub(super) fn transparency_allowed() -> bool {
+    let workspace = NSWorkspace::sharedWorkspace();
+    !workspace.accessibilityDisplayShouldReduceTransparency()
+        && !workspace.accessibilityDisplayShouldIncreaseContrast()
+}
+
+pub(super) fn backdrop_supported(_material: BackdropMaterial) -> bool {
+    true
+}
+
+pub(super) fn set_backdrop(
+    _window: &impl HasWindowHandle,
+    _material: BackdropMaterial,
+) -> Result<(), PlatformWindowError> {
+    Ok(())
 }
 
 pub(super) fn pictures_dir() -> Option<PathBuf> {
