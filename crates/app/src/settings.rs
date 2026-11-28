@@ -902,6 +902,8 @@ fn toggle(theme: &Theme, value: bool, id: &'static str, reduce_motion: bool) -> 
 
     let track = move |progress: f32| {
         div()
+            .absolute()
+            .inset_0()
             .child(
                 div()
                     .absolute()
